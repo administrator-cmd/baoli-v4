@@ -1,0 +1,25 @@
+# Runtime: Python 3.12.x
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+pymysql[rsa]==1.1.2
+pydantic==2.11.7
+pydantic-settings==2.10.1
+python-multipart==0.0.20
+openpyxl==3.1.5
+httpx==0.28.1
+requests==2.34.2
+langgraph==0.6.6
+# 图直接使用 langgraph.checkpoint 的 saver 接口，显式固定该传递依赖以保证安装可复现。
+langgraph-checkpoint==2.1.2
+# 持久化 checkpoint：社区 MySQL saver，把 checkpoint 保存在同一个 baoli_v4 库。
+# 3.0.0 要求 Python>=3.10、langgraph-checkpoint>=2.1.2（与上面的 2.1.2 声明相符）；
+# 其传递依赖 orjson 已安装。建表 SQL 见 backend/database/schema.sql 第 8 节。
+langgraph-checkpoint-mysql[pymysql]==3.0.0
+
+# --- 审核任务检索取证（本地 Embedding）-----------------------------------------
+# 只使用本机已存在的本地模型（BAOLI_EMBEDDING_MODEL_PATH），不自动下载权重、不调用云 Embedding。
+# 这里声明兼容版本区间而不是固定补丁号：sentence-transformers 2.x/3.x 与 torch 2.x 都可运行，
+# 部署时请按部署机的 CUDA/CPU 环境选择具体版本并记录到部署说明；本轮未安装、未运行验证。
+sentence-transformers>=2.2,<4
+torch>=2.0

@@ -1,0 +1,60 @@
+import hashlib
+from pathlib import Path
+
+from fastapi import UploadFile
+
+from ..config import get_settings
+from ..errors import BusinessError
+
+
+RULEBOOK_EXTENSIONS = {".xlsx", ".xlsm"}
+DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xlsm", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+def resolve_storage_path(relative_path: str) -> Path:
+    root = get_settings().storage_root
+    target = (root / relative_path).resolve()
+    if root != target and root not in target.parents:
+        raise BusinessError("STORAGE_PATH_INVALID", "文件存储路径不安全", status_code=500)
+    return target
+
+
+async def save_upload(
+    upload: UploadFile,
+    *,
+    relative_path: str,
+    allowed_extensions: set[str],
+    max_bytes: int,
+) -> tuple[int, str]:
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix not in allowed_extensions:
+        raise BusinessError(
+            "FILE_TYPE_UNSUPPORTED",
+            "文件格式不受支持",
+            details={"filename": upload.filename or "", "allowed_extensions": sorted(allowed_extensions)},
+        )
+    target = resolve_storage_path(relative_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with target.open("wb") as output:
+            while chunk := await upload.read(1024 * 1024):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise BusinessError(
+                        "FILE_TOO_LARGE",
+                        "文件超过允许大小",
+                        details={"max_bytes": max_bytes},
+                    )
+                digest.update(chunk)
+                output.write(chunk)
+    except Exception:
+        if target.exists():
+            target.unlink()
+        raise
+    if total == 0:
+        target.unlink(missing_ok=True)
+        raise BusinessError("FILE_EMPTY", "上传文件为空")
+    return total, digest.hexdigest()
+

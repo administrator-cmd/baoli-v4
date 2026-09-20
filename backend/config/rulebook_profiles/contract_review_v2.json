@@ -1,0 +1,220 @@
+{
+  "profile_version": "contract_review_v2",
+  "display_name": "合同审核规则库模板",
+  "notes": {
+    "applicability": "适用条件留空表示“始终适用”；填写“所引用材料均已上传”表示仅当该规则引用的材料都已上传时才适用。其他条件当前不支持。",
+    "risk": "风险疑点固定为“来源审核规则异常时触发”，不提供触发条件列。证据不足不等于未触发风险。",
+    "risk_source_node": "风险疑点的“来源审核规则”必须唯一对应“来源节点”中的一条规则。",
+    "one_to_one": "一条内部校验或交叉校验规则只比较左侧一个字段和右侧一个字段；多字段之间的关系必须由业务人员拆成多条 1 对 1 规则。",
+    "unsupported_scope": "不支持 1 对多、多对 1、多对多，也不支持多发票求和、多合同分组、跨期间汇总和复杂公式；这类填写会在导入时明确报错，不会转换成规则。",
+    "unsupported": "当前不支持全部发票求和、多合同自动分组等汇总取数；此类要求会在导入预览中明确标出未支持。"
+  },
+  "sheet_roles": [
+    {
+      "role": "MATERIAL_LIST",
+      "display_name": "01_材料清单",
+      "aliases": ["01_材料清单", "材料清单", "合同材料", "资料清单"],
+      "columns": [
+        {"key": "name", "name": "材料名称", "aliases": ["材料名称", "材料编码", "资料名称"], "required": true, "data_type": "STRING"},
+        {"key": "material_type", "name": "材料类别", "aliases": ["材料类别", "材料类型", "文档类型"], "required": true, "data_type": "STRING"},
+        {"key": "required", "name": "是否必传", "aliases": ["是否必传", "必传"], "required": true, "data_type": "BOOLEAN", "allowed_values": ["是", "否"]},
+        {"key": "description", "name": "业务说明", "aliases": ["业务说明", "说明", "备注"], "required": false, "data_type": "STRING"}
+      ],
+      "example_rows": []
+    },
+    {
+      "role": "MATERIAL_QUALITY",
+      "display_name": "02_材料质量",
+      "aliases": ["02_材料质量", "材料质量", "文件质量", "资料质量"],
+      "columns": [
+        {"key": "name", "name": "检查名称", "aliases": ["检查名称", "规则名称", "质量项目"], "required": true, "data_type": "STRING"},
+        {"key": "material_ref", "name": "材料名称", "aliases": ["材料名称", "适用材料"], "required": true, "data_type": "MATERIAL_REF"},
+        {
+          "key": "operator",
+          "name": "检查项目",
+          "aliases": ["检查项目", "检查方式", "校验方式"],
+          "required": true,
+          "data_type": "ENUM",
+          "allowed_values": ["MATERIAL_EXISTS", "FILE_QUALITY_CHECK"],
+          "value_labels": {"MATERIAL_EXISTS": "材料是否齐全", "FILE_QUALITY_CHECK": "文件质量检查"}
+        },
+        {"key": "parameters", "name": "检查要求", "aliases": ["检查要求", "校验要求", "要求"], "required": false, "data_type": "STRING"}
+      ],
+      "example_rows": []
+    },
+    {
+      "role": "FIELD_EXTRACTION",
+      "display_name": "03_字段抽取",
+      "aliases": ["03_字段抽取", "字段抽取", "要素抽取", "关键字段"],
+      "columns": [
+        {"key": "name", "name": "字段名称", "aliases": ["字段名称", "要素名称"], "required": true, "data_type": "STRING"},
+        {"key": "material_ref", "name": "来源材料", "aliases": ["来源材料", "所属材料", "材料名称"], "required": true, "data_type": "MATERIAL_REF"},
+        {
+          "key": "value_type",
+          "name": "字段类型",
+          "aliases": ["字段类型", "数据类型", "类型"],
+          "required": true,
+          "data_type": "ENUM",
+          "allowed_values": ["STRING", "DECIMAL", "DATE", "BOOLEAN", "CLAUSE"],
+          "value_labels": {"STRING": "文本", "DECIMAL": "数值", "DATE": "日期", "BOOLEAN": "是否", "CLAUSE": "条款"}
+        },
+        {"key": "unit", "name": "单位", "aliases": ["单位", "计量单位"], "required": false, "data_type": "STRING"},
+        {"key": "required", "name": "是否必抽", "aliases": ["是否必抽", "必抽"], "required": true, "data_type": "BOOLEAN", "allowed_values": ["是", "否"]},
+        {"key": "instruction", "name": "抽取说明", "aliases": ["抽取说明", "提取说明", "字段说明"], "required": true, "data_type": "STRING"}
+      ],
+      "example_rows": []
+    },
+    {
+      "role": "INTERNAL_VALIDATE",
+      "display_name": "04_文件内部校验",
+      "aliases": ["04_文件内部校验", "文件内部校验", "内部校验", "单文件校验"],
+      "columns": [
+        {"key": "name", "name": "规则名称", "aliases": ["规则名称", "校验名称", "检查名称"], "required": true, "data_type": "STRING"},
+        {"key": "left_material_ref", "name": "左侧材料", "aliases": ["左侧材料", "左材料"], "required": true, "data_type": "MATERIAL_REF"},
+        {"key": "left_field_ref", "name": "左侧字段", "aliases": ["左侧字段", "左字段"], "required": true, "data_type": "FIELD_REF"},
+        {"key": "right_material_ref", "name": "右侧材料", "aliases": ["右侧材料", "右材料"], "required": false, "data_type": "MATERIAL_REF"},
+        {"key": "right_field_ref", "name": "右侧字段", "aliases": ["右侧字段", "右字段"], "required": false, "data_type": "FIELD_REF"},
+        {
+          "key": "operator",
+          "name": "检查方式",
+          "aliases": ["检查方式", "比较方式", "校验方式"],
+          "required": true,
+          "data_type": "ENUM",
+          "allowed_values": ["FIELD_EQUAL", "FIELD_NOT_EQUAL", "DATE_COMPARE", "DECIMAL_COMPARE", "LLM_VALIDATE"],
+          "value_labels": {
+            "FIELD_EQUAL": "字段一致",
+            "FIELD_NOT_EQUAL": "字段不同",
+            "DATE_COMPARE": "日期比较",
+            "DECIMAL_COMPARE": "数值比较",
+            "LLM_VALIDATE": "条款审核"
+          }
+        },
+        {"key": "parameters", "name": "审核要求", "aliases": ["审核要求", "判断依据", "校验要求"], "required": true, "data_type": "STRING"},
+        {"key": "applicability", "name": "适用条件", "aliases": ["适用条件", "生效条件"], "required": false, "data_type": "ENUM", "allowed_values": ["ALWAYS", "MATERIALS_UPLOADED"], "value_labels": {"ALWAYS": "始终适用", "MATERIALS_UPLOADED": "所引用材料均已上传"}, "allow_blank": true}
+      ],
+      "example_rows": []
+    },
+    {
+      "role": "CROSS_VALIDATE",
+      "display_name": "05_文件交叉校验",
+      "aliases": ["05_文件交叉校验", "文件交叉校验", "交叉校验", "跨文件校验"],
+      "columns": [
+        {"key": "name", "name": "规则名称", "aliases": ["规则名称", "校验名称", "检查名称"], "required": true, "data_type": "STRING"},
+        {"key": "left_material_ref", "name": "左侧材料", "aliases": ["左侧材料", "左材料"], "required": true, "data_type": "MATERIAL_REF"},
+        {"key": "left_field_ref", "name": "左侧字段", "aliases": ["左侧字段", "左字段"], "required": true, "data_type": "FIELD_REF"},
+        {"key": "right_material_ref", "name": "右侧材料", "aliases": ["右侧材料", "右材料"], "required": false, "data_type": "MATERIAL_REF"},
+        {"key": "right_field_ref", "name": "右侧字段", "aliases": ["右侧字段", "右字段"], "required": false, "data_type": "FIELD_REF"},
+        {
+          "key": "operator",
+          "name": "检查方式",
+          "aliases": ["检查方式", "比较方式", "校验方式"],
+          "required": true,
+          "data_type": "ENUM",
+          "allowed_values": ["FIELD_EQUAL", "FIELD_NOT_EQUAL", "DATE_COMPARE", "DECIMAL_COMPARE", "LLM_VALIDATE"],
+          "value_labels": {
+            "FIELD_EQUAL": "字段一致",
+            "FIELD_NOT_EQUAL": "字段不同",
+            "DATE_COMPARE": "日期比较",
+            "DECIMAL_COMPARE": "数值比较",
+            "LLM_VALIDATE": "条款审核"
+          }
+        },
+        {"key": "parameters", "name": "审核要求", "aliases": ["审核要求", "判断依据", "校验要求"], "required": true, "data_type": "STRING"},
+        {"key": "applicability", "name": "适用条件", "aliases": ["适用条件", "生效条件"], "required": false, "data_type": "ENUM", "allowed_values": ["ALWAYS", "MATERIALS_UPLOADED"], "value_labels": {"ALWAYS": "始终适用", "MATERIALS_UPLOADED": "所引用材料均已上传"}, "allow_blank": true}
+      ],
+      "example_rows": []
+    },
+    {
+      "role": "RISK",
+      "display_name": "06_风险疑点",
+      "aliases": ["06_风险疑点", "风险疑点", "风险规则", "风险清单"],
+      "columns": [
+        {"key": "name", "name": "风险名称", "aliases": ["风险名称", "疑点名称"], "required": true, "data_type": "STRING"},
+        {
+          "key": "source_node",
+          "name": "来源节点",
+          "aliases": ["来源节点", "来源校验节点", "来源检查"],
+          "required": true,
+          "data_type": "ENUM",
+          "allowed_values": ["MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE"],
+          "value_labels": {
+            "MATERIAL_QUALITY": "材料质量",
+            "INTERNAL_VALIDATE": "文件内部校验",
+            "CROSS_VALIDATE": "文件交叉校验"
+          }
+        },
+        {"key": "source_rule_ref", "name": "来源审核规则", "aliases": ["来源审核规则", "来源规则", "关联规则"], "required": true, "data_type": "RULE_REF"},
+        {"key": "risk_level", "name": "风险等级", "aliases": ["风险等级", "等级"], "required": true, "data_type": "ENUM", "allowed_values": ["高", "中", "低", "待确认"]},
+        {"key": "action", "name": "处理建议", "aliases": ["处理建议", "人工动作", "建议"], "required": true, "data_type": "STRING"}
+      ],
+      "example_rows": []
+    },
+    {
+      "role": "REPORT_TEMPLATE",
+      "display_name": "07_报告模板",
+      "aliases": ["07_报告模板", "报告模板", "报告章节", "审核报告"],
+      "columns": [
+        {"key": "section_name", "name": "章节名称", "aliases": ["章节名称", "章节", "名称"], "required": true, "data_type": "STRING"},
+        {"key": "field_refs", "name": "展示字段", "aliases": ["展示字段", "引用字段", "字段列表"], "required": false, "data_type": "FIELD_REF_LIST"},
+        {"key": "content_instruction", "name": "内容要求", "aliases": ["内容要求", "章节要求", "说明"], "required": true, "data_type": "STRING"}
+      ],
+      "example_rows": []
+    }
+  ],
+  "examples": {
+    "single_contract": {
+      "display_name": "示例 A：单份主合同",
+      "description": "一份主合同、四个字段、一条日期规则及其风险，报告附加章节引用已定义字段。",
+      "sheets": {
+        "01_材料清单": [
+          ["主合同", "合同", "是", "双方签署的主合同（示例内容，可删除）"]
+        ],
+        "03_字段抽取": [
+          ["合同编号", "主合同", "文本", "", "是", "提取合同正文中的合同编号"],
+          ["签署日期", "主合同", "日期", "", "是", "提取双方签署日期"],
+          ["生效日期", "主合同", "日期", "", "是", "提取合同生效日期"],
+          ["合同含税总额", "主合同", "数值", "元", "是", "提取合同含税总额"]
+        ],
+        "04_文件内部校验": [
+          ["签署日期不得晚于生效日期", "主合同", "签署日期", "主合同", "生效日期", "日期比较", "签署日期应不晚于生效日期", ""]
+        ],
+        "06_风险疑点": [
+          ["签署日期晚于生效日期", "文件内部校验", "签署日期不得晚于生效日期", "中", "请复核签署日期与生效日期（示例内容，可删除）"]
+        ],
+        "07_报告模板": [
+          ["合同基本信息", "主合同.合同编号, 主合同.合同含税总额", "列示合同编号、含税总额及其证据状态"]
+        ]
+      }
+    },
+    "contract_and_invoice": {
+      "display_name": "示例 B：主合同与指定发票一对一核对",
+      "description": "在示例 A 基础上增加一份指定发票，定义两份材料都已上传时“合同含税总额等于该张发票含税金额”。示例仅演示一对一核对，不代表适用于全部业务。",
+      "sheets": {
+        "01_材料清单": [
+          ["主合同", "合同", "是", "双方签署的主合同（示例内容，可删除）"],
+          ["发票", "发票", "是", "与主合同对应的这一张发票（示例内容，可删除）"]
+        ],
+        "03_字段抽取": [
+          ["合同编号", "主合同", "文本", "", "是", "提取合同正文中的合同编号"],
+          ["签署日期", "主合同", "日期", "", "是", "提取双方签署日期"],
+          ["生效日期", "主合同", "日期", "", "是", "提取合同生效日期"],
+          ["合同含税总额", "主合同", "数值", "元", "是", "提取合同含税总额"],
+          ["发票含税金额", "发票", "数值", "元", "是", "提取该张发票的含税金额"]
+        ],
+        "04_文件内部校验": [
+          ["签署日期不得晚于生效日期", "主合同", "签署日期", "主合同", "生效日期", "日期比较", "签署日期应不晚于生效日期", ""]
+        ],
+        "05_文件交叉校验": [
+          ["合同含税总额等于该张发票含税金额", "主合同", "合同含税总额", "发票", "发票含税金额", "数值比较", "合同含税总额与发票含税金额的绝对差不超过 0.01 元", "所引用材料均已上传"]
+        ],
+        "06_风险疑点": [
+          ["合同金额与发票金额不一致", "文件交叉校验", "合同含税总额等于该张发票含税金额", "中", "请复核合同与发票金额证据（示例内容，可删除）"]
+        ],
+        "07_报告模板": [
+          ["合同基本信息", "主合同.合同编号, 主合同.合同含税总额", "列示合同编号、含税总额及其证据状态"],
+          ["金额一致性", "主合同.合同含税总额, 发票.发票含税金额", "列示合同与发票金额及其比较结论"]
+        ]
+      }
+    }
+  }
+}
