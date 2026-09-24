@@ -6,7 +6,7 @@ import { isOperationActive, isOperationFinished, type OperationView } from "@/ap
  *
  * 每一步的可进入状态完全由服务端数据推导：
  * 作业没有 proposals 就不能进第二、三步；还有未处理问题就不能进第四步；
- * 发布检查没通过就不能点发布。这里不产生任何「前端假装完成」的状态。
+ * 未处理完业务问题就不能写入场景草稿。这里不产生任何「前端假装完成」的状态。
  */
 export type StepState = "not-started" | "current" | "done" | "blocked" | "running" | "failed";
 
@@ -26,15 +26,15 @@ export function importBlockingIssues(job: ImportJobView | null): number {
   return job?.issues.filter((issue) => issue.status === "OPEN").length ?? 0;
 }
 
+/** 按当前服务端数据算出五个导入步骤的可进入性与阻断原因。 */
 export function buildImportSteps(options: {
   job: ImportJobView | null;
   operation: OperationView | null;
   hasProposals: boolean;
   blockingIssues: number;
-  precheckReady: boolean;
   published: boolean;
 }): ImportStep[] {
-  const { job, operation, hasProposals, blockingIssues, precheckReady, published } = options;
+  const { job, operation, hasProposals, blockingIssues, published } = options;
   const operationRunning = isOperationActive(operation?.status);
   const operationFailed = operation?.status === "FAILED" || operation?.status === "INTERRUPTED";
   const hasFile = Boolean(job);
@@ -49,7 +49,7 @@ export function buildImportSteps(options: {
     },
     {
       label: "确认工作表用途和表头",
-      description: "为每张工作表指定用途与表头行，或设为不参与发布",
+      description: "为每张工作表指定用途、绑定节点，或设为不参与本次导入",
       enabled: true,
       state: "not-started",
       blockedReason: null,
@@ -62,15 +62,15 @@ export function buildImportSteps(options: {
       blockedReason: null,
     },
     {
-      label: "发布前预览",
-      description: "核对将要发布的材料、字段、规则与报告章节；本步只读，不改配置",
+      label: "导入预览",
+      description: "核对将要写入场景草稿的材料、字段、规则与报告章节；本步只读，不发布场景",
       enabled: true,
       state: "not-started",
       blockedReason: null,
     },
     {
-      label: "发布模板",
-      description: "确认发布意图、执行发布检查、处理能力缺口并发布新版本",
+      label: "写入场景草稿",
+      description: "把已确认的配置写入所属场景草稿。不发布场景，发布在场景页单独执行",
       enabled: true,
       state: "not-started",
       blockedReason: null,
@@ -115,17 +115,14 @@ export function buildImportSteps(options: {
   // 第 4 步
   if (!hasProposals) {
     steps[3].enabled = false;
-    steps[3].blockedReason = "解析完成后才能预览将要发布的内容。";
+    steps[3].blockedReason = "解析完成后才能核对将要写入草稿的内容。";
   } else if (blockingIssues > 0) {
     steps[3].enabled = false;
     steps[3].state = "blocked";
-    steps[3].blockedReason = `先处理完 ${blockingIssues} 项业务问题，再进入发布前预览。`;
-  } else if (published || precheckReady) {
-    // 发布检查已经通过（或作业已发布，其 precheck 记录同样为 ready）：
-    // 这一步的真实业务含义已经完成。少了这个分支，已发布的作业回到这一页时
-    // 第 4 步会因为没有 done 状态而显示成灰色未开始，与它实际走过的流程不符。
+    steps[3].blockedReason = `先处理完 ${blockingIssues} 项业务问题，再进入写入前核对。`;
+  } else if (published) {
     steps[3].state = "done";
-    steps[3].description = "发布检查已通过";
+    steps[3].description = "导入内容已核对";
   } else {
     steps[3].state = "current";
   }
@@ -133,19 +130,17 @@ export function buildImportSteps(options: {
   // 第 5 步
   if (published) {
     steps[4].state = "done";
-    steps[4].description = "模板版本已发布";
+    steps[4].description = "已写入场景草稿；发布场景请到场景页执行";
   } else if (!hasProposals) {
     steps[4].enabled = false;
-    steps[4].blockedReason = "还没有可发布的转换结果。";
+    steps[4].blockedReason = "还没有可写入草稿的转换结果。";
   } else if (blockingIssues > 0) {
     steps[4].enabled = false;
     steps[4].state = "blocked";
-    steps[4].blockedReason = "存在未处理的业务问题，不能发布。";
-  } else if (precheckReady) {
-    steps[4].state = "current";
-    steps[4].description = "发布检查已通过，可以发布";
+    steps[4].blockedReason = "存在未处理的业务问题，不能写入场景草稿。";
   } else {
-    steps[4].state = "not-started";
+    steps[4].state = "current";
+    steps[4].description = "确认后写入所属场景的草稿，不会发布场景版本";
   }
 
   return steps.map((step, index) => ({ ...step, index }));

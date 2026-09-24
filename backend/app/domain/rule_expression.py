@@ -2,9 +2,9 @@
 
 本轮 Excel 契约允许两类表达式，都必须是**确定性**解析，不能交给模型：
 
-1. 多项清单：`主合同；补充协议` —— 统一使用中文分号，忽略每项前后空白；空项、重复项、
+1. 多项清单：`MAT-001；MAT-002` —— 统一使用中文分号，忽略每项前后空白；空项、重复项、
    未知引用一律明确报错，空白不表示全部。
-2. 加总式：`已付款金额 + 未付款金额 + 其他应付款金额` —— 只允许「字段 + 字段 + …」，
+2. 加总式：`FLD-001 + FLD-002` —— 只允许「字段 + 字段 + …」，
    不执行 Excel 公式、Python 表达式或任意脚本；加数只追加，不增加列。
 
 名称本身不能包含引用语法占用的字符（`.`、`；`、`;`、`+`），否则无法区分名称与表达式，
@@ -25,8 +25,6 @@ from ..errors import BusinessError
 LIST_SEPARATOR = "；"
 # 加总式的连接符：前后必须有空格，与填写规范完全一致。
 SUM_OPERATOR = " + "
-# 报告展示字段的材料-字段分隔符。
-FIELD_SCOPE_SEPARATOR = "."
 # 名称里不允许出现的引用语法字符。
 NAME_FORBIDDEN_CHARS = (".", "；", ";", "+")
 
@@ -115,10 +113,10 @@ def split_list(text: str | None, *, location: CellLocation) -> list[str]:
 
 
 def parse_field_expression(text: str | None, *, location: CellLocation) -> list[str]:
-    """解析单个字段引用或「字段 + 字段 + …」加总式，返回按书写顺序排列的字段名称。
+    """解析单个字段引用或「字段 + 字段 + …」加总式，返回按书写顺序排列的引用。
 
     只接受 ` + ` 作为连接符；出现其他运算符号、Excel 函数、以 = 开头的公式一律明确报错。
-    返回的每一项都是原始字段名称，材料作用域由调用方按工作表语义补齐。
+    引用是字段名还是字段编号，由调用方按工作表协议解释。
     """
     if text is None or not text.strip():
         return []
@@ -126,7 +124,7 @@ def parse_field_expression(text: str | None, *, location: CellLocation) -> list[
     if normalized.startswith("="):
         raise BusinessError(
             "RULE_CELL_FORMULA_UNSUPPORTED",
-            f"{_location_text(location)}是公式而不是业务内容（“{normalized}”），请直接填写字段名称或“字段 + 字段”后重新上传",
+            f"{_location_text(location)}是公式而不是业务内容（“{normalized}”），请直接填写字段引用或“字段 + 字段”后重新上传",
             details=location.detail(),
         )
     # 先按加号切分，再逐项校验：任何非 ` + ` 形式的加号都会在下面被明确报出。
@@ -170,29 +168,6 @@ def _raise_sum_syntax(location: CellLocation, normalized: str) -> None:
         f"“字段{SUM_OPERATOR}字段”（加号两侧各一个空格）。不支持减法、乘除、百分比公式或 Excel 函数。",
         details=location.detail(),
     )
-
-
-def parse_report_field_reference(text: str, *, location: CellLocation) -> tuple[str, str]:
-    """解析报告展示字段“材料名称.字段名称”，返回 (材料名称, 字段名称)。"""
-    normalized = text.strip()
-    if FIELD_SCOPE_SEPARATOR not in normalized:
-        raise BusinessError(
-            "REPORT_FIELD_SCOPE_MISSING",
-            f"{_location_text(location)}的展示字段“{normalized}”没有写明所属材料，"
-            f"请按“材料名称{FIELD_SCOPE_SEPARATOR}字段名称”填写后重新上传",
-            details=location.detail(),
-        )
-    material_name, _, field_name = normalized.partition(FIELD_SCOPE_SEPARATOR)
-    material_name = material_name.strip()
-    field_name = field_name.strip()
-    if not material_name or not field_name or FIELD_SCOPE_SEPARATOR in field_name:
-        raise BusinessError(
-            "REPORT_FIELD_SCOPE_INVALID",
-            f"{_location_text(location)}的展示字段“{normalized}”格式不符合契约，"
-            f"请按“材料名称{FIELD_SCOPE_SEPARATOR}字段名称”填写后重新上传",
-            details=location.detail(),
-        )
-    return material_name, field_name
 
 
 def parse_non_negative_decimal(text: str | None, *, location: CellLocation) -> Decimal | None:

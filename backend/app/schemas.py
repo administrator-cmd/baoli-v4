@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiResponse(BaseModel):
@@ -55,6 +55,9 @@ class MaterialTypeCatalogResponse(ApiResponse):
 class SheetBindingItem(BaseModel):
     sheet_key: str
     role: str | None = None
+    # 绑定的**节点实例码**（来自当前场景的节点配置）。一张 Sheet 只能绑定一个节点，
+    # 一个节点可以绑定多张 Sheet。未绑定或已排除的 Sheet 不进入执行范围。
+    node_code: str | None = Field(default=None, max_length=80)
     header_row: int | None = Field(default=None, ge=1)
     excluded: bool = False
 
@@ -76,11 +79,21 @@ class ImportDecisionsRequest(BaseModel):
     expected_revision: int | None = Field(default=None, ge=0)
 
 
+class ApplyImportDraftRequest(BaseModel):
+    expected_job_revision: int = Field(ge=0)
+    expected_scene_revision: int = Field(ge=0)
+
+
 class PublishRequest(BaseModel):
+    """历史发布结果的重复调用请求。
+
+    导入页不再有发布前检查，也没有「新建模板 / 更新模板」的目标意图：写入场景草稿之后，
+    可执行的场景版本只由管理员在场景页显式发布。本请求只用于**只读地**重放已经产生过
+    场景版本的历史作业，因此没有 `template_mode` 一类会改写目标的字段。
+    """
+
     scenario_code: str | None = Field(default=None, min_length=2, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
     scenario_name: str = Field(min_length=2, max_length=255)
-    # new: 建立新模板；update: 在已有模板身份下生成新版本。由页面选择，不要求用户输入编码。
-    template_mode: Literal["new", "update"] = "new"
     # 已逐条确认「这条检查本次确实无法执行」的规则键。
     #
     # 能力缺口默认阻断发布：规则引用的能力当前没有判定实现时，发布检查不通过。
@@ -115,49 +128,6 @@ class OperationAcceptedResponse(ApiResponse):
     finished_at: datetime | None = None
 
 
-class PrecheckBinding(BaseModel):
-    """一次有效预检查的绑定记录；发布必须与它完全一致。"""
-
-    profile_version: str
-    draft_revision: int
-    manifest_hash: str
-    template_mode: Literal["new", "update"]
-    target_scenario_code: str | None = None
-    target_scenario_name: str
-    scene_code: str
-    scene_name: str
-    checked_at: datetime
-    # 预检查时逐条确认过的能力缺口规则键。发布必须与它完全一致：
-    # 换了确认集合就是换了发布意图，不能借同一次预检查放行。
-    acknowledged_capability_gaps: list[str] = Field(default_factory=list)
-
-
-class PrecheckResult(BaseModel):
-    ready: bool
-    blockers: list[dict[str, Any]]
-    summary: dict[str, int]
-    # 绑定信息：缺少它或与当前意图不一致时不能发布。
-    binding: PrecheckBinding | None = None
-    # 已配置但当前无法执行的检查（例如依赖供应商未提供的质量结论）。
-    # 这些项必须在预览里可见，不能在发布时承诺支持、运行时才发现永远无法执行。
-    capability_gaps: list[dict[str, Any]] = Field(default_factory=list)
-    # 与 capability_gaps 一一对应的规则键：发布请求必须把它们逐条确认后才放行。
-    unacknowledged_capability_gaps: list[str] = Field(default_factory=list)
-    # 展开后的能力覆盖结果：每条规则引用的能力标识、版本、参数与是否已实现。
-    # 「配置可保存」不等于「规则可执行」，发布前必须能一眼看出覆盖到什么程度。
-    capability_coverage: dict[str, Any] = Field(default_factory=dict)
-
-
-class PrecheckResponse(ApiResponse):
-    ready: bool
-    blockers: list[dict[str, Any]]
-    summary: dict[str, int]
-    binding: PrecheckBinding | None = None
-    capability_gaps: list[dict[str, Any]] = Field(default_factory=list)
-    unacknowledged_capability_gaps: list[str] = Field(default_factory=list)
-    capability_coverage: dict[str, Any] = Field(default_factory=dict)
-
-
 class CapabilityItem(BaseModel):
     """能力目录中的一项能力。
 
@@ -187,17 +157,59 @@ class CapabilityItem(BaseModel):
     note: str | None = None
 
 
+class ToolCatalogItem(BaseModel):
+    """工具目录中的一项工具。
+
+    与 `CapabilityItem` 的分工：能力项回答「这条规则由哪项能力判定」，
+    工具项回答「模型可以调用什么、参数长什么样、当前能不能真跑」。
+    两者都由 `domain/tool_catalog.py` 从能力目录派生，不各自维护一份名单。
+    """
+
+    tool_id: str
+    version: str
+    label: str
+    description: str
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    handler_ref: dict[str, str] | None = None
+    allowed_nodes: list[str] = Field(default_factory=list)
+    allowed_scenes: list[str] | None = None
+    required_evidence: list[str] = Field(default_factory=list)
+    side_effect: bool = False
+    idempotent: bool = True
+    supports_query: bool = False
+    # 四个口径分开返回，页面据此区分「已注册 / 节点级可调用 / Agent 可选择 / 已实现」。
+    # 只有一个笼统的「可调用」会让「注册了但模型调不到」显示成模型能用。
+    registered: bool = True
+    implemented: bool = False
+    agent_selectable: bool = False
+    node_level_only: bool = False
+    agent_unselectable_reason: str | None = None
+    error_codes: list[str] = Field(default_factory=list)
+    unimplemented_reason: str | None = None
+    input_count: str | None = None
+    runtime_keys: list[str] = Field(default_factory=list)
+
+
 class CapabilityCatalogResponse(ApiResponse):
     """审核能力目录。
 
     这是后端能力的单一事实来源：前端从这里取算子选项、节点约束与参数口径，
     版本随能力语义一起变化。目录里 implemented=false 的能力可以配置，
     但发布前必须逐条确认，运行时明确返回不可判定——不会伪装成通过。
+
+    `tools` 是同一份目录的工具视图：模型可调用的工具及其参数 Schema。
+    只有 `implemented=true` 的工具才会出现在模型请求的 `tools` 里，
+    不可调用的工具仍如实列出并写明原因，页面据此不把它们显示成可执行选项。
     """
 
     capability_version: str
     rule_statuses: list[str] = Field(default_factory=list)
     items: list[CapabilityItem] = Field(default_factory=list)
+    tool_catalog_version: str = ""
+    # 工具目录的内容指纹：随已发布配置冻结，用于对账「模型当时看到的是哪一版工具」。
+    tool_catalog_fingerprint: str = ""
+    tools: list[ToolCatalogItem] = Field(default_factory=list)
 
 
 class RuleCapabilityStatusResponse(BaseModel):
@@ -226,9 +238,11 @@ class ImportJobResponse(ApiResponse):
     job_no: str
     source_filename: str
     status: str
+    # 统一模板协议的版本标识：系统只有一份协议，这里记录按哪一版解释这份文件。
     profile_version: str
-    # 供页面显示的中文格式名，避免只显示 contract_review_v2 这类技术标识。
-    profile_display_name: str = ""
+    # 作业所属场景 + 统一模板协议摘要（Sheet 数量、名称与可绑定的节点类型）。
+    # 页面据此显示真实的表数量与名称，不写死任何场景的表清单。
+    profile: dict[str, Any] = Field(default_factory=dict)
     sheets: list[dict[str, Any]]
     issues: list[dict[str, Any]]
     proposals: dict[str, Any] | None = None
@@ -237,7 +251,6 @@ class ImportJobResponse(ApiResponse):
     coverage: dict[str, Any] | None = None
     # 草稿修订号：绑定、排除、裁决、候选原地修正都会递增；页面提交时带上它。
     draft_revision: int = 0
-    precheck: PrecheckResult | None = None
     failure: dict[str, str] | None = None
     # 该作业上最近一次后台操作的受理状态；有活跃操作时页面据此继续查询。
     latest_operation: dict[str, Any] | None = None
@@ -289,14 +302,16 @@ class TaskSchemaPreviewRequest(BaseModel):
 
 
 class TaskSchemaPreviewResponse(ApiResponse):
+    """方案范围预览。**范围完全等于勾选的规则**——系统不补入任何规则，
+    因此只有「已启用」与「未启用」两类，没有「自动补入」。"""
+
     enabled_rule_keys: list[str]
-    auto_included_rule_keys: list[str] = Field(default_factory=list)
     unenabled_rule_keys: list[str] = Field(default_factory=list)
-    # 后端补入的规则名称，页面直接显示中文，不必自己映射。
-    auto_included_rule_names: list[str] = Field(default_factory=list)
-    # 每条自动补入规则的真实原因（报告生成依赖 / 风险来源依赖 / 字段抽取依赖）。
-    auto_included_reasons: dict[str, str] = Field(default_factory=dict)
-    unconfigured_check_nodes: list[str] = Field(default_factory=list)
+    # 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
+    # `..._codes` 是这些类型下真实存在的节点实例码（「这个节点是不是未配置的类别」）。
+    # 两者口径不同，页面不得交叉比较。
+    unconfigured_check_node_types: list[str] = Field(default_factory=list)
+    unconfigured_check_node_codes: list[str] = Field(default_factory=list)
     scope: dict[str, Any] = Field(default_factory=dict)
     field_count: int = 0
 
@@ -308,8 +323,6 @@ class CreateTaskResponse(ApiResponse):
     current_node_name: str
     materials: list[dict[str, Any]]
     field_count: int
-    # 建任务时由后端补入的依赖规则与系统规则：用户误取消的规则不会真的不执行。
-    auto_included_rule_keys: list[str] = Field(default_factory=list)
     unenabled_rule_keys: list[str] = Field(default_factory=list)
     # 任务实际执行范围：未配置 / 未启用 / 已启用的区分依据。
     scope: dict[str, Any] = Field(default_factory=dict)
@@ -337,9 +350,23 @@ class AuditTaskResponse(ApiResponse):
     documents: list[dict[str, Any]]
     fields: list[dict[str, Any]]
     rules: list[dict[str, Any]]
+    # **当前复核批次**：唯一允许提交的集合。复核分批判决（字段事实先于规则结论），
+    # 页面只能提交这一批；不属于本批的待办留在服务端，提交它们会被明确拒绝。
     pending_reviews: list[dict[str, Any]]
-    # 本模板未配置的业务校验节点；这些节点会显式跳过，不代表检查通过。
-    unconfigured_check_nodes: list[str] = Field(default_factory=list)
+    # 全部待办（含不属于本批的批次）：仅用于展示「还有多少项在排队」。
+    all_pending_reviews: list[dict[str, Any]] = Field(default_factory=list)
+    # 本批的身份：`review_nos` 是本批全部待办编号，`hash` 与服务端提交校验、
+    # 检查点校验用的是同一个哈希；`stale=True` 表示待办集合在等待期间被改动过，
+    # 页面必须刷新后再提交。`all_pending_count` 是排队总数。
+    pending_review_batch: dict[str, Any] = Field(default_factory=dict)
+    pending_review_hash: str | None = None
+    pending_review_count: int = 0
+    # 本模板未配置的业务校验类别与对应的节点实例；这些节点会显式跳过，不代表检查通过。
+    # 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
+    # `..._codes` 是这些类型下真实存在的节点实例码（「这个节点是不是未配置的类别」）。
+    # 两者口径不同，页面不得交叉比较。
+    unconfigured_check_node_types: list[str] = Field(default_factory=list)
+    unconfigured_check_node_codes: list[str] = Field(default_factory=list)
     # 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。
     # 提交执行/复核命令时带上它，过期修订的命令会被明确拒绝。
     input_revision: int = 0
@@ -584,9 +611,7 @@ class EvidenceResponse(ApiResponse):
     historical: bool = False
 
 
-# ---------------------------------------------------------------------------
 # 管理端通用分页
-# ---------------------------------------------------------------------------
 
 
 class PagedResponse(ApiResponse):
@@ -616,9 +641,7 @@ class RiskResultPageResponse(PagedResponse):
     risk_levels: list[str] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
 # 场景管理（页面配置）
-# ---------------------------------------------------------------------------
 
 
 class ScenarioCreateRequest(BaseModel):
@@ -647,11 +670,82 @@ class ScenarioPublishRequest(BaseModel):
     # 发布必须携带页面看到的草稿修订号；不一致时明确冲突，要求刷新后重发。
     expected_revision: int = Field(ge=0)
     change_summary: str | None = Field(default=None, max_length=500)
+    # 能力缺口默认阻断发布。要继续发布，必须把缺口规则键逐条列在这里。
+    # 未列出的缺口仍然阻断；这不是「忽略全部缺口」的开关。
+    acknowledged_capability_gaps: list[str] = Field(default_factory=list, max_length=500)
+
+
+class DraftNodeRequest(BaseModel):
+    """新增节点实例。`node_code` 是**实例码**（同一场景可以有两个同类节点）。"""
+
+    node_code: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    # 能力类型来自统一模板协议的 node_types，决定谁执行这个节点。
+    node_type: str = Field(min_length=1, max_length=40)
+    name: str = Field(default="", max_length=120)
+    sequence_no: int | None = Field(default=None, ge=1)
+    # 上游节点**实例码**列表。缺失依赖与自依赖在此报出，循环依赖由发布期 DAG 校验兜底。
+    depends_on: list[str] = Field(default_factory=list)
+    config_json: dict[str, Any] | None = None
+    enabled: bool = True
+
+
+class DraftNodeUpdateRequest(BaseModel):
+    node_type: str | None = Field(default=None, min_length=1, max_length=40)
+    name: str | None = Field(default=None, max_length=120)
+    sequence_no: int | None = Field(default=None, ge=1)
+    depends_on: list[str] | None = None
+    config_json: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class DraftSheetSelection(BaseModel):
+    """场景选用的一张 Sheet 及它归属的节点实例。
+
+    场景负责配置「使用哪些 Sheet、Sheet 对应哪些节点及其流程关系」，
+    统一模板协议负责定义「系统支持哪些 Sheet 以及每张 Sheet 的结构」。
+    这份选择是**用户配置**，不由系统按草稿内容反推。
+    """
+
+    sheet_role: str = Field(min_length=1, max_length=80)
+    # 该 Sheet 归属的节点实例码。为空表示本场景选用这张表但尚未指定节点。
+    node_code: str | None = Field(default=None, max_length=80)
+
+
+class DraftSheetSelectionRequest(BaseModel):
+    """整体替换本场景选用的 Sheet 清单。
+
+    一次提交完整清单（而不是逐条增删）：Sheet 选择是**一份集合**，
+    逐条增删会让「这次提交之后到底选了哪些表」取决于历史操作顺序。
+    """
+
+    sheets: list[DraftSheetSelection] = Field(default_factory=list)
+
+
+class DraftDisabledSourceRowUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    values: dict[str, str]
+
+
+class DraftDisabledSourceRowActivateRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+
+
+class DraftDisabledSourceRowActivationPreviewItem(BaseModel):
+    row_key: str
+    sheet_role: str
+    sheet_name: str
+    row_no: int
+    source_id: str | None = None
+
+
+class DraftDisabledSourceRowActivationPreviewResponse(ApiResponse):
+    revision_no: int
+    rows: list[DraftDisabledSourceRowActivationPreviewItem]
+    updated_risk_codes: list[str]
 
 
 class DraftMaterialRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    material_type: str = Field(default="", max_length=80)
     required: bool = True
     description: str = Field(default="", max_length=4000)
     # 业务编号（Excel 的「材料编号」列）：导出规则库时写回该列，导入时它是必填项。
@@ -660,7 +754,6 @@ class DraftMaterialRequest(BaseModel):
 
 class DraftMaterialUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    material_type: str | None = Field(default=None, max_length=80)
     required: bool | None = None
     description: str | None = Field(default=None, max_length=4000)
     source_ref: str | None = Field(default=None, max_length=80)
@@ -675,6 +768,12 @@ class DraftFieldRequest(BaseModel):
     currency: str | None = Field(default=None, max_length=40)
     # 产物来源：该字段的取值由哪种处理产物提供（当前仅印章识别 SEAL）。
     artifact_source: Literal["SEAL"] | None = None
+    # 取数期间与报表口径：**由字段自己声明**，计算参数按这两项定位字段事实
+    # （参数表不再声明它们）。合同场景没有这些概念，因此**允许留空**，落成显式的
+    # 「不适用」——不是 NULL（统一事实表的当前版本唯一键由它拼成），也不是默认本期。
+    # 被计算参数引用的字段不能用「不适用」，发布期会明确拦下。
+    period_scope: Literal["CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
+    statement_scope: Literal["CONSOLIDATED", "PARENT", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
     required: bool = False
     instruction: str = Field(default="", max_length=4000)
     source_ref: str | None = Field(default=None, max_length=80)
@@ -687,6 +786,8 @@ class DraftFieldUpdateRequest(BaseModel):
     unit: str | None = Field(default=None, max_length=40)
     currency: str | None = Field(default=None, max_length=40)
     artifact_source: Literal["SEAL"] | None = None
+    period_scope: Literal["CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", "NOT_APPLICABLE"] | None = None
+    statement_scope: Literal["CONSOLIDATED", "PARENT", "NOT_APPLICABLE"] | None = None
     required: bool | None = None
     instruction: str | None = Field(default=None, max_length=4000)
     source_ref: str | None = Field(default=None, max_length=80)
@@ -707,14 +808,24 @@ class DraftRuleRequest(BaseModel):
     operator: str = Field(min_length=1, max_length=40)
     enabled: bool = True
     inputs: list[DraftRuleInput] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
     materials: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     requirement: str = Field(default="", max_length=4000)
+    # 「检查等级」是列协议里的必填业务口径（导入期缺失直接报 RULE_CHECK_LEVEL_REQUIRED）。
+    # 页面表单必须能提交它，否则页面新建的规则没有等级，导出后重新导入必然被拒——
+    # 「导出再导入完整保留」在页面路径上就永远不成立。
+    check_level: str | None = Field(default=None, max_length=40)
+    # 风险的成立条件（任一 / 全部关联检查不合格）：列协议里是必填枚举。
+    # 与检查等级同理，页面必须能提交它，否则页面新建的风险导出后成立条件为空，
+    # 重新导入被枚举校验拒掉。
+    risk_condition: str | None = Field(default=None, max_length=40)
     applicability: DraftRuleApplicability = Field(default_factory=DraftRuleApplicability)
     source_node: str | None = Field(default=None, max_length=40)
     source_rule_key: str | None = Field(default=None, max_length=40)
-    # 风险的多来源（任一 / 全部）：由导入 / 修订带入，页面一次只维护一个来源规则。
+    # 普通检查规则键与计算结果编号分开保存，不能混用两种身份。
     source_rule_keys: list[str] = Field(default_factory=list)
+    source_rule_codes: list[str] = Field(default_factory=list)
     # 业务编号（Excel 的「规则编号」列）：导出时写回，导入时必填。
     source_ref: str | None = Field(default=None, max_length=80)
 
@@ -766,10 +877,20 @@ class ScenarioDraftViewResponse(ApiResponse):
     # 不完整），但配置必须在页面上明确标为未生效，不能被当成已生效。
     sync_error: dict[str, Any] | None = None
     updated_at: datetime
+    # 用户配置的**节点实例**：流程编排与 Sheet 绑定的唯一来源。
+    # 少了这一列，服务层算好的节点清单会被响应模型整体丢掉——页面拿到的草稿里
+    # 一个节点都没有，而节点本身已经真实落库。
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    # 本场景**选用**的 Sheet：模板下载与绑定步骤按它取值，不从草稿内容反推。
+    sheets: list[dict[str, Any]] = Field(default_factory=list)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     fields: list[dict[str, Any]] = Field(default_factory=list)
     rules: list[dict[str, Any]] = Field(default_factory=list)
     sections: list[dict[str, Any]] = Field(default_factory=list)
+    disabled_source_rows: list[dict[str, Any]] = Field(default_factory=list)
+    # 草稿里的计算配置（定义 / 参数 / 判定）。与 `nodes` 同一类问题：服务层算好的清单
+    # 若不在响应模型里声明，会被整体丢掉，页面看到「没有计算配置」而库里其实有。
+    calculations: list[dict[str, Any]] = Field(default_factory=list)
     business_rule_count: int = 0
     system_rule_count: int = 0
 
@@ -783,12 +904,20 @@ class ScenarioVersionConfigResponse(ApiResponse):
     change_summary: str | None = None
     published_at: datetime
     manifest_hash: str
-    unconfigured_check_nodes: list[str] = Field(default_factory=list)
+    # 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
+    # `..._codes` 是这些类型下真实存在的节点实例码（「这个节点是不是未配置的类别」）。
+    # 两者口径不同，页面不得交叉比较。
+    unconfigured_check_node_types: list[str] = Field(default_factory=list)
+    unconfigured_check_node_codes: list[str] = Field(default_factory=list)
     capability_gaps: list[dict[str, Any]] = Field(default_factory=list)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     fields: list[dict[str, Any]] = Field(default_factory=list)
     rules: list[dict[str, Any]] = Field(default_factory=list)
     sections: list[dict[str, Any]] = Field(default_factory=list)
+    disabled_source_rows: list[dict[str, Any]] = Field(default_factory=list)
+    # 草稿里的计算配置（定义 / 参数 / 判定）。与 `nodes` 同一类问题：服务层算好的清单
+    # 若不在响应模型里声明，会被整体丢掉，页面看到「没有计算配置」而库里其实有。
+    calculations: list[dict[str, Any]] = Field(default_factory=list)
     business_rule_count: int = 0
     system_rule_count: int = 0
 
@@ -832,14 +961,22 @@ class VersionCompareResponse(ApiResponse):
     summary: dict[str, int] = Field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
 # 方案管理
-# ---------------------------------------------------------------------------
 
 
 class PlanCreateRequest(BaseModel):
+    """新建方案请求。
+
+    `scenario_version_no` 是页面预览时看到的那一版：它必须与创建时该场景当前允许创建
+    方案的已发布版本一致。缺省或版本变化都明确拒绝，不在创建时静默改取「当前最新版本」——
+    那会让用户看着场景 A/v1 的预览，实际建出场景 B 或 v2 的方案。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     plan_name: str = Field(min_length=1, max_length=255)
     scenario_code: str = Field(min_length=1, max_length=80)
+    scenario_version_no: int = Field(ge=1)
     description: str | None = Field(default=None, max_length=4000)
     enabled: bool = True
 
@@ -858,18 +995,23 @@ class PlanCopyRequest(BaseModel):
     plan_name: str | None = Field(default=None, max_length=255)
 
 
-class PlanSaveRequest(BaseModel):
-    """保存方案：绑定场景版本 + 显式规则选择；保存即重算范围。"""
+class PlanConfigUpdateRequest(BaseModel):
+    """整体提交方案的配置和计算规则启停选择。
 
-    scenario_version_no: int | None = Field(default=None, ge=1)
-    rule_keys: list[str] | None = None
+    五个列表各自是一份**完整集合**：这次提交之后这个方案配了哪些就由它决定，
+    不取决于历史操作顺序。逐项的必填键与取值校验在 `plan_service.update_plan_config`：
+    那里要给出「第几条缺了哪个键」这类可定位的错误，写在契约里只能报一句「校验失败」。
 
+    节点与选用 Sheet 不在这里 —— 它们是场景级执行结构，方案里只读。
+    """
 
-class PlanScopePreviewRequest(BaseModel):
-    scenario_code: str = Field(min_length=1, max_length=80)
-    # 页面已无「场景版本」选择：不传时按该场景当前生效的配置预览。
-    version_no: int | None = Field(default=None, ge=1)
-    rule_keys: list[str] | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    materials: list[dict[str, Any]]
+    fields: list[dict[str, Any]]
+    rules: list[dict[str, Any]]
+    sections: list[dict[str, Any]]
+    calculation_rules: list[dict[str, Any]]
 
 
 class PlanFromTaskRequest(BaseModel):
@@ -890,19 +1032,23 @@ class PlanSelectionResponse(ApiResponse):
     sync_error: dict[str, Any] | None = None
     scope_hash: str | None = None
     base_scenario_version: dict[str, Any] | None = None
-    selected_rule_keys: list[str] = Field(default_factory=list)
-    selected_rules: list[dict[str, Any]] = Field(default_factory=list)
+    # 方案自己的全部规则与启停：这就是「这个方案跑哪些规则」的唯一来源。
+    # 不再有 selected_rule_keys / auto_included_* —— 系统不替用户补规则，勾了什么就是什么。
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+    calculation_rules: list[dict[str, Any]] = Field(default_factory=list)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     field_count: int = 0
     updated_at: datetime
-    dropped_rule_keys: list[str] = Field(default_factory=list)
 
 
 class TaskFromPlanRequest(BaseModel):
     task_name: str = Field(min_length=1, max_length=255)
     remark: str | None = Field(default=None, max_length=4000)
+    # 页面预览看到的方案范围指纹。后端锁定方案后比对，不一致时返回 PLAN_SCOPE_CHANGED：
+    # 任务必须冻结用户刚刚确认的那一版范围，不在创建时静默取一个已经改过的范围。
+    expected_scope_hash: str = Field(min_length=1, max_length=128)
     # 创建任务是一次真实写操作：响应丢失时用同一幂等标识重发，返回原任务，不重复创建。
-    idempotency_key: str | None = Field(default=None, max_length=120)
+    idempotency_key: str = Field(min_length=1, max_length=120)
 
 
 class TaskCreatedResponse(ApiResponse):
@@ -925,7 +1071,15 @@ class TaskUpdateRequest(BaseModel):
 
 
 class TaskCopyRequest(BaseModel):
+    """复制任务：按源任务所属方案的**当前范围**重新创建一个新任务。
+
+    它**不是**「复制原任务的执行快照」：新任务冻结的是方案此刻的范围，
+    源任务的冻结快照与已发生的执行事实一概不带过来。
+    """
+
     task_name: str = Field(min_length=1, max_length=255)
+    # 复制同样是一次真实写操作：响应丢失时用同一幂等标识重发，返回原任务。
+    idempotency_key: str | None = Field(default=None, max_length=120)
 
 
 class DocumentRemoveResponse(ApiResponse):
@@ -974,12 +1128,10 @@ class ReviewDraftResponse(ApiResponse):
     drafts: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
 # 审核任务检索取证（RAG）
 #
 # 检索记录只用于取证：相似度仅作候选排序，不构成主体一致或审核通过的证明；
 # 检索不到内容不等于合同不存在该条款。这些结论必须如实呈现在响应里。
-# ---------------------------------------------------------------------------
 
 
 class RetrievalRequest(BaseModel):

@@ -41,6 +41,7 @@ def list_documents(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """审核材料分页列表：以任务材料位为行，显示当前文件与处理状态。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_documents_page(
         db,
@@ -62,6 +63,7 @@ def export_documents(
     has_file: bool | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出材料列表 CSV。"""
     result = admin_query_service.list_documents_page(
         db,
         task_no=task_no,
@@ -92,6 +94,7 @@ def export_documents(
 
 @router.get("/{document_no}")
 def get_document(document_no: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """材料位详情：当前文件与历史上传版本。"""
     return {**admin_query_service.document_detail(db, document_no), "request_id": request.state.request_id}
 
 
@@ -117,6 +120,7 @@ def list_evidence(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """证据记录分页列表（跨任务）：所属任务 / 文件、依据类型与定位核对状态。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_evidence_page(
         db,
@@ -138,6 +142,7 @@ def export_evidence(
     keyword: str | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出证据记录列表 CSV。"""
     result = admin_query_service.list_evidence_page(
         db,
         task_no=task_no,

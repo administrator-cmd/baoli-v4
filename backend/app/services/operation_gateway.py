@@ -15,12 +15,25 @@ from ..errors import BusinessError
 from ..models import AuditTask, ImportJob, ImportSheet
 from ..schemas import ExecuteNodeRequest, ManualReviewRequest
 from . import background_service
+from .audit.state import _single_node_code_of_type
 from .background_service import (
     PHASE_GRAPH_ADVANCED,
     PHASE_INTERRUPT_WAITING,
     normalized_request_hash,
 )
 from .operation_types import OBJECT_AUDIT_TASK, OBJECT_IMPORT_JOB
+
+
+def _manifest_of_task(db: Session, task: AuditTask) -> dict[str, Any]:
+    """任务创建时冻结的方案 manifest。
+
+    节点归属必须按它解析：`task.current_node` 是**节点实例码**（用户配置的），
+    拿它与能力类型比较在用户改了实例码之后恒为假，人工复核等待点会永远判定不成立。
+    """
+    manifest = task.manifest_json
+    if not isinstance(manifest, dict) or not manifest:
+        raise BusinessError("TASK_MANIFEST_MISSING", "任务缺少已冻结的执行配置", status_code=500)
+    return manifest
 
 
 
@@ -102,8 +115,12 @@ def submit_conversion(
 
     def validate() -> None:
         import_service._ensure_import_mutable(db, job)
-        if job.status == "PUBLISHED":
-            raise BusinessError("IMPORT_ALREADY_PUBLISHED", "该导入作业已发布，不能重新转换", status_code=409)
+        if job.status in {"PUBLISHED", "APPLIED"}:
+            raise BusinessError(
+                "IMPORT_ALREADY_PUBLISHED" if job.status == "PUBLISHED" else "IMPORT_ALREADY_APPLIED",
+                "该导入作业已写入场景或已产生版本，不能重新转换",
+                status_code=409,
+            )
 
     def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
         from . import import_service
@@ -200,7 +217,12 @@ def submit_manual_reviews(
 
     def validate() -> None:
         _reject_deleted_task(task)
-        if task.status != "WAITING_REVIEW" or task.current_node != "MANUAL_REVIEW":
+        # 人工复核等待点按**能力类型**解析实例码：`task.current_node` 是实例码，
+        # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
+        review_node_code = _single_node_code_of_type(
+            _manifest_of_task(db, task), "MANUAL_REVIEW", purpose="人工复核等待点"
+        )
+        if task.status != "WAITING_REVIEW" or task.current_node != review_node_code:
             raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
         _reject_stale_input_revision(task, input_revision)
 
@@ -223,7 +245,11 @@ def submit_manual_reviews(
         idempotency_key=_idempotency_key(idempotency_key),
         request=request,
         runner=runner,
-        target_node="MANUAL_REVIEW",
+        # 目标节点记**实例码**：它是本次命令真实落在哪个节点上的执行事实，
+        # 能力类型在不同场景里对应不同的实例码。
+        target_node=_single_node_code_of_type(
+            _manifest_of_task(db, task), "MANUAL_REVIEW", purpose="人工复核等待点"
+        ),
         input_version=str(task.input_revision),
         validate=validate,
     )

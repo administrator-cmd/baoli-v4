@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 def normalized_request_hash(payload: dict[str, Any]) -> str:
+    """请求内容的稳定哈希：幂等比对用，同一内容必得同一值。"""
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -45,6 +46,7 @@ def find_by_idempotency(
     operation_type: str,
     idempotency_key: str,
 ) -> OperationLog | None:
+    """按对象、操作类型与幂等标识查找原操作记录；没有则返回 None。"""
     return db.scalar(
         select(OperationLog).where(
             OperationLog.object_type == object_type,
@@ -101,20 +103,30 @@ def record_operation(
     request_hash: str | None = None,
     command_no: str | None = None,
     duration_ms: int | None = None,
+    result: str = "SUCCEEDED",
+    failure_code: str | None = None,
+    failure_message: str | None = None,
 ) -> OperationLog:
-    """在业务事务内追加一条操作日志；调用方负责随业务一起提交。"""
+    """在业务事务内追加一条操作日志；调用方负责随业务一起提交。
+
+    `result` 默认 SUCCEEDED：绝大多数记录的是**已经真实完成**的写操作。
+    幂等命令必须显式传 FAILED——失败结果不落库的话，同幂等标识的重发会以为
+    「什么都没发生」而重跑一次，把一次失败变成一次假成功。
+    """
     log = OperationLog(
         log_no=public_no("LOG"),
         object_type=object_type,
         object_no=object_no,
         object_name=object_name[:255],
         operation_type=operation_type,
-        result="SUCCEEDED",
+        result=result,
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         command_no=command_no,
         duration_ms=duration_ms,
         detail_json=detail,
+        failure_code=failure_code,
+        failure_message=failure_message,
     )
     db.add(log)
     return log

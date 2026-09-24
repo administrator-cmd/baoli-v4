@@ -43,11 +43,17 @@ class WorkbookIR(BaseModel):
     source_filename: str
     source_size: int
     source_sha256: str
+    # 统一模板协议的版本标识。系统只有一份协议，这里记录「按哪一版协议解释」。
     profile_version: str
+    # 上传入口的**场景身份**（用户先建场景、再在该场景下上传）。它不由表头推断：
+    # 猜错场景会拿另一套列协议去解释这份 Excel，报出一堆与真实问题无关的缺列错误，
+    # 而用户手里的文件根本没变。历史作业没有这一项，读取方按「未记录场景」处理。
+    scenario_code: str | None = None
     sheets: list[WorkbookSheet]
 
 
 def workbook_source_index(ir: WorkbookIR) -> dict[str, dict[str, Any]]:
+    """工作表 key → {名称, 行号→列集合, 行号→单元格}，供来源追溯按坐标还原原文。"""
     result: dict[str, dict[str, Any]] = {}
     for sheet in ir.sheets:
         rows = {row.row_no: set(row.cells) for row in sheet.rows}

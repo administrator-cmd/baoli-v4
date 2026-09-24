@@ -1,0 +1,35 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - complementary [ref=e4]:
+      - strong [ref=e12]: 保理合同审核系统
+      - menubar [ref=e13]:
+        - menuitem "场景管理" [ref=e14]
+        - menuitem "方案管理" [expanded] [ref=e25]:
+          - menu [ref=e35]:
+            - menuitem "方案列表" [ref=e36] [cursor=pointer]
+            - menuitem "方案编辑" [ref=e37] [cursor=pointer]
+        - menuitem "审核管理" [ref=e38]
+        - menuitem "资料管理" [ref=e48]
+        - menuitem "报告管理" [ref=e57]
+        - menuitem "系统管理" [ref=e66]
+    - generic [ref=e76]:
+      - button "折叠菜单" [ref=e79] [cursor=pointer]
+      - main [ref=e85]:
+        - generic [ref=e340]:
+          - generic [ref=e341]:
+            - generic [ref=e343]:
+              - generic [ref=e344]:
+                - button "方案管理" [ref=e345] [cursor=pointer]
+                - separator [ref=e347]
+                - heading "方案编辑" [level=1] [ref=e349]
+              - button "返回方案列表" [ref=e352] [cursor=pointer]
+            - generic [ref=e354]: 选择方案后调整材料、字段、规则和报告章节。
+          - generic [ref=e359]:
+            - generic [ref=e360]:
+              - combobox [expanded] [active] [ref=e362]
+              - generic [ref=e363]: 选择要编辑的方案
+            - generic [ref=e365] [cursor=pointer]
+  - tooltip [ref=e368]:
+    - listbox [ref=e372]:
+      - option "财报审查测试 · 财报审核场景" [ref=e373] [cursor=pointer]
+      - option "合同审查测试 · 合同审查" [ref=e374] [cursor=pointer]

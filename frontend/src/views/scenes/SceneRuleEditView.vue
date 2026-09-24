@@ -2,15 +2,20 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { Plus, Trash2 } from "lucide-vue-next";
 
-import type { CapabilityItem, DraftFieldItem, DraftMaterialItem, DraftRuleItem, JsonValue } from "@/api/contracts";
+import type { CapabilityItem, DraftCalculationItem, DraftFieldItem, DraftMaterialItem, DraftNodeItem, DraftRuleItem, JsonValue } from "@/api/contracts";
+import type { ToolCatalogItem } from "@/api/contracts/system";
 import { createDraftRule, getSceneDraft, updateDraftRule, type DraftRulePayload } from "@/api/scenes";
 import { getCapabilityCatalog } from "@/api/system";
 import {
   artifactTypeOptions,
+  checkLevelOptions,
   dateCompareOperatorOptions,
   decimalCompareOperatorOptions,
+  decimalSumCompareOperatorOptions,
   riskLevelOptions,
+  riskConditionOptions,
   riskSourceNodeOptions,
 } from "@/constants/labels";
 
@@ -28,15 +33,19 @@ const isCreate = computed(() => ruleKey.value === "new");
 const materials = ref<DraftMaterialItem[]>([]);
 const fields = ref<DraftFieldItem[]>([]);
 const rules = ref<DraftRuleItem[]>([]);
+const calculations = ref<DraftCalculationItem[]>([]);
+const nodes = ref<DraftNodeItem[]>([]);
 const draftRevision = ref<number | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
 /**
  * 打开既有规则时它的完整参数。表单只呈现一部分键（文件检查的检查项目/标准值/单位、
- * 非 ABS_DIFF_LTE 的金额容差等），保存时以此为基础合并，未呈现的键原样保留。
+ * 非 ABS_DIFF_LTE 的金额容差等）。检查方式未变时，保存以此为基础保留未呈现的键。
  */
 const loadedParameters = ref<Record<string, JsonValue>>({});
+const loadedOperator = ref<string | null>(null);
+const activeOperator = ref("FIELD_EQUAL");
 
 /**
  * 检查方式与可选检查阶段：由后端能力目录派生，不在页面维护第二份名单。
@@ -52,10 +61,14 @@ const catalog = ref<CapabilityItem[]>([]);
 const catalogError = ref<string | null>(null);
 const catalogLoading = ref(true);
 
-/** 业务可选能力：排除系统派生能力（字段抽取 / 报告生成由后端补齐，业务不选）。 */
+/** 已导入的显式抽取规则可以编辑；新增规则不提供系统派生算子。 */
 const SYSTEM_OPERATORS = new Set(["LLM_EXTRACT", "REPORT_RENDER"]);
 const businessCapabilities = computed(() =>
-  catalog.value.filter((item) => item.kind === "OPERATOR" && !SYSTEM_OPERATORS.has(item.capability_id)),
+  catalog.value.filter((item) =>
+    item.kind === "OPERATOR" &&
+    (!SYSTEM_OPERATORS.has(item.capability_id) ||
+      (!isCreate.value && loadedOperator.value === "LLM_EXTRACT" && item.capability_id === "LLM_EXTRACT")),
+  ),
 );
 const OPERATOR_OPTIONS = computed(() =>
   businessCapabilities.value.map((item) => ({
@@ -76,29 +89,21 @@ const SOURCE_NODE_RULE_NODES: Record<string, string[]> = {
   CROSS_VALIDATE: ["CROSS_VALIDATE"],
 };
 
-const NODE_LABELS: Record<string, string> = {
-  MATERIAL_CHECK: "材料检查",
-  DOCUMENT_PREPARE: "文件处理",
-  FIELD_EXTRACTION: "字段抽取",
-  INTERNAL_VALIDATE: "文件内部校验",
-  CROSS_VALIDATE: "文件交叉校验",
-  MANUAL_REVIEW: "人工复核",
-  RISK_RATING: "风险评定",
-  REPORT_OUTPUT: "报告输出",
-};
-
 const form = reactive({
   name: "",
+  source_ref: "",
   operator: "FIELD_EQUAL",
   node: "CROSS_VALIDATE",
   enabled: true,
   // 材料规则
   material_keys: [] as string[],
+  output_field_keys: [] as string[],
   // 比较 / 智能判断输入
   left_material_key: "",
   left_field_key: "",
   right_material_key: "",
   right_field_key: "",
+  addends: [] as Array<{ material_key: string; field_key: string }>,
   // 参数
   date_operator: "EQ",
   decimal_operator: "EQ",
@@ -109,10 +114,13 @@ const form = reactive({
   requires_manual_review: false,
   // 审核要求与适用条件
   requirement: "",
+  check_level: "",
   applicability_kind: "ALWAYS",
   // 风险规则
-  source_node: "CROSS_VALIDATE",
-  source_rule_key: "",
+  source_node: "",
+  source_rule_keys: [] as string[],
+  source_rule_codes: [] as string[],
+  risk_condition: "",
   risk_level: "中",
   risk_action: "",
 });
@@ -122,15 +130,41 @@ const currentCapability = computed(
   () => businessCapabilities.value.find((item) => item.capability_id === form.operator) ?? null,
 );
 
-const nodeOptions = computed(() =>
-  (OPERATOR_NODES.value[form.operator] ?? []).map((code) => ({ value: code, label: NODE_LABELS[code] ?? code })),
-);
 /**
- * 表单分支按能力的**输入形态**与执行方式判断，不按算子码逐个列举。
+ * 工具目录：模型在规则评估循环里**可以选择**哪些工具。
  *
- * 此前这里是三份硬编码名单（比较类 4 个、材料类 2 个、智能判断 1 个），
- * 后端新增一个算子就必须同时改这里，漏改的表现是「能保存但表单少了一块输入」。
- * 现在只问能力目录：「这项能力吃什么输入、谁来判」，新算子接入后页面自动跟上。
+ * 它与「能力已实现」是两件事，页面必须分开显示：
+ * 材料齐全性、文件质量子项由确定性节点执行（`agent_selectable=false`），
+ * 即使已实现也不会出现在模型的工具清单里。把它们显示成「模型可以调用」
+ * 会让使用者以为模型能替这些检查做决定。
+ */
+const toolCatalog = ref<ToolCatalogItem[]>([]);
+
+/** 当前检查方式对应的工具项；未注册时返回 null（页面如实说明）。 */
+const currentTool = computed(
+  () => toolCatalog.value.find((item) => item.tool_id === form.operator) ?? null,
+);
+
+/** 当前检查方式是否会被 Agent 在循环里选择调用。 */
+const currentAgentSelectable = computed(() => currentTool.value?.agent_selectable === true);
+
+const nodeTypeByCode = computed(() => new Map(nodes.value.map((node) => [node.node_code, node.node_type])));
+const currentNodeType = computed(() => nodeTypeByCode.value.get(form.node) ?? null);
+const nodeOptions = computed(() =>
+  nodes.value
+    .filter((node) => (OPERATOR_NODES.value[form.operator] ?? []).includes(node.node_type))
+    .map((node) => ({
+      value: node.node_code,
+      label: node.name === node.node_type_label ? node.name : `${node.name}（${node.node_type_label}）`,
+      disabled: !node.enabled,
+    })),
+);
+function nodeName(code: string): string {
+  return nodes.value.find((node) => node.node_code === code)?.name ?? code;
+}
+/**
+ * 表单分支按能力的**输入形态**与执行方式判断，不按算子码逐个列举——
+ * 硬编码名单会让「后端新增算子」变成「能保存但表单少了一块输入」。
  */
 const inputKind = computed(() => currentCapability.value?.input_kind ?? null);
 /** 需要字段输入的能力（比较、非空、条款存在性、智能判断、金额加总）。 */
@@ -139,19 +173,21 @@ const needsFieldInputs = computed(() =>
 );
 /** 按材料位判定、没有字段输入的能力（材料齐全性、文件质量检查）。 */
 const isMaterialRule = computed(() => inputKind.value === "MATERIAL_SCOPE");
+const isExplicitExtraction = computed(() => !isCreate.value && form.operator === "LLM_EXTRACT");
 /** 输入形态是「字段对」的能力（比较、大小写金额、智能判断）：加总比较用 FIELD_LIST，不在此列。 */
 const isPairInput = computed(() => inputKind.value === "FIELD_PAIR");
+const isAddends = computed(() => form.operator === "DECIMAL_SUM_COMPARE");
 const isComparison = computed(() => needsFieldInputs.value && !isLlmValidate.value);
 const isLlmValidate = computed(() => currentCapability.value?.execution === "LLM_VALIDATE");
 const isRisk = computed(() => currentCapability.value?.execution === "RISK_TRIGGER");
-/** 文件检查子项的检查项目由规则库导入维护，页面只读展示。 */
+/** 文件质量检查：表单按它切换分支，检查项目等口径见下面的 qualityParameters。 */
 const isFileQuality = computed(() => currentCapability.value?.execution === "FILE_QUALITY_CHECK");
 /**
  * 单输入：形态声明为「一个字段」的能力（非空、条款存在性），
  * 以及文件内部校验的智能判断（它只针对同一份材料里的一段约定）。
  */
 const singleInput = computed(
-  () => inputKind.value === "FIELD_ONE" || (isLlmValidate.value && form.node === "INTERNAL_VALIDATE"),
+  () => inputKind.value === "FIELD_ONE" || (isLlmValidate.value && currentNodeType.value === "INTERNAL_VALIDATE"),
 );
 /** 文件检查由导入维护的口径参数：页面只读展示，保存时原样保留。 */
 const qualityParameters = computed<Record<string, string>>(() => {
@@ -172,15 +208,28 @@ const sourceRuleOptions = computed(() =>
       (item) =>
         !item.system &&
         item.operator !== "RISK_TRIGGER" &&
-        (SOURCE_NODE_RULE_NODES[form.source_node] ?? []).includes(item.node),
+        (!form.source_node || (SOURCE_NODE_RULE_NODES[form.source_node] ?? []).includes(nodeTypeByCode.value.get(item.node) ?? "")),
     )
-    .map((item) => ({ value: item.rule_key, label: `${item.name}（${NODE_LABELS[item.node] ?? item.node}）` })),
+    .map((item) => ({ value: item.rule_key, label: `${item.name}（${nodeName(item.node)}）` })),
+);
+const calculationSourceOptions = computed(() =>
+  calculations.value
+    .filter((item) => item.result_code && item.status !== "DISABLED")
+    .map((item) => ({ value: item.result_code as string, label: `${item.name || item.rule_code || item.result_code}（${item.result_code}）` })),
 );
 
 function onOperatorChange(): void {
-  const allowed = OPERATOR_NODES.value[form.operator] ?? [];
-  if (!allowed.includes(form.node)) {
-    form.node = allowed[0] ?? "CROSS_VALIDATE";
+  if (form.operator !== activeOperator.value) {
+    form.threshold = "";
+    form.threshold_unit = "";
+    form.date_operator = "EQ";
+    form.decimal_operator = "EQ";
+    form.requires_manual_review = false;
+    activeOperator.value = form.operator;
+  }
+  const available = nodeOptions.value.filter((item) => !item.disabled);
+  if (!available.some((item) => item.value === form.node)) {
+    form.node = available[0]?.value ?? "";
   }
   // 输入形态按能力声明清空：换成不需要字段输入的能力时，把上一条规则的字段选择清掉，
   // 否则它会以「这条规则选了别的检查用过的字段」的形式留在提交内容里。
@@ -190,6 +239,18 @@ function onOperatorChange(): void {
     form.left_material_key = "";
     form.right_material_key = "";
   }
+  if (isAddends.value) {
+    form.right_field_key = "";
+    form.right_material_key = "";
+    if (!decimalSumCompareOperatorOptions.some((item) => item.value === form.decimal_operator)) {
+      form.decimal_operator = "EQ";
+    }
+    if (!form.addends.length) {
+      form.addends = [{ material_key: "", field_key: "" }];
+    }
+  } else {
+    form.addends = [];
+  }
   if (inputKind.value === "FIELD_ONE") {
     // 单输入能力不允许右侧输入：留着会让「恰好两个输入」的校验通过并提交多余输入。
     form.right_field_key = "";
@@ -197,23 +258,22 @@ function onOperatorChange(): void {
   }
   // 阈值与单位只属于数值/日期比较：换成别的检查方式时清掉表单值，
   // 避免把上一条检查的容差带到另一条规则上。
-  if (form.operator !== "DATE_COMPARE" && form.operator !== "DECIMAL_COMPARE") {
+  if (form.operator !== "DATE_COMPARE" && form.operator !== "DECIMAL_COMPARE" && !isAddends.value) {
     form.threshold = "";
     form.threshold_unit = "";
   }
 }
 
 function onNodeChange(): void {
-  if (isLlmValidate.value && form.node === "INTERNAL_VALIDATE") {
+  if (isLlmValidate.value && currentNodeType.value === "INTERNAL_VALIDATE") {
     form.right_material_key = "";
     form.right_field_key = "";
   }
 }
 
 function onSourceNodeChange(): void {
-  if (!sourceRuleOptions.value.some((item) => item.value === form.source_rule_key)) {
-    form.source_rule_key = "";
-  }
+  const available = new Set(sourceRuleOptions.value.map((item) => item.value));
+  form.source_rule_keys = form.source_rule_keys.filter((key) => available.has(key));
 }
 
 async function load(): Promise<void> {
@@ -232,6 +292,8 @@ async function load(): Promise<void> {
     materials.value = draft.materials;
     fields.value = draft.fields;
     rules.value = draft.rules.filter((item) => !item.system);
+    calculations.value = draft.calculations;
+    nodes.value = draft.nodes;
     if (!isCreate.value) {
       const existing = draft.rules.find((item) => item.rule_key === ruleKey.value);
       if (!existing || existing.system) {
@@ -241,12 +303,16 @@ async function load(): Promise<void> {
         return;
       }
       applyRule(existing);
-    } else if (typeof route.query.from === "string" && route.query.from) {
-      const source = draft.rules.find((item) => item.rule_key === route.query.from);
-      if (source) {
-        applyRule(source);
-        form.name = `${source.name} 副本`;
+    } else {
+      if (typeof route.query.from === "string" && route.query.from) {
+        const source = draft.rules.find((item) => item.rule_key === route.query.from);
+        if (source) {
+          applyRule(source);
+          form.name = `${source.name} 副本`;
+          form.source_ref = "";
+        }
       }
+      onOperatorChange();
     }
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : "草稿读取失败";
@@ -261,10 +327,12 @@ async function loadCatalog(): Promise<void> {
   try {
     const response = await getCapabilityCatalog();
     catalog.value = response.items;
+    toolCatalog.value = response.tools ?? [];
   } catch (error) {
     // 读不到目录时不回退到本地名单：那会让页面显示一份后端并不支持的能力集合，
     // 用户据此保存的规则会在发布时才失败。这里明确报错并由页面禁用保存。
     catalog.value = [];
+    toolCatalog.value = [];
     catalogError.value = error instanceof Error ? error.message : "审核能力目录读取失败";
   } finally {
     catalogLoading.value = false;
@@ -273,18 +341,28 @@ async function loadCatalog(): Promise<void> {
 
 function applyRule(rule: DraftRuleItem): void {
   form.name = rule.name;
+  form.source_ref = rule.source_ref ?? "";
   form.operator = rule.operator;
+  activeOperator.value = rule.operator;
+  loadedOperator.value = rule.operator;
   form.node = rule.node;
   form.enabled = rule.enabled;
   form.requirement = rule.requirement;
+  form.check_level = rule.check_level ?? "";
   form.applicability_kind = rule.applicability.kind === "MATERIALS_UPLOADED" ? "MATERIALS_UPLOADED" : "ALWAYS";
   form.material_keys = rule.materials.map((item) => item.material_key);
+  form.output_field_keys = rule.outputs.map((item) => item.field_key);
   if (rule.inputs.length) {
     form.left_material_key = rule.inputs[0]?.material_key ?? "";
     form.left_field_key = rule.inputs[0]?.field_key ?? "";
     if (rule.inputs.length > 1) {
       form.right_material_key = rule.inputs[1]?.material_key ?? "";
       form.right_field_key = rule.inputs[1]?.field_key ?? "";
+    }
+    if (rule.operator === "DECIMAL_SUM_COMPARE") {
+      form.addends = rule.inputs.length > 1
+        ? rule.inputs.slice(1).map((item) => ({ material_key: item.material_key ?? "", field_key: item.field_key ?? "" }))
+        : [{ material_key: "", field_key: "" }];
     }
   }
   const parameters = rule.parameters;
@@ -296,7 +374,7 @@ function applyRule(rule: DraftRuleItem): void {
   if (rule.operator === "DATE_COMPARE" && typeof parameters.operator === "string") {
     form.date_operator = parameters.operator;
   }
-  if (rule.operator === "DECIMAL_COMPARE" && typeof parameters.operator === "string") {
+  if ((rule.operator === "DECIMAL_COMPARE" || rule.operator === "DECIMAL_SUM_COMPARE") && typeof parameters.operator === "string") {
     form.decimal_operator = parameters.operator;
   }
   if (parameters.threshold !== undefined && parameters.threshold !== null) {
@@ -305,7 +383,7 @@ function applyRule(rule: DraftRuleItem): void {
   if (typeof parameters.threshold_unit === "string") {
     form.threshold_unit = parameters.threshold_unit;
   }
-  if (typeof parameters.instruction === "string" && rule.operator === "LLM_VALIDATE") {
+  if (typeof parameters.instruction === "string" && (rule.operator === "LLM_VALIDATE" || rule.operator === "LLM_EXTRACT")) {
     form.instruction = parameters.instruction;
   }
   if (typeof parameters.artifact_type === "string") {
@@ -315,9 +393,9 @@ function applyRule(rule: DraftRuleItem): void {
   if (rule.source_node) {
     form.source_node = rule.source_node;
   }
-  if (rule.source_rule_key) {
-    form.source_rule_key = rule.source_rule_key;
-  }
+  form.source_rule_keys = rule.source_rule_keys?.length ? [...rule.source_rule_keys] : rule.source_rule_key ? [rule.source_rule_key] : [];
+  form.source_rule_codes = [...(rule.source_rule_codes ?? [])];
+  form.risk_condition = rule.risk_condition ?? "";
   if (rule.risk_level) {
     form.risk_level = rule.risk_level;
   }
@@ -330,13 +408,21 @@ function buildPayload(): DraftRulePayload | string {
   if (!form.name.trim()) {
     return "请填写规则名称";
   }
+  if (!nodeOptions.value.some((item) => item.value === form.node && !item.disabled)) {
+    return "请选择当前场景中可用的检查节点";
+  }
   const inputs: Array<{ field_key: string; material_key: string }> = [];
   if (needsFieldInputs.value) {
     if (!form.left_field_key || !form.left_material_key) {
       return "请选择实际输入字段（左侧/唯一输入）";
     }
     inputs.push({ field_key: form.left_field_key, material_key: form.left_material_key });
-    if (!singleInput.value) {
+    if (isAddends.value) {
+      if (!form.addends.length || form.addends.some((item) => !item.material_key || !item.field_key)) {
+        return "金额加总比较至少需要一个完整的加数字段";
+      }
+      inputs.push(...form.addends.map((item) => ({ field_key: item.field_key, material_key: item.material_key })));
+    } else if (!singleInput.value) {
       if (!form.right_field_key || !form.right_material_key) {
         return "请选择右侧输入字段";
       }
@@ -348,18 +434,17 @@ function buildPayload(): DraftRulePayload | string {
       return "该检查方式需要左右各一个字段";
     }
     if (
-      isPairInput.value &&
+      (isPairInput.value || isAddends.value) &&
       !singleInput.value &&
-      form.node === "INTERNAL_VALIDATE" &&
-      inputs.length === 2 &&
-      inputs[0]?.material_key !== inputs[1]?.material_key
+      currentNodeType.value === "INTERNAL_VALIDATE" &&
+      new Set(inputs.map((item) => item.material_key)).size > 1
     ) {
       return "文件内部校验的左右字段必须属于同一份材料";
     }
   }
   // 以打开时的完整参数为基础：未在表单呈现的键（标准值、合格要求、criterion、
   // 非 ABS_DIFF_LTE 的金额容差等）原样保留，只覆盖本次真正由表单决定的方向与阈值。
-  const parameters: Record<string, JsonValue> = { ...loadedParameters.value };
+  const parameters: Record<string, JsonValue> = form.operator === loadedOperator.value ? { ...loadedParameters.value } : {};
   for (const key of ["operator", "threshold", "threshold_unit"]) {
     // 先清掉本表单负责的键，再由下面的分支按当前表单值重新写入；
     // 不清掉会让「改成别的方向」后残留旧方向的阈值与单位。
@@ -367,6 +452,16 @@ function buildPayload(): DraftRulePayload | string {
   }
   if (isMaterialRule.value && !form.material_keys.length) {
     return "请选择适用材料";
+  }
+  if (isExplicitExtraction.value) {
+    if (!form.source_ref.trim()) return "显式字段抽取规则必须保留业务编号";
+    if (!form.material_keys.length) return "请选择适用材料";
+    if (!form.output_field_keys.length) return "请选择输出字段";
+    if (form.output_field_keys.some((key) => !fields.value.some((field) => field.field_key === key && form.material_keys.includes(field.material_key)))) {
+      return "输出字段必须属于适用材料";
+    }
+    if (!form.instruction.trim()) return "请填写字段抽取指令";
+    parameters.instruction = form.instruction.trim();
   }
   if (form.operator === "DATE_COMPARE") {
     parameters.operator = form.date_operator;
@@ -389,13 +484,22 @@ function buildPayload(): DraftRulePayload | string {
       if (!Number.isFinite(threshold) || threshold < 0) {
         return "金额允许差值必须是不小于 0 的数值";
       }
-      parameters.threshold = threshold;
+      parameters.threshold = form.threshold.trim();
       if (form.threshold_unit.trim()) {
         parameters.threshold_unit = form.threshold_unit.trim();
       }
     } else if (form.decimal_operator === "ABS_DIFF_LTE") {
       return "金额绝对差比较必须填写有效的数值阈值";
     }
+  }
+  if (isAddends.value) {
+    parameters.operator = form.decimal_operator;
+    const threshold = Number(form.threshold);
+    if (!form.threshold.trim() || !Number.isFinite(threshold) || threshold < 0) {
+      return "金额加总比较必须填写不小于 0 的允许差值";
+    }
+    parameters.threshold = form.threshold.trim();
+    if (form.threshold_unit.trim()) parameters.threshold_unit = form.threshold_unit.trim();
   }
   if (form.operator === "LLM_VALIDATE") {
     if (!form.instruction.trim()) {
@@ -410,8 +514,11 @@ function buildPayload(): DraftRulePayload | string {
     parameters.requires_manual_review = true;
   }
   if (isRisk.value) {
-    if (!form.source_rule_key) {
-      return "风险规则必须选择来源规则";
+    if (!form.source_rule_keys.length && !form.source_rule_codes.length) {
+      return "风险规则必须选择来源检查或计算结果";
+    }
+    if (!form.risk_condition) {
+      return "请选择风险成立条件";
     }
     if (!form.risk_action.trim()) {
       return "风险规则必须填写处理建议";
@@ -421,16 +528,22 @@ function buildPayload(): DraftRulePayload | string {
   }
   return {
     name: form.name.trim(),
+    source_ref: form.source_ref.trim() || null,
     node: form.node,
     operator: form.operator,
     enabled: form.enabled,
     inputs,
-    materials: isMaterialRule.value ? [...form.material_keys] : [],
+    outputs: isExplicitExtraction.value ? [...form.output_field_keys] : [],
+    materials: isMaterialRule.value || isExplicitExtraction.value ? [...form.material_keys] : [],
     parameters,
     requirement: form.requirement,
+    check_level: form.check_level.trim() || null,
+    risk_condition: isRisk.value ? form.risk_condition : null,
     applicability: { kind: form.applicability_kind },
-    source_node: isRisk.value ? form.source_node : null,
-    source_rule_key: isRisk.value ? form.source_rule_key : null,
+    source_node: isRisk.value ? form.source_node || null : null,
+    source_rule_key: isRisk.value ? form.source_rule_keys[0] ?? null : null,
+    source_rule_keys: isRisk.value ? [...form.source_rule_keys] : [],
+    source_rule_codes: isRisk.value ? [...form.source_rule_codes] : [],
   };
 }
 
@@ -457,8 +570,13 @@ async function submit(): Promise<void> {
   }
 }
 
+/** 返回场景详情的规则 tab。规则配置是场景详情的 tab，不是独立页面。 */
 async function back(): Promise<void> {
-  await router.push({ name: "scene-rules", query: { scenario: scenarioCode.value, scope: "draft" } });
+  await router.push({
+    name: "scene-detail",
+    params: { scenarioCode: scenarioCode.value },
+    query: { tab: "rules" },
+  });
 }
 
 onMounted(load);
@@ -491,16 +609,19 @@ onMounted(load);
       <el-form-item label="规则名称" required>
         <el-input v-model="form.name" maxlength="255" placeholder="按业务填写，例如：结算总额与加总核对" />
       </el-form-item>
+      <el-form-item label="规则编号">
+        <el-input v-model="form.source_ref" maxlength="80" placeholder="与规则库中的规则编号一致" />
+      </el-form-item>
       <el-form-item label="检查方式" required>
         <el-select v-model="form.operator" style="width: 260px" @change="onOperatorChange">
           <el-option v-for="item in OPERATOR_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
       <el-form-item label="检查阶段" required>
-        <el-select v-model="form.node" :disabled="nodeOptions.length === 1" style="width: 260px" @change="onNodeChange">
-          <el-option v-for="item in nodeOptions" :key="item.value" :value="item.value" :label="item.label" />
+        <el-select v-model="form.node" :disabled="nodeOptions.filter((item) => !item.disabled).length === 1" style="width: 260px" @change="onNodeChange">
+          <el-option v-for="item in nodeOptions" :key="item.value" :value="item.value" :label="item.label" :disabled="item.disabled" />
         </el-select>
-        <span class="text-hint" style="margin-left: 8px">检查方式决定规则能在哪个阶段执行</span>
+        <span v-if="!nodeOptions.some((item) => !item.disabled)" class="text-hint">当前场景没有支持该检查方式的可用节点</span>
       </el-form-item>
 
       <el-alert
@@ -515,9 +636,35 @@ onMounted(load);
         规则可以保存，但发布前必须逐条确认，运行时这条检查会明确报「不可判定」，不会给出结论。
       </el-alert>
 
+      <!-- 「已实现」与「模型可以调用」是两件事，分开如实显示：
+           由确定性节点执行的检查（材料齐全性、文件质量子项）不会出现在模型的工具清单里。 -->
+      <el-alert
+        v-if="currentCapability && currentCapability.implemented && !currentAgentSelectable"
+        class="block-gap-sm"
+        type="info"
+        show-icon
+        :closable="false"
+        title="该检查由固定节点执行，不作为模型可选工具"
+      >
+        {{ currentTool?.agent_unselectable_reason || "模型在规则评估循环里没有调用它的入口" }}。
+        判定仍按确定性程序完成，结论不受模型影响。
+      </el-alert>
+
 
       <h3 class="app-section-title">实际输入对象</h3>
-      <template v-if="isMaterialRule">
+      <template v-if="isExplicitExtraction">
+        <el-form-item label="适用材料" required>
+          <el-select v-model="form.material_keys" multiple filterable style="width: 100%" placeholder="选择抽取所用材料">
+            <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="输出字段" required>
+          <el-select v-model="form.output_field_keys" multiple filterable style="width: 100%" placeholder="选择要抽取的字段">
+            <el-option v-for="item in fields.filter((field) => form.material_keys.includes(field.material_key))" :key="item.field_key" :value="item.field_key" :label="item.name" />
+          </el-select>
+        </el-form-item>
+      </template>
+      <template v-else-if="isMaterialRule">
         <el-form-item label="适用材料" required>
           <el-select v-model="form.material_keys" multiple filterable style="width: 100%" placeholder="选择这条检查覆盖的材料位">
             <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
@@ -539,7 +686,34 @@ onMounted(load);
             <el-option v-for="item in leftFields" :key="item.field_key" :value="item.field_key" :label="item.name" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="!singleInput" label="右侧字段" required>
+        <template v-if="isAddends">
+          <el-form-item v-for="(addend, index) in form.addends" :key="index" :label="`加数字段 ${index + 1}`" required>
+            <div class="rule-addend-row">
+              <el-select v-model="addend.material_key" placeholder="材料" class="rule-addend-select" @change="addend.field_key = ''">
+                <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
+              </el-select>
+              <el-select v-model="addend.field_key" placeholder="字段" class="rule-addend-select">
+                <el-option
+                  v-for="item in fields.filter((field) => field.material_key === addend.material_key)"
+                  :key="item.field_key"
+                  :value="item.field_key"
+                  :label="item.name"
+                />
+              </el-select>
+              <el-button
+                :icon="Trash2"
+                :disabled="form.addends.length === 1"
+                :aria-label="`移除加数字段 ${index + 1}`"
+                :title="`移除加数字段 ${index + 1}`"
+                @click="form.addends.splice(index, 1)"
+              />
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button :icon="Plus" @click="form.addends.push({ material_key: '', field_key: '' })">添加加数字段</el-button>
+          </el-form-item>
+        </template>
+        <el-form-item v-else-if="!singleInput" label="右侧字段" required>
           <el-select v-model="form.right_material_key" placeholder="材料" style="width: 220px" @change="form.right_field_key = ''">
             <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
           </el-select>
@@ -569,6 +743,19 @@ onMounted(load);
           <el-input v-model="form.threshold_unit" style="width: 220px" placeholder="可选，例如：元" />
         </el-form-item>
       </template>
+      <template v-if="isAddends">
+        <el-form-item label="比较方式" required>
+          <el-select v-model="form.decimal_operator" style="width: 220px">
+            <el-option v-for="item in decimalSumCompareOperatorOptions" :key="item.value" :value="item.value" :label="item.label" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="允许差值" required>
+          <el-input v-model="form.threshold" style="width: 220px" placeholder="请输入非负数" />
+        </el-form-item>
+        <el-form-item label="差值单位">
+          <el-input v-model="form.threshold_unit" style="width: 220px" placeholder="例如：元" />
+        </el-form-item>
+      </template>
       <template v-if="form.operator === 'DATE_COMPARE'">
         <el-form-item label="允许差值（天）">
           <el-input v-model="form.threshold" style="width: 220px" placeholder="例如：1（留空表示不做容差）" />
@@ -595,6 +782,9 @@ onMounted(load);
           placeholder="写给模型判断的要求：判断什么、根据什么材料与字段"
         />
       </el-form-item>
+      <el-form-item v-if="isExplicitExtraction" label="抽取指令" required>
+        <el-input v-model="form.instruction" type="textarea" :rows="3" maxlength="4000" />
+      </el-form-item>
       <el-form-item v-if="isComparison || isLlmValidate" label="人工复核">
         <el-checkbox v-model="form.requires_manual_review">异常时需要人工复核</el-checkbox>
       </el-form-item>
@@ -609,6 +799,11 @@ onMounted(load);
         />
         <div class="text-hint">汇总、合计、与固定常量比较等当前不支持的能力会在这里被识别并在保存/发布时明确报错。</div>
       </el-form-item>
+      <el-form-item v-if="!isRisk" label="检查等级">
+        <el-select v-model="form.check_level" clearable style="width: 220px" placeholder="选择检查等级">
+          <el-option v-for="item in checkLevelOptions" :key="item.value" :value="item.value" :label="item.label" />
+        </el-select>
+      </el-form-item>
 
       <el-form-item label="适用条件">
         <el-radio-group v-model="form.applicability_kind">
@@ -619,14 +814,24 @@ onMounted(load);
 
       <template v-if="isRisk">
         <h3 class="app-section-title">风险来源与建议</h3>
-        <el-form-item label="来源节点" required>
-          <el-select v-model="form.source_node" style="width: 260px" @change="onSourceNodeChange">
+        <el-form-item label="来源节点类型">
+          <el-select v-model="form.source_node" clearable style="width: 260px" placeholder="全部可用类型" @change="onSourceNodeChange">
             <el-option v-for="item in riskSourceNodeOptions" :key="item.value" :value="item.value" :label="item.label" />
           </el-select>
         </el-form-item>
-        <el-form-item label="来源规则" required>
-          <el-select v-model="form.source_rule_key" filterable style="width: 100%" placeholder="选择这条风险监视的审核规则">
+        <el-form-item label="来源检查">
+          <el-select v-model="form.source_rule_keys" multiple filterable style="width: 100%" placeholder="选择来源检查规则">
             <el-option v-for="item in sourceRuleOptions" :key="item.value" :value="item.value" :label="item.label" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="calculationSourceOptions.length || form.source_rule_codes.length" label="计算结果">
+          <el-select v-model="form.source_rule_codes" multiple filterable style="width: 100%" placeholder="选择来源计算结果">
+            <el-option v-for="item in calculationSourceOptions" :key="item.value" :value="item.value" :label="item.label" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="成立条件" required>
+          <el-select v-model="form.risk_condition" style="width: 260px" placeholder="选择成立条件">
+            <el-option v-for="item in riskConditionOptions" :key="item.value" :value="item.value" :label="item.label" />
           </el-select>
         </el-form-item>
         <el-form-item label="风险等级" required>
@@ -655,3 +860,17 @@ onMounted(load);
     </el-form>
   </div>
 </template>
+
+<style scoped>
+.rule-addend-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.rule-addend-select {
+  width: min(220px, 100%);
+}
+</style>

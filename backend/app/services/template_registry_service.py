@@ -64,6 +64,7 @@ def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int
 
 
 def published_version(db: Session, scenario_code: str, version_no: int) -> ScenarioVersion | None:
+    """取指定场景版本；不存在时返回 None。"""
     return db.scalar(
         select(ScenarioVersion).where(
             ScenarioVersion.scenario_code == scenario_code,

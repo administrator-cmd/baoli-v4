@@ -10,13 +10,42 @@ import type { TaskScope } from "./scenes";
 import type { TaskPlanInfo } from "./plans";
 
 export interface AuditNode {
+  /** 节点**实例码**：用户配置的实例，同一能力类型可以有多个。 */
   node_code: string;
+  /** 能力类型：决定这个节点由谁执行、属于哪个业务工作区。 */
+  node_type?: string | null;
   name: string;
   sequence_no: number;
   enabled: boolean;
   status: string;
   failure_message: string | null;
   skip_reason: string | null;
+}
+
+/** 任务展示结构里的一张 Sheet：本场景选用的表及它归属的节点实例。 */
+export interface TaskDisplaySheet {
+  sheet_role: string;
+  node_code: string | null;
+}
+
+/**
+ * 任务的**展示结构**（需求 31~34）：由后端按当前任务的场景配置返回。
+ *
+ * 页面按它通用渲染：只展示当前场景实际使用的节点、Sheet 与字段，
+ * 统一模板协议里未被本场景选中的内容不出现。
+ */
+export interface TaskDisplay {
+  task_no: string;
+  nodes: AuditNode[];
+  sheets: TaskDisplaySheet[];
+  fields: Array<{
+    field_key: string;
+    name: string;
+    value_type: string;
+    unit: string | null;
+    currency: string | null;
+    material_key: string;
+  }>;
 }
 
 export interface AuditDocument {
@@ -134,6 +163,13 @@ export interface RetrievalCandidateSnapshot {
   chunk_id?: number | null;
   source_entry_no?: number | null;
   subject_name?: string | null;
+  artifact_type?: string | null;
+  text?: string | null;
+  page_no?: number | null;
+  page_no_source?: string | null;
+  heading_path?: string | null;
+  char_start?: number | null;
+  char_end?: number | null;
   material_key?: string | null;
   material_name?: string | null;
   filename?: string | null;
@@ -248,14 +284,22 @@ export interface AuditTask extends ApiResponse {
   updated_at?: string | null;
   current_node: AuditNode;
   nodes: AuditNode[];
+  /** 展示结构：本任务真实使用的节点、Sheet 与字段；旧任务可能没有该字段。 */
+  display?: TaskDisplay | null;
   documents: AuditDocument[];
   fields: AuditField[];
   rules: AuditRule[];
   pending_reviews: PendingReview[];
-  unconfigured_check_nodes: string[];
+  /**
+   * 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
+   * `..._codes` 是这些类型下的节点实例码（「当前这个节点是不是未配置的类别」）。
+   * 两个口径不同，不得交叉比较。旧任务可能没有这两个字段。
+   */
+  unconfigured_check_node_types?: string[];
+  unconfigured_check_node_codes?: string[];
   /** 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。 */
   input_revision: number;
-  /** 任务实际执行范围：未配置 / 未启用 / 自动补入的区分依据（含规则中文名）。 */
+  /** 任务冻结的普通规则、计算规则与未配置检查范围。 */
   scope?: TaskScope | null;
   latest_operation: OperationAccepted | null;
   /** 任务备注（可编辑基本资料）。 */

@@ -11,14 +11,17 @@ export interface DocumentQuery {
   page_size: number;
 }
 
+/** 审核材料分页列表：以任务材料位为行，显示当前文件与处理状态。 */
 export function listDocuments(query: DocumentQuery): Promise<Paged<DocumentRow>> {
   return request<Paged<DocumentRow>>(`/documents${toQuery({ ...query })}`);
 }
 
+/** 材料列表导出地址；与当前筛选同一作用域。 */
 export function documentExportUrl(query: Omit<DocumentQuery, "page" | "page_size">): string {
   return apiFileUrl(`/documents/export${toQuery({ ...query })}`);
 }
 
+/** 材料位详情：当前文件与历史上传版本。 */
 export function getDocument(documentNo: string): Promise<DocumentDetail> {
   return request<DocumentDetail>(`/documents/${encodeURIComponent(documentNo)}`);
 }
@@ -39,10 +42,12 @@ export interface EvidenceQuery {
   page_size: number;
 }
 
+/** 证据记录分页列表。 */
 export function listEvidence(query: EvidenceQuery): Promise<Paged<EvidenceRow>> {
   return request<Paged<EvidenceRow>>(`/evidence${toQuery({ ...query })}`);
 }
 
+/** 证据列表导出地址；与当前筛选同一作用域。 */
 export function evidenceExportUrl(query: Omit<EvidenceQuery, "page" | "page_size">): string {
   return apiFileUrl(`/evidence/export${toQuery({ ...query })}`);
 }

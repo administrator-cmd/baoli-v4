@@ -62,6 +62,7 @@ def register_document_service(port: DocumentServicePort) -> None:
 
 
 def document_service() -> DocumentServicePort:
+    """取已注册的供应商文档服务；未注册时明确报 503，不回落成空实现。"""
     if _PORT is None:
         raise BusinessError(
             "EXTERNAL_CONFIG_MISSING",

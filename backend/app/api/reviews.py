@@ -41,6 +41,7 @@ def list_reviews(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """人工复核分页列表（跨任务）：系统原判断、人工结论与复核后有效状态分开呈现。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_reviews_page(
         db,
@@ -64,6 +65,7 @@ def export_reviews(
     updated_to: datetime | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出人工复核列表 CSV。"""
     result = admin_query_service.list_reviews_page(
         db,
         task_no=task_no,
@@ -108,6 +110,7 @@ def list_executions(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """节点执行记录分页列表（跨任务）。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_executions_page(
         db,
@@ -131,6 +134,7 @@ def export_executions(
     started_to: datetime | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出执行记录列表 CSV。"""
     result = admin_query_service.list_executions_page(
         db,
         task_no=task_no,

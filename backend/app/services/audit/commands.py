@@ -23,8 +23,8 @@ from .flow import _raise_graph_error
 from .graph_runtime import _ensure_audit_interrupt, _mark_graph_runtime_failed
 from .interrupt import start_audit_interrupt
 from .reviews import _current_review_batch, _decision_command_no, _invalidate_validation_results, _review_hash, _validate_review_payloads
-from .shared import _normalize_field_value, _scenario, _task_field_definitions
-from .state import _scenario_nodes
+from .shared import _normalize_field_value, _scenario, _task_field_definitions, _task_manifest
+from .state import _node_codes_of_type, _scenario_nodes, _single_node_code_of_type
 from datetime import UTC, datetime, timedelta
 from decimal import InvalidOperation
 from sqlalchemy import select, update
@@ -57,6 +57,7 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
     return {"interrupted_executions": len(interrupted), "blocked_tasks": len(running_tasks)}
 
 def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest) -> dict[str, Any]:
+    """节点执行命令入口：先做并发与状态校验（任务已结束 / 正在执行 / 节点不一致都明确拒绝），再恢复图执行。"""
     task = task_or_404(db, task_no, lock=True)
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
@@ -107,8 +108,9 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
     return result
 
 def submit_manual_reviews(db: Session, task_no: str, request: ManualReviewRequest) -> dict[str, Any]:
+    """人工复核提交命令入口：校验等待状态与待复核集合身份后交回图执行；幂等复用由 operation_gateway 先行处理。"""
     task = task_or_404(db, task_no, lock=True)
-    if task.status != "WAITING_REVIEW" or task.current_node != "MANUAL_REVIEW":
+    if task.status != "WAITING_REVIEW" or task.current_node != _single_node_code_of_type(_task_manifest(task), "MANUAL_REVIEW", purpose="人工复核等待点"):
         raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
     reviews = _current_review_batch(db, task)
     current_hash = _review_hash(reviews)
@@ -285,16 +287,21 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     db.add(review)
     task.input_revision += 1
     db.flush()
-    manifest = _scenario(db, task).manifest_json
+    manifest = _task_manifest(task)
     _, nodes, current_index = _scenario_nodes(db, task)
-    extraction_index = next(index for index, item in enumerate(nodes) if item["node_code"] == "FIELD_EXTRACTION")
+    # 节点实例码由用户配置：按**能力类型**解析成实例码，不写死能力类型当实例码。
+    extraction_codes = _node_codes_of_type(manifest, "FIELD_EXTRACTION")
+    extraction_indexes = [index for index, item in enumerate(nodes) if item["node_code"] in extraction_codes]
     # 只有已经越过字段抽取节点才有可重算的抽取规则结果；否则抽取重跑时会自然重建。
     recomputed_rules = (
-        _refresh_extraction_rule_results(db, task, manifest) if current_index > extraction_index else []
+        _refresh_extraction_rule_results(db, task, manifest)
+        if extraction_indexes and current_index > min(extraction_indexes)
+        else []
     )
-    invalidation = _invalidate_validation_results(db, task)
+    invalidation = _invalidate_validation_results(db, task, manifest)
     # 退回内部校验重新判定；任务停在当前节点之前的节点时保持原节点，不跳过尚未执行的节点。
-    target_index = next(index for index, item in enumerate(nodes) if item["node_code"] == "INTERNAL_VALIDATE")
+    target_code = _single_node_code_of_type(manifest, "INTERNAL_VALIDATE", purpose="字段纠错后的重判起点")
+    target_index = next(index for index, item in enumerate(nodes) if item["node_code"] == target_code)
     rewind_index = min(current_index, target_index)
     db.execute(
         update(WorkflowCheckpoint)

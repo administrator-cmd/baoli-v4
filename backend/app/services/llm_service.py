@@ -23,26 +23,27 @@ from ..domain.proposals import (
     CoverageReport,
     CoverageRow,
     CoverageSheet,
-    CoverageTotals,
     ProposalBundle,
     QuestionOption,
     RuleInputProposal,
     SheetProposal,
     UnsupportedCapabilityCode,
+    coverage_totals,
 )
 from ..domain.workbook import WorkbookIR, WorkbookRow, workbook_source_index
 from ..domain import node_rulebook
-from ..domain.profile import role_index
+from ..domain import unified_profile
 from ..errors import BusinessError
 from ..integrations.llm.gateway import call_json
 
 
 logger = logging.getLogger(__name__)
 
-# 节点版格式版本：它们的转换完全由代码确定性完成，不经过远程大模型。
-# v3 与 v4 都属于节点版（同一套七表解析器），v4 在 01 表增加了「材料识别类型」列。
-NODE_PROFILE_VERSIONS = frozenset({"contract_review_v3", "contract_review_v4"})
-NODE_PROFILE_VERSION = "contract_review_v3"
+# 规则库转换完全由代码确定性完成，不经过远程大模型。
+# base Excel 是系统唯一的模板，转换**按 Sheet 独立进行、结果合并**：每张表由负责它的
+# 解析器转换（01/02/03/04/05/09/10 走 node_rulebook，06/07/08 计算三表走
+# financial_report），绑定里出现哪几类表就转换哪几类。没有「业务族」这一层，
+# 也不存在「按族二选一、另一族的表被静默丢掉」这条分支。
 
 
 # 规则列的填写契约。这些取值由后端解析确定性事实并校验，模型只负责把自然语言要求
@@ -136,7 +137,7 @@ def _normalize_sheet_payload(raw: Any, role: str, version: str | None = None) ->
     """
     if not isinstance(raw, dict):
         return raw
-    profile_role = role_index(version).get(role) if role else None
+    profile_role = unified_profile.sheet_index(unified_profile.load_unified_profile()).get(role) if role else None
     fields = raw.get("fields")
     if isinstance(fields, list):
         value_type_labels = _column_value_labels(profile_role, "value_type") if profile_role else {}
@@ -381,7 +382,8 @@ def _validate_candidate_source_ids(
     role: str,
     version: str,
 ) -> None:
-    if not any(column["key"] == "source_id" for column in role_index(version)[role]["columns"]):
+    definition = unified_profile.sheet_index(unified_profile.load_unified_profile()).get(role)
+    if definition is None or not any(column["key"] == "source_id" for column in definition["columns"]):
         # 业务模板不要求填写内部编码；候选来源由来源工作表、行号和单元格承担。
         return
     source_id_header = proposal.column_mapping.get("source_id")
@@ -707,9 +709,6 @@ def _apply_source_cells(
             name = required_text(row_no, "name", "材料名称")
             if name is not None:
                 material.name = name
-            material_type = required_text(row_no, "material_type", "材料类别")
-            if material_type is not None:
-                material.material_type = material_type
             flag = required_boolean(row_no, "required", "是否必传")
             if flag is not None:
                 material.required = flag
@@ -1320,7 +1319,6 @@ def _directory_entries(
         {
             "kind": "MATERIAL",
             "name": item.name,
-            "material_type": item.material_type,
             "required": item.required,
         }
         for item in proposal.materials
@@ -1352,31 +1350,27 @@ def _conversion_targets(
     targets: list[dict[str, Any]] = []
     for sheet in ir.sheets:
         binding = bindings.get(sheet.sheet_key, {})
-        if sheet.suggested_role == "INSTRUCTION":
-            if binding.get("role") is not None:
-                raise BusinessError(
-                    "TEMPLATE_METADATA_IMMUTABLE",
-                    "填写说明和隐藏模板元数据不能绑定为业务工作表",
-                    status_code=409,
-                    details={"sheet_name": sheet.name},
-                )
-            continue
-        role = binding.get("role") or (None if binding.get("hidden") else sheet.suggested_role)
-        if not sheet.visible and not role:
-            continue
-        if binding.get("excluded") or role == "INSTRUCTION" or sheet.state in {"EMPTY", "NO_BUSINESS_DATA"}:
+        role = binding.get("role")
+        # 判断依据只有用户绑定或明确排除：**不看 `sheet.visible`**。
+        # 隐藏只是 Excel 的展示属性，隐藏的业务 Sheet 仍然可以由用户绑定并参与转换；
+        # 按隐藏跳过会让用户明确绑定过的表在转换期被静默丢掉。
+        if binding.get("excluded") or sheet.state in {"EMPTY", "NO_BUSINESS_DATA"}:
             continue
         if not role:
             raise BusinessError(
                 "SHEET_ROLE_REQUIRED",
-                "存在无法确定用途的工作表，请先完成工作表绑定",
+                "存在尚未确认用途的工作表，请先完成工作表绑定。系统不会把建议用途写成已确认角色",
                 details={"sheet_key": sheet.sheet_key, "sheet_name": sheet.name},
             )
         if role not in profiles:
             raise BusinessError("SHEET_ROLE_INVALID", "工作表用途不在合同审核支持范围内", details={"role": role})
-        header_row = binding.get("header_row") or (sheet.header_candidates[0] if sheet.header_candidates else None)
-        if not header_row:
-            raise BusinessError("SHEET_HEADER_REQUIRED", "无法确定工作表表头", details={"sheet_name": sheet.name})
+        header_row = binding.get("header_row")
+        if not isinstance(header_row, int):
+            raise BusinessError(
+                "SHEET_HEADER_REQUIRED",
+                "业务工作表必须先确认表头行，系统不会把第一表头候选写成已确认表头",
+                details={"sheet_name": sheet.name},
+            )
         # 业务转换范围是完整 IR 的非空业务行，preview_rows 只用于界面摘要，不得当作最终转换范围。
         header = next((row for row in sheet.rows if row.row_no == header_row), None)
         if not header:
@@ -1505,15 +1499,6 @@ def _build_coverage(
     return CoverageSheet(sheet_key=sheet_key, sheet_name=sheet.name, business_rows=len(rows), rows=rows)
 
 
-def _coverage_totals(sheets: list[CoverageSheet]) -> CoverageTotals:
-    return CoverageTotals(
-        business_rows=sum(sheet.business_rows for sheet in sheets),
-        candidate_rows=sum(1 for sheet in sheets for row in sheet.rows if row.disposition == "CANDIDATE"),
-        excluded_rows=sum(1 for sheet in sheets for row in sheet.rows if row.disposition == "EXCLUDED"),
-        question_rows=sum(1 for sheet in sheets for row in sheet.rows if row.disposition == "QUESTION"),
-    )
-
-
 def _convert_target(
     target: dict[str, Any],
     *,
@@ -1617,66 +1602,6 @@ def _convert_target(
     return produced, column_notes
 
 
-def convert_workbook(ir: WorkbookIR, bindings: dict[str, dict[str, Any]]) -> ProposalBundle:
-    """把一份工作簿转换成候选集合。
-
-    节点版（contract_review_v3）的格式、表头、编号与引用全部由代码确定性解析：
-    不调用模型、不读向量索引。RAG 不参与场景导入、表头识别或字段匹配。
-    """
-    if ir.profile_version in NODE_PROFILE_VERSIONS:
-        bundle, _ = convert_node_rulebook(ir, bindings)
-        return bundle
-    source_index = workbook_source_index(ir)
-    # 列协议随 Excel 格式版本不同：用识别出来的版本解释这份工作簿，不按默认版本猜测。
-    profiles = role_index(ir.profile_version)
-    targets = _conversion_targets(ir, bindings, profiles)
-    proposals: list[SheetProposal] = []
-    converted: list[tuple[dict[str, Any], list[str]]] = []
-    directory: list[dict[str, Any]] = []
-    material_names: dict[str, str] = {}
-    for target in targets:
-        produced, column_notes = _convert_target(
-            target,
-            ir=ir,
-            profiles=profiles,
-            source_index=source_index,
-            directory=directory,
-        )
-        proposals.extend(produced)
-        for proposal in produced:
-            for material in proposal.materials:
-                material_names[material.candidate_ref] = material.name
-                material_names.setdefault(material.name, material.name)
-            directory.extend(_directory_entries(proposal, material_names))
-        converted.append((target, column_notes))
-    if not proposals or not any(sheet.materials or sheet.fields or sheet.rules for sheet in proposals):
-        raise BusinessError("LLM_EMPTY_RESULT", "规则转换未返回任何可用于场景的材料、字段或规则")
-    bundle = ProposalBundle(sheets=proposals)
-    # 未支持的取数/汇总能力必须在转换结果里明确报出，不能生成"取第一份文件"的可执行规则。
-    _reject_unsupported_capabilities(bundle, {sheet.sheet_key: sheet.name for sheet in ir.sheets})
-    # 业务模板用中文名称与材料范围引用对象；先按模板自身目录还原成候选引用。
-    _normalize_references_to_candidate_refs(bundle)
-    # 先用模型返回的临时引用和 Excel 来源编码验证引用闭合，再替换为后端来源引用。
-    _validate_bundle_references(bundle)
-    _canonicalize_candidate_references(bundle, ir)
-    _validate_bundle_references(bundle)
-    # 覆盖对账在引用规范化之后按工作表（而非分块）生成，记录的是最终候选引用。
-    by_sheet: dict[str, list[SheetProposal]] = {}
-    for proposal in bundle.sheets:
-        by_sheet.setdefault(proposal.sheet_key, []).append(proposal)
-    coverage_sheets = [
-        _build_coverage(
-            target,
-            by_sheet.get(target["sheet"].sheet_key, []),
-            source_index=source_index,
-            profile_role=profiles[target["role"]],
-            sheet_notes=notes,
-        )
-        for target, notes in converted
-    ]
-    bundle.coverage = CoverageReport(sheets=coverage_sheets, totals=_coverage_totals(coverage_sheets))
-    return bundle
-
 
 def convert_node_rulebook(
     ir: WorkbookIR,
@@ -1697,9 +1622,11 @@ def convert_node_rulebook(
             {"sheets": payload["sheets"], "coverage": payload["coverage"]}
         )
     except ValidationError as exc:
+        first_error = exc.errors(include_url=False)[0]
+        location = ".".join(str(part) for part in first_error["loc"])
         raise BusinessError(
             "NODE_RULEBOOK_BUNDLE_INVALID",
-            "节点版规则库的确定性解析结果不符合候选契约，请检查填写内容后重新上传",
+            f"节点版规则库解析结果与候选契约不一致：{location}（{first_error['type']}）",
             status_code=500,
         ) from exc
     return bundle, payload
@@ -1711,12 +1638,146 @@ def convert_workbook_with_notes(
 ) -> tuple[ProposalBundle, dict[str, Any] | None]:
     """返回（候选集合，转换附加信息）。
 
-    模型路径没有附加信息，返回 None；节点版返回含 `node_notes` / `coverage` /
-    `bundle_hash` 的字典。消费方必须按类型取 `node_notes`，不能把整份附加信息当成列表。
+    确定性路径返回含 `node_notes` / `coverage` / `bundle_hash` 的字典；
+    模型路径返回 None。消费方必须按类型取 `node_notes`，不能把整份附加信息当成列表。
+
+    分派依据是**用户绑定的 Sheet 角色**，不是文件名、表名或表头：base Excel 是系统
+    唯一的模板，一份规则库用到哪些 Sheet 完全由用户的绑定决定。
+
+    **按 Sheet 独立转换，结果合并**：每张表由负责它的解析器转换（01/02/03/04/05/09/10
+    走 `node_rulebook`，06/07/08 计算三表走 `financial_report`），绑定里出现哪几类表就
+    转换哪几类，彼此互不干扰。此前是「按业务族二选一」，绑定里一旦混了，就必然有一条
+    路径静默胜出、另一批表被丢掉；现在没有这条分支，也没有业务族这一层。
+
+    角色完全不在协议里时明确报错，不静默按模型路径处理。
     """
-    if ir.profile_version in NODE_PROFILE_VERSIONS:
-        return convert_node_rulebook(ir, bindings)
-    return convert_workbook(ir, bindings), None
+    profile = unified_profile.load_unified_profile()
+    index = unified_profile.sheet_index(profile)
+    roles = sorted(
+        {
+            str((bindings.get(sheet.sheet_key) or {}).get("role"))
+            for sheet in ir.sheets
+            # 命中说明页的元数据 Sheet 由导入侧固定排除；这里只看用户绑定与明确排除，
+            # 不看 `sheet.visible`（隐藏的业务表仍可由用户绑定并参与转换）。
+            if not (bindings.get(sheet.sheet_key) or {}).get("excluded")
+        }
+        - {"None"}
+    )
+    if not roles:
+        # 一张业务表都没有绑定：没有可转换的内容，明确报错而不是返回空候选。
+        raise BusinessError(
+            "IMPORT_NO_BOUND_SHEET",
+            "本次导入没有绑定任何业务工作表，没有可转换的内容",
+            details={"sheet_count": len(ir.sheets)},
+        )
+    unknown = [role for role in roles if role not in index]
+    if unknown:
+        raise BusinessError(
+            "SHEET_ROLE_UNSUPPORTED",
+            "本次导入绑定的 Sheet 用途不在统一模板协议里："
+            + "、".join(f"“{item}”" for item in unknown)
+            + "。请确认绑定结果",
+            details={"roles": unknown},
+        )
+    from ..domain import financial_report, node_rulebook
+
+    parts: list[tuple[ProposalBundle, dict[str, Any]]] = []
+    if set(roles) & node_rulebook.OWNED_ROLES:
+        parts.append(convert_node_rulebook(ir, bindings))
+    if set(roles) & financial_report.OWNED_ROLES:
+        parts.append(convert_financial_report(ir, bindings))
+    if not parts:
+        raise BusinessError(
+            "SHEET_ROLE_UNSUPPORTED",
+            "本次导入绑定的 Sheet 用途没有对应的确定性转换路径："
+            + "、".join(f"“{item}”" for item in roles),
+            details={"roles": roles},
+        )
+    if len(parts) == 1:
+        return parts[0]
+    return _merge_bundles(parts)
+
+
+def _merge_bundles(
+    parts: list[tuple[ProposalBundle, dict[str, Any]]],
+) -> tuple[ProposalBundle, dict[str, Any]]:
+    """合并多个按 Sheet 独立转换的结果。
+
+    合并是**并集**：Sheet 候选、逐行覆盖对账、计算候选与待确认事项各自拼接。
+    各解析器只产出自己那几张表的候选，因此不存在「同一张表被两处转换」的情况；
+    真出现重复 sheet_key 说明绑定或分派有矛盾，明确报错而不是覆盖。
+    """
+    sheets: list[Any] = []
+    coverage_sheets: list[dict[str, Any]] = []
+    calculations: list[Any] = []
+    notes: list[dict[str, Any]] = []
+    seen_sheets: set[str] = set()
+    for bundle, payload in parts:
+        for sheet in bundle.sheets:
+            if sheet.sheet_key in seen_sheets:
+                raise BusinessError(
+                    "IMPORT_SHEET_CONVERTED_TWICE",
+                    "同一张工作表被转换了两次，绑定或分派存在矛盾",
+                    status_code=500,
+                    details={"sheet_key": sheet.sheet_key},
+                )
+            seen_sheets.add(sheet.sheet_key)
+            sheets.append(sheet)
+        coverage = payload.get("coverage") or {}
+        coverage_sheets.extend(coverage.get("sheets") or [])
+        calculations.extend(payload.get("calculations") or [])
+        notes.extend(payload.get("node_notes") or [])
+    coverage = {
+        "sheets": coverage_sheets,
+        "totals": coverage_totals(coverage_sheets),
+    }
+    merged = ProposalBundle.model_validate(
+        {"sheets": sheets, "coverage": coverage, "calculations": calculations}
+    )
+    hashes = [str(payload.get("bundle_hash") or "") for _, payload in parts]
+    payload = {
+        "node_notes": notes,
+        "coverage": coverage,
+        "calculations": calculations,
+        "bundle_hash": hashlib.sha256("|".join(sorted(hashes)).encode("utf-8")).hexdigest(),
+        "merged_parts": len(parts),
+    }
+    return merged, payload
+
+
+def convert_financial_report(
+    ir: WorkbookIR,
+    bindings: dict[str, dict[str, Any]],
+) -> tuple[ProposalBundle, dict[str, Any]]:
+    """计算类规则库的确定性转换入口。
+
+    与合同审核路径同一收口方式：转换结果共用 `ProposalBundle` 契约，因此下游的
+    引用校验、裁决、编译、发布与页面展示不需要第二套代码。差别在于这里的附加信息里
+    多了 `calculations`（计算规则候选：定义 + 参数 + 判定区间）。
+
+    列协议来自**统一模板协议**——系统只有一份，不再按场景类型加载另一份 Profile。
+    """
+    from ..domain import financial_report
+
+    profile = unified_profile.load_unified_profile()
+    payload = financial_report.build_convert_bundle(ir, bindings, profile)
+    try:
+        bundle = ProposalBundle.model_validate(
+            {
+                "sheets": payload["sheets"],
+                "coverage": payload["coverage"],
+                # 计算规则候选跨 Sheet（定义/参数/判定三张表按 rule_code 关联），
+                # 因此放在顶层而不是挂在某一张 Sheet 上。
+                "calculations": payload["calculations"],
+            }
+        )
+    except ValidationError as exc:
+        raise BusinessError(
+            "FINANCIAL_REPORT_BUNDLE_INVALID",
+            "计算类规则库的确定性解析结果不符合候选契约，请检查填写内容后重新上传",
+            status_code=500,
+        ) from exc
+    return bundle, payload
 
 
 def _reference_alias_index(
@@ -1920,7 +1981,7 @@ def _validate_bundle_references(bundle: ProposalBundle) -> None:
         "RULE": (rule_candidate_aliases, rule_source_aliases),
     }
     question_properties = {
-        "MATERIAL": {"name", "material_type", "required"},
+        "MATERIAL": {"name", "required"},
         "FIELD": {"name", "value_type", "unit", "material_ref", "required", "instruction"},
         "RULE": {"name", "node", "operator", "parameters", "source_rule_ref", "material_refs"},
     }

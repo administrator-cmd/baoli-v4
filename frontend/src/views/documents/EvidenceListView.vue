@@ -68,7 +68,7 @@ function openTask(row: EvidenceRow): void {
   void router.push({ name: "audit-task-detail", params: { taskNo: row.task_no }, query: { tab: "fields" } });
 }
 
-/* ---- 详情（复用任务级证据查看：核对定位、历史身份） ---- */
+/* 详情（复用任务级证据查看：核对定位、历史身份） */
 const evidence = ref<Evidence | null>(null);
 const evidenceOpen = ref(false);
 const evidenceLoading = ref(false);
@@ -138,8 +138,7 @@ onMounted(() => {
     <div class="app-toolbar">
       <div class="app-toolbar__left">
         <span class="text-hint">
-          点击行可查看完整证据。后端只支持按任务、依据类型、定位核对与引用原文筛选；
-          按规则/材料/页码/字段过滤，以及「置信度」，后端证据记录未提供，页面不显示。
+          点击行可查看完整证据。后端只支持按任务、依据类型、定位核对与引用原文筛选。
         </span>
       </div>
     </div>

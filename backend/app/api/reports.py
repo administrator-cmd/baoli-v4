@@ -46,6 +46,7 @@ def list_reports(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """审核报告分页列表：按名称、任务、场景、方案与归档状态筛选。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_reports_page(
         db,
@@ -73,6 +74,7 @@ def export_reports(
     generated_to: datetime | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出报告列表 CSV。"""
     result = admin_query_service.list_reports_page(
         db,
         name=name,
@@ -107,6 +109,7 @@ def export_reports(
 
 @router.get("/{report_no}")
 def get_report(report_no: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """报告详情：正文、三信号、范围快照与结构化结论。"""
     return {**admin_query_service.report_detail(db, report_no), "request_id": request.state.request_id}
 
 
@@ -119,18 +122,21 @@ def update_report(report_no: str, payload: ReportRemarkRequest, request: Request
 
 @router.post("/{report_no}/archive")
 def archive_report(report_no: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """归档报告快照；只改归档状态，不删除任何历史快照。"""
     admin_query_service.set_report_archived(db, report_no, True)
     return {**admin_query_service.report_detail(db, report_no), "request_id": request.state.request_id}
 
 
 @router.post("/{report_no}/unarchive")
 def unarchive_report(report_no: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """取消归档。"""
     admin_query_service.set_report_archived(db, report_no, False)
     return {**admin_query_service.report_detail(db, report_no), "request_id": request.state.request_id}
 
 
 @router.get("/{report_no}/download")
 def download_report(report_no: str, db: Session = Depends(get_db)) -> StreamingResponse:
+    """下载报告正文 Markdown；快照没有正文时明确 409。"""
     report = admin_query_service.report_or_404(db, report_no)
     content = report.content_md
     if not isinstance(content, str) or not content:
@@ -160,6 +166,7 @@ def list_risk_results(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> RiskResultPageResponse:
+    """跨任务的风险结果分页列表。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_risk_results_page(
         db,
@@ -183,6 +190,7 @@ def export_risk_results(
     status: str | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出风险结果列表 CSV。"""
     result = admin_query_service.list_risk_results_page(
         db,
         task_no=task_no,

@@ -1,4 +1,4 @@
-"""文件处理检查（02_文件处理）的配置事实与确定性判定。
+"""文件处理检查（02_文件处理规则）的配置事实与确定性判定。
 
 这个模块是**叶子模块**：不导入 manifest、node_rulebook、capabilities 或任何 services。
 它同时承载两类内容，且必须放在一起，否则「导入期校验」与「运行期判定」会各写一份
@@ -24,7 +24,7 @@ from typing import Any
 from ..errors import BusinessError
 
 
-# 检查项目。与 02_文件处理 的「检查项目」下拉取值一一对应。
+# 检查项目。与 02_文件处理规则 的「检查项目」下拉取值一一对应。
 CHECK_FILE_FORMAT = "FILE_FORMAT"
 CHECK_FILE_SIZE = "FILE_SIZE"
 CHECK_FILE_DUPLICATE = "FILE_DUPLICATE"
@@ -157,10 +157,12 @@ def gap_code_for(check_item: str) -> str:
 
 
 def is_implemented(check_item: str) -> bool:
+    """该检查项目是否已有真实判定实现；未知取值返回 False（不当作已实现）。"""
     return check_item in IMPLEMENTED_QUALITY_ITEMS
 
 
 def label_of(check_item: str) -> str:
+    """检查项目的中文名；未知取值原样返回编码。"""
     return QUALITY_ITEM_LABELS.get(check_item, check_item)
 
 
@@ -221,16 +223,9 @@ def check_file_format(upload: Any, *, standard_value: str | None) -> dict[str, A
 
     - 后缀是**客户端上报的文件名**，不是服务端对内容的鉴定。
     - `content_type` 同样是客户端上报的声明值，系统不读取文件字节做类型嗅探。
-    - 因此本项能确定的是「声明一致 / 声明冲突 / 声明不足」，不能声称做过真实内容鉴定。
-
-    判定：
-      1. 后缀不属于允许集合 → 不合格。
-      2. 后缀属于允许集合，且声明了明确的内容类型、该类型与后缀族不一致 → 不合格
-         （明确冲突不能仍然直接通过）。
-      3. 后缀不属于任何已知格式族，且声明了明确的内容类型，该类型与允许集合相符
-         → 无法核对（后缀无法用于核对，不能因此判通过）。
-      4. 后缀属于允许集合，内容类型缺失或为通用占位（application/octet-stream 等）
-         → 通过，但在结论里明确说明“内容类型未声明/为通用值，未做内容鉴定”。
+    - 因此本项能确定的是「声明一致 / 声明冲突 / 声明不足」，不能声称做过真实内容鉴定：
+      后缀与声明明确冲突时判不合格；后缀无法用于核对时不能因此判通过；
+      内容类型缺失或为通用占位时通过，但结论里必须说明未做内容鉴定。
     """
     allowed = parse_format_set(standard_value)
     filename = str(getattr(upload, "original_filename", "") or "")

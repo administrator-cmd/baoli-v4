@@ -1,51 +1,183 @@
 from io import BytesIO
-from typing import Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 
-from ..services.template_service import available_examples, build_contract_review_template
+from ..database import get_db
+from ..domain import unified_profile
+from ..errors import BusinessError
+from ..models import ScenarioDraft, ScenarioDraftSheet
+from ..services.scenario_admin_service import template_or_404
+from ..services.scene_template_service import build_scene_template
 
 
 router = APIRouter(prefix="/rulebook-templates", tags=["规则库模板"])
 
-TemplateExample = Literal["blank", "single_contract", "contract_and_invoice"]
 
-_FILENAMES = {
-    "blank": "合同审核规则库模板-空白.xlsx",
-    "single_contract": "合同审核规则库模板-示例A-单份主合同.xlsx",
-    "contract_and_invoice": "合同审核规则库模板-示例B-主合同与发票.xlsx",
-}
+@router.get("")
+def template_catalog(request: Request) -> dict:
+    """**唯一一份**规则库模板的目录：系统支持的全部 Sheet、节点类型与列协议。
 
+    系统只有一份统一模板协议（`backend/config/unified_profile.json`），
+    因此也只有一个下载入口。不再有「合同审核模板 / 财报模板」两个下载地址，
+    也不再有 v1-v4 的格式版本选择——那些都来自已删除的双轨 Profile。
 
-@router.get("/contract-review/examples")
-def list_contract_review_examples(request: Request) -> dict:
-    """当前格式版本真实可下载的模板示例。
-
-    页面据此渲染下载入口，不再写死「示例 A / 示例 B」。节点版 v3/v4 没有真实示例内容，
-    这里只会返回 blank；继续展示必然下载失败的示例会让用户点下去只拿到报错。
+    `sheets` 是协议声明的全部 Sheet，也是 base Excel 的完整表清单。
+    场景已有确认绑定时，下载只含这些角色；还没有绑定时，必须由调用方传入本次要下载的
+    `sheet_roles`，该选择不写入场景。
     """
-    return {"request_id": request.state.request_id, "items": available_examples()}
+    profile = unified_profile.load_unified_profile()
+    return {
+        "request_id": request.state.request_id,
+        "profile_version": profile.get("profile_version"),
+        "display_name": profile.get("display_name"),
+        "download_path": "/rulebook-templates/download",
+        "download_requires_scenario": True,
+        **unified_profile.profile_summary(profile),
+    }
 
 
-@router.get("/contract-review/download")
-def download_contract_review_template(
-    example: TemplateExample = Query(
-        default="blank",
-        description="blank=空白模板；其余取值必须是该格式版本真实提供的示例",
+@router.get("/download")
+def download_template(
+    db: Session = Depends(get_db),
+    scenario_code: str = Query(
+        ...,
+        min_length=1,
+        description="场景编码。已有确认绑定时只导出这些 Sheet；没有绑定时必须另传 sheet_roles",
+    ),
+    sheet_roles: list[str] = Query(
+        default_factory=list,
+        description="仅本次下载的 Sheet 角色。场景已有确认绑定时忽略本参数，且不会写入场景",
     ),
 ) -> StreamingResponse:
     """下载规则库模板。
 
-    模板内容由 profile 决定：声明了说明页的格式版本会额外带说明页，v2 只输出业务工作表。
-    空白模板只带表头；示例必须是 profile 里真实声明的内容，没有就明确报错，
-    不编造示例数据、也不返回一份空文件冒充示例。
+    已确认绑定（scenario_draft_sheet）是下载范围的真源，查询参数里的勾选一律忽略。
+    还没有确认绑定时，必须由调用方逐项传入 `sheet_roles`。该列表只生成这一份文件，
+    不写库、不要求节点、也不默认包含协议全集。
+
+    一次下载就是**一份 base Excel**：同一份模板里的表可以一起下载，导入时按 Sheet
+    独立转换，不存在「只能属于一个业务族」的限制。
     """
-    filename = _FILENAMES.get(example, f"合同审核规则库模板-{example}.xlsx")
+    profile = unified_profile.load_unified_profile()
+    template = template_or_404(db, scenario_code)
+    bound = _confirmed_sheet_roles(db, scenario_code, profile)
+    if bound:
+        selected = bound
+        download_only = False
+    else:
+        selected = _download_only_sheet_roles(profile, sheet_roles)
+        download_only = True
+    scene_name = template.scenario_name
+    content = build_scene_template(
+        profile,
+        scene_name=scene_name,
+        sheet_roles=selected,
+        download_only=download_only,
+    )
+    filename = f"{scene_name}-规则库模板.xlsx"
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     return StreamingResponse(
-        BytesIO(build_contract_review_template(example)),
+        BytesIO(content),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+
+@router.get("/sheets")
+def list_sheets(request: Request) -> dict:
+    """统一模板协议声明的 Sheet 与列协议。
+
+    页面据此渲染「Sheet 绑定」步骤：每张 Sheet 列出它可以绑定的节点类型与列定义。
+    只返回声明，不含任何示例数据。
+    """
+    profile = unified_profile.load_unified_profile()
+    return {
+        "request_id": request.state.request_id,
+        "profile_version": profile.get("profile_version"),
+        "display_name": profile.get("display_name"),
+        "schema_version": profile.get("schema_version"),
+        "instruction_sheet": unified_profile.instruction_sheet_name(profile),
+        "node_types": [
+            {
+                "node_type": node["node_type"],
+                "display_name": node.get("display_name", node["node_type"]),
+                "depends_on_types": list(node.get("depends_on_types", [])),
+            }
+            for node in profile["node_types"]
+        ],
+        "sheets": [
+            {
+                "sheet_role": sheet["sheet_role"],
+                "code_prefix": str(sheet["code_prefix"]),
+                "display_name": sheet.get("display_name", sheet["sheet_role"]),
+                "aliases": list(sheet.get("aliases", [])),
+                "header_signature": list(sheet.get("header_signature", [])),
+                "node_types": list(sheet["node_types"]),
+                "columns": [
+                    {
+                        "key": column["key"],
+                        "name": column["name"],
+                        "required": bool(column.get("required")),
+                        "row_required": bool(column.get("row_required")),
+                        "data_type": column.get("data_type"),
+                        "allowed_values": list(column.get("allowed_values", [])),
+                        "value_labels": dict(column.get("value_labels", {})),
+                    }
+                    for column in sheet["columns"]
+                ],
+            }
+            for sheet in profile["sheets"]
+        ],
+    }
+
+
+def _confirmed_sheet_roles(db: Session, scenario_code: str, profile: dict) -> list[str]:
+    """导入写入草稿后的 Sheet 角色。没有草稿或尚未写入时返回空列表，不回退到协议全集。"""
+    from sqlalchemy import select
+
+    draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == scenario_code))
+    if draft is None:
+        return []
+    index = unified_profile.sheet_index(profile)
+    roles: list[str] = []
+    for item in db.scalars(
+        select(ScenarioDraftSheet)
+        .where(ScenarioDraftSheet.draft_id == draft.id)
+        .order_by(ScenarioDraftSheet.sort_no, ScenarioDraftSheet.id)
+    ).all():
+        if item.sheet_role in index and item.sheet_role not in roles:
+            roles.append(item.sheet_role)
+    return roles
+
+
+def _download_only_sheet_roles(profile: dict, requested: list[str]) -> list[str]:
+    """校验一次性下载勾选。不写库，也不把未勾选的协议表补进来。
+
+    base Excel 是系统唯一的模板，没有业务族这一层：勾选哪些表就下载哪些表，
+    未勾选的不补进来，也不默认生成协议全集。
+    """
+    cleaned: list[str] = []
+    for raw in requested:
+        role = str(raw).strip()
+        if role and role not in cleaned:
+            cleaned.append(role)
+    if not cleaned:
+        raise BusinessError(
+            "TEMPLATE_DOWNLOAD_SELECTION_REQUIRED",
+            "当前场景还没有确认的 Sheet 绑定。请明确勾选本次要下载的工作表；"
+            "下载选择不会写入场景，也不等于最终绑定",
+            status_code=409,
+        )
+    index = unified_profile.sheet_index(profile)
+    unknown = [role for role in cleaned if role not in index]
+    if unknown:
+        raise BusinessError(
+            "TEMPLATE_SHEET_ROLE_UNKNOWN",
+            "勾选的工作表角色不在统一模板协议中",
+            status_code=409,
+            details={"sheet_roles": unknown},
+        )
+    return cleaned

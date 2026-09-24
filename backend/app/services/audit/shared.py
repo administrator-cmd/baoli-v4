@@ -12,6 +12,7 @@
 
 import re
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, read_material_type_status
+from ...domain import quality_judgement
 from ...domain.manifest import EVIDENCE_SEAL_SUBJECT, applicability_view
 from ...errors import BusinessError
 from ...models import AuditTask, DocumentUpload, ScenarioVersion, TaskDocument
@@ -282,6 +283,14 @@ def _scenario(db: Session, task: AuditTask) -> ScenarioVersion:
         raise BusinessError("SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500)
     return scenario
 
+
+def _task_manifest(task: AuditTask) -> dict[str, Any]:
+    """任务创建时冻结的方案配置，是执行期的配置来源。"""
+    manifest = task.manifest_json
+    if not isinstance(manifest, dict) or not manifest:
+        raise BusinessError("TASK_MANIFEST_MISSING", "任务缺少已冻结的执行配置", status_code=500)
+    return manifest
+
 def _current_uploads(db: Session, task: AuditTask) -> list[tuple[TaskDocument, DocumentUpload | None]]:
     documents = db.scalars(select(TaskDocument).where(TaskDocument.audit_task_id == task.id).order_by(TaskDocument.id)).all()
     return [(document, db.get(DocumentUpload, document.current_upload_id) if document.current_upload_id else None) for document in documents]
@@ -314,12 +323,12 @@ def _rule_applicability(rule: dict[str, Any]) -> dict[str, Any]:
     }
 
 def _applicability_state(rule: dict[str, Any], uploaded_keys: set[str]) -> dict[str, Any]:
-    """规则是否适用，以及适用条件引用的未上传材料。材料可选不等于规则不适用。"""
-    applicability = _rule_applicability(rule)
-    if applicability["kind"] == "ALWAYS":
-        return {**applicability, "applicable": True, "missing_material_keys": []}
-    missing = [key for key in applicability["material_keys"] if key not in uploaded_keys]
-    return {**applicability, "applicable": not missing, "missing_material_keys": missing}
+    """规则是否适用，以及适用条件引用的未上传材料。材料可选不等于规则不适用。
+
+    判定实现只有一份（`domain.quality_judgement.applicability_state`）：
+    Agent 工具对同一份已发布配置得出同一结论，两条路径不会各判一套。
+    """
+    return quality_judgement.applicability_state(_rule_applicability(rule), uploaded_keys)
 
 def _applicability_json(state: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -421,7 +430,7 @@ def _is_subject_rule(rule: dict[str, Any]) -> bool:
     """主体/签章一致性检查。
 
     判定依据是编译期固化的 route（取证方式=印章主体检索）与 subject_check 标记，
-    两者都来自 03_字段抽取 的「产物来源=印章识别」声明，**不是**字段中文名里
+    两者都来自 03_字段 的「产物来源=印章识别」声明，**不是**字段中文名里
     是否含「签章主体」几个字：中文名可以改，靠名字认规则会接错证据源。
 
     这类检查不做程序判定：检索只返回候选，结论由工作人员确认。

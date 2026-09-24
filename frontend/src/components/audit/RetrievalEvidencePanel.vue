@@ -74,6 +74,7 @@ const decisionStale = computed(
 
 /** 「一致 / 不一致」必须指明依据的候选；「证据不足」不需要。 */
 const canSubmit = computed(() => {
+  if (props.status !== "OK") return false;
   if (!draftDecision.value) return false;
   if (draftDecision.value === "EVIDENCE_INSUFFICIENT") return true;
   return selectedCandidate.value !== null;
@@ -120,11 +121,12 @@ function candidateKey(candidate: RetrievalCandidate): string {
         show-icon
         :closable="false"
         class="block-gap-sm"
-        title="部分材料没有可用的主体索引"
+        :title="status === 'PARTIAL_COVERAGE' ? '部分材料未进入本次候选' : '指定材料没有可用的主体索引'"
       >
         <div v-for="item in uncoveredMaterials" :key="item.material_key">
           {{ item.material_key || "未标明材料" }}：{{ item.reason || "原因未记录" }}
         </div>
+        <div v-if="status === 'PARTIAL_COVERAGE'">本次候选仅供查看，不能作为完整材料范围的主体核对结论。</div>
       </el-alert>
 
       <el-alert
@@ -142,20 +144,20 @@ function candidateKey(candidate: RetrievalCandidate): string {
       <StateBlock
         v-if="!hasCandidates"
         kind="empty"
-        title="本次范围内没有识别到印章主体候选"
+        :title="status === 'NO_INDEX' ? '本次范围内没有可用的主体索引' : '本次范围内没有识别到印章主体候选'"
         description="没有候选不等于合同不存在该主体；请先确认印章识别已完成、主体索引已建立后重试。"
       />
 
       <template v-else>
         <div class="retrieval-heading">印章主体候选（{{ candidates.length }} 条）</div>
-        <el-radio-group v-model="selectedChunkId" class="candidate-list">
+        <el-radio-group v-model="selectedChunkId" class="candidate-list" :disabled="status !== 'OK'">
           <el-card
             v-for="candidate in candidates"
             :key="candidateKey(candidate)"
             shadow="never"
             class="candidate-card"
             :class="{ 'is-selected': selectedChunkId === candidate.chunk_id }"
-            @click="selectedChunkId = candidate.chunk_id"
+            @click="status === 'OK' && (selectedChunkId = candidate.chunk_id)"
           >
             <div class="candidate-head">
               <el-radio :value="candidate.chunk_id" class="candidate-radio">
@@ -191,7 +193,7 @@ function candidateKey(candidate: RetrievalCandidate): string {
           </div>
         </el-alert>
 
-        <el-form label-position="top" class="block-gap">
+        <el-form v-if="status === 'OK'" label-position="top" class="block-gap">
           <el-form-item label="核对结论">
             <el-select v-model="draftDecision" placeholder="请选择一致、不一致或证据不足" style="max-width: 320px">
               <el-option

@@ -7,7 +7,7 @@ import { dispositionLabel, dispositionTone } from "@/constants/labels";
 /**
  * 逐业务行处置对账。
  *
- * 每条来源业务行必须有处置：已形成候选 / 明确排除（含原因）/ 待处理问题。
+ * 每条来源业务行必须有处置：候选 / 停用保留 / 明确排除 / 待处理问题。
  * 服务端没返回 coverage 时明确说明，不能假装转换完整。
  */
 type Coverage = NonNullable<ImportJob["coverage"]>;
@@ -16,18 +16,27 @@ defineProps<{
   coverage: Coverage | null;
 }>();
 
-/** 需要人工关注的行排前面：待处理问题、已排除优先，其余按行号。 */
+/** 需要人工关注的行排前面。 */
 function sortedRows(rows: Coverage["sheets"][number]["rows"]) {
-  const weight = (disposition: string) => (disposition === "QUESTION" ? 0 : disposition === "EXCLUDED" ? 1 : 2);
+  const weights: Record<string, number> = { QUESTION: 0, DISABLED: 1, EXCLUDED: 2, CANDIDATE: 3 };
+  const weight = (disposition: string) => weights[disposition] ?? 4;
   return [...rows].sort((left, right) => weight(left.disposition) - weight(right.disposition) || left.row_no - right.row_no);
 }
+
+const totalLabels: Record<string, string> = {
+  business_rows: "业务行",
+  candidate_rows: "候选行",
+  disabled_rows: "停用保留",
+  excluded_rows: "已排除",
+  question_rows: "待处理",
+};
 
 function totalsText(totals: Record<string, number>): string {
   const entries = Object.entries(totals);
   if (!entries.length) {
     return "";
   }
-  return entries.map(([key, value]) => `${dispositionLabel(key)} ${value}`).join(" · ");
+  return entries.map(([key, value]) => `${totalLabels[key] ?? key} ${value}`).join(" · ");
 }
 </script>
 
@@ -45,6 +54,14 @@ function totalsText(totals: Record<string, number>): string {
       共 {{ coverage.sheets.length }} 张业务表；总计：
       {{ totalsText(coverage.totals) || "没有可汇总的处置统计" }}。
     </p>
+    <section v-if="coverage.notices?.length" class="coverage__notices">
+      <h3>转换说明（{{ coverage.notices.length }}）</h3>
+      <ul>
+        <li v-for="(notice, index) in coverage.notices" :key="`${notice.code}-${notice.sheet_name}-${notice.row_no}-${index}`">
+          <strong>{{ notice.sheet_name }} · 第 {{ notice.row_no }} 行：</strong>{{ notice.message }}
+        </li>
+      </ul>
+    </section>
 
     <el-collapse>
       <el-collapse-item
@@ -85,5 +102,24 @@ function totalsText(totals: Record<string, number>): string {
 <style scoped>
 .coverage {
   width: 100%;
+}
+
+.coverage__notices {
+  margin: 16px 0;
+}
+
+.coverage__notices h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.coverage__notices ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.coverage__notices li {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
 }
 </style>

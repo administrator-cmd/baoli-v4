@@ -22,8 +22,8 @@ from ..operation_types import OBJECT_AUDIT_TASK
 from ..task_lookup import task_or_404
 from .facts import _refresh_extraction_rule_results, _write_human_field_fact
 from .quality import _execute_file_quality_rules, _sync_type_review_pending
-from .shared import REVIEW_DECISION_LABELS, _normalize_field_value, _scenario, _task_field_definitions
-from .state import _save_flow_checkpoint, _set_task_checkpoint, _task_field_value_of_current_upload, _validate_graph_namespace
+from .shared import REVIEW_DECISION_LABELS, _normalize_field_value, _task_field_definitions, _task_manifest
+from .state import _save_flow_checkpoint, _set_task_checkpoint, _single_node_code_of_type, _task_field_value_of_current_upload, _validate_graph_namespace
 from datetime import UTC, datetime
 from decimal import InvalidOperation
 from sqlalchemy import func, select, update
@@ -150,7 +150,9 @@ def _validate_review_payloads(
                 raise BusinessError("REVIEW_DOCUMENT_MISSING", "复核关联材料不存在", status_code=500)
     return normalized_values
 
-def _invalidate_file_quality_results(db: Session, task: AuditTask) -> dict[str, int]:
+def _invalidate_file_quality_results(
+    db: Session, task: AuditTask, manifest: dict[str, Any]
+) -> dict[str, int]:
     """材料类型经人工确认变化后，失效文件质量检查的旧结论与待办。
 
     质量检查的判定依赖材料类型（类型待复核时它会明确记“缺少有效依据”）；
@@ -164,7 +166,7 @@ def _invalidate_file_quality_results(db: Session, task: AuditTask) -> dict[str, 
         db.scalars(
             select(NodeExecution.id).where(
                 NodeExecution.audit_task_id == task.id,
-                NodeExecution.node_code == "DOCUMENT_PREPARE",
+                NodeExecution.node_code.in_(_node_codes_of_type(manifest, "DOCUMENT_PREPARE")),
                 NodeExecution.status != "INVALIDATED",
             )
         ).all()
@@ -200,10 +202,18 @@ def _recompute_file_quality_results(db: Session, task: AuditTask, manifest: dict
     """
     sequence_no = (db.scalar(select(func.max(NodeExecution.sequence_no)).where(NodeExecution.audit_task_id == task.id)) or 0) + 1
     now = datetime.now(UTC)
+    prepare_codes = _node_codes_of_type(manifest, "DOCUMENT_PREPARE")
+    if not prepare_codes:
+        raise BusinessError(
+            "AUDIT_NODE_UNKNOWN",
+            "本任务绑定的场景没有配置文件处理节点，无法重算文件质量结论",
+            status_code=500,
+            details={"task_no": task.task_no},
+        )
     execution = NodeExecution(
         audit_task_id=task.id,
         scenario_version_id=task.scenario_version_id,
-        node_code="DOCUMENT_PREPARE",
+        node_code=prepare_codes[0],
         sequence_no=sequence_no,
         status="SUCCEEDED",
         started_at=now,
@@ -226,19 +236,32 @@ def _recompute_file_quality_results(db: Session, task: AuditTask, manifest: dict
     db.flush()
     return {**summary, "sequence_no": execution.sequence_no}
 
-def _invalidate_validation_results(db: Session, task: AuditTask) -> dict[str, int]:
+def _invalidate_validation_results(
+    db: Session, task: AuditTask, manifest: dict[str, Any]
+) -> dict[str, int]:
     """字段有效值或材料依据改变后失效内部校验、交叉校验、风险与报告。
 
     旧批次的待复核项同时失效：新结果批次是否需要人工判断由新结果自己决定，
     旧复核项不能继续挂在待办里，也不能自动贴到新结果上。
     返回真实失效数量，供纠错接口如实回报影响范围。
+
+    受影响节点按**能力类型**解析成实例码集合：节点实例码由用户配置，
+    写死能力类型当实例码会让用户改了实例码之后一条执行记录都失效不掉，
+    下游继续拿旧结论。
     """
     counts = {"invalidated_executions": 0, "invalidated_rule_results": 0, "invalidated_reviews": 0}
+    affected_codes = [
+        code
+        for node_type in ("INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK_RATING", "REPORT_OUTPUT")
+        for code in _node_codes_of_type(manifest, node_type)
+    ]
+    if not affected_codes:
+        return counts
     execution_ids = list(
         db.scalars(
             select(NodeExecution.id).where(
                 NodeExecution.audit_task_id == task.id,
-                NodeExecution.node_code.in_(["INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK_RATING", "REPORT_OUTPUT"]),
+                NodeExecution.node_code.in_(affected_codes),
                 NodeExecution.status != "INVALIDATED",
             )
         ).all()
@@ -296,7 +319,15 @@ def _invalidate_retry_results(
             .values(status="INVALIDATED")
         )
 
-    if "FIELD_EXTRACTION" not in affected_nodes:
+    # 「失效范围里有没有字段抽取节点」按**能力类型**判断：`affected_nodes` 是
+    # 节点**实例码**集合（用户配置的，如 EXTRACT1），拿它与能力类型字符串比较
+    # 恒为真，这段字段事实失效逻辑永远不会执行。
+    extraction_codes = {
+        str(item["node_code"])
+        for item in nodes
+        if str(item.get("node_type") or item["node_code"]) == "FIELD_EXTRACTION"
+    }
+    if not (extraction_codes & affected_nodes):
         return
     current_upload_ids = [
         document.current_upload_id
@@ -323,33 +354,20 @@ def _invalidate_retry_results(
         )
     task.pending_review_hash = None
 
-def _apply_manual_reviews_direct(
+def _apply_review_decisions(
     db: Session,
-    task_no: str,
-    request: ManualReviewRequest,
-    graph_namespace: str,
-    expected_hash: str,
-    expected_count: int,
-) -> dict[str, Any]:
-    task = task_or_404(db, task_no, lock=True)
-    checkpoint_state = _validate_graph_namespace(task, graph_namespace)
-    if task.status != "WAITING_REVIEW" or task.current_node != "MANUAL_REVIEW":
-        raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
-    reviews = _current_review_batch(db, task)
-    current_hash = _review_hash(reviews)
-    if current_hash != task.pending_review_hash or current_hash != expected_hash or len(reviews) != expected_count:
-        raise BusinessError("MANUAL_REVIEW_SET_CHANGED", "待复核集合已变化，请刷新后重新提交", status_code=409)
-    if (
-        checkpoint_state.get("phase") != "WAITING_REVIEW"
-        or checkpoint_state.get("review_hash") != current_hash
-        or checkpoint_state.get("review_count") != len(reviews)
-    ):
-        raise BusinessError("REVIEW_CHECKPOINT_MISSING", "人工复核流程检查点不存在或与当前复核集合不一致", status_code=409)
-    requested = {item.review_no: item for item in request.reviews}
-    if len(requested) != len(request.reviews) or set(requested) != {item.review_no for item in reviews}:
-        raise BusinessError("MANUAL_REVIEW_INCOMPLETE", "必须处理当前全部待复核项")
-    normalized_values = _validate_review_payloads(db, task, reviews, requested)
-    command_no = _decision_command_no(db, task)
+    task: AuditTask,
+    reviews: list[ManualReview],
+    requested: dict[str, Any],
+    normalized_values: dict[int, tuple[str, str | bool]],
+    command_no: str | None,
+) -> tuple[bool, bool, list[dict[str, Any]]]:
+    """把一批裁决写到各自的业务对象上，返回（字段事实是否变化, 材料状态是否变化, 字段变化清单）。
+
+    只有**裁决落库**这一件事在这里，不含批次划分与流程推进：Agent 复核批与
+    人工复核节点批调用的是同一份实现，两者的差别只在「提交之后怎么推进」。
+    复制一份裁决逻辑会让「复核一个待办」在两处产生不同的副作用。
+    """
     field_values_confirmed = False
     material_state_changed = False
     field_changes: list[dict[str, Any]] = []
@@ -441,10 +459,53 @@ def _apply_manual_reviews_direct(
             # 字段比较、条款语义）按材料中的真实原文判定，不受类型结论影响，因此不必重跑。
             # 因此这里不再把整条校验链路退回内部校验：见下面 validation_reexecution_required。
             material_state_changed = True
-    scenario = _scenario(db, task)
-    manifest = scenario.manifest_json
+    return field_values_confirmed, material_state_changed, field_changes
+
+
+def _apply_manual_reviews_direct(
+    db: Session,
+    task_no: str,
+    request: ManualReviewRequest,
+    graph_namespace: str,
+    expected_hash: str,
+    expected_count: int,
+) -> dict[str, Any]:
+    task = task_or_404(db, task_no, lock=True)
+    checkpoint_state = _validate_graph_namespace(task, graph_namespace)
+    # 等待点按**能力类型**解析实例码：`task.current_node` 是实例码，
+    # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
+    review_node_code = _single_node_code_of_type(
+        _task_manifest(task), "MANUAL_REVIEW", purpose="人工复核等待点"
+    )
+    if task.status != "WAITING_REVIEW" or task.current_node != review_node_code:
+        raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
+    reviews = _current_review_batch(db, task)
+    current_hash = _review_hash(reviews)
+    if current_hash != task.pending_review_hash or current_hash != expected_hash or len(reviews) != expected_count:
+        raise BusinessError("MANUAL_REVIEW_SET_CHANGED", "待复核集合已变化，请刷新后重新提交", status_code=409)
+    if (
+        checkpoint_state.get("phase") != "WAITING_REVIEW"
+        or checkpoint_state.get("review_hash") != current_hash
+        or checkpoint_state.get("review_count") != len(reviews)
+    ):
+        raise BusinessError("REVIEW_CHECKPOINT_MISSING", "人工复核流程检查点不存在或与当前复核集合不一致", status_code=409)
+    requested = {item.review_no: item for item in request.reviews}
+    if len(requested) != len(request.reviews) or set(requested) != {item.review_no for item in reviews}:
+        raise BusinessError("MANUAL_REVIEW_INCOMPLETE", "必须处理当前全部待复核项")
+    normalized_values = _validate_review_payloads(db, task, reviews, requested)
+    command_no = _decision_command_no(db, task)
+    field_values_confirmed, material_state_changed, field_changes = _apply_review_decisions(
+        db,
+        task,
+        reviews,
+        requested,
+        normalized_values,
+        command_no,
+    )
+    manifest = _task_manifest(task)
     nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
-    current_index = next(index for index, item in enumerate(nodes) if item["node_code"] == "MANUAL_REVIEW")
+    review_node_code = _single_node_code_of_type(manifest, "MANUAL_REVIEW", purpose="人工复核等待点")
+    current_index = next(index for index, item in enumerate(nodes) if item["node_code"] == review_node_code)
     # 只有**字段事实本身变化**（确认新值 / 判为证据不足）才需要把校验链路退回重判：
     # 那条取值的含义变了，按它算出来的结论不再成立。
     # 材料类型定案不在此列：它不再是依据可用性的开关，普通审核不受它影响，
@@ -460,13 +521,14 @@ def _apply_manual_reviews_direct(
         # 因此只重算质量结论：旧批次标 INVALIDATED 保留为历史，新批次挂在新执行记录上。
         # 人工结论不会被改回去：该节点现在只按 MATERIAL_CLASSIFY 产物**记录**识别结论，
         # 不再据它写材料状态或挂待办。
-        invalidated_reviews += _invalidate_file_quality_results(db, task)["invalidated_reviews"]
+        invalidated_reviews += _invalidate_file_quality_results(db, task, manifest)["invalidated_reviews"]
         file_quality_recompute = _recompute_file_quality_results(db, task, manifest)
     if validation_reexecution_required:
         _refresh_extraction_rule_results(db, task, manifest)
         # 字段有效值已改变：失效内部校验及之后的结论与待办，回到内部校验重新判定。
-        invalidated_reviews += _invalidate_validation_results(db, task)["invalidated_reviews"]
-        next_node = next(item for item in nodes if item["node_code"] == "INTERNAL_VALIDATE")
+        invalidated_reviews += _invalidate_validation_results(db, task, manifest)["invalidated_reviews"]
+        next_node_code = _single_node_code_of_type(manifest, "INTERNAL_VALIDATE", purpose="字段事实变化后的重判起点")
+        next_node = next(item for item in nodes if item["node_code"] == next_node_code)
         next_node_index = next(index for index, item in enumerate(nodes) if item["node_code"] == next_node["node_code"])
     else:
         next_node = nodes[current_index + 1] if current_index + 1 < len(nodes) else None
@@ -494,7 +556,7 @@ def _apply_manual_reviews_direct(
         NodeExecution(
             audit_task_id=task.id,
             scenario_version_id=task.scenario_version_id,
-            node_code="MANUAL_REVIEW",
+            node_code=review_node_code,
             sequence_no=sequence_no,
             status="SUCCEEDED",
             started_at=datetime.now(UTC),
@@ -520,7 +582,7 @@ def _apply_manual_reviews_direct(
         # 否则下一批提交会因集合哈希或检查点不一致被拒绝。
         task.pending_review_hash = next_hash
         task.status = "WAITING_REVIEW"
-        task.current_node = "MANUAL_REVIEW"
+        task.current_node = review_node_code
         _set_task_checkpoint(
             task,
             node_index=current_index,

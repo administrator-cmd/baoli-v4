@@ -2,9 +2,8 @@
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { DraftMaterialItem, MaterialTypeItem, ScenarioDraftView } from "@/api/contracts";
+import type { DraftMaterialItem, ScenarioDraftView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
-import { getMaterialTypes } from "@/api/system";
 import {
   createDraftMaterial,
   deleteDraftMaterial,
@@ -40,8 +39,6 @@ const dialogVisible = ref(false);
 const editingItem = ref<DraftMaterialItem | null>(null);
 const form = reactive({
   name: "",
-  /** 8018 识别类型；未确认时为空字符串，草稿可保存，发布由后端阻断。 */
-  material_type: "" as string | null,
   required: true,
   description: "",
   /**
@@ -52,22 +49,6 @@ const form = reactive({
 });
 
 const dependencyIssue = ref<{ title: string; entries: string[] } | null>(null);
-/** 8018 支持的类型目录。取不到时页面明确说明，不退回自由输入。 */
-const materialTypes = ref<MaterialTypeItem[]>([]);
-const catalogError = ref<string | null>(null);
-
-async function loadMaterialTypes(): Promise<void> {
-  try {
-    materialTypes.value = await getMaterialTypes();
-    catalogError.value = null;
-  } catch (error) {
-    materialTypes.value = [];
-    catalogError.value =
-      error instanceof ApiError
-        ? `材料识别类型目录读取失败：${error.message}`
-        : "材料识别类型目录读取失败，请检查 8018 服务配置。";
-  }
-}
 
 async function load(): Promise<void> {
   if (!props.scenarioCode) {
@@ -91,13 +72,10 @@ async function load(): Promise<void> {
 }
 
 watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immediate: true });
-// 类型目录是外部服务的当前事实，页面挂载时读取一次；不在组件里内置任何默认清单。
-void loadMaterialTypes();
 
 function openCreate(): void {
   editingItem.value = null;
   form.name = "";
-  form.material_type = "";
   form.required = true;
   form.description = "";
   form.source_ref = "";
@@ -107,7 +85,6 @@ function openCreate(): void {
 function openEdit(item: DraftMaterialItem): void {
   editingItem.value = item;
   form.name = item.name;
-  form.material_type = item.material_type ?? "";
   form.required = item.required;
   form.description = item.description;
   form.source_ref = item.source_ref ?? "";
@@ -130,9 +107,6 @@ async function submitForm(): Promise<void> {
   try {
     const payload = {
       name: form.name.trim(),
-      // 识别类型可以为空：草稿允许保存未确认的类型，发布时由后端阻断。
-      // 空字符串按「未声明」提交，不代填材料名称。
-      material_type: (form.material_type ?? "").trim(),
       required: form.required,
       description: form.description,
       source_ref: form.source_ref.trim() ? form.source_ref.trim() : null,
@@ -239,12 +213,6 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
           </template>
         </el-table-column>
         <el-table-column prop="name" label="材料名称" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="material_type" label="材料识别类型" width="160" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span v-if="row.material_type">{{ row.material_type }}</span>
-            <span v-else class="text-hint">未确认，发布前必须选择</span>
-          </template>
-        </el-table-column>
         <el-table-column label="是否必需" width="100">
           <template #default="{ row }">
             <el-tag :type="row.required ? 'warning' : 'info'" size="small" effect="plain" disable-transitions>
@@ -269,8 +237,8 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         </el-table-column>
       </el-table>
       <p class="text-hint">
-        材料编码由系统生成，用于稳定引用；材料识别类型是提交给 8018 的 doc_type，必须从支持目录中选择。
-        后端未提供逐材料的「文件格式」「数量限制」与独立「状态」字段，页面不显示这三项（启停由必传/按需体现）。
+        材料编码由系统生成，用于稳定引用；材料位只定义「需要哪些材料」，
+        材料类型在**上传文件时**由用户从 8018 支持目录中选择，不在这里配置。
       </p>
 
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑材料' : '新增材料'" width="600px" :close-on-click-modal="false">
@@ -281,23 +249,7 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
           </el-form-item>
           <el-form-item label="材料名称" required>
             <el-input v-model="form.name" maxlength="255" placeholder="例如：主合同" />
-            <div class="text-hint">材料名称是业务叫法，与下面的识别类型是两回事。</div>
-          </el-form-item>
-          <el-form-item label="材料识别类型" required>
-            <el-select
-              v-model="form.material_type"
-              filterable
-              clearable
-              placeholder="从 8018 支持的类型目录中选择"
-              style="width: 100%"
-            >
-              <el-option v-for="item in materialTypes" :key="item.id" :label="item.name" :value="item.name" />
-            </el-select>
-            <div class="text-hint">
-              这是提交给 8018 的 doc_type，必须是其支持目录中的取值，不能自由填写；
-              未确认前可以保存草稿，但发布会被阻断。
-            </div>
-            <div v-if="catalogError" class="text-hint">{{ catalogError }}</div>
+            <div class="text-hint">材料名称是业务叫法，只表达这个材料位需要什么文件。</div>
           </el-form-item>
           <el-form-item label="是否必传">
             <el-radio-group v-model="form.required">
@@ -327,7 +279,7 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
       </el-dialog>
 
       <div class="text-hint block-gap-sm">
-        保存即生效：修改会立即成为该场景的当前配置；已建方案与任务使用它们创建时的快照，不受影响。
+        已保存到草稿，发布后才供新方案使用。已建方案与任务使用它们创建时的快照。
       </div>
     </template>
   </div>

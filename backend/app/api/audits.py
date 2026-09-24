@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..errors import BusinessError
-from ..models import ManualReview, RuleResult, TaskDocument, TaskFieldValue
+from ..models import ManualReview, RuleResult, TaskDocument, TaskFieldValue, AuditTask
 from ..schemas import (
     ApiResponse,
     AuditTaskResponse,
@@ -41,6 +41,8 @@ from ..services.audit import correct_field_value, reconcile_ocr
 from ..services.audit import evidence_view, report_view, risks_view
 from ..services.background_service import operation_view
 from ..services.operation_gateway import submit_manual_reviews, submit_node_execution
+from ..services.operation_log_service import record_operation, require_idempotent_replay
+from ..services.operation_types import OBJECT_AUDIT_TASK
 from ..services.task_lookup import task_or_404
 from ..services.task_service import (
     copy_task,
@@ -91,6 +93,7 @@ def list_tasks(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """审核任务分页列表；不传 deleted 时不返回已逻辑删除的任务。"""
     page, page_size = _page_params(page, page_size)
     result = task_admin_service.list_tasks_page(
         db,
@@ -111,6 +114,7 @@ def list_tasks(
 
 @router.get("/options")
 def task_options(request: Request, keyword: str | None = None, db: Session = Depends(get_db)) -> dict:
+    """任务下拉选项：按名称或编号模糊匹配，最多 50 条，不含已删除任务。"""
     return {"request_id": request.state.request_id, "items": task_admin_service.list_task_options(db, keyword=keyword)}
 
 
@@ -127,6 +131,7 @@ def export_tasks(
     deleted: bool = False,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出任务列表 CSV；与列表页使用同一查询作用域，不做静默截断。"""
     result = task_admin_service.list_tasks_page(
         db,
         name=name,
@@ -162,6 +167,7 @@ def export_tasks(
 
 @router.get("/{task_no}", response_model=AuditTaskResponse)
 def get_task(task_no: str, request: Request, db: Session = Depends(get_db)) -> AuditTaskResponse:
+    """任务详情：当前节点、材料位、字段、规则、待办与最近一次后台操作。"""
     return AuditTaskResponse.model_validate({**task_view(db, task_or_404(db, task_no)), "request_id": request.state.request_id})
 
 
@@ -174,11 +180,57 @@ def update_task(task_no: str, payload: TaskUpdateRequest, request: Request, db: 
 
 @router.post("/{task_no}/copy", response_model=AuditTaskResponse, status_code=201)
 def copy_task_endpoint(task_no: str, payload: TaskCopyRequest, request: Request, db: Session = Depends(get_db)) -> AuditTaskResponse:
-    """复制为新任务：保留原任务方案绑定与执行快照，材料与结果重新开始。
+    """按源任务所属方案的**当前范围**重新创建任务。
 
-    已完成任务需要更换输入时复制为新任务，保留原任务报告。
+    明确不是「复制原任务的执行快照」：新任务冻结的是方案此刻的范围。没有方案或
+    方案、场景已失效时拒绝。同一幂等标识 + 同一请求内容的重发返回原任务。
+    成功操作日志只在任务与审核等待点都成功之后写入；等待点失败时记一条失败记录，
+    重放该标识返回原来的失败原因。
     """
+    request_payload = {"task_no": task_no, "task_name": payload.task_name}
+    existing, request_hash = require_idempotent_replay(
+        db,
+        object_type=OBJECT_AUDIT_TASK,
+        operation_type="TASK_COPY",
+        idempotency_key=payload.idempotency_key,
+        request=request_payload,
+    )
+    if existing is not None:
+        if str(existing.result or "") != "SUCCEEDED":
+            raise BusinessError(
+                "TASK_COPY_PREVIOUSLY_FAILED",
+                f"该幂等标识对应的复制任务命令此前执行失败：{existing.failure_message or '原因未记录'}。"
+                "请更换幂等标识后重试",
+                status_code=409,
+                details={"log_no": existing.log_no, "failure_code": existing.failure_code},
+            )
+        detail = existing.detail_json if isinstance(existing.detail_json, dict) else {}
+        replayed = db.scalar(select(AuditTask).where(AuditTask.task_no == detail.get("new_task_no")))
+        if replayed is None:
+            raise BusinessError(
+                "TASK_COPY_REPLAY_UNAVAILABLE",
+                "该幂等标识对应的任务记录不存在，请更换标识后重新复制",
+                status_code=409,
+                details={"log_no": existing.log_no},
+            )
+        return AuditTaskResponse.model_validate({**task_view(db, replayed), "request_id": request.state.request_id})
     created = copy_task(db, task_no, task_name=payload.task_name)
+    record_operation(
+        db,
+        object_type=OBJECT_AUDIT_TASK,
+        object_no=task_no,
+        object_name=payload.task_name,
+        operation_type="TASK_COPY",
+        detail={
+            "source_task_no": task_no,
+            "new_task_no": created.task_no,
+            # 复制复制的是方案当前范围，指纹留痕以说明新任务冻结的是哪一版。
+            "plan_scope_hash": created.task_schema_json.get("plan_scope_hash"),
+        },
+        idempotency_key=payload.idempotency_key,
+        request_hash=request_hash,
+    )
+    db.commit()
     return AuditTaskResponse.model_validate({**task_view(db, task_or_404(db, created.task_no)), "request_id": request.state.request_id})
 
 
@@ -191,6 +243,7 @@ def delete_task(task_no: str, request: Request, db: Session = Depends(get_db)) -
 
 @router.post("/{task_no}/restore", response_model=AuditTaskResponse)
 def restore_task(task_no: str, request: Request, db: Session = Depends(get_db)) -> AuditTaskResponse:
+    """恢复已逻辑删除的任务；任务不在已删除列表时明确返回 409。"""
     task_admin_service.restore_task(db, task_no)
     return AuditTaskResponse.model_validate({**task_view(db, task_or_404(db, task_no)), "request_id": request.state.request_id})
 
@@ -304,6 +357,7 @@ def get_task_executions(
     page_size: int = Query(default=50),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """该任务的节点执行记录分页（默认每页 50 条）。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_executions_page(
         db,
@@ -324,11 +378,19 @@ async def upload_task_document(
     document_no: str,
     request: Request,
     file: UploadFile = File(...),
+    material_type: str = Form(...),
     replace: bool = Form(False),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
     # 与后台执行互斥由服务函数在锁定任务行之后检查，避免检查与修改之间的竞态。
-    record, impact = await upload_document(db, task_no, document_no, file, replace=replace)
+    """上传或替换材料位的当前文件，返回本次输入修订的真实影响范围。
+
+    `material_type` 必填：用户从 8018 支持目录中选择的材料类型，随本次上传保存。
+    材料位本身不再声明类型（见 01_材料位 的列协议），因此这里不能留空。
+    """
+    record, impact = await upload_document(
+        db, task_no, document_no, file, material_type=material_type, replace=replace
+    )
     document = db.scalar(select(TaskDocument).where(TaskDocument.id == record.task_document_id))
     if not document:
         raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=500)
@@ -428,18 +490,52 @@ def manual_review(task_no: str, payload: ManualReviewRequest, request: Request, 
     )
 
 
+@router.get("/{task_no}/agent-tool-calls")
+def get_agent_tool_calls(
+    task_no: str,
+    request: Request,
+    evaluation_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Agent 工具调用账本的只读查询：模型请求了什么、依据哪一版事实与工具定义、得到什么。
+
+    `evaluation_id` 给出时只返回该评估批次的调用；不给出时返回本任务的全部批次，
+    并按批次分组，便于页面按「一次规则评估」查看取证过程。
+
+    只读、不触发任何执行；返回的是账本里真实记录的内容，不由页面重新计算比较过程。
+    密钥与外部服务原始载荷不进这个视图（见 `services.agent_tool_ledger.call_view`）。
+    """
+    task = task_or_404(db, task_no)
+    from ..services import agent_tool_ledger as ledger
+
+    batches = [evaluation_id] if evaluation_id else ledger.evaluations_of_task(db, task_id=task.id)
+    return {
+        "request_id": request.state.request_id,
+        "task_no": task.task_no,
+        "evaluations": batches,
+        "items": [
+            call
+            for batch in batches
+            for call in ledger.ledger_view(db, task_id=task.id, evaluation_id=batch)
+        ],
+    }
+
+
 @router.get("/{task_no}/risks", response_model=RiskListResponse)
 def get_risks(task_no: str, request: Request, db: Session = Depends(get_db)) -> RiskListResponse:
+    """该任务的风险结果：命中只统计 ABNORMAL，未配置 / 未执行 / 无法判断分别表达。"""
     return RiskListResponse.model_validate({**risks_view(db, task_no), "request_id": request.state.request_id})
 
 
 @router.get("/{task_no}/reports", response_model=ReportResponse)
 def get_report(task_no: str, request: Request, db: Session = Depends(get_db)) -> ReportResponse:
+    """该任务的审核报告视图：正文、三信号与生成时的范围快照。"""
     return ReportResponse.model_validate({**report_view(db, task_no), "request_id": request.state.request_id})
 
 
 @router.get("/{task_no}/reports/download")
 def download_report(task_no: str, db: Session = Depends(get_db)) -> StreamingResponse:
+    """下载报告正文 Markdown；报告尚未生成时明确 409，不返回空文件。"""
     report = report_view(db, task_no)
     content = report["content"]
     if report["status"] == "NOT_GENERATED" or not isinstance(content, str) or not content:
@@ -454,6 +550,7 @@ def download_report(task_no: str, db: Session = Depends(get_db)) -> StreamingRes
 
 @router.get("/{task_no}/evidence/{evidence_no}", response_model=EvidenceResponse)
 def get_evidence(task_no: str, evidence_no: str, request: Request, db: Session = Depends(get_db)) -> EvidenceResponse:
+    """单条证据详情：引用原文、依据类型与定位核对结论。"""
     return EvidenceResponse.model_validate({**evidence_view(db, task_no, evidence_no), "request_id": request.state.request_id})
 
 

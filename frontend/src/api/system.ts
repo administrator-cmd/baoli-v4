@@ -5,18 +5,13 @@ import type {
   Paged,
   RuleStatusCatalog,
   SystemServices,
-  SystemStatus,
   UploadPolicy,
 } from "./contracts";
 import { request } from "./http";
 import { toQuery } from "./query";
 
-export function getSystemStatus(): Promise<SystemStatus> {
-  return request<SystemStatus>("/system/status");
-}
-
 /**
- * 8018 支持的材料识别类型目录。场景材料页从这里取值，
+ * 8018 支持的材料类型目录。材料上传页从这里取值，
  * 不内置默认清单、不把 8018 的取值与业务材料名称做映射。
  */
 export async function getMaterialTypes(): Promise<MaterialTypeItem[]> {

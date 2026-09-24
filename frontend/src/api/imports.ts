@@ -4,17 +4,13 @@ import type {
   JsonValue,
   OperationAccepted,
   Paged,
-  PrecheckResult,
+  ProposalCalculation,
   ProposalRule,
   ProposalSheet,
   RuleComparison,
-  ScenarioVersion,
 } from "./contracts";
 import { apiFileUrl, request, type OperationView } from "./http";
 import { toQuery } from "./query";
-
-/** 模板发布目标：新建模板，或在已有模板身份下生成新版本。 */
-export type TemplateMode = "new" | "update";
 
 /** 一条草稿裁决：问题作答、候选原地修正、候选排除/恢复共用同一接口。 */
 export interface ImportDecision {
@@ -23,21 +19,6 @@ export interface ImportDecision {
   action: "RESOLVE" | "EXCLUDE" | "ACCEPT";
   /** RESOLVE 时为属性字典（问题作答为 {selected: ...}）；EXCLUDE/ACCEPT 用空对象。 */
   value: Record<string, JsonValue>;
-}
-
-export interface PublishPayload {
-  scenario_name: string;
-  /** 更新已有模板时必填；新建模板时由后端生成，页面不要求业务用户输入编码。 */
-  scenario_code?: string;
-  template_mode: TemplateMode;
-  /**
-   * 已逐条确认「这条检查本次确实无法执行」的规则键。
-   *
-   * 能力缺口默认阻断发布；要把发布继续下去，必须把缺口规则的 rule_key 逐条列出来，
-   * 表示使用者已经看到并接受「该检查运行时会明确报不可判定、不会给出结论」。
-   * 它不是「忽略全部缺口」的开关，也不是默认值：未列出的缺口仍然阻断。
-   */
-  acknowledged_capability_gaps?: string[];
 }
 
 /**
@@ -67,13 +48,17 @@ export type ProposalSheetView = Omit<ProposalSheet, "rules"> & { rules: Proposal
 /**
  * 作业视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
  * - latest_operation：页面刷新后要凭它继续查询该作业正在进行/刚结束的后台操作；
- * - profile_display_name 由 ImportJob 声明，页面优先使用服务端给出的中文格式名。
+ * - profile_display_name 由 ImportJob 声明，页面优先使用服务端给出的中文格式名；
+ * - profile：作业所属场景 + 统一模板协议摘要（Sheet 数量、名称与可绑定的节点类型）。
+ *   页面据此显示真实的表数量与用途说明，不再硬编码「7 类工作表」。
  */
 export type ImportJobView = Omit<ImportJob, "proposals"> & {
-  proposals: { sheets: ProposalSheetView[] } | null;
+  proposals: { sheets: ProposalSheetView[]; calculations: ProposalCalculation[] } | null;
   latest_operation?: OperationView | null;
+  profile?: ProfileSummary | null;
 };
 
+/** 导入作业摘要列表（完整数组，兼容旧调用）。 */
 export function listImportJobs(): Promise<ImportJobSummary[]> {
   return request<ImportJobSummary[]>("/import-jobs");
 }
@@ -84,9 +69,10 @@ export interface ImportJobRow {
   source_filename: string;
   status: string;
   profile_version: string;
+  /** 作业所属场景（上传时指定）；历史作业为 null，如实显示「未记录场景」。 */
+  scenario_code: string | null;
+  scenario_name: string | null;
   draft_revision: number;
-  target_mode: "new" | "update" | null;
-  target_name: string | null;
   pending_issue_count: number;
   /**
    * 该作业未结束（待执行 / 执行中）的后台操作数。
@@ -100,6 +86,7 @@ export interface ImportJobRow {
 }
 
 export interface ImportJobQuery {
+  scenario_code?: string;
   filename?: string;
   status?: string;
   created_from?: string;
@@ -108,10 +95,12 @@ export interface ImportJobQuery {
   page_size: number;
 }
 
+/** 导入作业分页列表（后端筛选与 total）。 */
 export function listImportJobsPage(query: ImportJobQuery): Promise<Paged<ImportJobRow>> {
   return request<Paged<ImportJobRow>>(`/import-jobs/page${toQuery({ ...query })}`);
 }
 
+/** 导入作业列表导出地址；与当前筛选同一作用域。 */
 export function importJobsExportUrl(query: Omit<ImportJobQuery, "page" | "page_size">): string {
   return apiFileUrl(`/import-jobs/export${toQuery({ ...query })}`);
 }
@@ -129,34 +118,71 @@ export function abortImportJob(jobNo: string): Promise<OperationView> {
   return request<OperationView>(`/import-jobs/${encodeURIComponent(jobNo)}/abort`, { method: "POST" });
 }
 
-export type RulebookTemplateExample = "blank" | "single_contract" | "contract_and_invoice";
+/**
+ * 统一模板协议摘要：系统支持的全部 Sheet 与可绑定的节点类型。
+ *
+ * 系统只有**一份**模板协议，因此也只有一个下载入口；不再有「合同模板 / 财报模板」
+ * 两个下载地址，也不再有 v1-v4 的格式版本选择——那些都来自已删除的双轨 Profile。
+ */
+export interface ProfileSheet {
+  sheet_role: string;
+  /** 编号前缀（例如 RSK-）：跨表引用靠它判断指向。 */
+  code_prefix?: string;
+  display_name: string;
+  /** 这张 Sheet 可以绑定的节点类型（绑定由用户确认，系统只给建议）。 */
+  node_types: string[];
+  column_count: number;
+}
+
+export interface ProfileSummary {
+  profile_version: string | null;
+  display_name: string | null;
+  schema_version: string | null;
+  /** 模板说明页名称：模板生成、导出与导入读同一声明。 */
+  instruction_sheet?: string;
+  sheet_count: number;
+  node_types: Array<{ node_type: string; display_name: string; depends_on_types: string[] }>;
+  sheets: ProfileSheet[];
+  /** 作业所属场景（上传时指定）；历史作业为 null。 */
+  scenario_code?: string | null;
+  scenario_name?: string | null;
+}
 
 /**
- * 模板下载地址。示例 key 由后端 /rulebook-templates/contract-review/examples 给出，
- * 不限于当前已知的三种取值——新格式可以声明自己的示例，前端不应把它限制成写死的联合类型。
+ * 规则库模板下载地址。
+ *
+ * 不传 selection 时只带场景编码：已有确认绑定的场景由服务端按绑定导出。
+ * 还没有确认绑定时，必须由用户勾选本次要下载的工作表；该选择不写场景。
+ * 一份模板就是**一份 base Excel**，勾选哪些表就下载哪些表。
  */
-export function rulebookTemplateUrl(example: string): string {
-  return apiFileUrl(`/rulebook-templates/contract-review/download?example=${encodeURIComponent(example)}`);
+export function unifiedTemplateUrl(
+  scenarioCode: string,
+  selection?: { sheetRoles: string[] },
+): string {
+  const params = new URLSearchParams();
+  params.set("scenario_code", scenarioCode);
+  if (selection) {
+    for (const role of selection.sheetRoles) {
+      params.append("sheet_roles", role);
+    }
+  }
+  return apiFileUrl(`/rulebook-templates/download?${params.toString()}`);
 }
 
-/**
- * 当前格式版本真实可下载的模板示例。
- * 页面必须据此渲染下载入口：节点版没有真实示例内容，只有 blank；
- * 在前端写死示例 A/B 会让用户点到必然失败的链接。
- */
-export interface RulebookTemplateExampleItem {
-  key: string;
-  label: string;
-  available: boolean;
-  description: string;
+/** 统一模板协议声明的 Sheet 与列协议（页面据此渲染 Sheet 绑定步骤）。 */
+export function getProfileSheets(): Promise<{
+  request_id: string;
+  profile_version: string | null;
+  display_name: string | null;
+  schema_version: string | null;
+  instruction_sheet: string;
+  node_types: ProfileSummary["node_types"];
+  sheets: Array<ProfileSheet & { aliases: string[]; header_signature: string[]; columns: Array<Record<string, unknown>> }>;
+}> {
+  return request("/rulebook-templates/sheets");
 }
 
-export async function listRulebookTemplateExamples(): Promise<RulebookTemplateExampleItem[]> {
-  const payload = await request<{ items: RulebookTemplateExampleItem[] }>(
-    "/rulebook-templates/contract-review/examples",
-  );
-  return payload.items;
-}
+
 
 /** 「更新已有模板」下拉用：未删除的场景及最新版本号（不含已发布状态字段）。 */
 export interface TemplateOption {
@@ -167,23 +193,53 @@ export interface TemplateOption {
   latest_version_no: number;
 }
 
+/**
+ * **管理员**用的场景下拉：未删除的全部场景与最新版本号。
+ *
+ * 导入页在场景**发布之前**就要选中它（先建场景、再上传规则库），
+ * 因此走 `/scenarios/admin-options`；业务用户用的 `/scenarios/options`
+ * 只返回已发布且启用的场景，选不到刚建好的场景。
+ */
 export function listTemplates(): Promise<TemplateOption[]> {
-  return request<{ request_id: string; items: TemplateOption[] }>("/scenarios/options").then((payload) => payload.items);
+  return request<{ request_id: string; items: TemplateOption[] }>("/scenarios/admin-options").then((payload) => payload.items);
 }
 
-export function createImportJob(file: File): Promise<ImportJobView> {
+/** 上传规则库 Excel 并读取为工作簿 IR；此时还没有规则候选。 */
+/**
+ * 在**指定场景**下上传规则库 Excel，读取为工作簿 IR；此时还没有规则候选。
+ *
+ * `scenarioCode` 必填：上传流程以场景为起点（用户先建场景、再在该场景下上传），
+ * 场景不由 Excel 表头推断。此时也没有绑定关系——Sheet 与业务节点的对应关系
+ * 由用户在绑定步骤确认。
+ */
+export function createImportJob(file: File, scenarioCode: string): Promise<ImportJobView> {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("scenario_code", scenarioCode);
   return request<ImportJobView>("/import-jobs", { method: "POST", body: formData });
 }
 
+/** 导入作业详情：工作表、问题、候选与草稿修订号。 */
 export function getImportJob(jobNo: string): Promise<ImportJobView> {
   return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}`);
 }
 
+/** 保存工作表用途与表头行绑定。 */
+/**
+ * 保存 Sheet → 节点实例的绑定。
+ *
+ * `node_code` 是用户在当前场景里建立的**节点实例**：一张 Sheet 只能绑定一个节点，
+ * 一个节点可以绑定多张 Sheet。未绑定或已排除的 Sheet 不进入转换与执行范围。
+ */
 export function updateSheetBindings(
   jobNo: string,
-  bindings: Array<{ sheet_key: string; role: string | null; header_row: number | null; excluded: boolean }>,
+  bindings: Array<{
+    sheet_key: string;
+    role: string | null;
+    node_code: string | null;
+    header_row: number | null;
+    excluded: boolean;
+  }>,
 ): Promise<ImportJobView> {
   return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}/sheet-bindings`, {
     method: "PUT",
@@ -231,19 +287,19 @@ export function saveDecisionDraft(jobNo: string, answers: Record<string, JsonVal
   });
 }
 
-export function precheckImport(jobNo: string, payload: PublishPayload): Promise<PrecheckResult> {
-  return request<PrecheckResult>(`/import-jobs/${encodeURIComponent(jobNo)}/precheck`, {
+/**
+ * 把已确认的导入结果写入作业所属场景的草稿。
+ * 不发布场景版本。管理员之后在场景页核对并显式发布。
+ */
+export function applyImportToDraft(
+  jobNo: string, expectedJobRevision: number, expectedSceneRevision: number,
+): Promise<ImportJobView> {
+  return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}/apply-draft`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-/** 发布保持同步：返回已发布（或同一作业已发布的同一个）模板版本。 */
-export function publishImport(jobNo: string, payload: PublishPayload): Promise<ScenarioVersion> {
-  return request<ScenarioVersion>(`/import-jobs/${encodeURIComponent(jobNo)}/publish`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      expected_job_revision: expectedJobRevision,
+      expected_scene_revision: expectedSceneRevision,
+    }),
   });
 }

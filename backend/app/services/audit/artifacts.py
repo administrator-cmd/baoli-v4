@@ -187,8 +187,7 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
     )
     db.add(record)
     db.flush()
-    # Reserve the idempotency record before contacting the provider. An interrupted submit is explicit,
-    # and must never be retried automatically because the provider may have accepted it.
+    # 先占位再联系供应商：提交中断是显式状态，绝不能自动重试——供应商可能已经受理。
     db.commit()
     try:
         submission = document_service().submit_processed_document(file_path=processed_path, filename=processed_filename)

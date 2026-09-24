@@ -24,8 +24,11 @@ const statusLabels: Record<string, string> = {
   PROPOSED: "已转换",
   PENDING_DECISION: "等待业务确认",
   CONFIRMED: "已确认",
-  PRECHECKED: "检查完成",
+  // 历史状态：导入页已不再产生 PRECHECKED（发布前检查已移除，编译与发布状态机
+  // 只在场景页）。保留这条映射只为让历史作业列表能显示中文，不是可选状态。
+  PRECHECKED: "检查完成（历史）",
   PUBLISHED: "已发布",
+  APPLIED: "已写入场景草稿",
   CONTRACT_INVALID: "转换结果无效",
   SOURCE_REF_INVALID: "来源引用无效",
   EXTERNAL_FAILED: "外部服务失败",
@@ -70,7 +73,7 @@ const statusLabels: Record<string, string> = {
   AUTO: "自动识别",
   MANUAL: "已人工处理",
 
-  // 本轮新增：外部作业阶段、证据定位、依据类型、逐行处置
+  // 外部作业阶段、证据定位、依据类型、逐行处置
   PROCESSING: "处理中",
   VERIFIED: "已核实",
   UNVERIFIED: "未核实",
@@ -101,6 +104,7 @@ const statusLabels: Record<string, string> = {
   // 因此索引状态的中文名与颜色由 evidenceIndexStatusLabel / evidenceIndexStatusTone 单独提供。
   BUILDING: "索引构建中",
   NO_INDEX: "范围内没有可用索引",
+  PARTIAL_COVERAGE: "检索范围未完整覆盖",
 };
 
 /**
@@ -207,13 +211,15 @@ const statusTones: Record<string, StatusTone> = {
   UNCONFIGURED: "neutral",
   CONFIGURATION_INCOMPLETE: "warning",
   NOT_CONFIGURED: "neutral",
+  PARTIAL_COVERAGE: "warning",
   // 索引状态色由 evidenceIndexStatusTone 提供（READY 在任务状态里另有所指）。
   BUILDING: "info",
 };
 
-/** 逐行处置的中文口径：候选是蓝、排除是灰、待处理问题是橙。 */
+/** 逐行处置的中文口径。 */
 const dispositionLabels: Record<string, string> = {
   CANDIDATE: "已形成候选",
+  DISABLED: "已停用并保留",
   EXCLUDED: "已明确排除",
   QUESTION: "待处理问题",
 };
@@ -445,6 +451,8 @@ const operationTypeLabels: Record<string, string> = {
   DRAFT_SECTION_UPDATE: "编辑报告章节",
   DRAFT_SECTION_DELETE: "删除报告章节",
   REVISE_FROM_VERSION: "基于版本创建修订",
+  APPLY_DRAFT: "导入写入场景草稿",
+  IMPORT_APPLY: "规则库写入场景草稿",
   TASK_CREATE: "创建审核任务",
   SAVE_FROM_TASK: "历史任务另存为方案",
   FIELD_CORRECTION: "字段纠错",
@@ -592,19 +600,25 @@ export const ruleNodeOrder = [
 ];
 
 /**
- * 规则库模板支持的 7 个业务 Sheet 用途。
+ * base Excel 的 10 个业务 Sheet 用途。
  *
- * 中文名与规则库模板中的工作表名称一致，用户可以直接对照 Excel 里的标签页填写；
+ * 中文名与模板里的工作表名称一致，用户可以直接对照 Excel 里的标签页填写；
  * 模板自带的说明页等元数据不是业务用途，绝不出现在这里。
+ *
+ * **服务端协议才是权威来源**：绑定步骤优先用 `/rulebook-templates/sheets` 返回的
+ * `display_name`（见 profileSheetLabels），这份清单只作为协议不可达时的兜底。
  */
 export const sheetRoleOptions = [
-  { value: "MATERIAL_LIST", label: "01_材料检查" },
-  { value: "MATERIAL_QUALITY", label: "02_文件处理" },
-  { value: "FIELD_EXTRACTION", label: "03_字段抽取" },
-  { value: "INTERNAL_VALIDATE", label: "04_文件内部校验" },
-  { value: "CROSS_VALIDATE", label: "05_文件交叉校验" },
-  { value: "RISK", label: "06_风险评定" },
-  { value: "REPORT_TEMPLATE", label: "07_报告输出" },
+  { value: "MATERIAL_LIST", label: "01_材料位" },
+  { value: "MATERIAL_QUALITY", label: "02_文件处理规则" },
+  { value: "FIELD_EXTRACTION", label: "03_字段" },
+  { value: "INTERNAL_VALIDATE", label: "04_文件内部校验规则" },
+  { value: "CROSS_VALIDATE", label: "05_文件交叉校验规则" },
+  { value: "CALC_DEFINITION", label: "06_计算定义" },
+  { value: "CALC_PARAMETER", label: "07_计算参数" },
+  { value: "CALC_JUDGEMENT", label: "08_计算判定" },
+  { value: "RISK", label: "09_风险规则" },
+  { value: "REPORT_TEMPLATE", label: "10_报告模板" },
 ];
 
 /**
@@ -614,38 +628,27 @@ export const sheetRoleOptions = [
  * 但必须给出中文说明，避免页面上出现原始编码。
  */
 const nonBusinessSheetRoleLabels: Record<string, string> = {
-  INSTRUCTION: "填写说明（模板元数据，不参与发布）",
+  INSTRUCTION: "填写说明（模板元数据，不参与本次导入）",
 };
 
 /** 工作表用途的业务说明，帮助用户判断这张表该绑成什么。 */
 const sheetRoleDescriptions: Record<string, string> = {
-  MATERIAL_LIST: "定义本次审核需要登记的材料，以及哪些是必传。",
+  MATERIAL_LIST: "定义本次审核需要登记的材料位，以及哪些是必传。",
   MATERIAL_QUALITY: "定义对材料文件本身的检查项目、合格要求与判定口径。",
-  FIELD_EXTRACTION: "定义需要从材料中抽取的业务字段、类型、单位与币种。",
+  FIELD_EXTRACTION: "定义需要从材料中抽取的业务字段、类型、单位、币种、取数期间与报表口径。",
   INTERNAL_VALIDATE: "定义单份材料内部信息的一致性检查规则及允许差值。",
   CROSS_VALIDATE: "定义两种材料之间的交叉核对规则及允许差值。",
+  CALC_DEFINITION: "定义计算规则：指标名称、类别、计算公式、结果期间与报表口径。",
+  CALC_PARAMETER: "定义公式里每个标识符的取值来源（字段 / 上游计算结果 / 常量）、单位与币种。",
+  CALC_JUDGEMENT: "定义计算结果的判定区间：上下界、是否含边界、比较基准与结论。",
   RISK: "定义风险及其等级、成立条件（任一/全部关联检查不合格）；来源只在检查行的「关联风险」维护。",
   REPORT_TEMPLATE: "定义报告编号、材料范围、输出格式与章节；同一报告编号的属性必须整组一致。",
-  INSTRUCTION: "模板自带的填写说明页，属于模板元数据，不参与本次发布。",
+  INSTRUCTION: "模板自带的填写说明页，属于模板元数据，不参与本次导入。",
 };
 
 export function sheetRoleDescription(role: string | null | undefined): string {
-  return role ? sheetRoleDescriptions[role] ?? "该用途暂无业务说明。" : "尚未指定用途，本工作表不参与本次发布。";
+  return role ? sheetRoleDescriptions[role] ?? "该用途暂无业务说明。" : "尚未指定用途。请选择用途，或把本表设为不参与本次导入。";
 }
-
-/**
- * 导入环节的业务约束。放在导入工作台的显眼位置。
- *
- * 这些是系统真实支持的范围，不是建议：超出范围的填写会在导入时被明确阻断并给出原因，
- * 系统不会自动拆分、自动汇总或用默认值代替业务填写。
- */
-export const importBusinessConstraints: string[] = [
-  "对照内容只接受一个字段，或由「 + 」连接的多个字段（加总只用于数值的等于、不大于、不小于）。",
-  "不支持减法、乘除、百分比公式、多份同类文件汇总与多合同自动分组；这类填写会在导入时被明确阻断并给出原因。",
-  "金额字段必须写明单位与币种；系统不默认人民币或元，币种未知时不做数值比较或求和。",
-  "「配置状态=待确认」的行可以保存草稿与修正，但未解决前不能发布为可执行版本；「停用」的行不参与执行。",
-  "空的 04/05/06 等可选 Sheet 表示该类检查未配置，执行时会显示「未配置并跳过」，不等于检查通过。",
-];
 
 /**
  * 风险疑点（06_风险疑点）的业务列名。
@@ -656,6 +659,7 @@ export const importBusinessConstraints: string[] = [
 export const riskSourceNodeColumnLabel = "来源节点";
 export const riskSourceRuleColumnLabel = "来源审核规则";
 
+/** 规则结果状态的中文口径；未识别的状态码连同原始码一起显示。 */
 export function statusLabel(status: string | null | undefined): string {
   if (!status) {
     return "未开始";
@@ -760,6 +764,7 @@ export function reviewObjectKindLabel(kind: string | null | undefined): string {
   return kind ? `未识别类型（${kind}）` : "未识别类型";
 }
 
+/** 业务取值 → 展示文本；null / undefined / 空串统一显示为「未提供」，不留空白。 */
 export function formatBusinessValue(value: unknown): string {
   if (value === null || value === undefined || value === "") {
     return "未提供";
@@ -830,17 +835,6 @@ export function configurationItemLabel(item: string): string {
   return configurationItemLabels[item] ?? item;
 }
 
-/** 导入模板格式：优先使用服务端给出的中文名，缺失时用本地映射兜底。 */
-const profileVersionLabels: Record<string, string> = {
-  contract_review_v3: "节点版模板（01_材料检查 … 07_报告输出）",
-  contract_review_v2: "业务版模板（中文列，旧）",
-  contract_review_v1: "编码版模板（旧格式，含内部编码列）",
-};
-
-export function profileVersionLabel(version: string | null | undefined): string {
-  return version ? profileVersionLabels[version] ?? `未识别的模板格式（${version}）` : "模板格式未知";
-}
-
 /** 业务节点的可选值，用于候选原地修正里选择「所属节点」。 */
 export const nodeOptions = Object.keys(nodeLabels).map((value) => ({ value, label: nodeLabels[value] }));
 
@@ -876,6 +870,44 @@ const artifactSourceLabels: Record<string, string> = {
 
 export function artifactSourceLabel(value: string | null | undefined): string {
   return value ? artifactSourceLabels[value] ?? value : "常规抽取";
+}
+
+/**
+ * 取数期间与报表口径：字段自己声明「这个数取的是哪一期、哪个口径」，
+ * 计算参数按这两项定位字段事实。取值与统一模板协议里的 `value_labels` 同一口径，
+ * 因此页面与 Excel 下拉看到的是同一套中文名。
+ */
+export const periodScopeOptions = [
+  // 「不适用」是**显式取值**，不是留空的占位：合同场景没有期间概念，
+  // 该字段声明为不适用后，计算参数不能拿它定位事实（发布期会拦）。
+  { value: "NOT_APPLICABLE", label: "不适用" },
+  { value: "CURRENT", label: "本期" },
+  { value: "PRIOR", label: "上期" },
+  { value: "OPENING", label: "期初" },
+  { value: "CLOSING", label: "期末" },
+  { value: "AVERAGE_OPENING_CLOSING", label: "期初期末平均值" },
+];
+
+const periodScopeLabels: Record<string, string> = Object.fromEntries(
+  periodScopeOptions.map((item) => [item.value, item.label]),
+);
+
+export function periodScopeLabel(value: string | null | undefined): string {
+  return value ? periodScopeLabels[value] ?? value : "未声明";
+}
+
+export const statementScopeOptions = [
+  { value: "NOT_APPLICABLE", label: "不适用" },
+  { value: "CONSOLIDATED", label: "合并报表" },
+  { value: "PARENT", label: "母公司报表" },
+];
+
+const statementScopeLabels: Record<string, string> = Object.fromEntries(
+  statementScopeOptions.map((item) => [item.value, item.label]),
+);
+
+export function statementScopeLabel(value: string | null | undefined): string {
+  return value ? statementScopeLabels[value] ?? value : "未声明";
 }
 
 /**
@@ -944,6 +976,20 @@ export const riskSourceNodeOptions = [
   { value: "CROSS_VALIDATE", label: "文件交叉校验" },
 ];
 
+export const riskConditionOptions = [
+  { value: "ANY_ABNORMAL", label: "任一来源检查不合格" },
+  { value: "ALL_ABNORMAL", label: "全部来源检查不合格" },
+];
+
+export const checkLevelOptions = [
+  { value: "最高", label: "最高" },
+  { value: "一级", label: "一级" },
+  { value: "二级", label: "二级" },
+  { value: "三级", label: "三级" },
+  { value: "高", label: "高（旧格式）" },
+  { value: "低", label: "低（旧格式）" },
+];
+
 /**
  * 规则算子的**兜底**中文名。
  *
@@ -981,14 +1027,14 @@ const failureNextSteps: Record<string, string> = {
   BLOCKED_BY_PRECHECK: "先处理发布检查中列出的阻断项，再重新执行发布检查。",
 
   // 工作表绑定：未知工作表、用途缺失或表头行无效
-  SHEET_ROLE_REQUIRED: "在「Sheet 绑定」步骤为这张工作表选择用途，或把它设为不参与本次发布。",
+  SHEET_ROLE_REQUIRED: "在「Sheet 绑定」步骤为这张工作表选择用途，或把它设为不参与本次导入。",
   SHEET_ROLE_INVALID: "该用途不在当前模板支持的范围内，请重新选择用途后再次提交解析。",
   SHEET_BINDING_INCOMPLETE: "本次作业的每一张工作表都要提交绑定结果，请刷新页面后重新确认用途。",
   SHEET_BINDING_DUPLICATE: "同一张工作表被提交了两次，请刷新页面后重新确认用途。",
   SHEET_NOT_FOUND: "该工作表已不在当前导入作业中，请刷新页面后重新确认用途。",
   SHEET_HEADER_REQUIRED: "为这张业务工作表填写实际存在的表头行（列名所在行）。",
   SHEET_HEADER_INVALID: "所选表头行不在可转换范围内，请按文件实际情况重新填写表头行。",
-  TEMPLATE_METADATA_IMMUTABLE: "填写说明等模板元数据工作表不能绑定为业务工作表，请把它设为不参与本次发布。",
+  TEMPLATE_METADATA_IMMUTABLE: "填写说明等模板元数据工作表不能绑定为业务工作表，请把它设为不参与本次导入。",
   NO_BUSINESS_DATA_SHEET_IMMUTABLE: "这张工作表没有业务数据，系统已跳过，不能绑定为业务用途。",
 
   // 规则填写超出系统支持范围
@@ -1019,15 +1065,20 @@ const failureNextSteps: Record<string, string> = {
   MANIFEST_RISK_SOURCE_REQUIRED: "在 06_风险疑点的「来源审核规则」列填写被引用的审核规则名称，再重新解析。",
   MANIFEST_RISK_REVIEW_NODE_ORDER_INVALID: "风险评定排在人工复核之后，不能再要求新增人工复核；请去掉该风险规则的人工复核要求后重新解析。",
   MANIFEST_APPLICABILITY_MATERIAL_MISSING: "为「所引用材料均已上传时」的规则补充所引用的材料，或把适用条件改为始终适用。",
-  PUBLISH_PRECHECK_FAILED: "按发布检查列出的阻断项逐项处理，再重新执行发布检查。",
-  PUBLISH_PRECHECK_REQUIRED: "发布前必须先针对当前发布意图执行发布检查；页面的发布检查结果已失效，请重新执行。",
-  PUBLISH_PREVIEW_MISMATCH: "发布内容与上次检查结果不一致，请重新执行发布检查后再发布。",
+  PUBLISH_PRECHECK_FAILED: "这是历史导入发布接口留下的阻断。新导入请写入场景草稿，再在场景页按发布检查处理。",
+  PUBLISH_PRECHECK_REQUIRED: "这是历史导入发布接口的结果。新导入不能从这里发布，请写入场景草稿后再到场景页发布。",
+  PUBLISH_PREVIEW_MISMATCH: "历史导入发布的内容与当时的检查结果不一致。新导入请写入场景草稿，再在场景页发布。",
+  IMPORT_DOES_NOT_PUBLISH_SCENE: "规则库导入不能直接发布场景。请先写入该场景草稿，核对配置后在场景页执行「发布场景」。",
+  IMPORT_ALREADY_APPLIED: "该导入作业已经写入场景草稿，不能再改。请到场景草稿里修改，或重新上传一份规则库。",
+  IMPORT_SCENARIO_REQUIRED: "这份导入没有所属场景。请先创建场景，再在该场景下上传规则库。",
+  PLAN_FROM_TASK_FORBIDDEN: "不能把审核任务另存为方案。请先选择已发布场景建立方案，再从方案创建任务。",
+  MANIFEST_CALC_FROZEN_STALE: "已冻结的计算配置与当前草稿的字段编号或计算节点不一致，不能发布。请核对字段编号和计算节点后再发布。",
   IMPORT_DRAFT_REVISION_CONFLICT: "有人在本次编辑后改动了这个导入作业的草稿；请刷新页面重新加载最新草稿，再重新提交。",
   OPERATION_IDEMPOTENCY_CONFLICT: "同一提交标识对应了不同的输入内容；请刷新页面后按最新内容重新提交，不要复用旧请求。",
   INPUT_REVISION_CONFLICT: "任务输入已被其他操作更新（例如另一端替换了材料或提交了纠错）；请刷新任务详情加载最新状态后再提交。",
 
   // 场景草稿编辑与发布：每一条都指出具体要改哪个配置项。
-  SCENARIO_DRAFT_REVISION_CONFLICT: "草稿在本次编辑期间被改动；请刷新页面加载最新草稿，确认后再发布。",
+  SCENARIO_DRAFT_REVISION_CONFLICT: "场景草稿在本次确认期间被改动；请刷新页面核对最新配置后再提交。",
   SCENARIO_DISABLED: "该场景已停用，不能发布或用于新建方案与任务；如需继续请先启用场景。",
   FIELD_REFERENCED: "该字段被规则引用，删除会破坏规则定义；请先改掉引用它的规则，再删除字段。",
   FIELD_TYPE_INVALID: "字段类型不在支持范围内，请从页面提供的类型里重新选择。",
@@ -1055,12 +1106,8 @@ const failureNextSteps: Record<string, string> = {
   TASK_RULE_EMPTY: "任务至少要执行一条规则；请回到方案里选择规则并重新保存。",
   TASK_RULE_UNKNOWN: "任务引用了当前场景版本中不存在的规则；请回到方案编辑页重新保存以对齐场景配置。",
   TASK_RULE_DISABLED: "任务引用了场景里已停用的规则；请在场景配置中启用该规则或从方案中移除。",
-  TASK_RULE_DEPENDENCY_MISSING: "风险规则依赖的来源规则不可用；请在场景配置中恢复来源规则，或改掉风险规则的来源。",
-  TASK_FIELD_EXTRACTION_DEPENDENCY_INVALID: "任务需要的字段缺少唯一的字段抽取规则；请为每个字段配置一条抽取规则。",
-  TASK_NODE_RULE_MISSING: "所选规则缺少必需节点的规则；请为缺失的阶段补充规则后重新发布方案。",
-  TASK_REPORT_RULE_MISSING: "缺少报告生成规则；请在场景配置中保留报告输出规则。",
   TASK_SCHEMA_FIELD_MISSING: "规则引用的字段不在场景字段集合中；请补齐字段定义后重新发布。",
-  TASK_CREATE_REQUIRES_PLAN: "新审核任务必须从已发布且启用的方案版本创建；请先在方案管理中建立并发布方案。",
+  TASK_CREATE_REQUIRES_PLAN: "新审核任务必须从已启用的方案创建；请先基于已发布场景建立方案，再从方案创建任务。",
   TASK_DOCUMENT_NO_CURRENT_FILE: "该材料位还没有当前文件；请先上传文件再执行需要它的节点。",
 };
 

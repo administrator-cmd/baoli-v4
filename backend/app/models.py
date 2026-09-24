@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -7,11 +8,13 @@ from sqlalchemy import (
     CHAR,
     CheckConstraint,
     Computed,
+    Date,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -55,6 +58,13 @@ class ImportJob(Base, TimestampMixin):
     source_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     source_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     profile_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    # **上传入口的场景身份**：用户先建场景，再在该场景下上传 Excel。
+    # 场景不由 Excel 表头推断——猜错场景会拿另一套列协议去解释它，报出一堆
+    # 与真实问题无关的缺列错误，而用户手里的文件根本没变。
+    # 历史作业没有这一列，读取方按「未记录场景」如实处理，不自动补一个场景。
+    scenario_code: Mapped[str | None] = mapped_column(String(80))
+    # 统一模板协议的版本标识。系统只有一份协议，这里只记录「按哪一版协议解释」。
+    profile_display_version: Mapped[str | None] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     workbook_ir_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     proposals_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -155,7 +165,14 @@ class ImportSheet(Base, TimestampMixin):
     sheet_name: Mapped[str] = mapped_column(String(255), nullable=False)
     visible: Mapped[bool] = mapped_column(Boolean, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
+    # 绑定的 Sheet 角色（统一模板协议里的 sheet_role）。它由用户在绑定步骤确认，
+    # 系统的表头建议只作参考；未绑定或已排除的 Sheet 不进转换、发布与执行范围。
     bound_role: Mapped[str | None] = mapped_column(String(40))
+    # 绑定的**节点实例**：节点实例由用户在场景配置里建立（scenario_draft_node），
+    # 这里保存它的 node_code。一张 Sheet 只能绑定一个节点，一个节点可以绑定多张 Sheet
+    # （财报的计算三表都绑到同一个 CALCULATION 实例上）。
+    # 空表示未绑定——未绑定的 Sheet 不进入执行范围，也不自动推断用途。
+    bound_node_code: Mapped[str | None] = mapped_column(String(80))
     header_row: Mapped[int | None] = mapped_column(Integer)
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
@@ -239,12 +256,24 @@ class ScenarioMaterial(Base, TimestampMixin):
     scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
     material_key: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    material_type: Mapped[str] = mapped_column(String(80), nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
     source_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
 class ScenarioNode(Base, TimestampMixin):
+    """场景版本里的一个节点实例。
+
+    三层身份必须分开，混用会让调度与展示都出错：
+
+    - `node_code`：**节点实例码**（例如 `extract_balance_sheet`），在场景版本内唯一；
+    - `node_type`：**节点能力类型**（`MATERIAL_CHECK` / `CALCULATION` / …），
+      决定这个节点由哪个 handler 执行；同一能力类型可以有多个实例；
+    - `sequence_no`：只用于页面展示与确定性排序，**不代替** `depends_on`。
+
+    `depends_on` 是节点实例码清单，构成 DAG。旧场景（线性流程）由编译期
+    写成「依赖前一个节点」，语义与旧的线性推进完全一致。
+    """
+
     __tablename__ = "scenario_node"
     __table_args__ = (
         UniqueConstraint("scenario_version_id", "node_code"),
@@ -254,13 +283,26 @@ class ScenarioNode(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
+    # 列名沿用 node_code：它在 17 个文件、313 处被引用。它承载的是**实例码**。
     node_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 依赖的节点实例码清单。空数组表示无依赖，可以立即就绪。
+    depends_on: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # 节点级配置：计算节点绑定哪些计算规则、风险节点绑定哪些风险规则。
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 
 class ScenarioRule(Base, TimestampMixin):
+    """场景版本里的一条规则投影。
+
+    `rule_code` 是业务编号；同一内部校验规则按材料展开后，多条执行分支共用它。
+    `rule_key` 是每条执行分支的稳定键，供方案启停、任务范围和结果唯一定位。
+    `legacy_rule_key` 保留旧版本的历史键，不参与新分支身份派生。
+    """
+
     __tablename__ = "scenario_rule"
     __table_args__ = (
         UniqueConstraint("scenario_version_id", "rule_key"),
@@ -269,11 +311,14 @@ class ScenarioRule(Base, TimestampMixin):
             ["scenario_node.scenario_version_id", "scenario_node.node_code"],
         ),
         Index("idx_scenario_rule_version_node_enabled", "scenario_version_id", "node_code", "enabled"),
+        Index("idx_scenario_rule_version_code", "scenario_version_id", "rule_code"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
     rule_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    rule_code: Mapped[str | None] = mapped_column(String(80))
+    legacy_rule_key: Mapped[str | None] = mapped_column(String(40))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     node_code: Mapped[str] = mapped_column(String(40), nullable=False)
     operator_code: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -299,8 +344,7 @@ class AuditTask(Base, TimestampMixin):
     task_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
     scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
     # 任务创建时使用的审核方案。旧任务没有方案关联时为空，页面显示「历史任务配置」，
-    # 不猜测迁移、不改写历史结果。方案后续改动不影响本任务：创建时已把范围抓进
-    # task_schema_json，那是本任务的执行快照。
+    # 不猜测迁移、不改写历史结果。
     plan_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("audit_plan.id"))
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 任务备注：属于可编辑的基本资料，不进入执行快照。
@@ -308,6 +352,10 @@ class AuditTask(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     current_node: Mapped[str] = mapped_column(String(40), nullable=False)
     thread_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # 本任务的执行快照：**方案的编译产物整份冻结**（材料/字段/规则/报告章节/节点/Sheet）。
+    # 执行期只读它，不读场景版本、也不读方案当前配置——方案后来怎么改都不影响已建任务。
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # 本任务的规则范围（启用/未启用、字段清单、未配置节点）。从上面的 manifest 算出。
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     checkpoint_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     pending_review_hash: Mapped[str | None] = mapped_column(CHAR(64))
@@ -379,6 +427,10 @@ class DocumentUpload(Base, TimestampMixin):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
     content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    # 上传时由用户从 8018 支持目录中选择的材料类型，只在本次上传内有效：
+    # 替换文件时可以改成另一个类型，历史上传版本各自保留当时声明的值。
+    # 它是提交给 8018 /validate 的 doc_type（见 services/audit/quality._document_prepare）。
+    declared_material_type: Mapped[str] = mapped_column(String(80), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -444,8 +496,8 @@ class TaskFieldValue(Base, TimestampMixin):
             ["audit_task.id", "audit_task.scenario_version_id"],
         ),
         ForeignKeyConstraint(
-            ["scenario_version_id", "material_key"],
-            ["scenario_material.scenario_version_id", "scenario_material.material_key"],
+            ["audit_task_id", "material_key"],
+            ["task_document.audit_task_id", "task_document.material_key"],
         ),
         ForeignKeyConstraint(
             ["document_upload_id", "audit_task_id"],
@@ -488,7 +540,118 @@ class TaskFieldValue(Base, TimestampMixin):
     )
 
 
+class TaskFact(Base, TimestampMixin):
+    """统一事实：字段抽取事实与计算派生事实。
+
+    为什么不能复用 `task_field_value`
+    ---------------------------------
+    `task_field_value` 的唯一范围是 (任务, 字段, 材料位, 上传版本, 版本号)，
+    它表达不了财报场景的三个必要维度：
+
+    - **期间**：同一个「营业收入」在本期与上期是两个不同的数；
+    - **报表口径**：合并报表与母公司报表是两套数；
+    - **主体范围**：多主体场景下同一科目属于哪个主体。
+
+    没有这三个维度，本期与上期的事实会互相覆盖，而覆盖之后页面看起来完全正常。
+
+    事实不可变
+    ----------
+    重跑不覆盖旧行，而是新增 `revision_no` 并把它置为当前；旧行保留为历史，
+    旧复核与旧证据仍指向它们当时依据的那一版事实。同一
+    (任务, 事实编号, 材料位, 期间, 报表口径, 主体范围) 最多只有一条当前事实，
+    由生成列唯一键在数据库层保证（`material_key` 可空，生成列里用 COALESCE 归一）。
+
+    计算派生事实的追溯
+    ------------------
+    `input_snapshot_json` 记录本次计算**实际用到的每一版事实**（fact_id + revision_no）
+    与表达式版本哈希。没有它就无法回答「这个数是按哪一版输入算出来的」。
+    `judgement_json` 记录命中的判定区间与业务结论。
+
+    RAG 只保存证据、原文与检索信息，不是 `decimal_value` 的权威来源。
+    """
+
+    __tablename__ = "task_fact"
+    __table_args__ = (
+        UniqueConstraint(
+            "audit_task_id",
+            "fact_code",
+            "material_key",
+            "period_scope",
+            "statement_scope",
+            "entity_scope",
+            "revision_no",
+        ),
+        UniqueConstraint("audit_task_id", "current_fact_scope"),
+        UniqueConstraint("id", "audit_task_id"),
+        CheckConstraint("revision_no >= 1"),
+        ForeignKeyConstraint(
+            ["audit_task_id", "scenario_version_id"],
+            ["audit_task.id", "audit_task.scenario_version_id"],
+        ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "audit_task_id"],
+            ["node_execution.id", "node_execution.audit_task_id"],
+        ),
+        Index(
+            "idx_task_fact_lookup",
+            "audit_task_id",
+            "fact_code",
+            "period_scope",
+            "statement_scope",
+            "entity_scope",
+        ),
+        Index("idx_task_fact_kind", "audit_task_id", "fact_kind", "is_current"),
+        Index("idx_task_fact_current", "audit_task_id", "is_current"),
+        Index("idx_task_fact_rule", "audit_task_id", "calculation_rule_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    audit_task_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    scenario_version_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 业务事实编号：EXTRACTED 是字段编号，DERIVED 是计算结果编号。
+    fact_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    fact_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    material_key: Mapped[str | None] = mapped_column(String(40))
+    entity_scope: Mapped[str] = mapped_column(String(20), nullable=False, default="SELF", server_default=text("'SELF'"))
+    period_scope: Mapped[str] = mapped_column(String(30), nullable=False)
+    statement_scope: Mapped[str] = mapped_column(String(20), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 数值事实用 DECIMAL(38, 10) 定点保存，不用浮点：float 的二进制误差会让
+    # 「恰好等于阈值」的判定随机翻转。
+    decimal_value: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    text_value: Mapped[str | None] = mapped_column(Text)
+    date_value: Mapped[date | None] = mapped_column(Date)
+    unit: Mapped[str | None] = mapped_column(String(40))
+    currency: Mapped[str | None] = mapped_column(String(40))
+    source_execution_id: Mapped[int | None] = mapped_column(BigInteger)
+    input_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    judgement_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    calculation_status: Mapped[str | None] = mapped_column(String(30))
+    calculation_rule_code: Mapped[str | None] = mapped_column(String(80))
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    # 当前事实的唯一定位：只有 is_current=1 的行才有值。material_key 可空，
+    # CONCAT 会把 NULL 吞掉，因此用 COALESCE 归一成固定串。
+    current_fact_scope: Mapped[str | None] = mapped_column(
+        String(255),
+        Computed(
+            "IF(is_current = 1, CONCAT(fact_code, ':', COALESCE(material_key, '-'), ':',"
+            " period_scope, ':', statement_scope, ':', entity_scope), NULL)",
+            persisted=False,
+        ),
+        nullable=True,
+    )
+
+
 class RuleResult(Base, TimestampMixin):
+    """一次规则执行的结果。
+
+    `rule_key` 是历史规则身份，唯一键仍建在它上面（历史任务按它去重）。
+    新任务的规则身份在 `rule_code`：写入时两个列取同一个业务编号，
+    因此唯一性口径与历史完全一致，读取路径也各自能用自己熟悉的那一列。
+    """
+
     __tablename__ = "rule_result"
     __table_args__ = (
         UniqueConstraint("node_execution_id", "rule_key"),
@@ -499,12 +662,15 @@ class RuleResult(Base, TimestampMixin):
         ),
         Index("idx_rule_result_task_status", "audit_task_id", "status"),
         Index("idx_rule_result_task_rule", "audit_task_id", "rule_key"),
+        Index("idx_rule_result_task_code", "audit_task_id", "rule_code"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
     node_execution_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     rule_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    rule_code: Mapped[str | None] = mapped_column(String(80))
+    legacy_rule_key: Mapped[str | None] = mapped_column(String(40))
     rule_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -696,10 +862,81 @@ class ScenarioDraft(Base, TimestampMixin):
     # 因此它由导入发布、版本修订或复制从原始 manifest 继承：发布时按它导出，
     # 不能一律用默认版本给所有草稿打戳，那样会把旧格式配置说成节点版格式。
     profile_version: Mapped[str | None] = mapped_column(String(40))
-    # 最近一次保存时配置未能生效的原因（编译未通过：缺业务规则、缺材料识别类型等）。
-    # NULL 表示当前配置已生效。页面据此显示“尚未生效 + 具体原因”，
-    # 已发布版本保持为上一个可用版本；这是显式状态，不是静默降级。
+    # 最近一次保存时草稿还不能发布的原因。NULL 表示当前草稿可以通过发布检查，
+    # 不是「已经发布」：已发布版本只在显式发布时产生。
     sync_error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 计算规则候选，或历史版本留下的 {"frozen": [已编译计算规则]}。
+    # NULL 与空数组都表示没有计算配置。
+    calculation_json: Mapped[Any | None] = mapped_column(JSON)
+    # 停用行允许保留未填写的业务列，不能强行塞进完整业务对象表。
+    disabled_source_rows: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+
+
+class ScenarioDraftNode(Base, TimestampMixin):
+    """场景配置草稿里的**节点实例**：用户配置的流程节点。
+
+    节点的存在、顺序与依赖由用户配置，不由系统按规则内容或固定序列自动生成。
+    一个场景可以有两个同类节点（例如两张报表各一个字段抽取），因此
+    `node_code` 是**实例码**，`node_type` 才是能力类型——两者不能混用。
+
+    `depends_on` 保存上游**实例码**列表：依赖表达的是数据流，必须指向真实存在的实例。
+    发布期校验缺失依赖、自依赖、循环依赖与顺序冲突，运行期不再遇到这类问题。
+
+    节点与 Sheet 的关系是**一对多**：一个节点可以绑定多张 Sheet
+    （财报的计算三表都绑到同一个 CALCULATION 实例上），一张 Sheet 只能绑定一个节点
+    （见 `import_sheet.bound_node_code`）。
+    """
+
+    __tablename__ = "scenario_draft_node"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "node_code"),
+        CheckConstraint("sequence_no >= 1"),
+        Index("idx_scenario_draft_node_draft", "draft_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
+    # 节点实例码：同一场景内唯一，规则按它归属。
+    node_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    # 能力类型：来自统一模板协议的 node_types，决定谁执行这个节点。
+    node_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 上游节点**实例码**列表。
+    depends_on: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # 节点级配置（例如计算节点参与的计算规则编号）。为空表示该节点没有额外配置。
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+
+class ScenarioDraftSheet(Base, TimestampMixin):
+    """场景**选用**的 Sheet：这个场景用统一模板协议里的哪几张表，每张归哪个节点。
+
+    统一模板协议定义「系统支持哪些 Sheet 以及每张表的结构」；场景负责配置
+    「使用哪些 Sheet、Sheet 对应哪些节点及其流程关系」。这张表就是后者的落点。
+
+    没有它，模板下载只能按草稿里已有内容反推（有材料→材料清单表，有规则→按节点类型
+    反查），于是「本场景选了哪些表」没有权威来源：反推区分不了合同版与财报版的同名
+    Sheet，也会把用户明确排除的表重新算进来。
+
+    一个节点可以绑多张 Sheet（财报的计算三表绑到同一个计算节点实例上），
+    一张 Sheet 只能绑一个节点——与 `import_sheet.bound_node_code` 同一口径。
+    """
+
+    __tablename__ = "scenario_draft_sheet"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "sheet_role"),
+        Index("idx_scenario_draft_sheet_draft", "draft_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
+    # Sheet 角色：来自统一模板协议的 sheet_role。
+    sheet_role: Mapped[str] = mapped_column(String(80), nullable=False)
+    # 该 Sheet 归属的节点实例码。为空表示本场景选用这张表但尚未指定节点。
+    node_code: Mapped[str | None] = mapped_column(String(80))
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
 class ScenarioDraftMaterial(Base, TimestampMixin):
@@ -714,11 +951,11 @@ class ScenarioDraftMaterial(Base, TimestampMixin):
     draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
     material_key: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    material_type: Mapped[str] = mapped_column(String(80), nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
     # 来源业务编号（Excel 的「材料编号」列）：导出时要原样写回，页面新建的行留空。
     source_ref: Mapped[str | None] = mapped_column(String(80))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
@@ -744,10 +981,17 @@ class ScenarioDraftField(Base, TimestampMixin):
     # 主体核对必须按这一声明确定「待核对主体取自哪份材料的哪种产物」，
     # 不能靠字段名猜。留空表示字段由常规字段抽取提供。
     artifact_source: Mapped[str | None] = mapped_column(String(30))
+    # 取数期间与报表口径：**由字段自己声明**，计算参数按这两项定位字段事实
+    # （参数表不再声明它们，因此这里是唯一的来源）。必填、无默认值——
+    # 默认成「本期 / 合并」会让一个声明了上期的计算参数静默取到本期的数，
+    # 而结果看起来完全正常。
+    period_scope: Mapped[str] = mapped_column(String(30), nullable=False)
+    statement_scope: Mapped[str] = mapped_column(String(20), nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
     instruction: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
     # 来源业务编号（Excel 的「字段编号」列）：导出时写回，页面新建的字段留空。
     source_ref: Mapped[str | None] = mapped_column(String(80))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
@@ -771,6 +1015,7 @@ class ScenarioDraftRule(Base, TimestampMixin):
     rule_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 来源业务编号（Excel 的「规则编号」列）：导出时写回，页面新建的规则留空。
     source_ref: Mapped[str | None] = mapped_column(String(80))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
@@ -807,17 +1052,23 @@ class ScenarioDraftSection(Base, TimestampMixin):
     result_sort: Mapped[str | None] = mapped_column(String(60))
     # 业务配置状态（已明确 / 待确认 / 停用）：待确认的非停用章节属于未完成配置。
     config_status: Mapped[str | None] = mapped_column(String(30))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class AuditPlan(Base, TimestampMixin):
-    """审核方案：对某个场景版本的可复用审核范围选择，保存即生效。
+    """审核方案：**已发布场景版本的一份可编辑副本**。
 
-    方案只有一份配置，没有草稿/发布之分。每次保存都会重算范围并写入 scope_json
-    （显式规则、自动补入依赖、未启用规则、任务 schema 快照）与 scope_hash；
-    算不出来时保存照常成功，原因记在 sync_error，页面显示「待核对」。
+    创建方案时把 `scenario_version_id` 那一版的配置整份复制到方案自己的
+    `plan_material` / `plan_field` / `plan_rule` / `plan_section`，之后由用户在方案里增删改。
+    节点与 Sheet 是场景级执行结构，只读地存在 `context_json` 里随方案一起冻结，
+    用户在方案页只能看不能改。
 
-    已建任务不受方案后续改动影响：任务创建时把 task_schema_json 抓成自己的执行快照。
-    方案不自动跟随场景升级；切换场景版本是一次显式的保存。
+    保存方案 = 用自己的配置重新编译 → 写 `manifest_json` / `manifest_hash`，
+    再按编译产物算任务范围写入 `scope_json` / `scope_hash`；算不出来时保存照常成功，
+    原因记在 `sync_error`，页面显示「待核对」。
+
+    已建任务不受方案后续改动影响：任务创建时把**方案的编译产物**整份抓进
+    `audit_task.manifest_json`，执行期只读它，不再读场景版本。
     """
 
     __tablename__ = "audit_plan"
@@ -831,12 +1082,19 @@ class AuditPlan(Base, TimestampMixin):
     plan_code: Mapped[str] = mapped_column(String(80), nullable=False)
     plan_name: Mapped[str] = mapped_column(String(255), nullable=False)
     scenario_code: Mapped[str] = mapped_column(String(80), nullable=False)
-    # 当前绑定的场景版本。未选择版本时为空，此时范围算不出来，sync_error 说明原因。
+    # 这份方案从哪一版场景复制而来。**只是溯源**：执行与范围都不再读它，
+    # 场景后来发布新版本也不会改变本方案（要换基准请另建方案）。
     scenario_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scenario_version.id"))
     description: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
     deleted_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
-    # 最近一次保存时范围未能生效的原因（编译未通过：没选规则、场景未生效等）。
+    # 场景级、方案里只读的那部分上下文：节点实例、选用 Sheet 与协议版本。
+    # 它们不参与方案编辑，但编译（compile_form_manifest）必须有，因此随方案冻结一份。
+    context_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 方案的编译产物：报告渲染、任务冻结都读它。未编译成功时为空，原因见 sync_error。
+    manifest_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    manifest_hash: Mapped[str | None] = mapped_column(CHAR(64))
+    # 最近一次保存时范围未能生效的原因（编译未通过：没选规则、字段引用缺失等）。
     # NULL 表示当前范围已生效。这是可展示状态，不是静默降级。
     sync_error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 范围指纹：内容没变时不重复写 scope_json。
@@ -845,18 +1103,121 @@ class AuditPlan(Base, TimestampMixin):
     scope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
-class AuditPlanRule(Base, TimestampMixin):
-    """方案当前显式选中的规则（按绑定场景版本内的 rule_key 引用）。"""
+class PlanMaterial(Base, TimestampMixin):
+    """方案自己的材料位。创建方案时从钉住的场景版本复制一份，之后由用户在方案里增删改。
 
-    __tablename__ = "audit_plan_rule"
+    形状与 `ScenarioDraftMaterial` 一致，只是归属换成 `plan_id`：方案是场景版本的**可编辑
+    副本**，配置本身归方案所有，不再随场景版本变化。
+    """
+
+    __tablename__ = "plan_material"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "material_key"),
+        CheckConstraint("sort_no >= 0"),
+        Index("idx_plan_material_plan", "plan_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("audit_plan.id"), nullable=False)
+    material_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
+    # 来源业务编号（Excel 的「材料编号」列）：导出时原样写回，页面新建的行留空。
+    source_ref: Mapped[str | None] = mapped_column(String(80))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+
+class PlanField(Base, TimestampMixin):
+    """方案自己的字段定义。列语义与 `ScenarioDraftField` 完全一致。"""
+
+    __tablename__ = "plan_field"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "field_key"),
+        CheckConstraint("sort_no >= 0"),
+        Index("idx_plan_field_plan", "plan_id"),
+        Index("idx_plan_field_material", "plan_id", "material_key"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("audit_plan.id"), nullable=False)
+    field_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    material_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    unit: Mapped[str | None] = mapped_column(String(40))
+    # 币种留空表示未声明，不表示人民币。
+    currency: Mapped[str | None] = mapped_column(String(40))
+    # 产物来源：该字段的取值由哪种处理产物提供（当前仅印章识别 SEAL）；留空表示常规抽取。
+    artifact_source: Mapped[str | None] = mapped_column(String(30))
+    # 取数期间与报表口径：由字段自己声明，计算参数按这两项定位字段事实。
+    # 留空（Excel 里不填）落成显式的「不适用」取值，见 domain/audit_vocab。
+    period_scope: Mapped[str] = mapped_column(String(30), nullable=False)
+    statement_scope: Mapped[str] = mapped_column(String(20), nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    instruction: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
+    source_ref: Mapped[str | None] = mapped_column(String(80))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+
+class PlanRule(Base, TimestampMixin):
+    """方案自己的规则定义。
+
+    `enabled` 就是「这条规则要不要在这个方案里跑」：用户在方案页勾选与取消，直接改它。
+    **不再区分「系统派生 / 业务规则」**——用户在方案里看到的就是全部规则，逐条可勾可取消；
+    取消一条抽取规则就是那个字段不抽，取消报告生成规则就是不生成报告。
+    """
+
+    __tablename__ = "plan_rule"
     __table_args__ = (
         UniqueConstraint("plan_id", "rule_key"),
-        Index("idx_audit_plan_rule_plan", "plan_id"),
+        CheckConstraint("sort_no >= 0"),
+        Index("idx_plan_rule_plan", "plan_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     plan_id: Mapped[int] = mapped_column(ForeignKey("audit_plan.id"), nullable=False)
     rule_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    node_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    operator_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
+    # 规则的业务定义：输入对象、审核要求、参数、适用条件、风险来源与等级建议。
+    # 由 compile_form_manifest 编译成 manifest 规则。
+    rule_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(80))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+
+class PlanSection(Base, TimestampMixin):
+    """方案自己的报告章节。列语义与 `ScenarioDraftSection` 完全一致。"""
+
+    __tablename__ = "plan_section"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "section_key"),
+        CheckConstraint("sort_no >= 0"),
+        Index("idx_plan_section_plan", "plan_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("audit_plan.id"), nullable=False)
+    section_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_instruction: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
+    field_keys: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    report_code: Mapped[str | None] = mapped_column(String(80))
+    report_name: Mapped[str | None] = mapped_column(String(255))
+    material_keys: Mapped[list[str] | None] = mapped_column(JSON)
+    formats: Mapped[list[str] | None] = mapped_column(JSON)
+    section_order: Mapped[int | None] = mapped_column(Integer)
+    content_type: Mapped[str | None] = mapped_column(String(40))
+    result_sort: Mapped[str | None] = mapped_column(String(60))
+    config_status: Mapped[str | None] = mapped_column(String(30))
+    origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class AuditReport(Base, TimestampMixin):
@@ -936,7 +1297,6 @@ class OperationLog(Base, TimestampMixin):
     failure_message: Mapped[str | None] = mapped_column(Text)
 
 
-# ---------------------------------------------------------------------------
 # 审核任务材料证据索引与检索（本地 Embedding + 任务范围检索）
 #
 # 设计边界：
@@ -945,7 +1305,6 @@ class OperationLog(Base, TimestampMixin):
 #     绝不先全库检索再交给前端筛选，也不跨任务或跨上传版本共用结果；
 #   - 索引批次成功构建后才标为可检索；部分失败不得标为就绪；
 #   - 每次检索保存查询内容、限定范围、模型与索引版本、候选、相似度与被采用的证据。
-# ---------------------------------------------------------------------------
 
 
 class EvidenceIndexVersion(Base, TimestampMixin):
@@ -1099,3 +1458,100 @@ class EvidenceRetrieval(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     message: Mapped[str | None] = mapped_column(Text)
     input_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+
+class AgentToolCall(Base, TimestampMixin):
+    """Agent 工具调用账本：模型请求了什么、传了什么、得到什么。
+
+    为什么独立成表而不是塞进 checkpoint：LangGraph checkpoint 只负责恢复**流程状态**，
+    它回答不了「这次审核里模型调了哪些工具、依据哪一版事实、当时看到的是哪一版工具定义」。
+    把审计寄托在 checkpoint 上会让 interrupt/resume 后无法判断某个 tool_call_id
+    是否已执行过，只能重跑。
+
+    `tool_call_id` 唯一：这是「同一个调用不重复执行」的数据库级保证。
+    恢复时按 status 区分：SUCCEEDED 读原结果、RUNNING 进待核查、FAILED 保留原错误。
+
+    失败**不允许**用同一个 `tool_call_id` 重试：那会让一条记录先后对应两次真实执行。
+    明确重试必须由调用方生成新的调用标识，并把原标识写进 `retry_of_tool_call_id`，
+    两次调用因此各自可追溯、可对账。
+
+    `evaluation_id` / `rule_instance_id` / `input_snapshot_hash` / `fact_snapshot_ref`
+    非空：本表只承载 Agent 工具调用，缺任一列都说明调用来源不合法或快照未冻结，
+    必须显式失败（见 `services/agent_tool_ledger.begin_call`），不允许写无归属记录。
+    """
+
+    __tablename__ = "agent_tool_call"
+    __table_args__ = (
+        UniqueConstraint("tool_call_id"),
+        Index("idx_agent_tool_call_evaluation", "audit_task_id", "evaluation_id"),
+        Index("idx_agent_tool_call_rule", "rule_instance_id"),
+        Index("idx_agent_tool_call_retry", "retry_of_tool_call_id"),
+        Index("idx_agent_tool_call_status", "status"),
+        Index("idx_agent_tool_call_started", "started_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    audit_task_id: Mapped[int | None] = mapped_column(ForeignKey("audit_task.id"))
+    evaluation_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    rule_instance_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    tool_call_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    # 明确重试时指向原调用的标识；为空表示这是一次全新调用，不是重试。
+    retry_of_tool_call_id: Mapped[str | None] = mapped_column(String(120))
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    tool_version: Mapped[str | None] = mapped_column(String(20))
+    # 工具目录版本与内容指纹：回答「模型当时看到的是哪一版工具定义」。
+    # 指纹由目录内容算出，能发现「版本号没改但内容变了」。
+    tool_catalog_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    tool_catalog_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    tool_policy_version: Mapped[str | None] = mapped_column(String(20))
+    # 模型给出的参数原文：只含业务口径与身份引用，运行期依赖不在这里。
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # 本次调用依据的输入事实快照身份。恢复时与原记录不同即协议冲突，不按新参数重算。
+    input_snapshot_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    fact_snapshot_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    caller_identity: Mapped[str | None] = mapped_column(String(80))
+    # PENDING / RUNNING / SUCCEEDED / FAILED。RUNNING 表示可能已发出但结果未知。
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 外部作业号（若该工具调用过外部服务）。有它才能查询原作业而不是重发。
+    external_job_id: Mapped[str | None] = mapped_column(String(120))
+    started_at: Mapped[datetime] = mapped_column(MySQLDateTime(fsp=6), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
+
+
+class EvaluationSnapshot(Base, TimestampMixin):
+    """规则评估所依据的**冻结事实内容**（不是只有指纹）。
+
+    为什么不能只存哈希：只存哈希意味着工具执行时仍然去读「当前数据」，
+    同一批次的两次工具调用可能落到不同的材料版本上，而指纹对得上只是巧合。
+    本表把事实内容本身落库，工具执行只从它解析事实；工具确实需要读文件或产物时，
+    必须核对其引用、hash 与修订号与本表一致。
+
+    冻结内容不可改写（`trg_evaluation_snapshot_immutable`）：改写它等于让已经
+    据此执行的工具结果无从解释。
+    """
+
+    __tablename__ = "evaluation_snapshot"
+    __table_args__ = (
+        UniqueConstraint("snapshot_ref"),
+        UniqueConstraint("evaluation_id", "rule_instance_id", "input_revision"),
+        Index("idx_evaluation_snapshot_task", "audit_task_id", "node_code"),
+        Index("idx_evaluation_snapshot_hash", "fact_snapshot_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 可读引用（形如 facts:<条数>:<短哈希>），同时是恢复入口。
+    snapshot_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
+    evaluation_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    rule_instance_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    node_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    # 冻结时的任务输入修订号：与任务当前修订不一致即说明输入已变。
+    input_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    facts_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    fact_snapshot_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    tool_catalog_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    tool_catalog_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    tool_policy_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    allowed_tools_json: Mapped[list[Any]] = mapped_column(JSON, nullable=False)

@@ -15,9 +15,10 @@
 
 from ...domain.audit_vocab import LEGACY_TYPE_MISMATCH, MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, MATERIAL_TYPE_UNAVAILABLE_STATUSES, read_material_type_status
 from ...domain.identity import public_no
-from ...domain.manifest import NODE_DEFINITIONS
+from ...domain.manifest import NODE_DEFINITIONS, rule_node_type_of
+from .state import _node_codes_of_type
 from ...errors import BusinessError
-from ...models import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, ScenarioVersion, TaskDocument, TaskFieldValue
+from ...models import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
 from .evidence import _fact_evidence_suffix, _quote_check_of
 from .facts import _input_trace
 from .shared import BASIS_TYPE_LABELS, LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _current_uploads, _material_names, _scenario
@@ -166,22 +167,40 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     report_rules = [
         item
         for item in manifest["rules"]
-        if item["node"] == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" and item["rule_key"] in enabled_keys
+        if rule_node_type_of(item) == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" and item["rule_key"] in enabled_keys
     ]
     if not report_rules:
-        raise BusinessError("REPORT_RULE_MISSING", "当前任务未启用报告输出规则，不能生成审核报告", status_code=409)
+        # 本任务没有选入报告生成规则：**显式跳过**，不报错。
+        #
+        # 方案是用户自己的范围选择——勾了什么就跑什么。没勾报告生成就没有报告，
+        # 这正是这份方案表达的意思，不该让任务在最后一个节点整个失败
+        # （原实现报 REPORT_RULE_MISSING 409）。
+        # 跳过必须写明原因：**「没有报告」不等于「审核通过」**，也不等于
+        # 「报告生成了但是空的」。因此三个信号与正常路径同一口径，report_generated=False。
+        return {
+            "skipped": True,
+            "skip_reason": "本任务未选入报告生成规则，本次不生成审核报告",
+            "report_generated": False,
+            "results_scope": "CURRENT_RUN",
+            "input_revision": task.input_revision,
+        }
     risk_rules = [
         item
         for item in manifest["rules"]
-        if item["node"] == "RISK_RATING" and item["operator"] == "RISK_TRIGGER" and item["rule_key"] in enabled_keys
+        if rule_node_type_of(item) == "RISK_RATING" and item["operator"] == "RISK_TRIGGER" and item["rule_key"] in enabled_keys
     ]
     # 未配置风险评级不是执行失败：报告照常输出，但必须写明未配置且不能给出无风险结论。
     risk_configured = bool(risk_rules)
     # 报告只取当前有效执行批次：节点序号不晚于当前节点、每个节点取最新一条未失效执行。
     current_executions = _current_node_executions(db, task)
     current_execution_ids = {item.id for item in current_executions.values()}
+    # 报告输出节点按**能力类型**解析实例码：`node_code` 是用户配置的实例码，
+    # 写死能力类型当实例码会在用户改过实例码后一条都匹配不上——
+    # 报告输出规则的产物就会被误算进「预期结果缺失」。
+    report_node_codes = set(_node_codes_of_type(manifest, "REPORT_OUTPUT"))
+    risk_node_codes = set(_node_codes_of_type(manifest, "RISK_RATING"))
     output_execution_ids = {
-        item.id for item in current_executions.values() if item.node_code == "REPORT_OUTPUT"
+        item.id for item in current_executions.values() if item.node_code in report_node_codes
     }
     # 已配置但供应商没有质量结论的检查：必须在报告里如实呈现，不能被当成已通过。
     capability_gap_items = manifest.get("capability_gaps") or []
@@ -309,7 +328,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     extraction_outputs = {
         rule["rule_key"]: list(rule.get("outputs", []))
         for rule in manifest["rules"]
-        if rule["node"] == "FIELD_EXTRACTION" and rule["operator"] == "LLM_EXTRACT"
+        if rule_node_type_of(rule) == "FIELD_EXTRACTION" and rule["operator"] == "LLM_EXTRACT"
     }
 
     def rule_out_of_scope(result: RuleResult) -> bool:
@@ -320,7 +339,8 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
 
     # 预期集合：任务实际启用范围里的每条规则都必须形成结果，不能只统计已有结果里的未完成项。
     # 报告输出规则由本节点自身产出，不进入“预期结果缺失”的判断。
-    rule_node_by_key = {item["rule_key"]: item["node"] for item in manifest["rules"]}
+    # 按**能力类型**判断，不按实例码：`node` 是用户配置的实例码。
+    rule_node_by_key = {item["rule_key"]: rule_node_type_of(item) for item in manifest["rules"]}
     expected_rule_keys = {
         key
         for key in task.task_schema_json["enabled_rule_keys"]
@@ -361,9 +381,13 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         }
         for execution in current_executions.values()
         # 报告输出节点自身在本次执行中仍是 RUNNING，不能因此把报告判成永远不完整。
-        if execution.node_code != "REPORT_OUTPUT" and execution.status in {"FAILED", "BLOCKED"}
+        # 这里按**能力类型**解析出的实例码集合判断，不按固定实例码比较。
+        if execution.node_code not in report_node_codes and execution.status in {"FAILED", "BLOCKED"}
     ]
-    risk_execution = current_executions.get("RISK_RATING")
+    risk_execution = next(
+        (current_executions[code] for code in sorted(risk_node_codes) if code in current_executions),
+        None,
+    )
     risk_results = (
         db.scalars(
             select(RuleResult)
@@ -531,10 +555,13 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             )
     lines.extend(["", "## 三、执行范围", ""])
     enabled_rule_keys = set(task.task_schema_json["enabled_rule_keys"])
+    # 执行范围一节按**能力类型**归并：实例码是用户配置的，同一类型可能有多个实例，
+    # 按实例码分行会让报告出现「同一类检查列两遍」而用户看不出它们是一类。
     rule_node_counts: dict[str, int] = {}
     for rule in manifest["rules"]:
         if rule["rule_key"] in enabled_rule_keys:
-            rule_node_counts[rule["node"]] = rule_node_counts.get(rule["node"], 0) + 1
+            node_type = rule_node_type_of(rule)
+            rule_node_counts[node_type] = rule_node_counts.get(node_type, 0) + 1
     lines.append(f"- 材料范围：{material_summary}")
     lines.append(f"- 已启用规则：{len(enabled_rule_keys)} 条")
     for code, label in NODE_DEFINITIONS:
@@ -542,8 +569,16 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             lines.append(f"  - {label}：{rule_node_counts[code]} 条")
     lines.append(f"- 任务字段：{len(task.task_schema_json['fields'])} 个")
     lines.extend(["", "节点执行情况：", ""])
+    # 节点执行记录按**实例码**存储，报告按**能力类型**分行：先解析该类型的实例码集合。
+    # 直接拿能力类型当实例码查会让报告永远显示「没有执行记录」。
+    node_codes_by_type = {
+        node_type: _node_codes_of_type(manifest, node_type) for node_type, _ in NODE_DEFINITIONS
+    }
     for code, label in NODE_DEFINITIONS:
-        execution = latest_by_node.get(code)
+        execution = next(
+            (latest_by_node[node_code] for node_code in node_codes_by_type[code] if node_code in latest_by_node),
+            None,
+        )
         if execution is None:
             continue
         if execution.status == "SKIPPED":
@@ -557,7 +592,10 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             lines.append(f"- {label}：已阻断（{execution.failure_code or '未记录错误码'}：{execution.failure_message or '未记录原因'}）")
         else:
             lines.append(f"- {label}：{ruled_status_labels.get(execution.status, execution.status)}")
-    unconfigured = [code for code in manifest.get("unconfigured_check_nodes", []) if code in node_labels]
+    # 报告说明按**能力类型**汇总（「本模板未配置这类检查」），不按实例码列节点。
+    unconfigured = [
+        code for code in manifest.get("unconfigured_check_node_types", []) if code in node_labels
+    ]
     if unconfigured:
         lines.append(f"- 本模板未配置此类检查：{'、'.join(node_labels[code] for code in unconfigured)}")
         lines.append("- 未配置的检查类别不产生规则结果，本报告不会把它当成已通过。")
@@ -1070,8 +1108,7 @@ def _configured_format_support(db: Session, task: AuditTask) -> list[dict[str, A
     声明（业务期望）与实现（系统能否真的产出该格式文件）必须分开表达：
     当前只生成 Markdown 正文，声明 PDF / Word / Excel 的报告在这里如实标为未实现。
     """
-    version = db.get(ScenarioVersion, task.scenario_version_id)
-    manifest = version.manifest_json if version else {}
+    manifest = task.manifest_json
     groups = manifest.get("report_groups") or {}
     return [
         entry

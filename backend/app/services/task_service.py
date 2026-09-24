@@ -1,4 +1,5 @@
 import logging
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,11 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..errors import BusinessError, exception_summary
 from .audit.interrupt import start_audit_interrupt
+# 复核批次的划分与哈希口径只有一份（`services.audit.reviews`）：
+# 任务视图给出的本批、提交校验用的本批、检查点里的哈希必须是同一个集合，
+# 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
+from .audit.reviews import _current_review_batch, _review_hash
+from .audit.state import _node_codes_of_type, _single_node_code_of_type
 from ..models import (
     AuditPlan,
     AuditTask,
@@ -18,6 +24,7 @@ from ..models import (
     ManualReview,
     NodeExecution,
     RuleResult,
+    ScenarioTemplate,
     ScenarioVersion,
     StoredArtifact,
     TaskDocument,
@@ -28,12 +35,39 @@ from ..schemas import CreateTaskRequest
 from . import rag_service
 from .background_service import assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
+from ..domain.node_registry import legacy_node_type_of
+from ..integrations.http_services import list_material_types
 from .operation_types import OBJECT_AUDIT_TASK
 from .task_lookup import scenario_or_404, task_or_404
 from .storage_service import DOCUMENT_EXTENSIONS, save_upload
 
 
 logger = logging.getLogger(__name__)
+
+
+def _verified_material_type(declared: str) -> str:
+    """核对上传时声明的材料类型，返回可落库的取值。
+
+    8018 的 doc_type 是严格枚举，目录是**外部服务的事实**：本函数不缓存、不内置默认清单、
+    不按材料名称猜类型。空值与目录外的取值都在这里显式拒绝——问题要在上传时就暴露，
+    不能等到材料检查节点执行时才由 8018 拒绝，那时用户已经以为文件传好了。
+    """
+    material_type = (declared or "").strip()
+    if not material_type:
+        raise BusinessError(
+            "MATERIAL_TYPE_MISSING",
+            "未选择材料类型，无法上传：请从 8018 支持的材料类型目录中选择",
+            status_code=409,
+        )
+    supported = {str(item["name"]) for item in list_material_types()}
+    if material_type not in supported:
+        raise BusinessError(
+            "MATERIAL_TYPE_UNSUPPORTED",
+            "选择的材料类型不在 8018 支持目录中，无法上传",
+            status_code=409,
+            details={"material_type": material_type, "supported": sorted(supported)},
+        )
+    return material_type
 
 
 def create_task(
@@ -49,7 +83,7 @@ def create_task(
     """
     raise BusinessError(
         "TASK_CREATE_REQUIRES_PLAN",
-        "新审核任务必须从已发布的方案版本创建：请先在方案管理中为该场景建立并发布方案",
+        "新审核任务必须从已启用的方案创建：请先基于已发布场景建立方案，再从方案创建任务",
         status_code=409,
         details={"scenario_code": scenario_code, "version_no": version_no},
     )
@@ -62,18 +96,100 @@ def create_task_from_plan(
     task_name: str,
     remark: str | None,
     task_no: str | None = None,
+    expected_scope_hash: str | None = None,
 ) -> AuditTask:
-    """使用审核方案创建审核任务。
+    """使用审核方案创建审核任务。这是新任务的唯一创建服务。
 
-    任务固定方案绑定的场景版本，并把方案当前范围抓成自己的 task_schema_json 快照；
-    之后修改方案不会影响本任务。task_no 可由调用方预生成，使幂等命令记录与任务
-    在同一次提交中对账。
+    同一事务里先锁定方案行，再校验方案、场景和已固定版本。通过后把**创建时确认的
+    方案范围**整体冻结进 task_schema_json：场景版本、节点、Sheet、规则、材料与字段，
+    以及方案的编号、名称与范围指纹。任务之后一切读取都从这里取，
+    不再读方案当前名称或方案后来重算的范围。
+
+    `expected_scope_hash` 是页面预览时看到的方案范围指纹：与锁定后的实际指纹不一致时
+    明确返回 `PLAN_SCOPE_CHANGED`——任务必须冻结用户刚刚确认的那一版范围，
+    不在创建时静默取一个已经改过的范围。
+
+    task_no 可由调用方预生成，使幂等命令记录与任务在同一次提交中对账。
+    本函数**不**记录成功操作日志：调用方要在等待点确认成功之后才记。
     """
+    locked = db.scalar(select(AuditPlan).where(AuditPlan.id == plan.id).with_for_update())
+    if locked is None:
+        raise BusinessError(
+            "PLAN_NOT_FOUND",
+            "审核方案不存在或已被删除",
+            status_code=404,
+            details={"plan_code": plan.plan_code},
+        )
+    plan = locked
+    if plan.deleted_at is not None:
+        raise BusinessError(
+            "PLAN_DELETED",
+            "该方案已删除，不能创建任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
+    if not plan.enabled:
+        raise BusinessError(
+            "PLAN_DISABLED",
+            "该方案已停用，不能创建任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
+    scenario_template = db.scalar(
+        select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == plan.scenario_code)
+    )
+    if scenario_template is None or scenario_template.deleted_at is not None:
+        raise BusinessError(
+            "SCENARIO_NOT_FOUND",
+            "方案所属场景不存在或已被删除",
+            status_code=409,
+            details={"scenario_code": plan.scenario_code},
+        )
+    if not scenario_template.enabled:
+        raise BusinessError(
+            "SCENARIO_DISABLED",
+            "该场景已停用，不能创建任务",
+            status_code=409,
+            details={"scenario_code": plan.scenario_code},
+        )
     if plan.scenario_version_id is None:
-        raise BusinessError("PLAN_SCOPE_UNAVAILABLE", "方案还没有绑定的场景版本，不能创建任务", status_code=409)
+        raise BusinessError(
+            "PLAN_SCENARIO_VERSION_MISSING",
+            "方案还没有绑定已发布的场景版本，不能创建任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
     scenario = db.get(ScenarioVersion, plan.scenario_version_id)
     if not scenario:
-        raise BusinessError("SCENARIO_VERSION_MISSING", "方案关联的场景版本不存在", status_code=500)
+        raise BusinessError(
+            "SCENARIO_VERSION_MISSING",
+            "方案关联的场景版本不存在",
+            status_code=409,
+            details={"plan_code": plan.plan_code, "scenario_version_id": plan.scenario_version_id},
+        )
+    if scenario.status != "PUBLISHED":
+        # 方案只能引用已发布版本；非发布版本不能作为任务的执行依据。
+        raise BusinessError(
+            "SCENARIO_VERSION_NOT_PUBLISHED",
+            "方案关联的场景版本不是已发布状态，不能创建任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code, "status": scenario.status},
+        )
+    if (
+        expected_scope_hash is not None
+        and plan.scope_hash is not None
+        and expected_scope_hash != plan.scope_hash
+    ):
+        raise BusinessError(
+            "PLAN_SCOPE_CHANGED",
+            "方案范围在创建任务期间已被修改，任务必须冻结刚刚确认的那一版范围。请刷新方案页重新核对后再创建任务",
+            status_code=409,
+            details={
+                "plan_code": plan.plan_code,
+                "expected_scope_hash": expected_scope_hash,
+                "current_scope_hash": plan.scope_hash,
+            },
+        )
     scope = plan.scope_json if isinstance(plan.scope_json, dict) else None
     # scope_json 本身就是保存时算好的任务 schema（外挂材料/字段数量与场景引用）：
     # 任务直接抓这一份，不重新解释选择。
@@ -84,9 +200,43 @@ def create_task_from_plan(
             status_code=409,
             details={"plan_code": plan.plan_code},
         )
-    schema = scope
-    manifest = scenario.manifest_json
-    first_node = min(manifest["nodes"], key=lambda item: item["sequence_no"])
+    if plan.scope_hash is None:
+        raise BusinessError(
+            "PLAN_SCOPE_HASH_MISSING",
+            "方案范围没有指纹，无法确认任务冻结的是哪一版范围；请在方案页重新保存后再创建任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
+    # 任务快照同时冻结方案身份、方案范围、节点计划和 Sheet 范围。
+    # 执行范围与配置都取自方案自身；场景版本只保留来源身份。
+    schema = dict(scope)
+    manifest = plan.manifest_json
+    if not isinstance(manifest, dict):
+        raise BusinessError(
+            "PLAN_MANIFEST_UNAVAILABLE",
+            "方案当前没有可执行配置，不能创建任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
+    schema["scenario_code"] = scenario.scenario_code
+    schema["scenario_version_no"] = scenario.version_no
+    # 方案身份与范围指纹随任务冻结：任务详情与幂等重放都读它，
+    # 不读方案后来改过的名称或重算过的范围。
+    schema["plan_code"] = plan.plan_code
+    schema["plan_name"] = plan.plan_name
+    schema["plan_scope_hash"] = plan.scope_hash
+    schema["node_plan"] = [dict(item) for item in manifest.get("nodes") or []]
+    schema["selected_sheets"] = [dict(item) for item in manifest.get("selected_sheets") or []]
+    nodes = list(manifest.get("nodes") or [])
+    if not nodes:
+        # `min()` 对空序列会抛 ValueError，那不是业务错误；这里显式报出业务原因。
+        raise BusinessError(
+            "SCENARIO_NODE_REQUIRED",
+            "该场景版本没有配置任何节点，不能创建任务：请先在场景配置里建立节点并重新发布",
+            status_code=409,
+            details={"scenario_code": scenario.scenario_code, "version_no": scenario.version_no},
+        )
+    first_node = min(nodes, key=lambda item: item["sequence_no"])
     task = AuditTask(
         task_no=task_no or public_no("TASK"),
         scenario_version_id=scenario.id,
@@ -96,6 +246,7 @@ def create_task_from_plan(
         status="READY",
         current_node=first_node["node_code"],
         thread_id=public_no("thread"),
+        manifest_json=deepcopy(manifest),
         task_schema_json=schema,
         checkpoint_json={
             "node_index": 0,
@@ -116,51 +267,45 @@ def create_task_from_plan(
                 status="WAITING_UPLOAD",
             )
         )
-    start_audit_interrupt(db, task)
     db.refresh(task)
     return task
 
 
 def copy_task(db: Session, task_no: str, *, task_name: str) -> AuditTask:
-    """复制任务：保留原任务的方案绑定与执行快照，材料与结果重新开始。"""
+    """按源任务所属方案的**当前范围**重新创建任务。
+
+    明确不是「复制原任务的执行快照」：复制出来的是一个全新的任务，它冻结的是
+    方案此刻的范围——源任务的冻结快照与已发生的执行事实一概不带过来。
+    没有方案、方案已删除或已停用时拒绝；场景与版本门禁由 create_task_from_plan 统一执行。
+    """
     source = task_or_404(db, task_no)
-    scenario = db.get(ScenarioVersion, source.scenario_version_id)
-    if not scenario:
-        raise BusinessError("SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500)
-    first_node = min(scenario.manifest_json["nodes"], key=lambda item: item["sequence_no"])
-    task = AuditTask(
-        task_no=public_no("TASK"),
-        scenario_version_id=source.scenario_version_id,
-        plan_id=source.plan_id,
-        task_name=task_name,
-        remark=source.remark,
-        status="READY",
-        current_node=first_node["node_code"],
-        thread_id=public_no("thread"),
-        # 复制的是原任务的执行快照：不重新计算范围，历史任务按原配置继续。
-        task_schema_json=source.task_schema_json,
-        checkpoint_json={
-            "node_index": 0,
-            "current_node": first_node["node_code"],
-            "phase": "AWAITING_CONFIRMATION",
-        },
-    )
-    db.add(task)
-    db.flush()
-    for material in scenario.manifest_json["materials"]:
-        db.add(
-            TaskDocument(
-                document_no=public_no("DOC"),
-                audit_task_id=task.id,
-                material_key=material["material_key"],
-                material_name=material["name"],
-                required=material["required"],
-                status="WAITING_UPLOAD",
-            )
+    if source.plan_id is None:
+        raise BusinessError(
+            "TASK_COPY_REQUIRES_PLAN",
+            "该任务没有关联方案，不能复制。请从已启用的方案创建任务",
+            status_code=409,
+            details={"task_no": task_no},
         )
-    start_audit_interrupt(db, task)
-    db.refresh(task)
-    return task
+    plan = db.get(AuditPlan, source.plan_id)
+    if plan is None or plan.deleted_at is not None:
+        raise BusinessError(
+            "PLAN_DELETED",
+            "该任务所属方案不存在或已删除，不能复制任务",
+            status_code=409,
+            details={"task_no": task_no, "plan_id": source.plan_id},
+        )
+    if not plan.enabled:
+        raise BusinessError(
+            "PLAN_DISABLED",
+            "该任务所属方案已停用，不能复制任务",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
+    created = create_task_from_plan(db, plan, task_name=task_name, remark=source.remark)
+    # 与新建任务同一口径：任务与等待点都成功后，才记一条成功操作日志。
+    start_audit_interrupt(db, created)
+    db.refresh(created)
+    return created
 
 
 def _invalidate_for_input_change(
@@ -178,9 +323,9 @@ def _invalidate_for_input_change(
     因此不覆盖原始字段值和原始规则结论，历史仍能查到当时抽到了什么、判定了什么。
     调用方负责更新材料位指针，并在完成后重新建立审核等待点。
     """
-    scenario = db.get(ScenarioVersion, task.scenario_version_id)
-    if not scenario:
-        raise BusinessError("SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500)
+    manifest = task.manifest_json
+    if not isinstance(manifest, dict) or not manifest:
+        raise BusinessError("TASK_MANIFEST_MISSING", "任务缺少已冻结的执行配置", status_code=500)
     affected_artifacts = db.scalar(
         select(func.count())
         .select_from(StoredArtifact)
@@ -239,17 +384,24 @@ def _invalidate_for_input_change(
         .where(NodeExecution.audit_task_id == task.id)
         .values(status="INVALIDATED")
     )
-    material_check_index = next(
-        item["sequence_no"] - 1
-        for item in scenario.manifest_json["nodes"]
-        if item["node_code"] == "MATERIAL_CHECK"
+    # 材料变化后任务退回材料检查节点：节点实例码由用户配置，按**能力类型**解析，
+    # 不写死能力类型当实例码（用户把实例码改成别的值时写死会一条都找不到）。
+    material_check_code = _single_node_code_of_type(
+        manifest, "MATERIAL_CHECK", purpose="材料变化后的退回节点"
     )
-    task.current_node = "MATERIAL_CHECK"
+    material_check_index = next(
+        index
+        for index, item in enumerate(
+            sorted(manifest["nodes"], key=lambda row: row["sequence_no"])
+        )
+        if item["node_code"] == material_check_code
+    )
+    task.current_node = material_check_code
     task.status = "READY"
     task.pending_review_hash = None
     task.checkpoint_json = {
         "node_index": material_check_index,
-        "current_node": "MATERIAL_CHECK",
+        "current_node": material_check_code,
         "phase": "AWAITING_CONFIRMATION",
     }
     # 当前有效事实与结果已失效：必须递增输入修订号，使携带旧修订的命令被明确拒绝。
@@ -273,7 +425,7 @@ def _invalidate_for_input_change(
         "invalidated_rule_results": int(affected_rule_results),
         "invalidated_node_executions": int(affected_executions),
         "invalidated_reviews": int(invalidated_reviews or 0),
-        "reset_to_node": "MATERIAL_CHECK",
+        "reset_to_node": material_check_code,
         "description": (
             f"{action_label}「{document.material_name}」的当前文件：{affected_artifacts} 个处理产物、"
             f"{superseded_field_values} 条旧版本字段事实不再进入当前结果，"
@@ -289,8 +441,15 @@ async def upload_document(
     document_no: str,
     upload: UploadFile,
     *,
+    material_type: str,
     replace: bool = False,
 ) -> DocumentUpload:
+    """上传或替换材料文件：落库、失效下游结果，并返回本次输入修订的真实影响范围。
+
+    `material_type` 是用户本次上传时从 8018 支持目录中选择的材料类型。它随**本次上传**
+    保存（见 DocumentUpload.declared_material_type），不来自场景配置：材料位本身不声明
+    类型，替换文件时可以改选。空值或不在 8018 目录内都显式拒绝，不代填、不跳过校验。
+    """
     settings = get_settings()
     task = task_or_404(db, task_no, lock=True)
     if task.deleted_at is not None:
@@ -326,7 +485,16 @@ async def upload_document(
     ) or 0
     # 输入变化不止“替换”：首次补传此前缺失的当前文件，同样改变任务已经依据的结论。
     # 只要任务已越过材料检查（移动过节点或执行过任何节点），补传就必须与替换走同一套失效流程。
-    input_changed = bool(previous_upload_id) or task.current_node != "MATERIAL_CHECK" or execution_count > 0
+    # 材料检查节点按**能力类型**解析实例码：写死能力类型当实例码会在用户改过实例码后失效。
+    task_manifest = task.manifest_json
+    input_changed = (
+        bool(previous_upload_id)
+        or task.current_node not in _node_codes_of_type(task_manifest, "MATERIAL_CHECK")
+        or execution_count > 0
+    )
+    # 类型核对放在所有任务侧校验之后、写文件之前：请求本身不合法时不必打扰 8018，
+    # 而类型不合法时必须在落盘前失败，不留下一份没有类型的孤儿文件。
+    declared_material_type = _verified_material_type(material_type)
     upload_no = public_no("UPL")
     suffix = Path(upload.filename or "").suffix.lower()
     relative_path = f"tasks/{task.task_no}/{document.document_no}/{upload_no}{suffix}"
@@ -348,6 +516,7 @@ async def upload_document(
         original_filename=upload.filename or f"材料{suffix}",
         relative_path=relative_path,
         content_type=upload.content_type or "application/octet-stream",
+        declared_material_type=declared_material_type,
         size_bytes=size,
         sha256=sha256,
         status="UPLOADED",
@@ -490,6 +659,72 @@ def ocr_status_view(db: Session, task_no: str, document_no: str) -> dict[str, An
     }
 
 
+def _task_display_structure(
+    task: AuditTask,
+    manifest: dict[str, Any],
+    nodes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """当前任务的**展示结构**：只包含本场景真实选中的节点、Sheet 与字段。
+
+    需求 31~34 要求「展示方式通用、展示内容动态」：前端提供通用组件（文本、金额、
+    日期、表格、审核结果），具体展示什么由后端按当前场景配置返回，页面不得按场景名
+    或固定条件分支写死内容。
+
+    因此这里返回的是**数据**而不是文案：
+    - `nodes`：本任务真实配置的节点实例（实例码 + 能力类型 + 顺序 + 依赖），
+      前端据此渲染流程条与工作区，不再维护一份写死的阶段清单；
+    - `sheets`：本场景选用的 Sheet 及各自归属的节点（来自 manifest 的
+      `selected_sheets`，即用户在场景配置里确认过的选择）；
+    - `fields`：本任务执行范围内的字段定义（名称、类型、单位、币种、所属材料），
+      前端据此决定用哪种通用组件渲染，不靠字段名猜类型。
+
+    任务创建时写入的 task_schema_json 优先：有 node_plan / selected_sheets 键就用它们。
+    历史任务没有这些键时，才读该任务所钉版本的 manifest，不读场景草稿。
+    """
+    schema = task.task_schema_json if isinstance(task.task_schema_json, dict) else {}
+    node_source = schema["node_plan"] if isinstance(schema.get("node_plan"), list) else nodes
+    if "selected_sheets" in schema and isinstance(schema.get("selected_sheets"), list):
+        sheet_source = schema["selected_sheets"]
+    else:
+        sheet_source = manifest.get("selected_sheets") or []
+    return {
+        "task_no": task.task_no,
+        "nodes": [
+            {
+                "node_code": str(node["node_code"]),
+                # 能力类型：缺 `node_type` 的旧节点只有在其实例码本身就是已知能力类型时
+                # 才能确定性迁移；无法确定时如实返回 null，页面按「未识别」处理，
+                # 不拿实例码冒充能力类型去匹配工作区。
+                "node_type": node.get("node_type") or legacy_node_type_of(str(node["node_code"])),
+                "name": str(node.get("name") or node["node_code"]),
+                "sequence_no": int(node.get("sequence_no") or 0),
+                "depends_on": [str(code) for code in (node.get("depends_on") or [])],
+                "enabled": bool(node.get("enabled", True)),
+            }
+            for node in node_source
+        ],
+        "sheets": [
+            {
+                "sheet_role": str(item.get("sheet_role")),
+                "node_code": item.get("node_code"),
+            }
+            for item in sheet_source
+            if isinstance(item, dict) and item.get("sheet_role")
+        ],
+        "fields": [
+            {
+                "field_key": str(field["field_key"]),
+                "name": str(field["name"]),
+                "value_type": str(field["value_type"]),
+                "unit": field.get("unit"),
+                "currency": field.get("currency"),
+                "material_key": str(field["material_key"]),
+            }
+            for field in task.task_schema_json["fields"]
+        ],
+    }
+
+
 def _execution_skip_reason(execution: NodeExecution | None) -> str | None:
     """节点被显式跳过时给出原因（例如“本模板未配置此类检查”）。"""
     if execution is None or not isinstance(execution.result_json, dict):
@@ -499,12 +734,21 @@ def _execution_skip_reason(execution: NodeExecution | None) -> str | None:
 
 
 def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
+    """任务详情视图：节点、材料位、字段、规则、执行范围与最近一次后台操作。"""
     scenario = db.get(ScenarioVersion, task.scenario_version_id)
     if not scenario:
         raise BusinessError("SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500)
-    plan = db.get(AuditPlan, task.plan_id) if task.plan_id else None
-    manifest = scenario.manifest_json
-    nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
+    manifest = task.manifest_json
+    schema = task.task_schema_json if isinstance(task.task_schema_json, dict) else {}
+    if isinstance(schema.get("node_plan"), list):
+        nodes = sorted(schema["node_plan"], key=lambda item: item.get("sequence_no") or 0)
+    else:
+        nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
+    frozen_version_no = (
+        schema["scenario_version_no"]
+        if isinstance(schema.get("scenario_version_no"), int)
+        else scenario.version_no
+    )
     executions = {
         item.node_code: item
         for item in db.scalars(
@@ -525,7 +769,10 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     }
     # 各材料位的 8018 识别结论，来自文件处理节点的真实执行结果；没有产物时为空。
     # 只作展示：识别结论与置信度不参与材料状态判定，也不影响后续节点执行。
-    document_prepare_result = executions["DOCUMENT_PREPARE"].result_json if "DOCUMENT_PREPARE" in executions else None
+    prepare_codes = _node_codes_of_type(manifest, "DOCUMENT_PREPARE")
+    document_prepare_result = next(
+        (executions[code].result_json for code in prepare_codes if code in executions), None
+    )
     material_classify = (
         document_prepare_result.get("material_classify") or {}
         if isinstance(document_prepare_result, dict)
@@ -564,7 +811,17 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         if current_execution_ids
         else []
     )
-    reviews = db.scalars(select(ManualReview).where(ManualReview.audit_task_id == task.id, ManualReview.status == "PENDING")).all()
+    # 待办分两层，页面必须按**本批**提交：
+    # `reviews` 是当前复核批次（唯一允许提交的集合），`all_pending` 是全部待办。
+    # 复核是分批判决的：存在字段确认待办时本批只含字段事实，规则结论待办留到下一批。
+    # 页面把全部待办一次提交时，集合恒不等于本批，服务端只会 409。
+    all_pending = db.scalars(
+        select(ManualReview)
+        .where(ManualReview.audit_task_id == task.id, ManualReview.status == "PENDING")
+        .order_by(ManualReview.id)
+    ).all()
+    reviews = _current_review_batch(db, task)
+    batch_hash = _review_hash(reviews) if reviews else None
     current_node_definition = next((item for item in nodes if item["node_code"] == task.current_node), None)
     if not current_node_definition:
         raise BusinessError("AUDIT_NODE_NOT_IN_SCENARIO", "任务当前节点不属于场景版本", status_code=500)
@@ -575,8 +832,19 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     }
     scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
     scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
-    scope_auto_keys = list(task.task_schema_json["auto_included_rule_keys"])
-    scope_auto_reasons = task.task_schema_json.get("auto_included_reasons", {}) or {}
+    # 未配置的检查类别优先读**任务冻结的快照**：它随任务一起冻结，之后场景发布新版本
+    # 不会改写历史任务的范围说明。历史任务没有这两个键时按该任务所钉版本的 manifest 读取，
+    # 都取不到时返回空列表（不编造「都没配」）。
+    unconfigured_node_types = list(
+        schema.get("unconfigured_check_node_types")
+        or manifest.get("unconfigured_check_node_types")
+        or []
+    )
+    unconfigured_node_codes = list(
+        schema.get("unconfigured_check_node_codes")
+        or manifest.get("unconfigured_check_node_codes")
+        or []
+    )
     current_execution = executions.get(current_node_definition["node_code"])
     current_node = {
         **current_node_definition,
@@ -619,7 +887,10 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             "quote_text": evidence.quote_text,
         })
     rule_definitions = {item["rule_key"]: item for item in manifest["rules"]}
-    extraction_finished = "FIELD_EXTRACTION" in executions and executions["FIELD_EXTRACTION"].status == "SUCCEEDED"
+    extraction_codes = _node_codes_of_type(manifest, "FIELD_EXTRACTION")
+    extraction_finished = any(
+        executions[code].status == "SUCCEEDED" for code in extraction_codes if code in executions
+    )
     field_view = []
     field_correction_candidates = []
     for field in task.task_schema_json["fields"]:
@@ -671,43 +942,40 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         # 不伪造关联、不改写历史结果。
         "plan": (
             {
-                "plan_code": plan.plan_code,
-                "plan_name": plan.plan_name,
-                "scenario_version_no": scenario.version_no,
+                "plan_code": schema["plan_code"],
+                "plan_name": schema["plan_name"],
+                "scenario_version_no": frozen_version_no,
             }
-            if plan
+            if task.plan_id is not None
             else None
         ),
-        "is_legacy_config": plan is None,
+        "is_legacy_config": task.plan_id is None,
         "scenario_code": scenario.scenario_code,
         "scenario_name": scenario.scenario_name,
-        "version_no": scenario.version_no,
+        "version_no": frozen_version_no,
         "status": task.status,
         "deleted": task.deleted_at is not None,
         "current_node": current_node,
         # 任务输入修订号：携带旧修订的命令会被后端明确拒绝，页面必须据此刷新。
         "input_revision": task.input_revision,
-        # 本任务实际执行范围：未配置 / 未启用 / 自动补入 的区分依据。
-        # 三种规则都带中文名与自动纳入原因，页面无需再去查场景最新版本。
+        # 本任务实际执行范围：未配置 / 未启用 的区分依据。
+        # **没有「自动补入」这一类**：范围就是创建任务时勾选的那些规则。
         "scope": {
             "enabled_rule_keys": scope_enabled_keys,
             "unenabled_rule_keys": scope_unenabled_keys,
-            "auto_included_rule_keys": scope_auto_keys,
-            "auto_included_reasons": scope_auto_reasons,
-            "unconfigured_nodes": manifest.get("unconfigured_check_nodes", []),
+            # 未配置的检查类别：类型级与实例级分开返回，页面按各自口径使用。
+            "unconfigured_node_types": unconfigured_node_types,
+            "unconfigured_node_codes": unconfigured_node_codes,
             "enabled_rules": [
                 {"rule_key": key, "name": rule_name_by_key.get(key, key)} for key in scope_enabled_keys
             ],
             "unenabled_rules": [
                 {"rule_key": key, "name": rule_name_by_key.get(key, key)} for key in scope_unenabled_keys
             ],
-            "auto_included_rules": [
-                {
-                    "rule_key": key,
-                    "name": rule_name_by_key.get(key, key),
-                    "reason": scope_auto_reasons.get(key),
-                }
-                for key in scope_auto_keys
+            "enabled_calculation_rules": [
+                {"rule_key": item["rule_code"], "name": item.get("rule_name") or item["rule_code"]}
+                for item in manifest.get("calculations", [])
+                if item.get("status") != "DISABLED"
             ],
         },
         "nodes": [
@@ -723,7 +991,14 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             for node in nodes
         ],
         # 本模板没有配置这类检查；页面和执行都必须明确说明，不能显示成通过。
-        "unconfigured_check_nodes": manifest.get("unconfigured_check_nodes", []),
+        # 两个口径分开：类型级说明「哪一类检查没配」，实例级让页面判断
+        # 「当前这个节点是不是未配置的类别」——拿实例码与类型列表交叉比较恒为假。
+        "unconfigured_check_node_types": unconfigured_node_types,
+        "unconfigured_check_node_codes": unconfigured_node_codes,
+        # 展示结构（需求 31~34）：**由当前任务的场景配置动态决定**，前端按它通用渲染。
+        # 页面不按场景名称或固定条件分支写死展示内容；这里给出本任务真实使用的
+        # 节点、Sheet、字段及其数据，统一协议里未被本场景选中的内容不出现。
+        "display": _task_display_structure(task, manifest, nodes),
         "documents": [
             {
                 "document_no": item.document_no,
@@ -771,6 +1046,36 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             )
             for item in reviews
         ],
+        # 全部待办（含不属于本批的批次）：仅供页面展示「还有多少项在排队」。
+        # 提交必须用 `pending_reviews` / `pending_review_batch` 给出的本批集合。
+        "all_pending_reviews": [
+            _pending_review_view(
+                review=item,
+                documents_by_id=documents_by_id,
+                documents_by_material_key=documents_by_material_key,
+                uploads_by_id=uploads,
+                fields_by_id=fields_by_id,
+                field_definitions=field_definitions,
+                rules_by_id=rules_by_id,
+                evidence_rows=evidence_rows,
+                evidence_by_id=evidence_by_id,
+            )
+            for item in all_pending
+        ],
+        # 当前复核批次的身份：**提交校验、检查点校验、Agent 复核准备与前端提交
+        # 用的是同一个集合**（`reviews._current_review_batch`）。
+        # `stale=True` 说明本批哈希与进入等待时落库的哈希不一致（待办集合在等待期间
+        # 被改动过），页面必须刷新后再提交，不能拿旧批次继续。
+        "pending_review_batch": {
+            "review_nos": [item.review_no for item in reviews],
+            "count": len(reviews),
+            "hash": batch_hash,
+            "stale": bool(reviews) and batch_hash != task.pending_review_hash,
+            "review_types": sorted({item.review_type for item in reviews}),
+            "all_pending_count": len(all_pending),
+        },
+        "pending_review_hash": batch_hash,
+        "pending_review_count": len(reviews),
         "latest_operation": operation_view(latest) if (latest := latest_operation(db, OBJECT_AUDIT_TASK, task.task_no)) else None,
     }
 

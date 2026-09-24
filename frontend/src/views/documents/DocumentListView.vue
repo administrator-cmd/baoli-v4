@@ -7,6 +7,7 @@ import type { DocumentDetail, DocumentRow } from "@/api/contracts";
 import { uploadTaskDocument } from "@/api/audits";
 import { documentExportUrl, documentFileUrl, getDocument, listDocuments } from "@/api/materials";
 import { usePagedList } from "@/composables/usePagedList";
+import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import { formatFileSize, statusLabel } from "@/constants/labels";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -63,10 +64,12 @@ function previewCurrent(row: DocumentRow): void {
   window.open(documentFileUrl(row.document_no, row.upload_no, true), "_blank");
 }
 
-/* ---- 上传 / 替换 ---- */
+/* 上传 / 替换 */
 const uploadVisible = ref(false);
 const uploadRow = ref<DocumentRow | null>(null);
 const uploadFile = ref<File | null>(null);
+/** 本次上传声明的材料类型：用户从 8018 支持目录中选择，必填。 */
+const uploadMaterialType = ref<string>("");
 const uploadSaving = ref(false);
 const uploadImpact = ref<string | null>(null);
 /** 真实上传进度百分比；上传中由浏览器 XHR 进度事件驱动。 */
@@ -76,6 +79,7 @@ const uploadError = ref<string | null>(null);
 function openUpload(row: DocumentRow): void {
   uploadRow.value = row;
   uploadFile.value = null;
+  uploadMaterialType.value = "";
   uploadImpact.value = null;
   uploadPercent.value = null;
   uploadError.value = null;
@@ -91,6 +95,11 @@ function onFileChange(file: { raw?: File }): void {
 async function submitUpload(): Promise<void> {
   if (!uploadRow.value || !uploadFile.value) {
     ElMessage.warning("请选择文件");
+    return;
+  }
+  // 材料类型必填：8018 的 doc_type 是严格枚举，没有类型就无法执行材料校验。
+  if (!uploadMaterialType.value) {
+    ElMessage.warning("请选择材料类型");
     return;
   }
   const row = uploadRow.value;
@@ -111,13 +120,21 @@ async function submitUpload(): Promise<void> {
   uploadError.value = null;
   uploadPercent.value = 0;
   try {
-    const uploaded = await uploadTaskDocument(row.task_no, row.document_no, uploadFile.value, replacing, (percent) => {
-      uploadPercent.value = percent;
-    });
+    const uploaded = await uploadTaskDocument(
+      row.task_no,
+      row.document_no,
+      uploadFile.value,
+      uploadMaterialType.value,
+      replacing,
+      (percent) => {
+        uploadPercent.value = percent;
+      },
+    );
     uploadPercent.value = 100;
     uploadImpact.value = uploaded.impact?.description ?? "上传完成；该材料位当前文件已更新。";
     ElMessage.success(replacing ? "已替换为新的文件版本" : "文件已上传");
     uploadFile.value = null;
+    uploadMaterialType.value = "";
     await list.load();
   } catch (failure) {
     // 失败原因保留在弹窗里，不随提示消失。
@@ -128,7 +145,7 @@ async function submitUpload(): Promise<void> {
   }
 }
 
-/* ---- 历史版本 ---- */
+/* 历史版本 */
 const detailVisible = ref(false);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
@@ -190,7 +207,7 @@ onMounted(() => {
         <span class="text-hint">
           上传/替换/移除都在对应任务的材料位上操作；本页上传会自动进入该材料的输入修订流程。
           后端材料位只有单一处理状态（待上传/已上传/已处理/类型待复核），没有单独的“解析状态”，
-          也没有材料类型字段，页面不显示这两项。
+          也不带材料类型：类型属于**每一次上传**（在上传时选择），不是材料位的属性。
         </span>
       </div>
     </div>
@@ -265,6 +282,10 @@ onMounted(() => {
         <el-descriptions-item label="材料位">{{ uploadRow.material_name }}{{ uploadRow.required ? "（必传）" : "（按需）" }}</el-descriptions-item>
         <el-descriptions-item label="当前文件">{{ uploadRow.filename || "未上传" }}</el-descriptions-item>
       </el-descriptions>
+      <div class="block-gap-sm">
+        <!-- 材料类型随本次上传声明：系统据此让 8018 校验文件是否放对材料位。 -->
+        <MaterialTypeSelect v-model="uploadMaterialType" :disabled="uploadSaving" />
+      </div>
       <el-upload class="block-gap-sm" drag :auto-upload="false" :limit="1" :on-change="onFileChange" :on-remove="() => (uploadFile = null)">
         <div class="upload-block__icon">⬆</div>
         <div class="el-upload__text">拖拽文件到此处，或<em>点击选择文件</em></div>
@@ -279,6 +300,8 @@ onMounted(() => {
       <el-alert v-if="uploadError" class="block-gap-sm" type="error" show-icon :closable="false" :title="`上传失败：${uploadError}`" />
       <p class="text-hint">
         材料位本身已由任务模板确定；这里只能为该材料位上传或替换文件，不能新建材料位。
+        材料类型是这次上传要声明的值，必须从 8018 支持目录中选择——它随本次上传保存，
+        替换文件时可以改选。
       </p>
       <template #footer>
         <el-button @click="uploadVisible = false">关闭</el-button>

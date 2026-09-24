@@ -6,10 +6,8 @@
   字段抽取与主体核对都按它确定取值来源；两处各写一份会让「声明了印章来源的字段」
   在一侧被当成普通字段，从错误的证据源取值，而这一偏差不会出现在任何结果里。
 - `public_no`：对外编号（任务号、证据号、复核号……），见 `domain/identity`。
-- 材料位的类型状态：`TYPE_REVIEW`（待复核，尚未由人定案）与 `TYPE_REJECTED`
-  （人工已确认与材料位不符）是两种来源不同的结论，下游的法律后果相同
-  （规则按证据不足处理），但业务含义与文案必须分开，不能合成一个值。
-  历史值 `TYPE_MISMATCH` 只可能由已下线的自动识别写入，读取时一律按**待复核**归一。
+- 材料位的类型状态：`TYPE_REVIEW` 与 `TYPE_REJECTED` 是两种来源不同的结论，
+  下游法律后果相同但业务含义必须分开；具体口径见下方 `MATERIAL_TYPE_*` 常量处。
 
 本模块不依赖 services，供 domain、services 与 operators 共同引用。
 """
@@ -21,6 +19,18 @@ from ..errors import BusinessError
 
 # 字段「产物来源」列唯一受支持的取值：印章识别产物。
 SEAL_ARTIFACT_SOURCE = "SEAL"
+
+# 字段的「期间口径」「报表口径」的**不适用**取值。
+#
+# 合同场景没有「本期 / 上期」「合并 / 母公司」这些概念，03_字段 的这两列留空即表达
+# 「这个字段没有期间或报表口径」。它必须是一个**显式取值**，不能是 NULL：
+# 统一事实表的「当前版本」唯一键由 (字段编号, 材料, 期间, 报表口径, 主体范围) 用
+# CONCAT 拼成，而 MySQL 的 CONCAT 遇到 NULL 会整体返回 NULL——唯一键随之失效，
+# 同一个字段可以出现多条「当前」事实。
+#
+# 它只表示「不适用」，**不等于**任何具体口径：计算参数不能拿它定位事实，
+# 发布编译会为此明确报错（见 manifest.required_field_scope 的调用处）。
+SCOPE_NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 def declared_artifact_source(item: dict[str, Any]) -> str | None:

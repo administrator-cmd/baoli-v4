@@ -28,6 +28,7 @@ def task_or_404(db: Session, task_no: str, *, lock: bool = False) -> AuditTask:
 
 
 def scenario_or_404(db: Session, scenario_code: str, version_no: int) -> ScenarioVersion:
+    """按场景编码与版本号取已发布版本；不存在时 404。"""
     scenario = db.scalar(
         select(ScenarioVersion).where(
             ScenarioVersion.scenario_code == scenario_code,

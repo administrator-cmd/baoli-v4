@@ -13,9 +13,11 @@
 真正的 commit 由命令层负责。"""
 
 from ...domain.audit_vocab import is_type_unavailable, read_material_type_status
+from ...domain.manifest import rule_node_type_of
+from ...domain.node_registry import legacy_node_type_of
 from ...errors import BusinessError
 from ...models import AuditTask, DocumentUpload, NodeExecution, ScenarioVersion, TaskDocument, TaskFieldValue, WorkflowCheckpoint
-from .shared import _current_uploads, _scenario
+from .shared import _current_uploads, _scenario, _task_manifest
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from typing import Any
@@ -162,12 +164,66 @@ def _risk_rule_keys(manifest: dict[str, Any]) -> set[str]:
     return {
         item["rule_key"]
         for item in manifest.get("rules", [])
-        if item.get("node") == "RISK_RATING"
+        if rule_node_type_of(item) == "RISK_RATING"
     }
+
+def _node_codes_of_type(manifest: dict[str, Any], node_type: str) -> list[str]:
+    """任务场景里某一**能力类型**的全部节点实例码。
+
+    节点实例码由用户配置，同一类型可以有多个实例（两张报表各一个字段抽取节点）。
+    按能力类型查询执行记录、产物或结果时必须先解析成实例码集合，不能写死一个
+    能力类型当实例码——那样在用户改了实例码之后一条也查不到，而页面只会显示
+    「尚未执行」。旧 manifest 的节点没有 `node_type`：那时实例码本身就是能力类型，
+    只有实例码是已知能力类型时迁移才确定；迁移不出来（自定义实例码）的节点
+    不参与匹配，也不会被当成任意一个能力类型。
+    """
+    return sorted(
+        str(item["node_code"])
+        for item in manifest.get("nodes", [])
+        if (item.get("node_type") or legacy_node_type_of(str(item["node_code"]))) == node_type
+    )
+
+
+def _is_node_of_type(manifest: dict[str, Any], node_code: str | None, node_type: str) -> bool:
+    """`node_code` 是不是该**能力类型**的节点。
+
+    用 `_node_codes_of_type` 做成员判断，**不用** `_single_node_code_of_type`：
+    一个场景可以完全没有配置某一类节点（「本模板未配置此类检查」是配置事实），
+    此时「当前节点是这类节点吗」的答案是**否**，而不是「配置缺失」。
+    拿 `_single_node_code_of_type` 做判断会让这类场景在**每一个节点**上都执行失败，
+    报出「没有配置人工复核节点」——与当前真正要做的事毫无关系。
+    """
+    if not node_code:
+        return False
+    return node_code in set(_node_codes_of_type(manifest, node_type))
+
+
+def _single_node_code_of_type(manifest: dict[str, Any], node_type: str, *, purpose: str) -> str:
+    """某一能力类型**唯一**的节点实例码；没有配置或配置了多个时明确报错。
+
+    用于系统需要定位到一个具体节点的场合（人工复核等待点、退回重判的落点）。
+    多个实例时无法确定该用哪一个，静默取第一个会让行为取决于用户配置顺序。
+    """
+    codes = _node_codes_of_type(manifest, node_type)
+    if not codes:
+        raise BusinessError(
+            "AUDIT_NODE_UNKNOWN",
+            f"本任务绑定的场景没有配置「{node_type}」节点，{purpose}无法进行",
+            status_code=500,
+            details={"node_type": node_type, "purpose": purpose},
+        )
+    if len(codes) > 1:
+        raise BusinessError(
+            "AUDIT_NODE_AMBIGUOUS",
+            f"本任务绑定的场景配置了多个「{node_type}」节点，无法确定{purpose}应落在哪一个上",
+            status_code=500,
+            details={"node_type": node_type, "purpose": purpose, "node_codes": codes},
+        )
+    return codes[0]
 
 def _scenario_nodes(db: Session, task: AuditTask) -> tuple[ScenarioVersion, list[dict[str, Any]], int]:
     scenario = _scenario(db, task)
-    nodes = sorted(scenario.manifest_json["nodes"], key=lambda item: item["sequence_no"])
+    nodes = sorted(_task_manifest(task)["nodes"], key=lambda item: item["sequence_no"])
     current_index = next((index for index, item in enumerate(nodes) if item["node_code"] == task.current_node), None)
     if current_index is None:
         raise BusinessError("AUDIT_NODE_NOT_IN_SCENARIO", "当前节点不属于任务场景", status_code=500)
@@ -235,6 +291,10 @@ def _flow_checkpoint_state(task: AuditTask) -> dict[str, Any]:
     return state
 
 def _save_flow_checkpoint(db: Session, task: AuditTask) -> None:
+    # 检查点随任务状态一起落盘：调用方可能刚把任务置为 BLOCKED（节点阻断），
+    # 而 `task.status` 是普通列，未 flush 时 `_flow_checkpoint_state` 读到的仍是旧值。
+    # 先 flush 再生成检查点，两者才不会一个说「阻断」一个说「执行中」。
+    db.flush()
     graph_namespace = _graph_namespace(task)
     checkpoint = db.scalar(
         select(WorkflowCheckpoint).where(

@@ -11,9 +11,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .api import audits, imports, materials, operations, plans, reports, reviews, scenarios, system, templates
 from .config import PROJECT_DIR, get_settings
-from .domain import profile as domain_profile
+from .domain import unified_profile
 from .integrations import http_services
-from .services.audit import document_ports
+from .services.audit import document_ports, flow as audit_flow
 from .database import SessionLocal, check_database_connection
 from .errors import (
     BusinessError,
@@ -65,11 +65,11 @@ def _configure_logging(level_name: str) -> None:
 
 
 settings = get_settings()
-# 领域层的 profile 目录从配置注入：domain 不读全局配置，由启动处喂给它。
-domain_profile.configure_profile_source(
-    settings.resolved_rulebook_profile_path.parent,
-    settings.default_rulebook_profile_version,
-)
+# 统一模板协议从配置注入：domain 不读全局配置，由启动处喂给它。
+# 系统只有这一份 Profile——旧的 rulebook_profiles 与 scene_profiles 双轨已删除。
+unified_profile.configure_unified_profile(settings.resolved_unified_profile_path)
+# 审核节点执行实现注册进节点注册表：flow 的分发改为查表，不再写 if/elif。
+audit_flow.register_node_handlers()
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
 document_ports.register_document_service(http_services)
 _configure_logging(settings.log_level)

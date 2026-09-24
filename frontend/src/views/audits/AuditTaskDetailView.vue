@@ -11,7 +11,7 @@ import type {
   ExecutionRow,
   FieldCorrectionRequest,
   FieldCorrectionResponse,
-  JsonValue,
+  PendingReview,
   Report,
   RiskList,
   TaskReviewRow,
@@ -32,7 +32,6 @@ import {
   documentFileUrl,
   executeAuditNode,
   getAuditTask,
-  getDocumentOcr,
   getTaskEvidence,
   getTaskEvidenceIndex,
   getTaskReport,
@@ -40,7 +39,6 @@ import {
   getTaskRisks,
   listTaskExecutions,
   listTaskReviews,
-  reconcileDocumentOcr,
   removeTaskDocumentFile,
   saveTaskReviewDrafts,
   submitFieldCorrections,
@@ -49,8 +47,6 @@ import {
   updateAuditTask,
   uploadTaskDocument,
   type AuditTaskView,
-  type DocumentOcrStatus,
-  type OcrReconcileRequest,
   type ReplacementImpact,
 } from "@/api/audits";
 import type {
@@ -60,7 +56,7 @@ import type {
   RetrievalResult,
   TaskEvidenceIndex,
 } from "@/api/contracts";
-import { saveTaskRangeAsPlan } from "@/api/plans";
+
 import { getExecution } from "@/api/reviews";
 import AuditFieldResults from "@/components/audit/AuditFieldResults.vue";
 import AuditReportPanel from "@/components/audit/AuditReportPanel.vue";
@@ -68,29 +64,26 @@ import AuditRiskResults from "@/components/audit/AuditRiskResults.vue";
 import AuditRuleResults from "@/components/audit/AuditRuleResults.vue";
 import RetrievalEvidencePanel from "@/components/audit/RetrievalEvidencePanel.vue";
 import FieldCorrectionDialog from "@/components/audit/FieldCorrectionDialog.vue";
-import OcrReconcileDialog from "@/components/audit/OcrReconcileDialog.vue";
 import PendingReviewCard, { type ReviewDraft } from "@/components/audit/PendingReviewCard.vue";
-import TaskMaterialCard from "@/components/audit/TaskMaterialCard.vue";
+import TaskMaterialRow from "@/components/audit/TaskMaterialRow.vue";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import EvidenceDrawer from "@/components/EvidenceDrawer.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
 import OperationPanel from "@/components/OperationPanel.vue";
-import StatGrid, { type StatItem } from "@/components/StatGrid.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { useEvidenceDrawer } from "@/composables/useEvidenceDrawer";
 import { useMaterialActions } from "@/composables/useMaterialActions";
-import { useOcrReconcile } from "@/composables/useOcrReconcile";
 import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { useRetrievalWorkbench } from "@/composables/useRetrievalWorkbench";
 import { useReviewWorkbench } from "@/composables/useReviewWorkbench";
 import {
-  auditWorkspaces,
   isDetailTab,
-  manualReviewNodeCode,
-  workspaceOfNode,
+  manualReviewNodeType,
+  workspacesOfNodes,
   type DetailTab,
+  type DisplayNode,
 } from "@/constants/auditWorkspaces";
 import {
   basisTypeLabel,
@@ -98,9 +91,6 @@ import {
   evidenceIndexStatusTone,
   formatDate,
   nodeLabel,
-  nodePurpose,
-  nodeStatusLabel,
-  nodeStatusTone,
   progressPercent,
   reviewDecisionLabel,
   reviewObjectKindLabel,
@@ -111,9 +101,7 @@ import {
 /**
  * 审核任务详情。
  *
- * 首屏顺序固定为：返回 / 任务名称 / 总体状态 → 场景与方案版本 → 当前阶段 →
- * 当前待办与阻断原因 → 唯一主操作按钮 → 关键统计 → 详细页签。
- * 同一份任务元数据不再同时出现在页头、描述表格、流程条和当前节点卡片里。
+ * 页头保留任务身份与流程，待办和概览用表格呈现；材料、结果与记录由页签承载。
  *
  * 执行、复核、报告都由服务端真实状态驱动；响应丢失先查询原命令，不重复提交。
  */
@@ -127,7 +115,7 @@ const taskNo = computed(() => String(route.params.taskNo ?? ""));
 
 // 任务详情整体替换（applyTask），用 shallowRef 避免对含递归 JsonValue 的类型做深解包（TS2589）。
 const task = shallowRef<AuditTaskView | null>(null);
-/* 材料位操作、OCR 对账与原文证据抽屉：各自独立的状态与操作流程，见对应 composable。 */
+/* 材料位操作与原文证据抽屉：各自独立的状态与操作流程，见对应 composable。 */
 const {
   busyDocumentNo: uploadingDocumentNo,
   uploadPercent: materialUploadPercent,
@@ -138,18 +126,6 @@ const {
   remove: removeDocument,
   reset: resetMaterialActions,
 } = useMaterialActions({ taskNo, run, refresh: refreshTask });
-const {
-  document: ocrDocument,
-  status: ocrStatus,
-  statusError: ocrStatusError,
-  statusLoading: ocrStatusLoading,
-  result: ocrResult,
-  pending: ocrPending,
-  open: openOcr,
-  requery: requeryOcr,
-  submit: submitOcrReconcile,
-  close: closeOcr,
-} = useOcrReconcile({ taskNo, run, setFailure, refresh: refreshTask });
 const {
   field: evidenceField,
   evidence,
@@ -164,7 +140,7 @@ const risks = ref<RiskList | null>(null);
 const risksError = ref<string | null>(null);
 const risksLoading = ref(false);
 
-/* ---- 检索取证 ---- */
+/* 检索取证 */
 const {
   index: evidenceIndex,
   indexError: evidenceIndexError,
@@ -213,7 +189,6 @@ const {
 const selectedReviewNo = ref<string | null>(null);
 const tab = ref<DetailTab>("materials");
 /** 规则结果页的校验阶段筛选；由工作区入口设置，不由当前节点隐式改写。 */
-const ruleNodeFilter = ref<string | null>(null);
 const loadingTask = ref(false);
 const correctionField = ref<AuditField | null>(null);
 const correctionResult = ref<FieldCorrectionResponse | null>(null);
@@ -221,13 +196,13 @@ const correctionPending = ref(false);
 const lastOperationType = ref<string | null>(null);
 let executionAttemptKey: string | null = null;
 
-/* ---- 弹窗与抽屉的可见性 ----
+/* 弹窗与抽屉的可见性
  * 这些状态在 resetWorkspace() 里会被统一清理，因此必须与其它页面状态一起声明在
  * 调用之前——声明在后面会让「切换任务清理抽屉」在第一次调用时就踩到暂时性死区。 */
 const snapshotOpen = ref(false);
 const editVisible = ref(false);
 const copyVisible = ref(false);
-const planVisible = ref(false);
+
 
 /** 页面状态代次：切换任务时递增，过期响应不得覆盖当前页面。 */
 let stateGeneration = 0;
@@ -237,7 +212,7 @@ function isStale(token: number, currentTaskNo: string): boolean {
   return token !== stateGeneration || activeTaskNo.value !== currentTaskNo;
 }
 
-/* ---- 复核记录 / 执行记录（页签） ---- */
+/* 复核记录 / 执行记录（页签） */
 const reviewRecords = ref<TaskReviewRow[]>([]);
 const reviewRecordsError = ref<string | null>(null);
 const reviewRecordsLoading = ref(false);
@@ -315,12 +290,29 @@ function retryLoadExecutions(): void {
   void loadExecutions(stateGeneration);
 }
 
-/* ---- 节点流程 ---- */
+/* 节点流程 */
 const currentNodeCode = computed(() => task.value?.current_node.node_code ?? null);
+const currentNode = computed(() => task.value?.current_node ?? null);
+/**
+ * 当前任务的工作区：按后端返回的**展示结构**（`display.nodes`）算出。
+ *
+ * 只展示当前场景实际配置的节点对应的工作区；统一模板协议里未被本场景选中的
+ * 能力类型不出现。旧任务没有 `display` 时退回任务自己的 `nodes`——
+ * 那里同样只有本任务真实配置的节点，不凭空补一份固定阶段表。
+ */
+/** 本任务真实配置的校验阶段（能力类型），供规则结果页的阶段下拉使用。 */
+const taskWorkspaceNodeTypes = computed(() => {
+  const types = taskWorkspaces.value.map((item) => item.nodeType);
+  return types.filter((item, index) => types.indexOf(item) === index);
+});
+
+const taskWorkspaces = computed(() =>
+  workspacesOfNodes(task.value?.display?.nodes ?? task.value?.nodes ?? []),
+);
 const currentNodeName = computed(() => task.value?.current_node.name || nodeLabel(currentNodeCode.value));
-/** 当前节点对应的工作区；人工复核等没有工作区的节点为 null。 */
-const currentWorkspace = computed(() => workspaceOfNode(currentNodeCode.value));
-const isManualReviewNode = computed(() => currentNodeCode.value === manualReviewNodeCode);
+const isManualReviewNode = computed(
+  () => currentNode.value?.node_type === manualReviewNodeType,
+);
 const currentStepIndex = computed(() => {
   if (!task.value) return 0;
   const index = task.value.nodes.findIndex((node) => node.node_code === task.value?.current_node.node_code);
@@ -360,14 +352,37 @@ const missingRequiredMaterials = computed(
   () => task.value?.documents.filter((document) => document.required && !document.filename) ?? [],
 );
 const hasAnyUpload = computed(() => uploadedDocumentCount.value > 0);
+/**
+ * 节点实例码 → 能力类型。
+ *
+ * `node_code` 是用户配置的**实例码**（例如 `INT_A`），`node_type` 才是能力类型
+ * （`INTERNAL_VALIDATE`）。页面判断「这是哪一类节点」必须用能力类型：拿实例码与
+ * 能力类型比较，在用户改了实例码之后恒为假，对应的工作区与进度会静默失效。
+ *
+ * 历史任务没有 `node_type` 时按后端同一口径回退（那时实例码本身就是能力类型）。
+ */
+function nodeTypeOf(code: string | null | undefined): string | null {
+  if (!code) {
+    return null;
+  }
+  const node = task.value?.nodes.find((item) => item.node_code === code);
+  return node?.node_type ?? code;
+}
 const extractionFinished = computed(
-  () => task.value?.nodes.some((node) => node.node_code === "FIELD_EXTRACTION" && node.status === "SUCCEEDED") ?? false,
+  () =>
+    task.value?.nodes.some(
+      (node) => nodeTypeOf(node.node_code) === "FIELD_EXTRACTION" && node.status === "SUCCEEDED",
+    ) ?? false,
 );
-const riskNode = computed(() => task.value?.nodes.find((node) => node.node_code === "RISK_RATING") ?? null);
+const riskNode = computed(() => task.value?.nodes.find((node) => nodeTypeOf(node.node_code) === "RISK_RATING") ?? null);
 const riskNodeExecuted = computed(() => riskNode.value?.status === "SUCCEEDED");
-const riskConfigured = computed(() => !(task.value?.unconfigured_check_nodes ?? []).includes("RISK_RATING"));
+// 未配置的检查类别：类型级汇总用于「这类检查有没有配」；实例级清单用于
+// 「当前这个节点是不是未配置的类别」。两者口径不同，不能交叉比较。
+const riskConfigured = computed(
+  () => !(task.value?.unconfigured_check_node_types ?? []).includes("RISK_RATING"),
+);
 const currentNodeUnconfigured = computed(
-  () => !!task.value && task.value.unconfigured_check_nodes.includes(task.value.current_node.node_code),
+  () => !!task.value && (task.value.unconfigured_check_node_codes ?? []).includes(task.value.current_node.node_code),
 );
 const canEnterManualReview = computed(() => task.value?.status === "READY" && isManualReviewNode.value);
 const atWaitingReview = computed(() => task.value?.status === "WAITING_REVIEW");
@@ -376,7 +391,8 @@ const prerequisites = computed(() => {
   if (!task.value) {
     return [] as Array<{ label: string; satisfied: boolean }>;
   }
-  const code = task.value.current_node.node_code;
+  // 前置条件按**能力类型**判断：当前节点的 `node_code` 是用户配置的实例码。
+  const nodeType = nodeTypeOf(task.value.current_node.node_code);
   const items: Array<{ label: string; satisfied: boolean }> = [
     { label: "任务不在后台执行中", satisfied: task.value.status !== "RUNNING" && !watching.value },
     {
@@ -384,16 +400,16 @@ const prerequisites = computed(() => {
       satisfied: task.value.status !== "COMPLETED" && task.value.status !== "FAILED",
     },
   ];
-  if (code === "MATERIAL_CHECK") {
+  if (nodeType === "MATERIAL_CHECK") {
     items.push({
       label: `必传材料已全部上传（还缺 ${missingRequiredMaterials.value.length} 项）`,
       satisfied: missingRequiredMaterials.value.length === 0,
     });
   }
-  if (code === "DOCUMENT_PREPARE") {
+  if (nodeType === "DOCUMENT_PREPARE") {
     items.push({ label: "至少已上传一份材料", satisfied: hasAnyUpload.value });
   }
-  if (code === "MANUAL_REVIEW" && task.value.status === "WAITING_REVIEW") {
+  if (nodeType === "MANUAL_REVIEW" && task.value.status === "WAITING_REVIEW") {
     items.push({ label: "任务已停在人工复核等待点（提交复核结论，不再执行节点）", satisfied: true });
   }
   return items;
@@ -416,7 +432,7 @@ const executeDisabledReason = computed(() => {
   return null;
 });
 
-/* ---- 唯一主操作 ---- */
+/* 唯一主操作 */
 
 interface PrimaryAction {
   label: string;
@@ -444,7 +460,7 @@ const primaryAction = computed<PrimaryAction>(() => {
   if (atWaitingReview.value) {
     const pendingCount = task.value.pending_reviews.length;
     return {
-      label: pendingCount ? `进入复核（${pendingCount} 项待办）` : "查看复核状态",
+      label: pendingCount ? `进入复核（本批 ${pendingCount} 项）` : "查看复核状态",
       tab: "reviews",
       disabled: false,
       reason: null,
@@ -488,7 +504,7 @@ function runPrimaryAction(): void {
   action.run?.();
 }
 
-/* ---- 当前待办与阻断原因 ---- */
+/* 当前待办与阻断原因 */
 
 interface BlockerItem {
   tone: "error" | "warning" | "info";
@@ -545,8 +561,10 @@ const blockers = computed<BlockerItem[]>(() => {
   if (task.value.pending_reviews.length) {
     items.push({
       tone: "info",
-      title: `有 ${task.value.pending_reviews.length} 项等待人工复核`,
-      description: "系统无法自动判定的项需要逐条给出业务结论；先提交字段事实，重算后再裁决规则。",
+      title: queuedReviewCount.value
+        ? `本批 ${task.value.pending_reviews.length} 项待复核，其后还有 ${queuedReviewCount.value} 项排队`
+        : `有 ${task.value.pending_reviews.length} 项等待人工复核`,
+      description: "系统无法自动判定的项需要逐条给出业务结论；先提交字段事实，重算后再裁决规则。页面只提交本批。",
       tab: "reviews",
       tabLabel: "进入复核",
     });
@@ -572,57 +590,6 @@ const blockers = computed<BlockerItem[]>(() => {
   return items;
 });
 
-/** 工作区入口的完成情况：用于「当前阶段」区域让用户直接跳到对应产物。 */
-interface WorkspaceEntry {
-  key: string;
-  label: string;
-  tab: DetailTab;
-  ruleNodeFilter: string | null;
-  /** 该工作区对应节点的中文名。 */
-  stageName: string;
-  nodeStatus: string | null;
-  isCurrent: boolean;
-  /**
-   * 该工作区产物的真实情况。
-   * 服务端无法按时拆分时（规则结果没有节点字段）如实写明原因，不显示一个编出来的数字。
-   */
-  countLabel: string;
-}
-
-const workspaceEntries = computed<WorkspaceEntry[]>(() => {
-  const current = task.value;
-  if (!current) {
-    return [];
-  }
-  return auditWorkspaces.map((workspace) => {
-    const node = current.nodes.find((item) => workspace.nodeCodes.includes(item.node_code)) ?? null;
-    let countLabel = "";
-    if (workspace.key === "MATERIAL_CONFIRM" || workspace.key === "MATERIAL_FORMAT") {
-      countLabel = `已上传 ${uploadedDocumentCount.value} / ${current.documents.length} 项材料`;
-    } else if (workspace.key === "FIELD_EXTRACT") {
-      const extracted = current.fields.filter((field) => field.status === "PRESENT" || field.status === "REVIEWED").length;
-      countLabel = `已抽取 ${extracted} / ${current.fields.length} 项字段`;
-    } else if (workspace.key === "INTERNAL_CHECK" || workspace.key === "CROSS_CHECK") {
-      // 规则结果里没有节点字段，无法按工作区拆分条数；不在这里编一个数字。
-      countLabel = "条数需按校验阶段拆分（见规则结果页说明）";
-    } else if (workspace.key === "RISK_RATING") {
-      countLabel = risks.value ? `已成立风险 ${risks.value.hit_count} 条` : "风险结果未读取";
-    } else if (workspace.key === "REPORT_OUTPUT") {
-      countLabel = report.value?.report_generated ? "报告已生成" : "报告未生成";
-    }
-    return {
-      key: workspace.key,
-      label: workspace.label,
-      tab: workspace.tab,
-      ruleNodeFilter: workspace.ruleNodeFilter,
-      stageName: node?.name || nodeLabel(workspace.nodeCodes[0]),
-      nodeStatus: node?.status ?? null,
-      isCurrent: node?.node_code === currentNodeCode.value,
-      countLabel,
-    };
-  });
-});
-
 /**
  * 检索结论提交：把「本次结论对应的输入修订」并入载荷。
  *
@@ -643,14 +610,7 @@ function onSubmitRetrievalDecision(payload: {
   void submitRetrievalDecision({ ...payload, inputRevision: task.value?.input_revision ?? 0 });
 }
 
-function openWorkspace(entry: WorkspaceEntry): void {
-  setTab(entry.tab);
-  if (entry.ruleNodeFilter) {
-    ruleNodeFilter.value = entry.ruleNodeFilter;
-  }
-}
-
-/* ---- 页签与 URL ---- */
+/* 页签与 URL */
 
 /**
  * 切换页签。
@@ -682,62 +642,13 @@ function tabFromRoute(): DetailTab | null {
   return isDetailTab(value) ? value : null;
 }
 
-/* ---- 关键统计 ---- */
+/* 关键统计 */
 
 const fieldExtractedCount = computed(
   () => task.value?.fields.filter((field) => field.status === "PRESENT" || field.status === "REVIEWED").length ?? 0,
 );
 const ruleAbnormalCount = computed(() => task.value?.rules.filter((rule) => rule.status === "ABNORMAL").length ?? 0);
-const ruleDecidedCount = computed(
-  () => task.value?.rules.filter((rule) => rule.status === "PASSED" || rule.status === "ABNORMAL" || rule.status === "REVIEWED").length ?? 0,
-);
-
-const stats = computed<StatItem[]>(() => {
-  const current = task.value;
-  if (!current) {
-    return [];
-  }
-  return [
-    {
-      label: "必传材料待上传",
-      value: missingRequiredMaterials.value.length,
-      hint: `已上传 ${uploadedDocumentCount.value} / ${current.documents.length} 项材料`,
-      tone: missingRequiredMaterials.value.length ? "danger" : "neutral",
-    },
-    {
-      label: "字段已抽取",
-      value: fieldExtractedCount.value,
-      hint: `共 ${current.fields.length} 项字段`,
-      tone: "neutral",
-    },
-    {
-      label: "规则不合格",
-      value: ruleAbnormalCount.value,
-      hint: `已判定 ${ruleDecidedCount.value} / ${current.rules.length} 条规则`,
-      tone: ruleAbnormalCount.value ? "danger" : "neutral",
-    },
-    {
-      label: "等待人工复核",
-      value: current.pending_reviews.length,
-      hint: atWaitingReview.value ? "任务停在本等待点" : "当前批次待处理项",
-      tone: current.pending_reviews.length ? "warning" : "neutral",
-    },
-    {
-      label: "已成立风险",
-      value: risks.value ? risks.value.hit_count : 0,
-      hint: risksError.value
-        ? "风险结果读取失败，不代表没有风险"
-        : !riskConfigured.value
-          ? "本模板未配置风险评级"
-          : risks.value?.risk_executed
-            ? "已执行风险评定"
-            : "风险评定尚未执行",
-      tone: risks.value && risks.value.hit_count ? "danger" : "neutral",
-    },
-  ];
-});
-
-/* ---- 阶段与进度 ---- */
+/* 阶段与进度 */
 
 const executionPercent = computed(() => {
   const execution = lastExecution.value;
@@ -745,9 +656,10 @@ const executionPercent = computed(() => {
   if (!execution || !executedNode || !task.value) return null;
   const summary = execution.result_summary;
   const counter = (key: string) => (typeof summary[key] === "number" ? (summary[key] as number) : null);
-  if (executedNode.code === "MATERIAL_CHECK") return progressPercent(counter("uploaded"), task.value.documents.length);
-  if (executedNode.code === "DOCUMENT_PREPARE") return progressPercent(counter("processed_documents"), uploadedDocumentCount.value);
-  if (executedNode.code === "FIELD_EXTRACTION") return progressPercent(counter("field_results"), task.value.fields.length);
+  const executedType = nodeTypeOf(executedNode.code);
+  if (executedType === "MATERIAL_CHECK") return progressPercent(counter("uploaded"), task.value.documents.length);
+  if (executedType === "DOCUMENT_PREPARE") return progressPercent(counter("processed_documents"), uploadedDocumentCount.value);
+  if (executedType === "FIELD_EXTRACTION") return progressPercent(counter("field_results"), task.value.fields.length);
   return null;
 });
 
@@ -756,85 +668,28 @@ const reportDownloadUrl = computed(() => {
   return apiFileUrl(`/audit-tasks/${task.value.task_no}/reports/download`);
 });
 
-const resultSummaryLabels: Record<string, string> = {
-  uploaded: "已上传材料位",
-  required_missing: "缺少必传材料",
-  missing_materials: "缺少材料",
-  material_rule_count: "材料检查规则",
-  processed_documents: "已处理材料",
-  file_quality_rule_count: "文件质量规则",
-  field_results: "已形成字段结果",
-  extraction_rule_count: "抽取规则",
-  rule_count: "参与判定的规则",
-  status_counts: "规则结果分布",
-  check_configured: "是否配置了检查",
-  pending_review_count: "进入人工复核的项",
-  review_count: "复核项",
-  skipped: "是否跳过",
-  skip_reason: "跳过原因",
-  blocked: "是否阻断",
-  report_status: "报告状态",
-  report_generated: "报告是否生成",
-  scope_execution_complete: "已配置范围是否执行完整",
-  risk_conclusion_available: "风险是否可判定",
-  risk_configured: "是否配置风险评级",
-};
-
-function formatResultValue(key: string, value: unknown): string {
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (typeof value === "string" && (key.endsWith("_status") || key === "report_status")) return statusLabel(value);
-  if (Array.isArray(value)) {
-    return value.length ? value.map((item) => String(item)).join("、") : "无";
-  }
-  if (typeof value === "object" && value !== null) {
-    return Object.entries(value as Record<string, unknown>)
-      .map(([innerKey, innerValue]) => `${innerKey} ${String(innerValue)}`)
-      .join("；");
-  }
-  return String(value ?? "—");
-}
-
 /**
- * 结果摘要里**业务可用**的条目：标量计数与材料名清单。
+ * 本批可提交的复核项。
  *
- * 报告范围快照、结论结构、状态分布这类嵌套对象不在这里铺开——它们被压成一行后
- * 既读不出业务含义，又会把页面撑出横向滚动条。它们收进下方「技术明细」折叠区。
+ * **以服务端给出的 `pending_review_batch.review_nos` 为准**，不是把页面看到的
+ * 全部待办一起提交：复核是分批判决的（字段事实先于规则结论），不属于本批的待办
+ * 留在服务端，一次性全提交会被服务端以 409 拒绝，而页面没有任何自救手段。
  */
-function isPlainSummaryValue(value: unknown): boolean {
-  return value === null || typeof value !== "object" || Array.isArray(value);
-}
-
-/**
- * 不进统计区的标量键。
- *
- * `content` 是报告正文（几百行的字符串），它的归属页面是报告页，不是执行统计表。
- * 本节点现在已不再把正文写进执行结果；这里排除的是改动前生成的执行记录——
- * 那些记录里正文仍在，按标量铺开就会重现整屏无换行的长文本。
- */
-const SUMMARY_EXCLUDED_KEYS = new Set(["content"]);
-
-const executionSummaryEntries = computed(() => {
-  const summary = lastExecution.value?.result_summary;
-  if (!summary) {
-    return [];
-  }
-  return Object.entries(summary)
-    .filter(([key, value]) => isPlainSummaryValue(value) && !SUMMARY_EXCLUDED_KEYS.has(key))
-    .map(([key, value]) => ({
-      label: resultSummaryLabels[key] ?? key,
-      value: formatResultValue(key, value),
-    }));
+const reviewBatch = computed<PendingReview[]>(() => {
+  const batch = task.value?.pending_review_batch;
+  if (!batch) return [];
+  const wanted = new Set(batch.review_nos);
+  return (task.value?.pending_reviews ?? []).filter((item) => wanted.has(item.review_no));
 });
 
-/** 收进折叠区的技术载荷：结构化的结论、范围快照、状态分布，以及旧记录里的报告正文。 */
-const executionSummaryTechnical = computed<Array<{ key: string; value: JsonValue }>>(() => {
-  const summary = lastExecution.value?.result_summary;
-  if (!summary) {
-    return [];
-  }
-  return Object.entries(summary)
-    .filter(([key, value]) => !isPlainSummaryValue(value) || SUMMARY_EXCLUDED_KEYS.has(key))
-    .map(([key, value]) => ({ key, value }));
+/** 本批哈希与等待点落库的哈希不一致：待办集合被改动过，必须刷新后再提交。 */
+const reviewBatchStale = computed(() => task.value?.pending_review_batch?.stale === true);
+
+/** 排队中但不属于本批的待办数（字段批与规则批并存时非零）。 */
+const queuedReviewCount = computed(() => {
+  const batch = task.value?.pending_review_batch;
+  if (!batch) return 0;
+  return Math.max(0, batch.all_pending_count - batch.count);
 });
 
 const reviewSubmitDisabledReason = computed(() => {
@@ -843,10 +698,13 @@ const reviewSubmitDisabledReason = computed(() => {
     return `任务当前状态为「${statusLabel(task.value.status)}」，未到人工复核等待点，不能提交复核结论。`;
   }
   if (watching.value) return "正在查询上一次复核提交的服务端状态，请在本次操作结束后再提交。";
-  if (!task.value.pending_reviews.length) {
+  if (reviewBatchStale.value) {
+    return "待复核集合已变化（本批哈希与等待点不一致），请先「刷新」重新读取当前批次再提交。";
+  }
+  if (!reviewBatch.value.length) {
     return "当前没有待复核项；请先「刷新」确认服务端是否已生成待办，页面不会自行跳过。";
   }
-  const incomplete = task.value.pending_reviews.filter((review) => {
+  const incomplete = reviewBatch.value.filter((review) => {
     const draft = reviewDraftOf(review.review_no);
     return !draft.decision || !draft.note.trim() || (requiresConfirmedFieldValue(draft.decision) && !draft.fieldValue.trim());
   });
@@ -913,11 +771,10 @@ function resetWorkspace(): void {
   lastExecution.value = null;
   executingNode.value = null;
   selectedReviewNo.value = null;
-  /* 独立业务区块各自重置：证据抽屉、检索取证、材料操作、OCR 对账、复核草稿。 */
+  /* 独立业务区块各自重置：证据抽屉、检索取证、材料操作、复核草稿。 */
   closeEvidence();
   resetRetrieval();
   resetMaterialActions();
-  closeOcr();
   clearReviewWorkbench();
   correctionField.value = null;
   correctionResult.value = null;
@@ -932,12 +789,10 @@ function resetWorkspace(): void {
   executionsLoading.value = false;
   executionDetail.value = null;
   executionDetailVisible.value = false;
-  ruleNodeFilter.value = null;
   /* 抽屉与弹窗 */
   snapshotOpen.value = false;
   editVisible.value = false;
   copyVisible.value = false;
-  planVisible.value = false;
   formMessage.value = "";
   loadingTask.value = false;
 }
@@ -1013,7 +868,7 @@ async function refreshTask(): Promise<void> {
   }
 }
 
-/* ---- 后台操作查询 ---- */
+/* 后台操作查询 */
 function trackOperation(value: OperationView, token = stateGeneration): void {
   // 提交后到响应之间可能已经切了任务：代次或对象不符时不得写入本页状态。
   if (token !== stateGeneration || value.object_no !== activeTaskNo.value) {
@@ -1132,7 +987,7 @@ async function syncFromRoute(): Promise<void> {
   }
 }
 
-/* ---- 任务动作 ---- */
+/* 任务动作 */
 async function executeCurrentNode(): Promise<void> {
   if (!task.value || !canExecuteNode.value) {
     formMessage.value = executeDisabledReason.value ?? "当前节点暂时不能执行。";
@@ -1185,7 +1040,7 @@ async function retryOperation(operationType: string): Promise<void> {
 }
 
 
-/* ---- 字段纠错与证据 ---- */
+/* 字段纠错与证据 */
 function openCorrection(field: AuditField): void {
   correctionResult.value = null;
   correctionField.value = field;
@@ -1216,7 +1071,7 @@ function closeCorrection(): void {
 
 
 
-/* ---- 人工复核提交 ---- */
+/* 人工复核提交 */
 function requiresConfirmedFieldValue(decision: string): boolean {
   return decision === "CONFIRM_FIELD" || decision === "MODIFY_FIELD";
 }
@@ -1230,7 +1085,8 @@ async function submitReviews(): Promise<void> {
   const token = stateGeneration;
   const currentRevision = task.value.input_revision;
   // 提交载荷与草稿暂存共用同一份组装口径（workbench.payloadOf），不再各写一套。
-  const reviews = task.value.pending_reviews.map((review) => {
+  // 集合来自**本批**：不属于本批的待办留在服务端，下一批再处理。
+  const reviews = reviewBatch.value.map((review) => {
     const draft = reviewDraftOf(review.review_no);
     return {
       review_no: review.review_no,
@@ -1241,9 +1097,12 @@ async function submitReviews(): Promise<void> {
     };
   });
   await run(async () => {
-    const attemptKey = executionAttemptKey ?? operationIdempotencyKey("MANUAL_REVIEW", currentTaskNo);
+    // 人工复核等待点的**实例码**由用户配置：从任务冻结的节点里按能力类型取出，
+    // 不写死 MANUAL_REVIEW 当实例码（用户改过实例码后那条记录就找不到对应节点）。
+    const reviewNode = task.value?.nodes.find((node) => nodeTypeOf(node.node_code) === manualReviewNodeType) ?? null;
+    const attemptKey = executionAttemptKey ?? operationIdempotencyKey(reviewNode?.node_code ?? manualReviewNodeType, currentTaskNo);
     executionAttemptKey = attemptKey;
-    executingNode.value = { code: "MANUAL_REVIEW", name: "人工复核" };
+    executingNode.value = { code: reviewNode?.node_code ?? "", name: reviewNode?.name ?? "人工复核" };
     replacementImpact.value = null;
     try {
       const accepted = await submitManualReviews(currentTaskNo, reviews, attemptKey, currentRevision);
@@ -1273,7 +1132,7 @@ async function submitReviews(): Promise<void> {
   });
 }
 
-/* ---- 任务资料 / 复制 / 删除 / 另存为方案 ---- */
+/* 任务资料 / 复制 / 删除。任务不能反向生成方案。 */
 const editForm = reactive({ task_name: "", remark: "" });
 const editSaving = ref(false);
 
@@ -1304,6 +1163,7 @@ async function submitEdit(): Promise<void> {
 
 const copyName = ref("");
 const copySaving = ref(false);
+let copyAttemptKey: string | null = null;
 
 function openCopy(): void {
   if (!task.value) return;
@@ -1318,41 +1178,18 @@ async function submitCopy(): Promise<void> {
   }
   copySaving.value = true;
   try {
-    const created = await copyAuditTask(task.value.task_no, copyName.value.trim());
-    ElMessage.success("已复制为新任务");
+    // 与新建任务同一口径：幂等标识在本次尝试内复用，响应丢失后重发返回原任务。
+    copyAttemptKey =
+      copyAttemptKey ?? operationIdempotencyKey("TASK_COPY", task.value.task_no, copyName.value.trim());
+    const created = await copyAuditTask(task.value.task_no, copyName.value.trim(), copyAttemptKey);
+    copyAttemptKey = null;
+    ElMessage.success("已按方案当前范围创建新任务（材料与结果重新开始，原任务报告保留）");
     copyVisible.value = false;
     await router.push({ name: "audit-task-detail", params: { taskNo: created.task_no } });
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "复制失败");
   } finally {
     copySaving.value = false;
-  }
-}
-
-const planName = ref("");
-const planSaving = ref(false);
-
-function openSaveAsPlan(): void {
-  if (!task.value) return;
-  planName.value = `${task.value.task_name} 方案`;
-  planVisible.value = true;
-}
-
-async function submitSaveAsPlan(): Promise<void> {
-  if (!task.value || !planName.value.trim()) {
-    ElMessage.warning("请填写方案名称");
-    return;
-  }
-  planSaving.value = true;
-  try {
-    const created = await saveTaskRangeAsPlan({ task_no: task.value.task_no, plan_name: planName.value.trim() });
-    ElMessage.success("已把当前任务的执行范围另存为方案（草稿）");
-    planVisible.value = false;
-    await router.push({ name: "plan-edit", params: { planCode: created.plan_code } });
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "另存为方案失败");
-  } finally {
-    planSaving.value = false;
   }
 }
 
@@ -1381,15 +1218,15 @@ const pollIntervalSeconds = OPERATION_POLL_INTERVAL_MS / 1000;
 const planText = computed(() => {
   if (!task.value) return "";
   if (task.value.is_legacy_config || !task.value.plan) return "历史任务配置（无方案关联）";
-  return `${task.value.plan.plan_name} · 第 ${task.value.plan.version_no} 版`;
+  return `${task.value.plan.plan_name} · 冻结场景第 ${task.value.plan.scenario_version_no} 版`;
 });
 
-/* ---- 任务规则快照 ---- */
+/* 任务规则快照：执行范围就是创建任务时勾选的那些规则 */
 const enabledRules = computed(() => task.value?.scope?.enabled_rules ?? []);
-const autoRules = computed(() => task.value?.scope?.auto_included_rules ?? []);
+const enabledCalculationRules = computed(() => task.value?.scope?.enabled_calculation_rules ?? []);
 const unenabledRules = computed(() => task.value?.scope?.unenabled_rules ?? []);
-const explicitRules = computed(() => enabledRules.value.filter((rule) => !autoRules.value.some((auto) => auto.rule_key === rule.rule_key)));
-const unconfiguredNodes = computed(() => task.value?.scope?.unconfigured_nodes ?? []);
+// 未配置的检查类别按**能力类型**汇总展示：拿实例码与能力类型列表比较恒为假。
+const unconfiguredNodes = computed(() => task.value?.scope?.unconfigured_node_types ?? []);
 
 /** 本任务的证据记录与操作记录：跳转到对应页面并按任务编号预筛选。 */
 function openTaskEvidence(): void {
@@ -1436,7 +1273,7 @@ watch(
                 <el-dropdown-item @click="snapshotOpen = true">任务规则快照</el-dropdown-item>
                 <el-dropdown-item v-if="task && !task.deleted" divided @click="openEdit">编辑资料</el-dropdown-item>
                 <el-dropdown-item v-if="task && !task.deleted" @click="openCopy">复制任务</el-dropdown-item>
-                <el-dropdown-item v-if="task && !task.deleted" @click="openSaveAsPlan">另存为方案</el-dropdown-item>
+
                 <el-dropdown-item v-if="task && !task.deleted" divided @click="removeTask">删除任务</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -1458,22 +1295,7 @@ watch(
         <span v-if="task.remark" class="task-meta__remark">备注：{{ task.remark }}</span>
       </div>
 
-      <!-- 3. 当前阶段 + 流程条 -->
-      <div v-if="task" class="current-stage">
-        <div class="current-stage__head">
-          <span class="current-stage__label">当前阶段</span>
-          <span class="current-stage__value">{{ currentNodeName }}</span>
-          <StatusBadge
-            v-if="task.current_node.status"
-            :status="task.current_node.status"
-            :label="nodeStatusLabel(task.current_node.status)"
-            :tone="nodeStatusTone(task.current_node.status)"
-          />
-          <span v-if="currentWorkspace" class="text-hint">业务工作区：{{ currentWorkspace.label }}</span>
-        </div>
-        <p class="text-muted current-stage__purpose">{{ nodePurpose(task.current_node.node_code) }}</p>
-      </div>
-
+      <!-- 3. 流程进度 -->
       <el-steps class="block-gap-sm" :active="currentStepIndex" align-center>
         <el-step
           v-for="node in task?.nodes ?? []"
@@ -1483,11 +1305,10 @@ watch(
           :description="stepDescription(node)"
         />
       </el-steps>
-    </div>
 
-    <template v-if="task">
-      <!-- 4. 当前待办与阻断原因；5. 唯一主操作 -->
-      <div class="app-panel">
+      <template v-if="task">
+        <!-- 4. 当前待办与阻断原因；5. 唯一主操作 -->
+        <div class="task-actions">
         <div class="app-toolbar">
           <div class="app-toolbar__left">
             <el-button
@@ -1500,30 +1321,28 @@ watch(
             >
               {{ primaryAction.label }}
             </el-button>
-            <span v-if="primaryAction.reason" class="text-danger primary-reason">{{ primaryAction.reason }}</span>
+            <span v-if="primaryAction.reason && !blockers.length" class="text-danger primary-reason">{{ primaryAction.reason }}</span>
           </div>
         </div>
 
-        <div v-if="blockers.length" class="blocker-list">
-          <el-alert
-            v-for="(blocker, index) in blockers"
-            :key="index"
-            :type="blocker.tone"
-            show-icon
-            :closable="false"
-            :title="blocker.title"
-          >
-            <div>{{ blocker.description }}</div>
-            <el-button v-if="blocker.tab" size="small" class="block-gap-sm" @click="setTab(blocker.tab)">
-              {{ blocker.tabLabel || "前往处理" }}
-            </el-button>
-          </el-alert>
-        </div>
-        <p v-else class="text-muted">当前没有需要处理的待办或阻断项。</p>
-
-        <p v-if="canEnterManualReview" class="text-hint block-gap-sm">
-          「进入人工复核」会准备本次待办：有待办时任务转为等待复核，待办为空时由服务端确认是否跳过，页面不会自行跳过。
-        </p>
+        <el-table v-if="blockers.length" :data="blockers" size="small" border class="block-gap-sm">
+          <el-table-column label="待办与阻断" min-width="240">
+            <template #default="{ row }">
+              <el-tag :type="row.tone === 'error' ? 'danger' : row.tone" size="small" effect="plain">
+                {{ row.tone === "error" ? "需处理" : row.tone === "warning" ? "注意" : "待办" }}
+              </el-tag>
+              <span class="blocker-title">{{ row.title }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="description" label="说明" min-width="280" />
+          <el-table-column label="操作" width="130">
+            <template #default="{ row }">
+              <el-button v-if="row.tab && tab !== row.tab" link type="primary" size="small" @click="setTab(row.tab)">
+                {{ row.tabLabel || "前往处理" }}
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
 
         <OperationPanel
           v-if="operation"
@@ -1537,61 +1356,36 @@ watch(
           @requery="requery()"
           @retry="retryOperation"
         />
-      </div>
-
-      <!-- 6. 关键统计 -->
-      <div class="app-panel">
-        <h3 class="app-section-title">关键统计</h3>
-        <StatGrid :items="stats" />
-
-        <el-descriptions v-if="lastExecution && executionSummaryEntries.length" :column="2" size="small" border class="block-gap">
-          <el-descriptions-item v-for="item in executionSummaryEntries" :key="item.label" :label="item.label">
-            {{ item.value }}
-          </el-descriptions-item>
-        </el-descriptions>
-
-        <!-- 技术载荷收在折叠区：结论结构化字段与范围快照读不出业务含义，不该铺满首屏 -->
-        <el-collapse v-if="executionSummaryTechnical.length" class="block-gap">
-          <el-collapse-item title="本次执行结果的技术明细" name="execution-summary">
-            <pre class="mono execution-tech">{{ JSON.stringify(Object.fromEntries(executionSummaryTechnical.map((item) => [item.key, item.value])), null, 2) }}</pre>
-          </el-collapse-item>
-        </el-collapse>
-        <p v-if="lastExecution" class="text-hint">
-          「节点执行完成」只表示这一步已经跑完，不代表本次审核通过：通过与否要看各条检查的结论与原因。
-        </p>
-      </div>
-
-      <!-- 业务工作区：直接映射到真实节点与页签 -->
-      <div class="app-panel">
-        <h3 class="app-section-title">业务工作区</h3>
-        <p class="text-hint">
-          以下工作区对应本任务真实的流程节点；点击进入对应的结果页。未配置的节点会显式记为跳过，不等于检查通过。
-        </p>
-        <div class="workspace-grid">
-          <button
-            v-for="entry in workspaceEntries"
-            :key="entry.key"
-            type="button"
-            class="workspace-card"
-            :class="{ 'workspace-card--current': entry.isCurrent }"
-            @click="openWorkspace(entry)"
-          >
-            <div class="workspace-card__title">
-              <span>{{ entry.label }}</span>
-              <StatusBadge
-                v-if="entry.nodeStatus"
-                :status="entry.nodeStatus"
-                :label="nodeStatusLabel(entry.nodeStatus)"
-                :tone="nodeStatusTone(entry.nodeStatus)"
-              />
-              <StatusBadge v-else status="PENDING" label="未开始" tone="neutral" />
-            </div>
-            <div class="workspace-card__node text-hint">节点：{{ entry.stageName }}</div>
-            <div class="workspace-card__count">{{ entry.countLabel }}</div>
-          </button>
         </div>
-      </div>
 
+        <!-- 6. 紧凑概览 -->
+        <div class="task-overview">
+        <h3 class="app-section-title">任务概览</h3>
+        <el-table :data="[task]" size="small" border>
+          <el-table-column label="材料已上传" min-width="120">
+            <template #default>{{ uploadedDocumentCount }} / {{ task.documents.length }}</template>
+          </el-table-column>
+          <el-table-column label="必传待上传" min-width="120">
+            <template #default>{{ missingRequiredMaterials.length }}</template>
+          </el-table-column>
+          <el-table-column label="字段已抽取" min-width="120">
+            <template #default>{{ fieldExtractedCount }} / {{ task.fields.length }}</template>
+          </el-table-column>
+          <el-table-column label="规则不合格" min-width="120">
+            <template #default>{{ ruleAbnormalCount }}</template>
+          </el-table-column>
+          <el-table-column label="待人工复核" min-width="120">
+            <template #default>{{ task.pending_reviews.length }}</template>
+          </el-table-column>
+          <el-table-column label="已成立风险" min-width="120">
+            <template #default>{{ risksError ? "读取失败" : risks ? risks.hit_count : riskConfigured ? "未评定" : "未配置" }}</template>
+          </el-table-column>
+        </el-table>
+        </div>
+      </template>
+    </div>
+
+    <template v-if="task">
       <!-- 7. 详细页签 -->
       <div class="app-panel">
         <el-tabs :model-value="tab" @update:model-value="setTab">
@@ -1603,25 +1397,30 @@ watch(
               </span>
             </div>
 
-            <el-row v-if="task.documents.length" :gutter="12" class="block-gap-sm">
-              <el-col v-for="document in task.documents" :key="document.document_no" :xs="24" :sm="12" :xl="8">
-                <TaskMaterialCard
-                  class="block-gap-sm"
-                  :document="document"
-                  :busy="uploadingDocumentNo === document.document_no"
-                  :disabled="pending && uploadingDocumentNo !== document.document_no"
-                  :needs-attention="currentNodeCode === 'MATERIAL_CHECK'"
-                  :replacement-impact="
-                    replacementImpact && replacementImpact.materialName === document.material_name ? replacementImpact : null
-                  "
-                  @pick="uploadMaterial($event, document)"
-                  @ocr="openOcr"
-                  @download="downloadDocument"
-                  @preview="previewDocument"
-                  @remove="removeDocument"
-                />
-              </el-col>
-            </el-row>
+            <div v-if="task.documents.length" class="material-table-scroll block-gap-sm">
+              <table class="material-table">
+                <thead>
+                  <tr><th scope="col">材料</th><th scope="col">当前文件</th><th scope="col">处理状态</th><th scope="col">上传类型</th><th scope="col">操作</th></tr>
+                </thead>
+                <tbody>
+                  <TaskMaterialRow
+                    v-for="document in task.documents"
+                    :key="document.document_no"
+                    :document="document"
+                    :busy="uploadingDocumentNo === document.document_no"
+                    :disabled="pending && uploadingDocumentNo !== document.document_no"
+                    :needs-attention="currentNodeCode === 'MATERIAL_CHECK'"
+                    :replacement-impact="
+                      replacementImpact && replacementImpact.materialName === document.material_name ? replacementImpact : null
+                    "
+                    @pick="(file, materialType) => uploadMaterial(file, document, materialType)"
+                    @download="downloadDocument"
+                    @preview="previewDocument"
+                    @remove="removeDocument"
+                  />
+                </tbody>
+              </table>
+            </div>
             <p v-else class="text-muted">该场景没有定义材料位。</p>
           </el-tab-pane>
 
@@ -1641,15 +1440,29 @@ watch(
           <el-tab-pane label="规则结果" name="rules">
             <AuditRuleResults
               :rules="task.rules"
-              :unconfigured-nodes="task.unconfigured_check_nodes"
-              :initial-node-filter="ruleNodeFilter"
+              :unconfigured-nodes="task.unconfigured_check_node_types ?? []"
+              :task-no="task.task_no"
+              :node-type-options="taskWorkspaceNodeTypes"
             />
           </el-tab-pane>
 
           <el-tab-pane name="reviews">
             <template #label>人工复核（{{ task.pending_reviews.length }}）</template>
             <template v-if="task.pending_reviews.length">
-              <p class="text-muted">系统无法自动判定的项在这里逐条给出业务结论；先提交字段事实，重算后再裁决规则。提交后由服务端恢复流程。</p>
+              <p class="text-muted">
+                系统无法自动判定的项在这里逐条给出业务结论；先提交字段事实，重算后再裁决规则。
+                页面只提交<strong>本批</strong>（{{ task.pending_reviews.length }} 项）<template v-if="queuedReviewCount">
+                  ，另有 {{ queuedReviewCount }} 项在本批之后处理</template>；提交后由服务端恢复流程。
+              </p>
+              <el-alert
+                v-if="reviewBatchStale"
+                type="warning"
+                show-icon
+                :closable="false"
+                class="block-gap-sm"
+                title="待复核集合已变化"
+                description="本批哈希与进入等待时不一致，请先「刷新」重新读取当前批次再提交；直接提交会被服务端以 409 拒绝。"
+              />
               <div class="review-layout block-gap">
                 <div class="review-list">
                   <div
@@ -1767,7 +1580,7 @@ watch(
             <AuditReportPanel
               :report="report"
               :download-url="reportDownloadUrl"
-              :running="watching && executingNode?.code === 'REPORT_OUTPUT'"
+              :running="watching && nodeTypeOf(executingNode?.code) === 'REPORT_OUTPUT'"
               :loading="reportLoading"
               :error="reportError"
             />
@@ -1865,7 +1678,7 @@ watch(
                 <div class="text-hint">只检索印章识别出的主体名称；合同正文本轮不参与检索。</div>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" :loading="retrievalLoading" @click="runRetrieval">检索印章主体</el-button>
+                <el-button type="primary" :loading="retrievalLoading" @click="runRetrieval(uploadableMaterialKeys)">检索印章主体</el-button>
               </el-form-item>
             </el-form>
 
@@ -1957,19 +1770,6 @@ watch(
       @submit="submitCorrection"
     />
 
-    <OcrReconcileDialog
-      :open="Boolean(ocrDocument)"
-      :document="ocrDocument"
-      :status="ocrStatus"
-      :status-error="ocrStatusError"
-      :loading="ocrStatusLoading"
-      :result="ocrResult"
-      :pending="ocrPending"
-      @close="closeOcr"
-      @query="requeryOcr"
-      @reconcile="submitOcrReconcile"
-    />
-
     <el-drawer v-model="executionDetailVisible" title="执行详情" size="560px">
       <el-descriptions v-if="executionDetail" :column="1" border size="small">
         <el-descriptions-item label="执行节点">{{ executionDetail.node_name }}（第 {{ executionDetail.sequence_no }} 次执行）</el-descriptions-item>
@@ -2017,39 +1817,35 @@ watch(
         type="info"
         show-icon
         :closable="false"
-        :title="`已启用规则共 ${enabledRules.length} 条：显式选择 ${explicitRules.length} 条 + 自动纳入依赖 ${autoRules.length} 条`"
+        :title="`本次任务启用 ${enabledRules.length + enabledCalculationRules.length} 条规则`"
       >
-        自动纳入的规则同样参与执行与判定；未启用规则只存在于场景版本中，本次任务不执行。
+        执行范围来自创建任务时冻结的方案配置；未启用的检查规则不参与本次审核。
       </el-alert>
 
-      <h4 class="app-section-title">已启用规则 · 显式选择（{{ explicitRules.length }} 条）</h4>
-      <el-table :data="explicitRules" size="small" border empty-text="没有显式选择的规则">
+      <h4 class="app-section-title">已启用检查规则（{{ enabledRules.length }} 条）</h4>
+      <el-table :data="enabledRules" size="small" border empty-text="没有启用规则">
         <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
         <el-table-column label="规则键" width="160" show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
         </el-table-column>
       </el-table>
 
-      <h4 class="app-section-title">自动纳入的依赖规则（{{ autoRules.length }} 条）</h4>
-      <el-table :data="autoRules" size="small" border empty-text="没有自动纳入的规则">
-        <el-table-column prop="name" label="规则名称" min-width="180" show-overflow-tooltip />
-        <el-table-column label="纳入原因" min-width="240" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span v-if="row.reason">{{ row.reason }}</span>
-            <span v-else class="text-hint">未提供原因</span>
-          </template>
+      <h4 class="app-section-title">已启用计算规则（{{ enabledCalculationRules.length }} 条）</h4>
+      <el-table :data="enabledCalculationRules" size="small" border empty-text="没有启用计算规则">
+        <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
+        <el-table-column label="规则编号" width="160" show-overflow-tooltip>
+          <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
         </el-table-column>
       </el-table>
-      <p class="text-hint">这些规则由后端按依赖或系统能力补入，任务执行时必须运行；不能单独取消。</p>
 
-      <h4 class="app-section-title">未启用规则（{{ unenabledRules.length }} 条）</h4>
+      <h4 class="app-section-title">未启用检查规则（{{ unenabledRules.length }} 条）</h4>
       <el-table :data="unenabledRules" size="small" border empty-text="没有未启用的规则">
         <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
         <el-table-column label="规则键" width="160" show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
         </el-table-column>
       </el-table>
-      <p class="text-hint">这些规则存在于场景版本中，但本任务不执行；它们不参与本次审核结论。</p>
+      <p class="text-hint">这些规则保留在任务冻结的方案配置中，本任务不执行。</p>
 
       <h4 class="app-section-title">任务技术信息</h4>
       <el-descriptions :column="1" size="small" border>
@@ -2070,7 +1866,7 @@ watch(
           <el-input v-model="editForm.remark" type="textarea" :rows="3" maxlength="4000" />
         </el-form-item>
       </el-form>
-      <p class="text-hint">执行快照不会随重命名或备注修改变化；已完成任务需要更换输入时，请复制为新任务。</p>
+      <p class="text-hint">冻结的创建时范围不会随重命名或备注修改变化；已完成任务需要更换输入时，请按方案当前范围重新创建任务。</p>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="editSaving" @click="submitEdit">保存</el-button>
@@ -2083,27 +1879,14 @@ watch(
           <el-input v-model="copyName" maxlength="255" />
         </el-form-item>
       </el-form>
-      <p class="text-hint">复制保留原任务的方案绑定与执行快照；材料与结果重新开始，原任务报告保留。</p>
+      <p class="text-hint">按所属方案的**当前范围**重新创建一个新任务；材料与结果重新开始，原任务报告保留。</p>
       <template #footer>
         <el-button @click="copyVisible = false">取消</el-button>
         <el-button type="primary" :loading="copySaving" @click="submitCopy">复制</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="planVisible" title="把当前任务范围另存为方案" width="600px" :close-on-click-modal="false">
-      <el-alert type="info" show-icon :closable="false" title="显式规则 = 本任务启用规则 − 后端自动补入的依赖">
-        另存不会修改本任务与历史结果；保存后可在方案编辑页确认范围。
-      </el-alert>
-      <el-form label-width="100px" class="block-gap-sm">
-        <el-form-item label="方案名称" required>
-          <el-input v-model="planName" maxlength="255" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="planVisible = false">取消</el-button>
-        <el-button type="primary" :loading="planSaving" @click="submitSaveAsPlan">另存为方案</el-button>
-      </template>
-    </el-dialog>
+
   </div>
 </template>
 
@@ -2121,83 +1904,50 @@ watch(
   overflow-wrap: anywhere;
 }
 
-.current-stage {
-  margin-top: 10px;
-}
-
-.current-stage__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.current-stage__label {
-  color: var(--el-text-color-secondary);
-}
-
-.current-stage__value {
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.current-stage__purpose {
-  margin: 4px 0 0;
-}
-
 .primary-reason {
   line-height: 1.6;
 }
 
-.blocker-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
+.task-actions,
+.task-overview {
+  margin-top: 16px;
 }
 
-.workspace-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
-  margin-top: 10px;
+.blocker-title {
+  margin-left: 8px;
 }
 
-.workspace-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
+.material-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.material-table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: collapse;
   text-align: left;
-  background: var(--el-fill-color-blank);
-  border: 1px solid var(--el-border-color);
-  border-radius: 4px;
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
-}
-
-.workspace-card:hover {
-  border-color: var(--el-color-primary);
-}
-
-.workspace-card--current {
-  border-color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.workspace-card__title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-}
-
-.workspace-card__count {
-  color: var(--el-text-color-regular);
   font-size: 13px;
 }
+
+.material-table th,
+.material-table :deep(td) {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  vertical-align: middle;
+}
+
+.material-table th {
+  color: var(--el-text-color-secondary);
+  font-weight: 600;
+  background: var(--el-fill-color-light);
+}
+
+.material-table th:nth-child(1) { width: 16%; }
+.material-table th:nth-child(2) { width: 20%; }
+.material-table th:nth-child(3) { width: 19%; }
+.material-table th:nth-child(4) { width: 21%; }
+.material-table th:nth-child(5) { width: 24%; }
 
 .execution-tech {
   max-height: 360px;

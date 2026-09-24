@@ -65,8 +65,6 @@ const specs = computed<Spec[]>(() => {
   if (props.targetType === "MATERIAL") {
     return [
       { key: "name", label: "材料名称", kind: "text" },
-      // 材料类别来自模板单元格的自由文本（例如「合同」「发票」），不做固定枚举猜测。
-      { key: "material_type", label: "材料类别", kind: "text" },
       { key: "required", label: "是否必传", kind: "switch" },
     ];
   }
@@ -85,7 +83,7 @@ const specs = computed<Spec[]>(() => {
       { key: "instruction", label: "抽取要求", kind: "textarea" },
     ];
   }
-  return [
+  const ruleSpecs: Spec[] = [
     { key: "name", label: "规则名称", kind: "text" },
     { key: "node", label: "所属节点", kind: "select", options: withCurrent(nodeOptions, form.value.node) },
     {
@@ -94,29 +92,30 @@ const specs = computed<Spec[]>(() => {
       kind: "select",
       options: withCurrent(ruleOperatorOptions, form.value.operator),
     },
-    {
+  ];
+  if (form.value.operator === "RISK_TRIGGER") {
+    ruleSpecs.push({
       key: "source_node",
-      label: "来源节点（风险疑点）",
+      label: "来源节点",
       kind: "select",
       options: withCurrent(riskSourceNodeOptions, form.value.source_node),
       clearable: true,
-      hint: "仅 06_风险疑点 规则使用；其它规则留空。",
-    },
-    {
-      key: "source_rule_ref",
-      label: "来源审核规则（风险疑点）",
-      kind: "select",
-      options: withCurrent(ruleRefOptions.value, form.value.source_rule_ref),
-      clearable: true,
-    },
-    {
+    }, {
+      key: "source_rule_refs",
+      label: "来源审核规则",
+      kind: "multiselect",
+      options: ruleRefOptions.value,
+      hint: "可选多条来源检查；同一业务行展开的材料分支分别显示。",
+    });
+  }
+  ruleSpecs.push({
       key: "material_refs",
       label: "适用材料",
       kind: "multiselect",
       options: materialRefOptions.value,
-      hint: "一条规则只比较左右各一个字段；多字段关系请拆成多条规则。",
-    },
-  ];
+      hint: "适用材料应覆盖本规则引用的字段。",
+  });
+  return ruleSpecs;
 });
 
 /** parameters 只提供后端对该算子支持的键，避免产生会被拒绝的参数。 */
@@ -141,6 +140,8 @@ const parameterSpecs = computed<Spec[]>(() => {
   if (operator === "DATE_COMPARE") {
     return [
       { key: "param_operator", label: "日期比较方向", kind: "select", options: withCurrent(dateCompareOperatorOptions, form.value.param_operator) },
+      { key: "param_threshold", label: "允许差值", kind: "text", hint: "留空表示严格比较；填写时单位必须为天。" },
+      { key: "param_threshold_unit", label: "差值单位", kind: "text" },
       { key: "param_requires_manual_review", label: "需人工复核", kind: "switch" },
     ];
   }
@@ -153,17 +154,27 @@ const parameterSpecs = computed<Spec[]>(() => {
         options: withCurrent(decimalCompareOperatorOptions, form.value.param_operator),
         hint: operator === "DECIMAL_SUM_COMPARE" ? "加总比较必须填写允许差值。" : undefined,
       },
-      { key: "param_threshold", label: "允许差值", kind: "number", hint: "仅在「差额不超过阈值」时需要填写。" },
+      { key: "param_threshold", label: "允许差值", kind: "text" },
+      { key: "param_threshold_unit", label: "差值单位", kind: "text" },
       { key: "param_requires_manual_review", label: "需人工复核", kind: "switch" },
     ];
   }
-  if (operator === "LLM_EXTRACT" || operator === "LLM_VALIDATE") {
+  if (operator === "DECIMAL_CN_EQUAL") {
+    return [
+      { key: "param_threshold", label: "允许差值", kind: "text", hint: "只能填写 0 或留空。" },
+      { key: "param_requires_manual_review", label: "需人工复核", kind: "switch" },
+    ];
+  }
+  if (operator === "LLM_EXTRACT") {
+    return [{ key: "param_instruction", label: "抽取要求", kind: "textarea" }];
+  }
+  if (operator === "LLM_VALIDATE") {
     return [
       { key: "param_instruction", label: "审核要求", kind: "textarea" },
       { key: "param_requires_manual_review", label: "需人工复核", kind: "switch" },
     ];
   }
-  if (operator === "FIELD_EQUAL" || operator === "FIELD_NOT_EQUAL") {
+  if (["FIELD_EQUAL", "FIELD_NOT_EQUAL", "FIELD_NOT_EMPTY", "CLAUSE_ABSENT"].includes(operator)) {
     return [{ key: "param_requires_manual_review", label: "需人工复核", kind: "switch" }];
   }
   return [];
@@ -174,7 +185,6 @@ function resetForm(): void {
   const parameters = (candidate.parameters ?? {}) as Record<string, unknown>;
   form.value = {
     name: candidate.name ?? "",
-    material_type: candidate.material_type ?? "",
     required: Boolean(candidate.required),
     value_type: candidate.value_type ?? "STRING",
     unit: candidate.unit ?? "",
@@ -183,16 +193,29 @@ function resetForm(): void {
     node: candidate.node ?? "",
     operator: candidate.operator ?? "",
     source_node: candidate.source_node ?? "",
-    source_rule_ref: candidate.source_rule_ref ?? "",
+    source_rule_refs: Array.isArray(candidate.source_rule_refs) ? [...candidate.source_rule_refs] : [],
     material_refs: Array.isArray(candidate.material_refs) ? [...(candidate.material_refs as string[])] : [],
     param_artifact_type: parameters.artifact_type ?? "",
     param_risk_level: parameters.risk_level ?? "",
     param_action: parameters.action ?? "",
     param_operator: parameters.operator ?? "",
-    param_threshold: parameters.threshold ?? null,
+    param_threshold: parameters.threshold == null ? "" : String(parameters.threshold),
+    param_threshold_unit: parameters.threshold_unit ?? "",
     param_instruction: parameters.instruction ?? "",
     param_requires_manual_review: Boolean(parameters.requires_manual_review),
   };
+}
+
+function updateSpecValue(key: string, value: unknown): void {
+  if (key === "operator" && value !== form.value.operator) {
+    for (const parameter of ["artifact_type", "risk_level", "action", "operator", "threshold", "threshold_unit", "instruction"]) {
+      form.value[`param_${parameter}`] = "";
+    }
+    form.value.param_requires_manual_review = false;
+    form.value.source_node = "";
+    form.value.source_rule_refs = [];
+  }
+  form.value[key] = value;
 }
 
 watch(
@@ -212,56 +235,38 @@ function normalize(value: unknown): unknown {
   return value;
 }
 
-/**
- * 组装后端 parameters。
- *
- * 以**候选现有的 parameters 为基础**，只覆盖本弹窗真正呈现的键；未呈现的键原样保留。
- * 此前这里从空对象开始拼：`DECIMAL_SUM_COMPARE`（加总比较）、`FIELD_NOT_EMPTY`、
- * `CLAUSE_ABSENT`、`DECIMAL_CN_EQUAL` 都不在下面的分支里，于是编辑这些规则会把
- * `operator` / `threshold` 等参数**整体清空**后再提交——一次「改个名字」的操作
- * 就能把这条规则的比较方向与允许差值抹掉，而且页面上看不出发生了什么。
- */
 function buildParameters(): Record<string, JsonValue> {
-  const operator = String(form.value.operator ?? "");
-  const parameters: Record<string, JsonValue> = {
-    ...((props.candidate?.parameters as Record<string, JsonValue>) ?? {}),
-  };
-  // 先清掉本弹窗负责的键，再由下面的分支按当前表单值重新写入；
-  // 不清掉会让「换成别的方向」后残留旧方向的阈值。
-  for (const key of ["operator", "threshold", "artifact_type", "risk_level", "action", "instruction"]) {
-    delete parameters[key];
-  }
-  const put = (key: string, value: unknown) => {
-    const normalized = normalize(value);
-    if (normalized !== null) {
-      parameters[key] = normalized as JsonValue;
+  const original = (props.candidate?.parameters ?? {}) as Record<string, JsonValue>;
+  const operatorChanged = form.value.operator !== props.candidate?.operator;
+  const parameters: Record<string, JsonValue> = operatorChanged ? {} : { ...original };
+  for (const spec of parameterSpecs.value) {
+    const key = spec.key.slice("param_".length);
+    const current = form.value[spec.key];
+    const previous = key === "threshold"
+      ? (original.threshold == null ? "" : String(original.threshold))
+      : key === "requires_manual_review"
+        ? Boolean(original.requires_manual_review)
+        : (original[key] ?? "");
+    if (!operatorChanged && equalValue(current, previous)) {
+      continue;
     }
-  };
-  if (operator === "FILE_QUALITY_CHECK") {
-    put("artifact_type", form.value.param_artifact_type);
-  } else if (operator === "RISK_TRIGGER") {
-    put("risk_level", form.value.param_risk_level);
-    put("action", form.value.param_action);
-  } else if (operator === "DATE_COMPARE") {
-    put("operator", form.value.param_operator);
-    put("threshold", form.value.param_threshold);
-  } else if (operator === "DECIMAL_COMPARE") {
-    put("operator", form.value.param_operator);
-    if (form.value.param_operator === "ABS_DIFF_LTE") {
-      put("threshold", form.value.param_threshold);
+    if (key === "requires_manual_review") {
+      if (current) {
+        parameters[key] = true;
+      } else {
+        delete parameters[key];
+      }
+    } else {
+      const value = normalize(current);
+      if (value === null) {
+        delete parameters[key];
+      } else {
+        parameters[key] = value as JsonValue;
+      }
     }
-  } else if (operator === "DECIMAL_SUM_COMPARE") {
-    // 加总比较同样需要方向与允许差值；缺 threshold 时后端会以「缺少必填参数」拒绝，
-    // 那不是静默失败，但页面本来就该把这两个键呈现出来。
-    put("operator", form.value.param_operator);
-    put("threshold", form.value.param_threshold);
-  } else if (operator === "LLM_EXTRACT" || operator === "LLM_VALIDATE") {
-    put("instruction", form.value.param_instruction);
   }
-  if (form.value.param_requires_manual_review) {
-    parameters.requires_manual_review = true;
-  } else {
-    delete parameters.requires_manual_review;
+  if (form.value.operator === "DATE_COMPARE" && !("threshold" in parameters)) {
+    delete parameters.threshold_unit;
   }
   return parameters;
 }
@@ -274,7 +279,7 @@ function submit(): void {
   const candidate = props.candidate ?? {};
   const value: Record<string, JsonValue> = {};
   if (props.targetType === "MATERIAL") {
-    for (const key of ["name", "material_type", "required"]) {
+    for (const key of ["name", "required"]) {
       if (!equalValue(form.value[key], candidate[key])) {
         value[key] = form.value[key] as JsonValue;
       }
@@ -286,10 +291,16 @@ function submit(): void {
       }
     }
   } else {
-    for (const key of ["name", "node", "operator", "source_node", "source_rule_ref"]) {
-      if (!equalValue(form.value[key], candidate[key])) {
-        value[key] = normalize(form.value[key]) as JsonValue;
+    for (const key of ["name", "node", "operator", "source_node"]) {
+      const current = normalize(form.value[key]);
+      if (!equalValue(current, candidate[key])) {
+        value[key] = current as JsonValue;
       }
+    }
+    const sourceRuleRefs = (form.value.source_rule_refs as string[]) ?? [];
+    if (!equalValue(sourceRuleRefs, candidate.source_rule_refs ?? [])) {
+      value.source_rule_refs = sourceRuleRefs;
+      value.source_rule_ref = null;
     }
     const materialRefs = (form.value.material_refs as string[]) ?? [];
     if (!equalValue(materialRefs, candidate.material_refs ?? [])) {
@@ -332,7 +343,7 @@ function submit(): void {
           :model-value="(form[spec.key] as string) ?? ''"
           :clearable="spec.clearable"
           style="width: 100%"
-          @update:model-value="form[spec.key] = $event ?? ''"
+          @update:model-value="updateSpecValue(spec.key, $event ?? '')"
         >
           <el-option v-for="option in spec.options" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>

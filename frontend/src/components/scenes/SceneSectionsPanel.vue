@@ -60,7 +60,9 @@ const form = reactive({
   section_order: null as number | null,
   content_type: "",
   result_sort: "",
-  config_status: "",
+  // 是否生效：与 Excel 的「是否生效」同一口径。业务只表达「这一行参不参与输出」，
+  // 不表达「系统配没配好」——后者是系统内部状态。
+  enabled: true,
 });
 
 const fieldOptions = computed(() =>
@@ -110,7 +112,7 @@ function openCreate(): void {
   form.section_order = null;
   form.content_type = "";
   form.result_sort = "";
-  form.config_status = "";
+  form.enabled = true;
   dialogVisible.value = true;
 }
 
@@ -126,7 +128,7 @@ function openEdit(item: DraftSectionItem): void {
   form.section_order = item.section_order ?? null;
   form.content_type = item.content_type ?? "";
   form.result_sort = item.result_sort ?? "";
-  form.config_status = item.config_status ?? "";
+  form.enabled = item.config_status !== "DISABLED";
   dialogVisible.value = true;
 }
 
@@ -150,7 +152,8 @@ async function submitForm(): Promise<void> {
       section_order: form.section_order,
       content_type: form.content_type || null,
       result_sort: form.result_sort || null,
-      config_status: form.config_status || null,
+      // 内部配置状态由「是否生效」映射：不生效 → DISABLED，生效 → CLEAR。
+      config_status: form.enabled ? "CLEAR" : "DISABLED",
     };
     if (editingItem.value) {
       await updateDraftSection(props.scenarioCode, editingItem.value.section_key, payload);
@@ -298,12 +301,9 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
               <el-option v-for="item in reportResultSortOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
           </el-form-item>
-          <el-form-item label="配置状态">
-            <el-select v-model="form.config_status" clearable style="width: 160px" placeholder="留空表示未声明">
-              <el-option value="CLEAR" label="已明确" />
-              <el-option value="PENDING" label="待确认" />
-              <el-option value="DISABLED" label="停用" />
-            </el-select>
+          <el-form-item label="是否生效">
+            <el-switch v-model="form.enabled" active-text="生效" inactive-text="不生效" />
+            <span class="text-hint" style="margin-left: 8px">不生效的章节仍然保留，只是不进入报告输出</span>
           </el-form-item>
         </el-form>
         <template #footer>

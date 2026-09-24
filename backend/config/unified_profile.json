@@ -1,0 +1,1525 @@
+{
+  "profile_version": "unified_v3",
+  "display_name": "统一规则库模板",
+  "schema_version": "unified_v3",
+  "instruction_sheet": "00_填写说明",
+  "notes": {
+    "base_excel": "本协议描述**一份 base Excel**：系统生成的唯一模板，一次下载、一次上传、一次导入都只针对它。场景（合同审查 / 财报分析）的差异体现在「选了哪些 Sheet、绑了哪些节点、填了什么内容」上，不体现在表结构上——不存在「合同版表」与「财报版表」。",
+    "sheet_fixed_name": "Sheet 名由协议固定，用户不得改名：角色由 Sheet 名直接确定，绑定步骤只用来指定「这张表绑到哪个节点实例」，不再需要猜这张表是什么。",
+    "one_node_one_sheet": "一般情况下一个节点对应一张表；计算节点对应三张（定义 / 参数 / 判定）。",
+    "code_prefix": "每张表的编号列有固定前缀（见每张表的 code_prefix）。跨表引用可填写业务名称或编号；系统按当前规则库精确匹配，名称重复或不存在时明确报错，内部始终保存编号。",
+    "field_references": "管理员可填写材料名称、字段名称和风险名称；也可填写对应编号。04/05 的字段按材料作用域解析，10_报告模板的字段可写“材料名称.字段名称”，系统导入后统一转换为稳定编号。",
+    "unbound_sheets": "未绑定的 Sheet 留空即可：不进模板校验、不进转换、不进已发布配置、不进任务执行范围。合同场景不配计算，留空 06/07/08 三张表即可。",
+    "enabled_column": "「是否生效」= 这一行参不参与审核。填「否」的行**仍然加载**（页面可见、可再启用），只是执行时跳过。它与「表留空」不是一回事：留空表示本场景不配这张表。",
+    "no_config_status": "Excel 里**没有**「配置状态」列：业务在 Excel 里不表达「系统配没配好」，只表达「这一行参不参与审核」。",
+    "blank_fields": "表头必须存在（列协议是确定的），但当前业务行不适用的字段允许留空。只有身份、引用或当前业务关系确实需要的参数缺失时才报错，系统不为空白字段补默认业务含义。",
+    "unknown_columns": "未知列、重复列、缺少必填列都在导入时明确报错，不按列位置解释含义，也不静默丢弃。",
+    "calculation": "计算规则由「06_计算定义」「07_计算参数」「08_计算判定」三张表通过 CAL- 规则编号关联，三张表须绑定同一计算节点；07/08 引用不存在的定义会报错。参数编号以 P 开头（如 P001），须能直接写进公式；条件编号以 C- 开头。公式只支持加、减、乘、除与括号；参数取值来源分为字段抽取事实、上游计算结果与常量三类。期间口径与报表口径由**来源自身**声明（字段看 03，上游结果看 06），参数表不再重复声明。系统不做单位换算、不做汇率换算，也不提供任何默认值。"
+  },
+  "node_types": [
+    {
+      "node_type": "MATERIAL_CHECK",
+      "display_name": "材料检查",
+      "depends_on_types": []
+    },
+    {
+      "node_type": "DOCUMENT_PREPARE",
+      "display_name": "文件处理",
+      "depends_on_types": [
+        "MATERIAL_CHECK"
+      ]
+    },
+    {
+      "node_type": "FIELD_EXTRACTION",
+      "display_name": "字段抽取",
+      "depends_on_types": [
+        "DOCUMENT_PREPARE"
+      ]
+    },
+    {
+      "node_type": "INTERNAL_VALIDATE",
+      "display_name": "文件内部校验",
+      "depends_on_types": [
+        "FIELD_EXTRACTION"
+      ]
+    },
+    {
+      "node_type": "CROSS_VALIDATE",
+      "display_name": "文件交叉校验",
+      "depends_on_types": [
+        "FIELD_EXTRACTION"
+      ]
+    },
+    {
+      "node_type": "CALCULATION",
+      "display_name": "计算",
+      "depends_on_types": [
+        "FIELD_EXTRACTION"
+      ]
+    },
+    {
+      "node_type": "MANUAL_REVIEW",
+      "display_name": "人工复核",
+      "depends_on_types": []
+    },
+    {
+      "node_type": "RISK_RATING",
+      "display_name": "风险评定",
+      "depends_on_types": [
+        "INTERNAL_VALIDATE",
+        "CROSS_VALIDATE",
+        "CALCULATION"
+      ]
+    },
+    {
+      "node_type": "REPORT_OUTPUT",
+      "display_name": "报告输出",
+      "depends_on_types": [
+        "RISK_RATING"
+      ]
+    }
+  ],
+  "sheets": [
+    {
+      "sheet_role": "MATERIAL_LIST",
+      "code_prefix": "MAT-",
+      "display_name": "01_材料位",
+      "aliases": [
+        "01_材料检查",
+        "材料检查",
+        "材料位"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "MATERIAL_CHECK"
+      ],
+      "columns": [
+        {
+          "key": "source_id",
+          "name": "材料编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "name",
+          "name": "材料名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "required",
+          "name": "是否必传",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "MATERIAL_QUALITY",
+      "code_prefix": "FLT-",
+      "display_name": "02_文件处理规则",
+      "aliases": [
+        "02_文件处理",
+        "文件处理",
+        "材料质量"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "DOCUMENT_PREPARE"
+      ],
+      "columns": [
+        {
+          "key": "source_id",
+          "name": "规则编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "name",
+          "name": "检查名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "material_refs",
+          "name": "适用材料",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "MATERIAL_REF_LIST"
+        },
+        {
+          "key": "check_item",
+          "name": "检查项目",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "FILE_FORMAT",
+            "FILE_SIZE",
+            "FILE_DUPLICATE",
+            "IMAGE_CLARITY",
+            "PAGE_INTEGRITY",
+            "SEAL_PARTY_A",
+            "SEAL_PARTY_B",
+            "SEAL_CROSS_PAGE"
+          ],
+          "value_labels": {
+            "FILE_FORMAT": "文件格式",
+            "FILE_SIZE": "文件大小",
+            "FILE_DUPLICATE": "文件内容",
+            "IMAGE_CLARITY": "图像清晰度方差",
+            "PAGE_INTEGRITY": "页码",
+            "SEAL_PARTY_A": "甲方签章",
+            "SEAL_PARTY_B": "乙方签章",
+            "SEAL_CROSS_PAGE": "骑缝章"
+          }
+        },
+        {
+          "key": "requirement",
+          "name": "合格要求",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "IN",
+            "LTE",
+            "NOT_DUPLICATE",
+            "GTE",
+            "CONTINUOUS_NO_MISSING",
+            "VALID_SEAL_EXISTS",
+            "COMPLETE"
+          ],
+          "value_labels": {
+            "IN": "属于",
+            "LTE": "不大于",
+            "NOT_DUPLICATE": "不重复",
+            "GTE": "不小于",
+            "CONTINUOUS_NO_MISSING": "连续且无缺页",
+            "VALID_SEAL_EXISTS": "有效签章存在",
+            "COMPLETE": "完整"
+          }
+        },
+        {
+          "key": "criterion",
+          "name": "检查口径",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "standard_value",
+          "name": "标准值",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "unit",
+          "name": "单位",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "check_level",
+          "name": "检查等级",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "最高",
+            "一级",
+            "二级",
+            "三级",
+            "高",
+            "低"
+          ],
+          "value_labels": {
+            "最高": "最高",
+            "一级": "一级",
+            "二级": "二级",
+            "三级": "三级",
+            "高": "高",
+            "低": "低",
+            "最高风险": "最高",
+            "一级风险": "一级",
+            "二级风险": "二级",
+            "三级风险": "三级"
+          }
+        },
+        {
+          "key": "risk_refs",
+          "name": "关联风险",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "RISK_REF_LIST"
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "FIELD_EXTRACTION",
+      "code_prefix": "FLD-",
+      "display_name": "03_字段",
+      "aliases": [
+        "03_字段抽取",
+        "字段抽取",
+        "字段目录"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "FIELD_EXTRACTION"
+      ],
+      "columns": [
+        {
+          "key": "source_id",
+          "name": "字段编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "material_ref",
+          "name": "所属材料",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "MATERIAL_REF"
+        },
+        {
+          "key": "name",
+          "name": "字段名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "value_type",
+          "name": "数据类型",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "STRING",
+            "DECIMAL",
+            "DECIMAL_CN",
+            "DATE",
+            "BOOLEAN",
+            "CLAUSE"
+          ],
+          "value_labels": {
+            "STRING": "文本",
+            "DECIMAL": "金额",
+            "DECIMAL_CN": "大写金额",
+            "DATE": "日期",
+            "BOOLEAN": "是否",
+            "CLAUSE": "条款"
+          }
+        },
+        {
+          "key": "unit",
+          "name": "单位",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "currency",
+          "name": "币种",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "required",
+          "name": "是否必抽",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "artifact_source",
+          "name": "产物来源",
+          "aliases": [],
+          "required": false,
+          "row_required": false,
+          "optional_column": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "SEAL"
+          ],
+          "value_labels": {
+            "SEAL": "印章识别"
+          }
+        },
+        {
+          "key": "instruction",
+          "name": "提取要求",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "period_scope",
+          "name": "期间口径",
+          "aliases": [
+            "期间",
+            "取数期间"
+          ],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "CURRENT",
+            "PRIOR",
+            "OPENING",
+            "CLOSING",
+            "AVERAGE_OPENING_CLOSING",
+            "NOT_APPLICABLE"
+          ],
+          "value_labels": {
+            "CURRENT": "本期",
+            "PRIOR": "上期",
+            "OPENING": "期初",
+            "CLOSING": "期末",
+            "AVERAGE_OPENING_CLOSING": "期初期末平均值",
+            "NOT_APPLICABLE": "不适用"
+          }
+        },
+        {
+          "key": "statement_scope",
+          "name": "报表口径",
+          "aliases": [
+            "合并口径",
+            "报表范围"
+          ],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "CONSOLIDATED",
+            "PARENT",
+            "NOT_APPLICABLE"
+          ],
+          "value_labels": {
+            "CONSOLIDATED": "合并报表",
+            "PARENT": "母公司报表",
+            "NOT_APPLICABLE": "不适用"
+          }
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "INTERNAL_VALIDATE",
+      "code_prefix": "INT-",
+      "display_name": "04_文件内部校验规则",
+      "aliases": [
+        "04_文件内部校验",
+        "文件内部校验"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "INTERNAL_VALIDATE"
+      ],
+      "columns": [
+        {
+          "key": "source_id",
+          "name": "规则编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "name",
+          "name": "检查名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "material_refs",
+          "name": "适用材料",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "MATERIAL_REF_LIST"
+        },
+        {
+          "key": "left_field_ref",
+          "name": "检查字段",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "SCOPED_FIELD_NAME"
+        },
+        {
+          "key": "operator",
+          "name": "合格要求",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "FIELD_EQUAL",
+            "DECIMAL_CN_EQUAL",
+            "DATE_LTE",
+            "DATE_GTE",
+            "DECIMAL_EQ",
+            "DECIMAL_LTE",
+            "DECIMAL_GTE",
+            "NOT_EMPTY",
+            "CLAUSE_ABSENT"
+          ],
+          "value_labels": {
+            "FIELD_EQUAL": "应一致",
+            "DECIMAL_CN_EQUAL": "大小写金额应相等",
+            "DATE_LTE": "不晚于",
+            "DATE_GTE": "不早于",
+            "DECIMAL_EQ": "等于",
+            "DECIMAL_LTE": "不大于",
+            "DECIMAL_GTE": "不小于",
+            "NOT_EMPTY": "不得为空",
+            "CLAUSE_ABSENT": "条款不应存在"
+          }
+        },
+        {
+          "key": "right_field_ref",
+          "name": "对照内容",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "SCOPED_FIELD_EXPR"
+        },
+        {
+          "key": "threshold",
+          "name": "允许差值",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "DECIMAL"
+        },
+        {
+          "key": "threshold_unit",
+          "name": "差值单位",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "check_level",
+          "name": "检查等级",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "最高",
+            "一级",
+            "二级",
+            "三级",
+            "高",
+            "低"
+          ],
+          "value_labels": {
+            "最高": "最高",
+            "一级": "一级",
+            "二级": "二级",
+            "三级": "三级",
+            "高": "高",
+            "低": "低",
+            "最高风险": "最高",
+            "一级风险": "一级",
+            "二级风险": "二级",
+            "三级风险": "三级"
+          }
+        },
+        {
+          "key": "risk_refs",
+          "name": "关联风险",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "RISK_REF_LIST"
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "CROSS_VALIDATE",
+      "code_prefix": "CRS-",
+      "display_name": "05_文件交叉校验规则",
+      "aliases": [
+        "05_文件交叉校验",
+        "文件交叉校验"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "CROSS_VALIDATE"
+      ],
+      "columns": [
+        {
+          "key": "source_id",
+          "name": "规则编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "name",
+          "name": "检查名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "material_ref",
+          "name": "材料",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "MATERIAL_REF"
+        },
+        {
+          "key": "left_field_ref",
+          "name": "检查字段",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "FIELD_REF"
+        },
+        {
+          "key": "operator",
+          "name": "合格要求",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "FIELD_EQUAL",
+            "DECIMAL_CN_EQUAL",
+            "DATE_LTE",
+            "DATE_GTE",
+            "DECIMAL_EQ",
+            "DECIMAL_LTE",
+            "DECIMAL_GTE",
+            "NOT_EMPTY",
+            "CLAUSE_ABSENT"
+          ],
+          "value_labels": {
+            "FIELD_EQUAL": "应一致",
+            "DECIMAL_CN_EQUAL": "大小写金额应相等",
+            "DATE_LTE": "不晚于",
+            "DATE_GTE": "不早于",
+            "DECIMAL_EQ": "等于",
+            "DECIMAL_LTE": "不大于",
+            "DECIMAL_GTE": "不小于",
+            "NOT_EMPTY": "不得为空",
+            "CLAUSE_ABSENT": "条款不应存在"
+          }
+        },
+        {
+          "key": "right_material_ref",
+          "name": "对照材料",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "MATERIAL_REF"
+        },
+        {
+          "key": "right_field_ref",
+          "name": "对照内容",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "FIELD_EXPR"
+        },
+        {
+          "key": "threshold",
+          "name": "允许差值",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "DECIMAL"
+        },
+        {
+          "key": "threshold_unit",
+          "name": "差值单位",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "check_level",
+          "name": "检查等级",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "最高",
+            "一级",
+            "二级",
+            "三级",
+            "高",
+            "低"
+          ],
+          "value_labels": {
+            "最高": "最高",
+            "一级": "一级",
+            "二级": "二级",
+            "三级": "三级",
+            "高": "高",
+            "低": "低",
+            "最高风险": "最高",
+            "一级风险": "一级",
+            "二级风险": "二级",
+            "三级风险": "三级"
+          }
+        },
+        {
+          "key": "risk_refs",
+          "name": "关联风险",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "RISK_REF_LIST"
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "CALC_DEFINITION",
+      "code_prefix": "CAL-",
+      "display_name": "06_计算定义",
+      "aliases": [
+        "05_经营指标计算规则库",
+        "计算定义"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "CALCULATION"
+      ],
+      "columns": [
+        {
+          "key": "rule_code",
+          "name": "规则编号",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING",
+          "aliases": [
+            "指标编号"
+          ]
+        },
+        {
+          "key": "rule_name",
+          "name": "指标名称",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "calculation_type_name",
+          "name": "指标类别",
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "RATIO",
+            "AMOUNT",
+            "GROWTH",
+            "DIFFERENCE"
+          ],
+          "value_labels": {
+            "RATIO": "比率",
+            "AMOUNT": "金额",
+            "GROWTH": "增长率",
+            "DIFFERENCE": "差额"
+          }
+        },
+        {
+          "key": "formula",
+          "name": "计算公式",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "bands_text",
+          "name": "结果区间定义",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "qualitative",
+          "name": "定性判定",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "risk_level",
+          "name": "风险等级",
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "最高",
+            "一级",
+            "二级",
+            "三级",
+            "高",
+            "低"
+          ],
+          "value_labels": {
+            "最高": "最高",
+            "一级": "一级",
+            "二级": "二级",
+            "三级": "三级",
+            "高": "高",
+            "低": "低",
+            "最高风险": "最高",
+            "一级风险": "一级",
+            "二级风险": "二级",
+            "三级风险": "三级"
+          }
+        },
+        {
+          "key": "description",
+          "name": "指标说明",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "period_scope",
+          "name": "结果期间",
+          "aliases": [
+            "期间"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "CURRENT",
+            "PRIOR",
+            "OPENING",
+            "CLOSING",
+            "AVERAGE_OPENING_CLOSING"
+          ],
+          "value_labels": {
+            "CURRENT": "本期",
+            "PRIOR": "上期",
+            "OPENING": "期初",
+            "CLOSING": "期末",
+            "AVERAGE_OPENING_CLOSING": "期初期末平均值"
+          }
+        },
+        {
+          "key": "statement_scope",
+          "name": "报表口径",
+          "aliases": [
+            "合并口径",
+            "报表范围"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "CONSOLIDATED",
+            "PARENT"
+          ],
+          "value_labels": {
+            "CONSOLIDATED": "合并报表",
+            "PARENT": "母公司报表"
+          }
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "CALC_PARAMETER",
+      "code_prefix": "P",
+      "display_name": "07_计算参数",
+      "aliases": [
+        "计算参数"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "CALCULATION"
+      ],
+      "columns": [
+        {
+          "key": "rule_code",
+          "name": "规则编号",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "parameter_code",
+          "name": "参数编号",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING",
+          "aliases": [
+            "参数编码"
+          ]
+        },
+        {
+          "key": "parameter_name",
+          "name": "参数名称",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "source_type",
+          "name": "取值来源",
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "FIELD",
+            "CALC_RESULT",
+            "CONSTANT"
+          ],
+          "value_labels": {
+            "FIELD": "字段",
+            "CALC_RESULT": "上游计算结果",
+            "CONSTANT": "常量"
+          }
+        },
+        {
+          "key": "source_code",
+          "name": "来源编号",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING",
+          "aliases": [
+            "来源编码"
+          ]
+        },
+        {
+          "key": "constant_value",
+          "name": "常量值",
+          "required": false,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "entity_scope",
+          "name": "主体范围",
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "SELF"
+          ],
+          "value_labels": {
+            "SELF": "本主体"
+          }
+        },
+        {
+          "key": "required",
+          "name": "是否必需",
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "unit",
+          "name": "单位",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "currency",
+          "name": "币种",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "CALC_JUDGEMENT",
+      "code_prefix": "C-",
+      "display_name": "08_计算判定",
+      "aliases": [
+        "计算判定"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "CALCULATION"
+      ],
+      "columns": [
+        {
+          "key": "rule_code",
+          "name": "规则编号",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "condition_code",
+          "name": "条件编号",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING",
+          "aliases": [
+            "条件编码"
+          ]
+        },
+        {
+          "key": "lower_value",
+          "name": "下界",
+          "required": false,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "lower_inclusive",
+          "name": "含下界",
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "upper_value",
+          "name": "上界",
+          "required": false,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "upper_inclusive",
+          "name": "含上界",
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "comparison_basis",
+          "name": "比较基准",
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "RESULT",
+            "ABS_RESULT"
+          ],
+          "value_labels": {
+            "RESULT": "计算结果",
+            "ABS_RESULT": "计算结果的绝对值"
+          }
+        },
+        {
+          "key": "judgement",
+          "name": "判定结论",
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "risk_level",
+          "name": "风险等级",
+          "required": false,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "最高",
+            "一级",
+            "二级",
+            "三级",
+            "高",
+            "低"
+          ],
+          "value_labels": {
+            "最高": "最高",
+            "一级": "一级",
+            "二级": "二级",
+            "三级": "三级",
+            "高": "高",
+            "低": "低",
+            "最高风险": "最高",
+            "一级风险": "一级",
+            "二级风险": "二级",
+            "三级风险": "三级"
+          }
+        },
+        {
+          "key": "action",
+          "name": "处理动作",
+          "required": false,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "RISK",
+      "code_prefix": "RSK-",
+      "display_name": "09_风险规则",
+      "aliases": [
+        "06_风险评定",
+        "风险评定",
+        "风险疑点"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "RISK_RATING"
+      ],
+      "columns": [
+        {
+          "key": "source_id",
+          "name": "风险编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "name",
+          "name": "风险名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "risk_level",
+          "name": "风险等级",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "最高",
+            "一级",
+            "二级",
+            "三级",
+            "高",
+            "低"
+          ],
+          "value_labels": {
+            "最高": "最高",
+            "一级": "一级",
+            "二级": "二级",
+            "三级": "三级",
+            "高": "高",
+            "低": "低",
+            "最高风险": "最高",
+            "一级风险": "一级",
+            "二级风险": "二级",
+            "三级风险": "三级"
+          }
+        },
+        {
+          "key": "condition",
+          "name": "成立条件",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "ANY_ABNORMAL",
+            "ALL_ABNORMAL"
+          ],
+          "value_labels": {
+            "ANY_ABNORMAL": "任一关联检查不合格",
+            "ALL_ABNORMAL": "全部关联检查不合格"
+          }
+        },
+        {
+          "key": "description",
+          "name": "风险说明",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "action",
+          "name": "人工核查建议",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    },
+    {
+      "sheet_role": "REPORT_TEMPLATE",
+      "code_prefix": "RPT-",
+      "display_name": "10_报告模板",
+      "aliases": [
+        "07_报告输出",
+        "报告输出"
+      ],
+      "header_signature": [],
+      "node_types": [
+        "REPORT_OUTPUT"
+      ],
+      "columns": [
+        {
+          "key": "report_code",
+          "name": "报告编号",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "report_name",
+          "name": "报告名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "material_refs",
+          "name": "材料范围",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "MATERIAL_REF_LIST"
+        },
+        {
+          "key": "formats",
+          "name": "输出格式",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "FORMAT_LIST"
+        },
+        {
+          "key": "section_order",
+          "name": "章节顺序",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "INTEGER"
+        },
+        {
+          "key": "section_name",
+          "name": "章节名称",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "STRING"
+        },
+        {
+          "key": "content_type",
+          "name": "内容类型",
+          "aliases": [],
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "FIELD_DETAIL",
+            "AUDIT_RESULT",
+            "FIELD_AND_RESULT",
+            "RISK_LIST",
+            "CONCLUSION"
+          ],
+          "value_labels": {
+            "FIELD_DETAIL": "字段明细",
+            "AUDIT_RESULT": "审核结果",
+            "FIELD_AND_RESULT": "字段及审核结果",
+            "RISK_LIST": "风险清单",
+            "CONCLUSION": "审核结论"
+          }
+        },
+        {
+          "key": "field_refs",
+          "name": "展示字段",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "FIELD_REF_LIST"
+        },
+        {
+          "key": "content_instruction",
+          "name": "内容要求",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        },
+        {
+          "key": "result_sort",
+          "name": "结果排序",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "RISK_LEVEL_DESC",
+            "MATERIAL_ORDER",
+            "MATERIAL_ORDER_RISK_LEVEL_DESC"
+          ],
+          "value_labels": {
+            "RISK_LEVEL_DESC": "风险等级降序",
+            "MATERIAL_ORDER": "材料顺序",
+            "MATERIAL_ORDER_RISK_LEVEL_DESC": "材料顺序；风险等级降序"
+          }
+        },
+        {
+          "key": "enabled",
+          "name": "是否生效",
+          "aliases": [
+            "生效",
+            "是否启用",
+            "启用"
+          ],
+          "required": true,
+          "row_required": true,
+          "data_type": "BOOLEAN",
+          "allowed_values": [
+            "是",
+            "否"
+          ]
+        },
+        {
+          "key": "remark",
+          "name": "备注",
+          "aliases": [],
+          "required": true,
+          "row_required": false,
+          "data_type": "STRING"
+        }
+      ]
+    }
+  ]
+}

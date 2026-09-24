@@ -6,6 +6,7 @@
  */
 
 import type { ApiResponse } from "./common";
+import type { DraftCalculationItem } from "./scenes";
 
 export interface PlanListItem {
   plan_code: string;
@@ -35,49 +36,137 @@ export interface PlanSelection extends ApiResponse {
   effective: boolean;
   sync_error: { code?: string; message?: string } | null;
   scope_hash: string | null;
+  /** 这份方案从哪一版场景复制而来。只是溯源：执行与范围都不再读它。 */
   base_scenario_version: {
     version_no: number;
     status: string;
     published_at: string;
     scenario_name: string;
   } | null;
-  selected_rule_keys: string[];
-  selected_rules: Array<{ rule_key: string; name: string; node: string | null; missing: boolean }>;
+  /** 方案自己的全部规则与启停：这就是「这个方案跑哪些规则」的唯一来源。 */
+  rules: Array<{ rule_key: string; name: string; node: string | null; enabled: boolean }>;
+  calculation_rules: Array<{ rule_code: string; name: string; enabled: boolean }>;
   materials: Array<{ material_key: string; name: string; required: boolean }>;
   field_count: number;
   updated_at: string;
-  /** 切换场景版本时被移除的旧选择（中文名），如实返回，不静默丢弃。 */
-  dropped_rule_keys: string[];
 }
 
-export interface PlanScopeRow {
-  rule_key: string;
+/** 方案的可编辑配置：材料、字段、普通规则、计算规则启停和报告章节。 */
+export interface PlanConfig extends ApiResponse {
+  plan_code: string;
+  materials: PlanMaterialItem[];
+  fields: PlanFieldItem[];
+  rules: PlanRuleItem[];
+  sections: PlanSectionItem[];
+  calculation_rules: PlanCalculationRuleItem[];
+  /** 只读：本方案会跑哪些节点（场景级执行结构，方案里不改）。 */
+  nodes: Array<{
+    node_code: string;
+    node_type: string;
+    name: string;
+    sequence_no: number;
+    depends_on: string[];
+    enabled: boolean;
+  }>;
+  /** 只读：本方案选用了哪些 Sheet。 */
+  selected_sheets: Array<{ sheet_role: string; node_code: string | null }>;
+}
+
+export interface PlanMaterialItem {
+  material_key: string;
   name: string;
-  node: string | null;
-  selection: "EXPLICIT" | "AUTO" | "UNENABLED";
-  system: boolean;
-  /** selection=AUTO 时的真实纳入原因；其余情况为空。 */
-  reason?: string | null;
+  required: boolean;
+  description: string;
+  source_ref?: string | null;
+  sort_no?: number;
 }
 
-export interface PlanScopePreview extends ApiResponse {
+export interface PlanFieldItem {
+  field_key: string;
+  material_key: string;
+  name: string;
+  value_type: string;
+  unit?: string | null;
+  currency?: string | null;
+  artifact_source?: string | null;
+  period_scope: string;
+  statement_scope: string;
+  required: boolean;
+  instruction: string;
+  source_ref?: string | null;
+  sort_no?: number;
+}
+
+export interface PlanRuleItem {
+  rule_key: string;
+  rule_code?: string | null;
+  is_system?: boolean;
+  name: string;
+  node_code: string;
+  operator_code: string;
+  enabled: boolean;
+  rule_json: Record<string, unknown>;
+  source_ref?: string | null;
+  sort_no?: number;
+}
+
+export interface PlanCalculationRuleItem extends Pick<DraftCalculationItem, "origin" | "parameter_sources" | "band_sources"> {
+  rule_code: string;
+  rule_name: string;
+  node_code: string | null;
+  enabled: boolean;
+}
+
+export interface PlanAdjustmentField {
+  label: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface PlanAdjustments extends ApiResponse {
+  plan_code: string;
+  plan_name: string;
   scenario_code: string;
-  version_no: number;
-  rows: PlanScopeRow[];
-  explicit_rule_keys: string[];
-  auto_included_rule_keys: string[];
-  unenabled_rule_keys: string[];
-  materials: Array<{ material_key: string; name: string; required: boolean; material_type: string }>;
-  field_count: number;
-  unconfigured_check_nodes: string[];
+  base_scenario_version_no: number;
+  items: Array<{
+    category: string;
+    code: string;
+    name: string;
+    change: "ADDED" | "REMOVED" | "MODIFIED";
+    fields: PlanAdjustmentField[];
+  }>;
+}
+
+export interface PlanSectionItem {
+  section_key: string;
+  title: string;
+  content_instruction: string;
+  field_keys: string[];
+  report_code?: string | null;
+  report_name?: string | null;
+  material_keys?: string[] | null;
+  formats?: string[] | null;
+  section_order?: number | null;
+  content_type?: string | null;
+  result_sort?: string | null;
+  config_status?: string | null;
+  sort_no?: number;
+}
+
+/** 整体提交方案的配置与计算规则选择。 */
+export interface PlanConfigPayload {
+  materials: PlanMaterialItem[];
+  fields: PlanFieldItem[];
+  rules: PlanRuleItem[];
+  sections: PlanSectionItem[];
+  calculation_rules: Array<Pick<PlanCalculationRuleItem, "rule_code" | "enabled">>;
 }
 
 export interface TaskPlanInfo {
   plan_code: string;
   plan_name: string;
-  version_no: number;
+  /** 任务创建时冻结的场景版本号，不是方案后来可能指向的版本。 */
   scenario_version_no: number;
-  published_at: string;
 }
 
 export interface AuditTaskRow {

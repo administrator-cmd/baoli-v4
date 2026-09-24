@@ -1,28 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { PlanListItem, PlanSelection } from "@/api/contracts";
 import {
   copyPlan,
-  createTaskFromPlan,
-  deletePlan,
   getPlan,
   listPlans,
-  planExportUrl,
   restorePlan,
   setPlanEnabled,
 } from "@/api/plans";
-import { operationIdempotencyKey } from "@/api/http";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
-import { nodeLabel } from "@/constants/labels";
 
 /**
- * 方案列表：独立持久化的审核方案（对固定场景版本的规则选择）。
- * 方案必须发布并启用后才能创建任务；旧任务范围可“另存为方案”。
+ * 方案列表：基于已发布场景版本生成、随后独立编辑的审核方案。
+ * 方案基于已发布且启用的场景版本。启用且范围已生效的方案才能创建审核任务。
  */
 const router = useRouter();
 
@@ -48,17 +43,6 @@ const sceneOptions = ref<ScenarioOption[]>([]);
 const sceneOptionsError = ref<string | null>(null);
 const selectedRows = ref<PlanListItem[]>([]);
 const editSelectedDisabled = computed(() => selectedRows.value.length !== 1);
-const deleteDisabled = computed(() => selectedRows.value.length === 0);
-
-function exportUrl(): string {
-  return planExportUrl({
-    name: filters.name || undefined,
-    scenario_code: filters.scenario_code || undefined,
-    enabled: filters.enabled === "" ? undefined : filters.enabled === "true",
-    effective: filters.effective === "" ? undefined : filters.effective === "true",
-    deleted: filters.deleted,
-  });
-}
 
 function goNew(): void {
   void router.push({ name: "plan-new" });
@@ -66,6 +50,10 @@ function goNew(): void {
 
 function goEdit(row: PlanListItem): void {
   void router.push({ name: "plan-edit", params: { planCode: row.plan_code } });
+}
+
+function goRegenerate(row: PlanListItem): void {
+  void router.push({ name: "plan-new", query: { previous: row.plan_code } });
 }
 
 async function toggleEnabled(row: PlanListItem): Promise<void> {
@@ -81,7 +69,7 @@ async function toggleEnabled(row: PlanListItem): Promise<void> {
 async function copyRow(row: PlanListItem): Promise<void> {
   let name = `${row.plan_name} 副本`;
   try {
-    const result = await ElMessageBox.prompt("复制方案会连同当前草稿的规则选择一起复制（已发布版本不复制）。", "复制方案", {
+    const result = await ElMessageBox.prompt("复制当前方案配置，仍沿用原场景版本。", "复制方案", {
       inputValue: name,
       confirmButtonText: "复制",
       cancelButtonText: "取消",
@@ -100,57 +88,6 @@ async function copyRow(row: PlanListItem): Promise<void> {
   }
 }
 
-async function deleteRow(row: PlanListItem): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `确认删除方案「${row.plan_name}」？删除为逻辑删除：已发布方案版本与使用它的任务保留，方案不再用于新建任务。`,
-      "删除方案",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  try {
-    await deletePlan(row.plan_code);
-    ElMessage.success("方案已移入已删除列表");
-    selectedRows.value = [];
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
-  }
-}
-
-async function deleteSelected(): Promise<void> {
-  const targets = selectedRows.value;
-  if (!targets.length) {
-    return;
-  }
-  const failures: string[] = [];
-  try {
-    await ElMessageBox.confirm(`确认删除选中的 ${targets.length} 个方案？删除为逻辑删除，历史版本保留。`, "批量删除方案", {
-      type: "warning",
-      confirmButtonText: "删除",
-      cancelButtonText: "取消",
-    });
-  } catch {
-    return;
-  }
-  for (const row of targets) {
-    try {
-      await deletePlan(row.plan_code);
-    } catch (failure) {
-      failures.push(`${row.plan_name}：${failure instanceof Error ? failure.message : "未知原因"}`);
-    }
-  }
-  if (failures.length) {
-    ElMessage.warning(`部分删除失败：${failures.join("；")}`);
-  } else {
-    ElMessage.success("选中的方案已移入已删除列表");
-  }
-  selectedRows.value = [];
-  await list.load();
-}
-
 async function restoreRow(row: PlanListItem): Promise<void> {
   try {
     await restorePlan(row.plan_code);
@@ -161,110 +98,41 @@ async function restoreRow(row: PlanListItem): Promise<void> {
   }
 }
 
-/* ---- 详情抽屉 ---- */
+/* 详情抽屉 */
 const detailVisible = ref(false);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 const detail = ref<PlanSelection | null>(null);
+let detailRequest = 0;
 
 async function openDetail(row: PlanListItem): Promise<void> {
+  const request = ++detailRequest;
   detailVisible.value = true;
   detailLoading.value = true;
   detailError.value = null;
   detail.value = null;
   try {
-    detail.value = await getPlan(row.plan_code);
+    const result = await getPlan(row.plan_code);
+    if (request === detailRequest) detail.value = result;
   } catch (failure) {
-    detailError.value = failure instanceof Error ? failure.message : "方案详情读取失败";
+    if (request === detailRequest) detailError.value = failure instanceof Error ? failure.message : "方案详情读取失败";
   } finally {
-    detailLoading.value = false;
+    if (request === detailRequest) detailLoading.value = false;
   }
 }
-
-/* ---- 创建任务 ---- */
-const taskDialogVisible = ref(false);
-const taskPlan = ref<PlanListItem | null>(null);
-const taskForm = reactive({ task_name: "", remark: "" });
-const taskSaving = ref(false);
-let taskAttemptKey: string | null = null;
 
 function openCreateTask(row: PlanListItem): void {
-  taskPlan.value = row;
-  taskDialogVisible.value = true;
-  // 每次打开弹窗生成新的幂等标识：失败重开时不会与上一次请求的内容冲突。
-  taskAttemptKey = null;
-  taskForm.task_name = "";
-  taskForm.remark = "";
+  void router.push({ name: "audit-tasks", query: { createPlan: row.plan_code } });
 }
 
-/**
- * 建任务前展示将被抓取的规则范围。
- *
- * 范围来自方案当前保存的配置；任务创建会把它抓成自己的快照，此后改方案不影响本任务。
- * 页面不在此处改选，避免让用户误以为可以在建任务时临时调整范围。
- */
-const createSnapshot = ref<PlanSelection | null>(null);
-const snapshotLoading = ref(false);
-const snapshotError = ref<string | null>(null);
-
-async function loadCreateSnapshot(): Promise<void> {
-  createSnapshot.value = null;
-  snapshotError.value = null;
-  if (!taskPlan.value) {
-    return;
-  }
-  snapshotLoading.value = true;
-  try {
-    createSnapshot.value = await getPlan(taskPlan.value.plan_code);
-  } catch (failure) {
-    snapshotError.value = failure instanceof Error ? failure.message : "方案范围读取失败";
-  } finally {
-    snapshotLoading.value = false;
-  }
+/** 方案详情里启用的规则。方案自己持有规则，`enabled` 就是「这条方案跑不跑它」。 */
+function planEnabledRules(detail: PlanSelection | null): Array<{ rule_key: string; name: string }> {
+  return [
+    ...(detail?.rules ?? []).filter((item) => item.enabled).map((item) => ({ rule_key: item.rule_key, name: item.name })),
+    ...(detail?.calculation_rules ?? []).filter((item) => item.enabled).map((item) => ({ rule_key: item.rule_code, name: item.name })),
+  ];
 }
-
-const snapshotRows = computed(() => {
-  const selected = new Set(createSnapshot.value?.selected_rule_keys ?? []);
-  return (createSnapshot.value?.selected_rules ?? []).map((rule) => ({
-    rule_key: rule.rule_key,
-    name: rule.name,
-    selection: selected.has(rule.rule_key) ? "EXPLICIT" : "AUTO",
-  }));
-});
-const snapshotExplicitCount = computed(() => snapshotRows.value.filter((row) => row.selection === "EXPLICIT").length);
-
-async function submitCreateTask(): Promise<void> {
-  if (!taskPlan.value) {
-    ElMessage.warning("请先选择方案");
-    return;
-  }
-  if (!taskForm.task_name.trim()) {
-    ElMessage.warning("请填写任务名称");
-    return;
-  }
-  taskSaving.value = true;
-  try {
-    // 幂等标识在本次弹窗尝试内复用：响应丢失后重发返回原任务，不重复创建。
-    taskAttemptKey = taskAttemptKey ?? operationIdempotencyKey("TASK_CREATE", taskPlan.value.plan_code, taskForm.task_name.trim());
-    const created = await createTaskFromPlan(taskPlan.value.plan_code, {
-      task_name: taskForm.task_name.trim(),
-      remark: taskForm.remark.trim() || null,
-      idempotency_key: taskAttemptKey,
-    });
-    taskAttemptKey = null;
-    taskDialogVisible.value = false;
-    if (created.reused) {
-      ElMessage.success("该请求此前已创建任务，已打开原任务");
-    } else {
-      ElMessage.success("审核任务已创建");
-    }
-    await router.push({ name: "audit-task-detail", params: { taskNo: created.task_no } });
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "创建任务失败");
-  } finally {
-    taskSaving.value = false;
-  }
-}
+const detailEnabledRules = computed(() => planEnabledRules(detail.value));
 
 onMounted(async () => {
   await loadSceneOptions();
@@ -287,7 +155,7 @@ async function loadSceneOptions(): Promise<void> {
     <PageHeader
       eyebrow="方案管理"
       title="方案列表"
-      subtitle="维护对固定场景版本的规则选择；方案发布并启用后才能创建审核任务。"
+      subtitle="基于已发布场景版本创建方案；启用且范围已生效的方案可用于创建审核任务。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -313,8 +181,6 @@ async function loadSceneOptions(): Promise<void> {
       </el-form-item>
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
-        <el-button @click="list.reset()">重置</el-button>
-        <el-button v-if="!filters.deleted" tag="a" :href="exportUrl()">导出</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
@@ -324,7 +190,6 @@ async function loadSceneOptions(): Promise<void> {
         <template v-if="!filters.deleted">
           <el-button type="primary" @click="goNew">新增</el-button>
           <el-button type="success" plain :disabled="editSelectedDisabled" @click="selectedRows[0] && goEdit(selectedRows[0])">编辑</el-button>
-          <el-button type="danger" plain :disabled="deleteDisabled" @click="deleteSelected">删除</el-button>
         </template>
       </div>
       <div class="app-toolbar__right">
@@ -366,9 +231,9 @@ async function loadSceneOptions(): Promise<void> {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="业务规则数" width="120">
+      <el-table-column label="启用规则数" width="120">
         <template #default="{ row }">
-          <span>{{ row.enabled_rule_count }}（含自动依赖）</span>
+          <span>{{ row.enabled_rule_count }}</span>
         </template>
       </el-table-column>
       <el-table-column label="启用状态" width="100">
@@ -393,7 +258,7 @@ async function loadSceneOptions(): Promise<void> {
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item @click="copyRow(row)">复制方案</el-dropdown-item>
-                  <el-dropdown-item divided @click="deleteRow(row)">删除</el-dropdown-item>
+                  <el-dropdown-item @click="goRegenerate(row)">基于当前场景重新生成</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -437,100 +302,22 @@ async function loadSceneOptions(): Promise<void> {
                 {{ detail.sync_error.message }}
               </span>
             </el-descriptions-item>
-            <el-descriptions-item label="显式选择规则">{{ detail.selected_rule_keys.length }} 条</el-descriptions-item>
+            <el-descriptions-item label="启用规则">{{ detailEnabledRules.length }} 条</el-descriptions-item>
             <el-descriptions-item label="材料位 / 字段">
               {{ detail.materials.length }} 个材料位 · {{ detail.field_count }} 个字段
             </el-descriptions-item>
             <el-descriptions-item label="说明">{{ detail.description || "—" }}</el-descriptions-item>
           </el-descriptions>
-          <h4 class="app-section-title block-gap-sm">显式选择的规则</h4>
-          <el-table :data="detail.selected_rules" border size="small" max-height="320" empty-text="尚未选择规则">
+          <h4 class="app-section-title block-gap-sm">启用的规则</h4>
+          <el-table :data="detailEnabledRules" border size="small" max-height="320" empty-text="本方案还没有启用任何规则">
             <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }">
-                <el-tag v-if="row.missing" type="danger" size="small" effect="plain" disable-transitions>已移除</el-tag>
-                <el-tag v-else type="success" size="small" effect="plain" disable-transitions>可选</el-tag>
-              </template>
+            <el-table-column label="规则键" width="200" show-overflow-tooltip>
+              <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
             </el-table-column>
           </el-table>
-          <p v-if="detail.selected_rules.some((item) => item.missing)" class="text-danger block-gap-sm">
-            有规则在当前绑定的场景版本中已不存在：编辑方案并保存草稿时会被如实移除。
-          </p>
         </template>
       </div>
     </el-drawer>
 
-    <el-dialog v-model="taskDialogVisible" title="创建审核任务" width="680px" :close-on-click-modal="false" @open="loadCreateSnapshot">
-      <el-alert type="info" show-icon :closable="false" title="任务创建时抓取方案当前的规则范围">
-        创建后任务保存自己的执行快照；之后修改方案或场景都不会改变已创建任务。
-      </el-alert>
-      <el-form label-width="100px" class="block-gap-sm">
-        <el-form-item label="方案">
-          <span>{{ taskPlan?.plan_name }}</span>
-        </el-form-item>
-        <el-form-item label="任务名称" required>
-          <el-input v-model="taskForm.task_name" maxlength="255" placeholder="例如：供应商甲 9 月合同审核" />
-        </el-form-item>
-        <el-form-item label="执行范围">
-          <div class="snapshot-block">
-            <div v-if="snapshotLoading" class="text-muted">正在读取方案的规则范围…</div>
-            <el-alert
-              v-else-if="snapshotError"
-              type="error"
-              show-icon
-              :closable="false"
-              :title="`方案范围读取失败：${snapshotError}`"
-            >
-              <el-button size="small" @click="loadCreateSnapshot">重试</el-button>
-            </el-alert>
-            <template v-else-if="createSnapshot">
-              <el-alert
-                v-if="!createSnapshot.effective"
-                type="warning"
-                show-icon
-                :closable="false"
-                title="该方案的范围尚未生效，不能创建任务"
-              >
-                {{ createSnapshot.sync_error?.message ?? "配置不完整" }}；请先在方案编辑页保存成功。
-              </el-alert>
-              <div class="text-muted">
-                显式选择 {{ snapshotExplicitCount }} 条 · 字段 {{ createSnapshot.field_count }} 个 ·
-                材料位 {{ createSnapshot.materials.length }} 个
-              </div>
-              <el-table :data="snapshotRows" size="small" border max-height="220" empty-text="该方案没有规则">
-                <el-table-column prop="name" label="规则" min-width="220" show-overflow-tooltip />
-              </el-table>
-              <div class="text-hint">
-                以上范围在创建时写入任务快照；之后修改方案或场景都不会改变本任务。
-              </div>
-            </template>
-          </div>
-        </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="taskForm.remark" type="textarea" :rows="2" maxlength="4000" placeholder="可选" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="taskDialogVisible = false">取消</el-button>
-        <el-button
-          type="primary"
-          :loading="taskSaving"
-          :disabled="!createSnapshot?.effective"
-          @click="submitCreateTask"
-        >
-          创建任务
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
-
-<style scoped>
-.snapshot-block {
-  width: 100%;
-}
-
-.snapshot-block > * + * {
-  margin-top: 8px;
-}
-</style>

@@ -86,7 +86,7 @@ function openTask(row: ReportRow): void {
   void router.push({ name: "audit-task-detail", params: { taskNo: row.task_no }, query: { tab: "report" } });
 }
 
-/* ---- 详情抽屉 ---- */
+/* 详情抽屉 */
 const detailVisible = ref(false);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
@@ -106,7 +106,7 @@ async function openDetail(row: ReportRow): Promise<void> {
   }
 }
 
-/* ---- 备注 / 归档 ---- */
+/* 备注 / 归档 */
 const remarkVisible = ref(false);
 const remarkRow = ref<ReportRow | null>(null);
 const remarkText = ref("");

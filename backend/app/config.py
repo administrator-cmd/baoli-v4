@@ -24,12 +24,11 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str | None = None
     data_dir: Path = Path("data")
-    # 该路径只用于定位 profile 目录（取它的父目录），目录内可同时存在多个格式版本。
-    rulebook_profile_path: Path = Path("backend/config/rulebook_profiles/contract_review_v3.json")
-    # Excel 格式协议版本（不是业务模板的第几版）。目录内可同时存在多个版本，
-    # 新导入默认使用该版本；上传文件的表头签名可以覆盖这个默认值，
-    # 识别不出时导入会明确报错而不是猜测。v1/v2 仍按各自格式读取，不被重新解释。
-    default_rulebook_profile_version: str = "contract_review_v3"
+    # **全系统唯一的一份模板协议**：backend/config/unified_profile.json。
+    # 它定义系统支持的全部 Sheet、每张 Sheet 的列协议，以及每张 Sheet 可以绑定的节点类型。
+    # 不再按合同审核 / 财报分析拆分，也不再按 v1-v4 拆分——双轨 Profile 已被删除。
+    # 场景用哪些 Sheet、Sheet 对应哪些节点及其流程关系，由场景配置维护（不在这里）。
+    unified_profile_path: Path = Path("backend/config/unified_profile.json")
     # 上传入口的体量上限。两者互相独立：规则库是配置表，业务材料是合同/协议扫描件，
     # 不是一回事，不能共用一个数值。
     # 只校验为正数，不设固定上界：真实运行环境里几十 MiB 的扫描件是正常的，
@@ -38,7 +37,7 @@ class Settings(BaseSettings):
     # 各自的体量上限是另一回事，本配置不构成对它们的承诺，也未经连通验证。
     max_rulebook_bytes: int = Field(default=30 * 1024 * 1024, gt=0)
     max_document_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
-    # These are contractual ceilings for every page and LLM payload, not display preferences.
+    # 它们是每次分页与 LLM 载荷的契约上限，不是展示偏好。
     workbook_preview_rows: int = Field(default=200, ge=1, le=200)
     workbook_preview_columns: int = Field(default=40, ge=1, le=40)
     workbook_cell_chars: int = Field(default=500, ge=1, le=500)
@@ -47,6 +46,10 @@ class Settings(BaseSettings):
     llm_baseurl: str | None = None
     llm_apikey: SecretStr | None = None
     llm_model_name: str | None = None
+    # 工具调用循环的轮数上限。达到上限时审核流程**显式失败**（LLM_TOOL_LOOP_LIMIT），
+    # 不把「跑到上限」当作结论，也不静默降级成普通文本解析。
+    # 0 表示不设上限，由调用方自行控制终止——上限是安全阀，不是业务默认。
+    llm_tool_max_rounds: int = Field(default=12, ge=0)
 
     service_8018_url: str | None = None
     service_8010_url: str | None = None
@@ -57,11 +60,11 @@ class Settings(BaseSettings):
     ocr_poll_interval_seconds: float = Field(default=5.0, gt=0)
     ocr_max_wait_seconds: float = Field(default=600.0, gt=0)
 
-    # This is the timeout for one HTTP request, not a whole OCR operation.
+    # 这是单次 HTTP 请求的超时，不是整轮 OCR 作业的超时。
     request_timeout_seconds: float = Field(default=300.0, gt=0)
     log_level: str = "INFO"
 
-    # --- 审核任务 RAG（本地 Embedding + 任务范围检索）--------------------------------
+    # 审核任务 RAG（本地 Embedding + 任务范围检索）
     # 本地嵌入模型目录。必须指向本机**已经存在**的模型；系统不会自动下载权重，
     # 也不会切换到远程模型或云 Embedding。留空表示未配置，需要检索的规则会明确报错。
     embedding_model_path: Path | None = None
@@ -95,7 +98,7 @@ class Settings(BaseSettings):
     def _strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
             normalized = value.strip()
-            # Keep copied .env.example placeholders from being reported as usable configuration.
+            # 照抄 .env.example 的占位文本不算已配置，否则会被报告成可用的外部服务。
             if not normalized or "<填写" in normalized:
                 return None
             return normalized
@@ -117,8 +120,9 @@ class Settings(BaseSettings):
         return root.resolve()
 
     @property
-    def resolved_rulebook_profile_path(self) -> Path:
-        path = self.rulebook_profile_path
+    def resolved_unified_profile_path(self) -> Path:
+        """统一模板协议的绝对路径。系统只读这一份，没有第二份 Profile。"""
+        path = self.unified_profile_path
         if not path.is_absolute():
             path = PROJECT_DIR / path
         return path.resolve()

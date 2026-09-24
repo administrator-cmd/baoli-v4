@@ -37,6 +37,7 @@ def list_tasks_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """审核任务分页列表（真实后端筛选与 total）。"""
     conditions = [AuditTask.deleted_at.is_not(None) if deleted else AuditTask.deleted_at.is_(None)]
     if name:
         like = f"%{name.strip()}%"
@@ -85,6 +86,8 @@ def list_tasks_page(
     ).all()
     items = []
     for task, scenario, node, plan in rows:
+        schema = task.task_schema_json if isinstance(task.task_schema_json, dict) else {}
+        frozen_plan_name = schema.get("plan_name")
         items.append(
             {
                 "task_no": task.task_no,
@@ -94,7 +97,7 @@ def list_tasks_page(
                 "scenario_name": scenario.scenario_name,
                 "scenario_version_no": scenario.version_no,
                 "plan_code": plan.plan_code if plan else None,
-                "plan_name": plan.plan_name if plan else None,
+                "plan_name": frozen_plan_name if isinstance(frozen_plan_name, str) and frozen_plan_name else None,
                 "is_legacy_config": plan is None,
                 "current_node": task.current_node,
                 "current_node_name": node.name if node else task.current_node,
@@ -108,6 +111,7 @@ def list_tasks_page(
 
 
 def list_task_options(db: Session, *, keyword: str | None, limit: int = 50) -> list[dict[str, Any]]:
+    """任务下拉选项：按名称或编号模糊匹配，最多 limit 条，不含已删除任务。"""
     conditions = [AuditTask.deleted_at.is_(None)]
     if keyword:
         like = f"%{keyword.strip()}%"
@@ -187,6 +191,7 @@ def delete_task(db: Session, task_no: str) -> AuditTask:
 
 
 def restore_task(db: Session, task_no: str) -> AuditTask:
+    """恢复已逻辑删除的任务；不在已删除列表时明确 409。"""
     task = db.scalar(
         select(AuditTask).where(AuditTask.task_no == task_no, AuditTask.deleted_at.is_not(None)).with_for_update()
     )

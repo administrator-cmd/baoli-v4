@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..database import engine, get_db
-from ..domain import capabilities
+from ..domain import capabilities, tool_catalog
 from ..errors import BusinessError
 from ..schemas import (
     CapabilityCatalogResponse,
@@ -21,6 +21,7 @@ from ..schemas import (
     SystemServiceItem,
     SystemServicesResponse,
     SystemStatusResponse,
+    ToolCatalogItem,
     UploadKindPolicy,
     UploadPolicyResponse,
 )
@@ -55,6 +56,7 @@ def _configuration_status(required: dict[str, bool]) -> ExternalServiceConfigura
 
 @router.get("/status", response_model=SystemStatusResponse)
 def system_status(request: Request) -> SystemStatusResponse:
+    """系统总体状态：数据库为本次真实探测结果，外部服务只报告配置状态与“未验证”。"""
     database_status = _database_status()
     settings = get_settings()
     return SystemStatusResponse(
@@ -116,8 +118,9 @@ def upload_policy(request: Request) -> UploadPolicyResponse:
 def material_types(request: Request) -> MaterialTypeCatalogResponse:
     """8018 支持的材料识别类型目录。
 
-    场景材料页的「材料识别类型」必须从该目录选择，不能自由输入：8018 的 doc_type 是
-    严格枚举，自由输入的值会在执行文件处理时被服务端拒绝，问题要到运行时才暴露。
+    材料上传页的文件类型下拉从这里取值，不能自由输入：8018 的 doc_type 是严格枚举，
+    自由输入的值会在服务端被直接拒绝。上传入口与材料检查节点前端交给 8018 的
+    `doc_type` 都取自这里。
 
     目录原样转发自 8018，本系统不做缓存、不内置默认清单，也不把 8018 的取值与
     业务材料名称做映射（例如不把「结算协议」认作「结算报告」）。服务未配置或不可用时
@@ -144,11 +147,19 @@ def capability_catalog(request: Request) -> CapabilityCatalogResponse:
 
     `implemented=false` 的能力仍然可以被配置，但发布前必须逐条确认，
     运行时明确返回「不可判定」：不默认通过，也不伪装成已执行。
+
+    `tools` 是同一份目录的工具视图（`domain/tool_catalog.py` 从能力目录派生）：
+    模型可调用的工具、参数 Schema、权限范围与真实错误码。只有 `implemented=true`
+    的工具才会进模型请求的 `tools`；不可调用的工具仍如实列出并写明原因，
+    页面据此不把它们显示成可执行选项。
     """
     return CapabilityCatalogResponse(
         capability_version=capabilities.CAPABILITY_VERSION,
         rule_statuses=sorted(capabilities.RULE_STATUSES),
         items=[CapabilityItem.model_validate(item) for item in capabilities.catalog_payload()],
+        tool_catalog_version=tool_catalog.TOOL_CATALOG_VERSION,
+        tool_catalog_fingerprint=tool_catalog.catalog_fingerprint(),
+        tools=[ToolCatalogItem.model_validate(item) for item in tool_catalog.catalog_payload()],
         request_id=request.state.request_id,
     )
 

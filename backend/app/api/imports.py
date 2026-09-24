@@ -10,20 +10,20 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..errors import BusinessError
 from ..schemas import (
+    ApplyImportDraftRequest,
     ImportDecisionsRequest,
     ImportJobResponse,
     ImportJobSummaryResponse,
     OperationAcceptedResponse,
     OperationRequest,
     PagedResponse,
-    PrecheckResponse,
     PublishRequest,
     ScenarioVersionResponse,
     SheetBindingsRequest,
@@ -35,7 +35,7 @@ from ..services.import_service import (
     get_import_job,
     import_job_summaries,
     import_job_view,
-    precheck_import,
+    apply_import_to_draft,
     publish_import,
     save_decisions,
     update_sheet_bindings,
@@ -63,6 +63,7 @@ def _page_params(page: int, page_size: int) -> tuple[int, int]:
 
 @router.get("", response_model=list[ImportJobSummaryResponse])
 def list_jobs(request: Request, db: Session = Depends(get_db)) -> list[ImportJobSummaryResponse]:
+    """导入作业摘要列表（完整数组，兼容旧调用）；分页列表见 GET /import-jobs/page。"""
     return [
         ImportJobSummaryResponse.model_validate({**item, "request_id": request.state.request_id})
         for item in import_job_summaries(db)
@@ -72,6 +73,7 @@ def list_jobs(request: Request, db: Session = Depends(get_db)) -> list[ImportJob
 @router.get("/page", response_model=PagedResponse)
 def list_jobs_page(
     request: Request,
+    scenario_code: str | None = None,
     filename: str | None = None,
     status: str | None = None,
     created_from: datetime | None = None,
@@ -80,9 +82,11 @@ def list_jobs_page(
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> PagedResponse:
+    """导入作业分页列表：可限定所属场景，total 与列表使用同一筛选范围。"""
     page, page_size = _page_params(page, page_size)
     result = admin_query_service.list_import_jobs_page(
         db,
+        scenario_code=scenario_code,
         filename=filename,
         status=status,
         created_from=created_from,
@@ -95,14 +99,17 @@ def list_jobs_page(
 
 @router.get("/export")
 def export_jobs(
+    scenario_code: str | None = None,
     filename: str | None = None,
     status: str | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
     db: Session = Depends(get_db),
 ):
+    """按当前筛选导出导入作业列表 CSV。"""
     result = admin_query_service.list_import_jobs_page(
         db,
+        scenario_code=scenario_code,
         filename=filename,
         status=status,
         created_from=created_from,
@@ -113,15 +120,14 @@ def export_jobs(
     rows = [
         [
             item["source_filename"],
-            item["target_name"],
-            item["target_mode"],
+            item["scenario_name"] or item["scenario_code"] or "",
             item["status"],
             item["pending_issue_count"],
             item["created_at"],
         ]
         for item in result["items"]
     ]
-    return csv_response("规则库导入列表.csv", ["文件名称", "目标场景", "新建/更新", "导入状态", "待处理数", "创建时间"], rows)
+    return csv_response("规则库导入列表.csv", ["文件名称", "所属场景", "导入状态", "待处理数", "创建时间"], rows)
 
 
 @router.delete("/{job_no}", status_code=204)
@@ -145,13 +151,25 @@ def abort_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> O
 
 
 @router.post("", response_model=ImportJobResponse, status_code=201)
-async def create_job(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)) -> ImportJobResponse:
-    job = await create_import_job(db, file)
+async def create_job(
+    request: Request,
+    file: UploadFile = File(...),
+    scenario_code: str = Form(..., min_length=2, max_length=80, pattern=r"^[A-Za-z0-9_-]+$"),
+    db: Session = Depends(get_db),
+) -> ImportJobResponse:
+    """在**指定场景**下上传规则库 Excel，读取为工作簿 IR 并返回新建作业。
+
+    `scenario_code` 必填：上传流程以场景为起点（用户先建场景、再在该场景下上传），
+    场景不由 Excel 表头推断。此时还没有规则候选，也没有绑定关系——
+    Sheet 与业务节点的对应关系由用户在绑定步骤确认。
+    """
+    job = await create_import_job(db, file, scenario_code=scenario_code)
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
 @router.get("/{job_no}", response_model=ImportJobResponse)
 def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
+    """导入作业详情：工作表、问题、候选与草稿修订号。"""
     return ImportJobResponse.model_validate({**import_job_view(db, get_import_job(db, job_no)), "request_id": request.state.request_id})
 
 
@@ -159,6 +177,7 @@ def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> Imp
 def put_sheet_bindings(job_no: str, payload: SheetBindingsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
     # 先锁再查：先取作业行锁，再检查活跃操作，最后才提交修改，消除「先查后锁」的 TOCTOU。
     # update_sheet_bindings 内部尚未接管该检查，故在此保持锁后检查；服务层补上后这里可移除。
+    """保存工作表用途与表头行绑定；与后台转换互斥（先锁作业行再检查活跃操作）。"""
     import_service._job_or_404(db, job_no, lock=True)
     assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
     job = update_sheet_bindings(db, job_no, payload)
@@ -192,6 +211,7 @@ def retry_job(
 def put_decisions(job_no: str, payload: ImportDecisionsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
     # 先锁再查：先取作业行锁，再检查活跃操作，最后才提交裁决，消除「先查后锁」的 TOCTOU。
     # save_decisions 内部尚未接管该检查，故在此保持锁后检查；服务层补上后这里可移除。
+    """提交裁决：必须一次处理全部待裁决问题，并带页面看到的草稿修订号，过期即 409。"""
     import_service._job_or_404(db, job_no, lock=True)
     assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
     job = save_decisions(db, job_no, payload)
@@ -211,14 +231,22 @@ def put_decision_draft(
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
-@router.post("/{job_no}/precheck", response_model=PrecheckResponse)
-def precheck(job_no: str, payload: PublishRequest, request: Request, db: Session = Depends(get_db)) -> PrecheckResponse:
-    _, result = precheck_import(db, job_no, payload)
-    return PrecheckResponse.model_validate({**result, "request_id": request.state.request_id})
+@router.post("/{job_no}/apply-draft", response_model=ImportJobResponse)
+def apply_draft(
+    job_no: str, payload: ApplyImportDraftRequest, request: Request, db: Session = Depends(get_db)
+) -> ImportJobResponse:
+    """把已确认的导入结果写入场景配置；完整配置自动生效。"""
+    job = apply_import_to_draft(
+        db, job_no,
+        expected_job_revision=payload.expected_job_revision,
+        expected_scene_revision=payload.expected_scene_revision,
+    )
+    return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
 @router.post("/{job_no}/publish", response_model=ScenarioVersionResponse, status_code=201)
 def publish(job_no: str, payload: PublishRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioVersionResponse:
+    """历史作业若已有场景版本则返回该版本。新的导入不能从这里发布场景。"""
     version = publish_import(db, job_no, payload)
     return ScenarioVersionResponse(
         request_id=request.state.request_id,

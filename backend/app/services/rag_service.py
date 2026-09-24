@@ -1,11 +1,11 @@
-"""印章主体检索：用待核对主体查询相似印章主体。
+"""任务内证据检索：印章主体候选与 OCR 正文候选分别建索引。
 
 范围与边界（本轮已收窄，与 docs/规则库与审核执行契约.md 一致）：
 
-- **本模块只做印章主体检索**，不实现合同全文向量检索、条款检索、通用问答，
-  也不做 LLM 主体裁决。条款语义审核仍走原有的字段事实 + LLM 校验路径。
-- 索引只对印章识别产物中的**主体名称**建向量。页码、坐标、识别置信度、条目序号、
+- 印章索引只对识别产物中的**主体名称**建向量。页码、坐标、识别置信度、条目序号、
   印章类型不进入向量文本；原始产物按既有机制完整保留，不在本模块改写。
+- OCR 正文按模型真实 token 边界分块，保留页号与原文字符区间；只供语义规则取证，
+  不作为精确计算或风险数值的权威来源。
 - 「只保留主体字段」不等于只保留第一枚印章：识别出的**不同主体都成为候选**，
   不自动合并、不按相似度择一。同一主体在多个印章条目中重复出现时，各条目分别保留。
 - 检索先按**当前任务、材料范围、当前上传版本、产物内容版本、索引版本、模型与向量维度**
@@ -69,9 +69,7 @@ PAGE_NO_ABSENT = "ABSENT"
 # 属于静默改变证据。真实主体名称远短于该上限，触发即说明输入不是主体名称。
 
 
-# ---------------------------------------------------------------------------
 # 建索引
-# ---------------------------------------------------------------------------
 
 
 def _artifact_content(artifact: StoredArtifact) -> dict[str, Any]:
@@ -187,10 +185,93 @@ def _build_seal_subject_chunks(artifact: StoredArtifact) -> list[dict[str, Any]]
     return chunks
 
 
+def _build_ocr_text_chunks(runtime: Any, artifact: StoredArtifact) -> list[dict[str, Any]]:
+    pages = _artifact_content(artifact).get("pages")
+    if not isinstance(pages, list):
+        raise BusinessError(
+            "ARTIFACT_CONTENT_INVALID",
+            "OCR 产物缺少页文本结构，无法建立正文索引",
+            status_code=500,
+            details={"artifact_no": artifact.artifact_no},
+        )
+    max_tokens = runtime.max_seq_length - runtime.special_token_count
+    chunks: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get("text"), str):
+            raise BusinessError(
+                "ARTIFACT_CONTENT_INVALID",
+                "OCR 页文本结构不符合契约，无法建立正文索引",
+                status_code=500,
+                details={"artifact_no": artifact.artifact_no},
+            )
+        page_no = page.get("page_no")
+        if isinstance(page_no, bool) or not isinstance(page_no, int) or page_no < 1:
+            raise BusinessError(
+                "ARTIFACT_CONTENT_INVALID",
+                "OCR 产物缺少有效页号，无法定位正文索引",
+                status_code=500,
+                details={"artifact_no": artifact.artifact_no},
+            )
+        page_text = page["text"]
+        if not page_text.strip():
+            continue
+        encoding = runtime.tokenize(page_text)
+        offsets = encoding.get("offset_mapping")
+        token_ids = encoding.get("input_ids")
+        if not isinstance(offsets, list) or not isinstance(token_ids, list) or len(offsets) != len(token_ids):
+            raise BusinessError(
+                "EMBEDDING_OFFSETS_MISSING",
+                "嵌入模型没有返回与 OCR 正文 token 对应的字符位置",
+                status_code=503,
+            )
+        if not offsets:
+            raise BusinessError(
+                "EMBEDDING_OFFSETS_MISSING",
+                "嵌入模型没有为非空 OCR 正文生成可定位 token",
+                status_code=503,
+            )
+        previous_end = 0
+        for offset in offsets:
+            if (
+                not isinstance(offset, (list, tuple))
+                or len(offset) != 2
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in offset)
+                or offset[0] < previous_end
+                or offset[1] <= offset[0]
+                or offset[1] > len(page_text)
+            ):
+                raise BusinessError(
+                    "EMBEDDING_OFFSETS_INVALID",
+                    "嵌入模型返回的 OCR 正文字符位置无效",
+                    status_code=503,
+                    details={"artifact_no": artifact.artifact_no, "page_no": page_no},
+                )
+            previous_end = offset[1]
+        for start_index in range(0, len(offsets), max_tokens):
+            group = offsets[start_index:start_index + max_tokens]
+            char_start = group[0][0]
+            char_end = group[-1][1]
+            chunks.append(
+                {
+                    "text": page_text[char_start:char_end],
+                    "heading_path": None,
+                    "char_start": char_start,
+                    "char_end": char_end,
+                    "page_no": page_no,
+                    "page_no_source": page.get("page_no_source") or PAGE_NO_ABSENT,
+                    "source_entry_no": None,
+                    "context_derived": False,
+                }
+            )
+    return chunks
+
+
 def _chunk_index_rows(runtime: Any, artifact: StoredArtifact) -> list[dict[str, Any]]:
-    """索引的行来源：本轮只索引印章识别产物的主体名称。"""
+    """按产物类型保留不同的检索语义与原文定位。"""
     if artifact.artifact_type == "SEAL":
         return _build_seal_subject_chunks(artifact)
+    if artifact.artifact_type == "OCR":
+        return _build_ocr_text_chunks(runtime, artifact)
     return []
 
 def _current_upload(db: Session, task: AuditTask, material_key: str) -> DocumentUpload | None:
@@ -210,8 +291,9 @@ def build_task_index(
     task: AuditTask,
     *,
     material_keys: list[str] | None = None,
+    artifact_types: tuple[str, ...] = ("SEAL",),
 ) -> dict[str, Any]:
-    """为当前任务当前上传版本的**印章识别产物**建立主体索引。
+    """为当前任务当前上传版本的所需产物建立索引。
 
     - 只处理**当前**上传版本的产物：旧上传版本的产物不进入当前索引（历史保留）；
     - 索引绑定**产物内容哈希**：同一份 PDF 重新识别后内容变化即产生新索引，
@@ -236,20 +318,19 @@ def build_task_index(
             continue
         if material_keys is not None and document.material_key not in material_keys:
             continue
-        # 本轮只索引印章识别产物：主体核对需要的是印章主体，不是合同正文。
         artifacts = db.scalars(
             select(StoredArtifact).where(
                 StoredArtifact.document_upload_id == upload.id,
                 StoredArtifact.upload_sha256 == upload.sha256,
                 StoredArtifact.status == "READY",
-                StoredArtifact.artifact_type == "SEAL",
+                StoredArtifact.artifact_type.in_(artifact_types),
             )
         ).all()
         if not artifacts:
             skipped.append(
                 {
                     "material_key": document.material_key,
-                    "reason": "当前上传文件没有可用于主体检索的印章识别产物",
+                    "reason": "当前上传文件没有所需的可检索产物",
                 }
             )
             continue
@@ -259,7 +340,7 @@ def build_task_index(
                 # 产物重建后就无法判断旧索引是否仍然适用。
                 raise BusinessError(
                     "ARTIFACT_CONTENT_HASH_MISSING",
-                    "印章识别产物缺少内容哈希，无法建立可核对的主体索引",
+                    "处理产物缺少内容哈希，无法建立可核对的证据索引",
                     status_code=500,
                     details={"artifact_no": artifact.artifact_no},
                 )
@@ -350,8 +431,8 @@ def _current_task_uploads(db: Session, task: AuditTask) -> list[tuple[TaskDocume
 def encode_texts(runtime: Any, texts: list[str]) -> list[list[Decimal]]:
     """把一段或多段文本编码成向量，并校验它们没有超过模型的实际长度。
 
-    主体名称与查询文本必须走同一个入口、用同一份 tokenizer 计数：超长时**报错**，
-    既不静默截断（截断会让不同主体更相似），也不改用字符数估算。
+    印章主体、OCR 分块与查询文本走同一个入口、用同一份 tokenizer 计数：
+    超长时**报错**，既不静默截断，也不改用字符数估算。
     返回向量的维度由 embedding 层校验，非法数值在那里直接报错。
     """
     if not texts:
@@ -361,7 +442,7 @@ def encode_texts(runtime: Any, texts: list[str]) -> list[list[Decimal]]:
         if not isinstance(text, str) or not text.strip():
             raise BusinessError("EMBEDDING_TEXT_EMPTY", "待编码文本为空，不能生成向量", status_code=500)
         token_count = len(runtime.tokenize(text).get("input_ids") or [])
-        if max_length and token_count > max_length:
+        if max_length and token_count + runtime.special_token_count > max_length:
             raise BusinessError(
                 "EMBEDDING_TEXT_TOO_LONG",
                 f"待编码文本长度为 {token_count} 个 token，超过本地模型上限 {max_length}；"
@@ -386,7 +467,7 @@ def _insert_chunks(
     index: EvidenceIndexVersion,
     rows: list[dict[str, Any]],
 ) -> int:
-    """把主体分块写入库：先校验长度，再批量嵌入，任一步失败整批不落库。"""
+    """把证据分块写入库：先校验长度，再批量嵌入，任一步失败整批不落库。"""
     prepared: list[tuple[int, dict[str, Any], str]] = []
     chunk_no = 0
     for row in rows:
@@ -446,9 +527,7 @@ def invalidate_upload_indexes(
     return int(result.rowcount or 0)
 
 
-# ---------------------------------------------------------------------------
 # 检索
-# ---------------------------------------------------------------------------
 
 
 def _scope_candidates(
@@ -458,6 +537,7 @@ def _scope_candidates(
     material_keys: list[str],
     runtime: Any,
     version_key: str,
+    artifact_type: str,
 ) -> tuple[list[EvidenceChunk], list[str], list[dict[str, str]], list[dict[str, str]]]:
     """按当前任务、材料范围、当前上传版本、产物内容、索引版本与模型过滤候选。
 
@@ -498,55 +578,57 @@ def _scope_candidates(
             EvidenceIndexVersion.model_revision == runtime.model_revision,
             EvidenceIndexVersion.embedding_dim == runtime.dimension,
             EvidenceIndexVersion.index_version == version_key,
+            EvidenceIndexVersion.artifact_type == artifact_type,
             EvidenceIndexVersion.status == INDEX_READY,
         )
     ).all()
     usable: list[EvidenceIndexVersion] = []
+    artifact_name = "印章识别" if artifact_type == "SEAL" else "OCR 正文"
     covered_uploads: set[int] = set()
     for index in indexes:
         artifact = db.get(StoredArtifact, index.artifact_id)
         if artifact is None:
-            excluded_reason = "索引对应的印章识别产物已不存在"
+            excluded_reason = f"索引对应的{artifact_name}产物已不存在"
+        elif artifact.artifact_type != artifact_type:
+            excluded_reason = "索引记录的产物类型与实际产物不一致"
         elif artifact.status != "READY":
-            excluded_reason = "印章识别产物当前不可用，索引不再适用"
+            excluded_reason = f"{artifact_name}产物当前不可用，索引不再适用"
         elif artifact.content_sha256 != index.artifact_content_sha256:
             # 产物内容已变化（例如重新识别）：旧索引不得被当作当前产物的索引。
-            excluded_reason = "印章识别产物已重新生成，索引不再适用于当前产物"
+            excluded_reason = f"{artifact_name}产物已重新生成，索引不再适用于当前产物"
         else:
             upload = next((item for item in uploads if item.id == index.document_upload_id), None)
             if upload is None or upload.sha256 != index.artifact_sha256:
                 excluded_reason = "上传版本已变化，索引不再适用于当前上传"
             else:
                 usable.append(index)
-                # chunk_count=0 的索引虽处于 READY，但没有任何可检索主体：
-                # 它不能算“已建索引”，否则该材料既不会落进“尚未识别主体”，
-                # 也不会落进“尚未建索引”，三种缺失原因全部表达不出来。
+                # 空索引没有可检索文本，不能算作已覆盖材料。
                 if index.chunk_count:
                     covered_uploads.add(index.document_upload_id)
                 continue
         excluded.append({"index_no": index.index_no, "reason": excluded_reason})
-    # 有上传但没有可用索引的材料：分别说明是还没有主体、还是尚未建索引、还是索引失效。
+    # 有上传但没有可用索引的材料：分别说明产物、索引或内容缺失。
     scoped_upload_ids = {item.id for item in uploads}
     for document, upload in _current_task_uploads(db, task):
         if upload is None or upload.id not in scoped_upload_ids or upload.id in covered_uploads:
             continue
-        seal_artifacts = db.scalars(
+        matching_artifacts = db.scalars(
             select(StoredArtifact).where(
                 StoredArtifact.document_upload_id == upload.id,
                 StoredArtifact.upload_sha256 == upload.sha256,
-                StoredArtifact.artifact_type == "SEAL",
+                StoredArtifact.artifact_type == artifact_type,
                 StoredArtifact.status == "READY",
             )
         ).all()
         empty_indexes = [item for item in usable if item.document_upload_id == upload.id and not item.chunk_count]
         if empty_indexes:
-            reason = "该材料的印章识别产物中没有识别出主体名称，索引存在但没有可检索的主体"
-        elif not seal_artifacts:
-            reason = "该材料的印章识别尚未完成，没有可检索的主体"
-        elif all(not (item.content_sha256 or "") for item in seal_artifacts):
-            reason = "印章识别产物缺少内容哈希，无法建立可核对的主体索引"
+            reason = f"该材料的{artifact_name}产物没有可检索文本"
+        elif not matching_artifacts:
+            reason = f"该材料的{artifact_name}处理尚未完成"
+        elif all(not (item.content_sha256 or "") for item in matching_artifacts):
+            reason = f"{artifact_name}产物缺少内容哈希，无法建立可核对的索引"
         else:
-            reason = "该材料尚未建立主体索引，或现有索引已失效"
+            reason = f"该材料尚未建立{artifact_name}索引，或现有索引已失效"
         uncovered.append({"material_key": document.material_key, "reason": reason})
     if not usable:
         return [], [], excluded, uncovered
@@ -572,16 +654,16 @@ def retrieve_evidence(
     rule_key: str | None = None,
     node_code: str | None = None,
     top_k: int | None = None,
+    artifact_type: str = "SEAL",
 ) -> dict[str, Any]:
-    """用待核对主体在当前任务范围内查询相似印章主体，返回候选。
+    """在当前任务与材料范围内查询同一种产物的证据候选。
 
-    只返回候选，不给出结论：相似度只用于排序，候选是否与待核对主体一致由人工确认。
-    本函数不自动“采纳”任何候选——`adopted` 只表示本次实际送入后续步骤的正文条目，
-    与人工结论是两件事，两者在记录里分开保存。
+    相似度只用于排序，不给出业务结论。OCR 候选作为 `adopted` 送入语义判断；
+    印章主体候选保留给人工选择，不自动采纳。`adopted` 不代表人工已确认。
     """
     query = query_text.strip()
     if not query:
-        raise BusinessError("RETRIEVAL_QUERY_EMPTY", "待核对主体为空，无法检索印章主体")
+        raise BusinessError("RETRIEVAL_QUERY_EMPTY", "检索文本为空，无法查询证据")
     if not material_keys:
         raise BusinessError("RETRIEVAL_SCOPE_EMPTY", "检索范围为空：必须明确本次检索覆盖哪些材料")
     settings = get_settings()
@@ -599,11 +681,13 @@ def retrieve_evidence(
         material_keys=material_keys,
         runtime=runtime,
         version_key=version_key,
+        artifact_type=artifact_type,
     )
     scope = {
         "audit_task_id": task.id,
         "task_no": task.task_no,
         "material_keys": list(material_keys),
+        "artifact_type": artifact_type,
         "index_nos": index_nos,
         "excluded_indexes": excluded,
         "uncovered_materials": uncovered,
@@ -615,13 +699,13 @@ def retrieve_evidence(
         "chunk_version": settings.embedding_chunk_version,
     }
     if not chunks:
-        # 分别表达“没有识别主体 / 尚未建索引 / 索引失效”，不合并成一句“没有索引”。
+        # 分别表达产物缺失、尚未建索引与索引失效，不把空候选解释成原文不存在。
         reasons = "；".join(
             f"{item['material_key']}：{item['reason']}" for item in uncovered
-        ) or "本次范围内没有可用的主体索引"
+        ) or "本次范围内没有可用索引"
         message = (
-            f"本次范围内没有可用的印章主体索引（{reasons}）。"
-            "这不等于合同不存在该主体，请先完成印章识别与主体索引后重试"
+            f"本次范围内没有可用的{artifact_type}证据索引（{reasons}）。"
+            "没有索引不等于原文不存在，请先完成所需产物处理与索引"
         )
         record = _save_retrieval(
             db,
@@ -662,22 +746,67 @@ def retrieve_evidence(
             query_norm,
             chunk_vector,
             chunk_norm,
-            left_label="待核对主体向量",
+            left_label="检索文本向量",
             right_label=f"索引 {chunk.index_version_id} 分块 {chunk.chunk_no} 的向量",
         )
         scored.append((score, chunk))
     scored.sort(key=lambda item: (-item[0], item[1].index_version_id, item[1].chunk_no))
-    candidates = scored[:limit]
     upload_by_id = {item.id: item for item in _all_task_uploads(db, task)}
     document_by_upload = _document_by_upload(db, task)
+    material_by_index: dict[int, str] = {}
+    for _, chunk in scored:
+        if chunk.index_version_id in material_by_index:
+            continue
+        index = db.get(EvidenceIndexVersion, chunk.index_version_id)
+        document = document_by_upload.get(index.document_upload_id) if index is not None else None
+        if document is None:
+            raise BusinessError(
+                "RETRIEVAL_INDEX_SCOPE_INVALID",
+                "检索分块无法回到本任务的材料位，不能作为证据候选",
+                status_code=500,
+                details={"index_version_id": chunk.index_version_id},
+            )
+        material_by_index[chunk.index_version_id] = document.material_key
+    # 先给每份有分块的材料保留最相关的一条，再按全局相似度补足剩余名额。
+    # 否则一份材料的多个相似片段可能挤掉另一份材料的全部候选。
+    best_by_material: dict[str, tuple[Decimal, EvidenceChunk]] = {}
+    for scored_item in scored:
+        material_key = material_by_index[scored_item[1].index_version_id]
+        best_by_material.setdefault(material_key, scored_item)
+    candidates = list(best_by_material.values())[:limit]
+    selected_ids = {chunk.id for _, chunk in candidates}
+    for scored_item in scored:
+        if len(candidates) >= limit:
+            break
+        if scored_item[1].id not in selected_ids:
+            candidates.append(scored_item)
+            selected_ids.add(scored_item[1].id)
+    candidates.sort(key=lambda item: (-item[0], item[1].index_version_id, item[1].chunk_no))
+    selected_materials = {material_by_index[chunk.index_version_id] for _, chunk in candidates}
+    uncovered_keys = {item["material_key"] for item in uncovered}
+    for material_key in dict.fromkeys(material_keys):
+        if material_key not in selected_materials and material_key not in uncovered_keys:
+            uncovered.append({
+                "material_key": material_key,
+                "reason": f"本次候选数量为 {limit}，不足以覆盖全部指定材料",
+            })
+    scope["uncovered_materials"] = uncovered
+    scope["candidate_material_keys"] = sorted(selected_materials)
     candidate_rows = [
         _candidate_row(db, chunk, score, upload_by_id, document_by_upload)
         for score, chunk in candidates
     ]
-    message = (
-        "已按当前任务与材料范围完成印章主体检索。相似度只用于候选排序，"
-        "不构成主体一致的结论；请由工作人员确认一致、不一致或证据不足。"
-    )
+    status = "PARTIAL_COVERAGE" if uncovered else "OK"
+    adopted = candidate_rows if artifact_type == "OCR" and not uncovered else []
+    if uncovered:
+        reasons = "；".join(f"{item['material_key']}：{item['reason']}" for item in uncovered)
+        message = f"本次检索未覆盖全部指定材料（{reasons}）。已有候选仅供查看，不能据此形成指定范围的结论。"
+    else:
+        message = (
+            "已按当前任务与材料范围检索 OCR 原文；候选仅供语义判断取证，相似度不构成业务结论。"
+            if artifact_type == "OCR"
+            else "已按当前任务与材料范围完成印章主体检索。相似度只用于候选排序，不构成主体一致的结论；请由工作人员确认。"
+        )
     record = _save_retrieval(
         db,
         task,
@@ -688,19 +817,19 @@ def retrieve_evidence(
         runtime=runtime,
         index_nos=index_nos,
         candidates=candidate_rows,
-        # 候选全部保留；这里不预先勾选任何一条，人工结论单独保存。
-        adopted=[],
+        # 只有范围完整时才把 OCR 候选送入语义判断；印章候选始终等待人工选择。
+        adopted=adopted,
         top_k=limit,
-        status="OK",
+        status=status,
         message=message,
         index_version=version_key,
     )
     return {
-        "status": "OK",
+        "status": status,
         "message": message,
         "retrieval_no": record.retrieval_no,
         "candidates": candidate_rows,
-        "adopted": [],
+        "adopted": adopted,
         "uncovered_materials": uncovered,
         "excluded_indexes": excluded,
     }
@@ -732,27 +861,35 @@ def _candidate_row(
     upload_by_id: dict[int, DocumentUpload],
     document_by_upload: dict[int, TaskDocument],
 ) -> dict[str, Any]:
-    """一条印章主体候选：主体名称、归属与候选身份。
-
-    主体名称就是索引文本本身（向量只由它生成）。页码只作为归属定位保留在记录里，
-    不在主体确认界面展示，也不参与相似度。
-    """
+    """一条候选及其可回到当前产物的定位信息。"""
     index = db.get(EvidenceIndexVersion, chunk.index_version_id)
     upload = upload_by_id.get(index.document_upload_id) if index else None
     document = document_by_upload.get(upload.id) if upload else None
-    return {
+    row = {
         # 候选身份：用于人工选择与提交校验，不用相似度数值做身份。
         "chunk_no": chunk.chunk_no,
         "chunk_id": chunk.id,
         "index_no": index.index_no if index else None,
         "source_entry_no": chunk.source_entry_no,
-        "subject_name": chunk.chunk_text,
         "material_key": document.material_key if document else None,
         "material_name": document.material_name if document else None,
         "upload_no": upload.upload_no if upload else None,
         "filename": upload.original_filename if upload else None,
         "similarity": format(score, "f"),
     }
+    if index is not None and index.artifact_type == "OCR":
+        row.update(
+            artifact_type="OCR",
+            text=chunk.chunk_text,
+            page_no=chunk.page_no,
+            page_no_source=chunk.page_no_source,
+            heading_path=chunk.heading_path,
+            char_start=chunk.char_start,
+            char_end=chunk.char_end,
+        )
+    else:
+        row["subject_name"] = chunk.chunk_text
+    return row
 
 
 def _save_retrieval(
@@ -842,10 +979,19 @@ def record_human_decision(
             status_code=404,
             details={"retrieval_no": retrieval_no},
         )
+    scope = record.scope_json if isinstance(record.scope_json, dict) else {}
+    if scope.get("artifact_type", "SEAL") != "SEAL":
+        raise BusinessError(
+            "RETRIEVAL_NOT_DECIDABLE",
+            "只有印章主体候选可以提交主体核对结论",
+            details={"retrieval_no": retrieval_no},
+        )
     if record.status != "OK":
         raise BusinessError(
             "RETRIEVAL_NOT_DECIDABLE",
-            "本次检索没有可用候选，不能提交主体核对结论",
+            "本次检索没有完整覆盖指定材料范围，不能提交主体核对结论"
+            if record.status == "PARTIAL_COVERAGE"
+            else "本次检索没有可用候选，不能提交主体核对结论",
             details={"retrieval_no": retrieval_no, "status": record.status},
         )
     if expected_input_revision is not None and int(expected_input_revision) != task.input_revision:
@@ -1025,9 +1171,7 @@ def retrieval_scope_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
 # 只读视图：索引状态与检索历史
-# ---------------------------------------------------------------------------
 
 
 def index_status_view(db: Session, task: AuditTask) -> dict[str, Any]:

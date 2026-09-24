@@ -10,7 +10,16 @@ import {
   getSceneDraft,
   updateDraftField,
 } from "@/api/scenes";
-import { artifactSourceLabel, artifactSourceOptions, valueTypeLabel, valueTypeOptions } from "@/constants/labels";
+import {
+  artifactSourceLabel,
+  artifactSourceOptions,
+  periodScopeLabel,
+  periodScopeOptions,
+  statementScopeLabel,
+  statementScopeOptions,
+  valueTypeLabel,
+  valueTypeOptions,
+} from "@/constants/labels";
 
 /**
  * 字段配置面板：以场景 + 版本为作用域。
@@ -74,6 +83,11 @@ const form = reactive({
   unit: "",
   currency: "",
   artifact_source: "",
+  // 取数期间与报表口径：计算参数按这两项定位字段事实。
+  // 默认「不适用」——合同场景的字段本来就没有期间与报表口径的概念；
+  // 财报场景要按实际口径改选，被计算引用的字段声明成「不适用」时发布期会明确拦下。
+  period_scope: "NOT_APPLICABLE",
+  statement_scope: "NOT_APPLICABLE",
   required: false,
   instruction: "",
   // 业务编号（Excel 的「字段编号」列）：导出规则库时写回该列，导入时必填。
@@ -115,6 +129,8 @@ function openCreate(): void {
   form.unit = "";
   form.currency = "";
   form.artifact_source = "";
+  form.period_scope = "NOT_APPLICABLE";
+  form.statement_scope = "NOT_APPLICABLE";
   form.required = false;
   form.instruction = "";
   form.source_ref = "";
@@ -129,6 +145,8 @@ function openEdit(item: DraftFieldItem): void {
   form.unit = item.unit ?? "";
   form.currency = item.currency ?? "";
   form.artifact_source = item.artifact_source ?? "";
+  form.period_scope = item.period_scope ?? "NOT_APPLICABLE";
+  form.statement_scope = item.statement_scope ?? "NOT_APPLICABLE";
   form.required = item.required;
   form.instruction = item.instruction;
   form.source_ref = item.source_ref ?? "";
@@ -154,6 +172,9 @@ async function submitForm(): Promise<void> {
       // 币种与产物来源：留空表示未声明 / 常规字段抽取，不表示“随便选一个”。
       currency: form.currency.trim() ? form.currency.trim() : null,
       artifact_source: form.artifact_source ? form.artifact_source : null,
+      // 取数期间与报表口径必须显式提交：服务端不代填默认值。
+      period_scope: form.period_scope,
+      statement_scope: form.statement_scope,
       required: form.required,
       instruction: form.instruction,
       source_ref: form.source_ref.trim() ? form.source_ref.trim() : null,
@@ -264,6 +285,12 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="币种" width="80">
           <template #default="{ row }">{{ row.currency || "—" }}</template>
         </el-table-column>
+        <el-table-column label="取数期间" width="120">
+          <template #default="{ row }">{{ periodScopeLabel(row.period_scope) }}</template>
+        </el-table-column>
+        <el-table-column label="报表口径" width="120">
+          <template #default="{ row }">{{ statementScopeLabel(row.statement_scope) }}</template>
+        </el-table-column>
         <el-table-column label="产物来源" width="110">
           <template #default="{ row }">{{ artifactSourceLabel(row.artifact_source) }}</template>
         </el-table-column>
@@ -288,9 +315,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
           </template>
         </el-table-column>
       </el-table>
-      <p class="text-hint">
-        「抽取方式」就是字段的抽取要求（后端以此描述如何从材料中取值）；字段没有独立的启用/停用状态。
-      </p>
 
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑字段' : '新增字段'" width="600px" :close-on-click-modal="false">
         <el-form label-width="100px">
@@ -316,6 +340,20 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
           </el-form-item>
           <el-form-item label="币种">
             <el-input v-model="form.currency" maxlength="40" placeholder="金额类字段建议填写（如：人民币）；不填写表示未声明，系统不默认币种" />
+          </el-form-item>
+          <el-form-item label="取数期间">
+            <el-select v-model="form.period_scope" style="width: 100%">
+              <el-option v-for="item in periodScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="报表口径">
+            <el-select v-model="form.statement_scope" style="width: 100%">
+              <el-option v-for="item in statementScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
+            </el-select>
+            <div class="text-hint">
+              合同场景的字段没有期间与报表口径，选「不适用」即可。被计算公式引用的字段不能是「不适用」，
+              发布时会明确拦下——计算参数按这两项定位字段事实。
+            </div>
           </el-form-item>
           <el-form-item label="产物来源">
             <el-select v-model="form.artifact_source" clearable style="width: 100%" placeholder="留空表示由常规字段抽取提供">

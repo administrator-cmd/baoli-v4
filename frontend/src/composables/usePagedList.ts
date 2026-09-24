@@ -30,29 +30,39 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
   const error = ref<string | null>(null);
   /** 最近一次成功响应的完整负载（含分页之外的附加字段，例如风险命中数与等级集合）。 */
   const lastResponse = ref<unknown>(null);
+  let latestRequest = 0;
 
   function persist(): void {
     listStateStore.set(options.key, { filters: { ...filters }, page: page.value, pageSize: pageSize.value });
   }
 
   async function load(): Promise<void> {
+    const request = ++latestRequest;
     loading.value = true;
     error.value = null;
     try {
       const payload = await options.fetch({ ...filters, page: page.value, page_size: pageSize.value });
+      if (request !== latestRequest) {
+        return;
+      }
       items.value = payload.items;
       total.value = payload.total;
       page.value = payload.page;
       pageSize.value = payload.page_size;
       lastResponse.value = payload;
     } catch (failure) {
+      if (request !== latestRequest) {
+        return;
+      }
       items.value = [];
       total.value = 0;
       lastResponse.value = null;
       error.value = failure instanceof Error ? failure.message : "列表读取失败";
     } finally {
-      loading.value = false;
-      persist();
+      if (request === latestRequest) {
+        loading.value = false;
+        persist();
+      }
     }
   }
 
@@ -81,6 +91,7 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
   return { filters, page, pageSize, total, items, loading, error, lastResponse, load, search, reset, setPage, setPageSize };
 }
 
+/** 清空某个列表页键下记忆的筛选与页码；再次进入该列表时按初始筛选重新开始。 */
 export function clearListState(key: string): void {
   listStateStore.delete(key);
 }

@@ -9,6 +9,7 @@ import type {
   RuleStandard,
   RuleStatusItem,
 } from "@/api/contracts";
+import { listAgentToolCalls, type AgentToolCallRow } from "@/api/audits";
 import CrossComparisonPanel from "@/components/audit/CrossComparisonPanel.vue";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import StateBlock from "@/components/StateBlock.vue";
@@ -41,9 +42,20 @@ const props = defineProps<{
   unconfiguredNodes: string[];
   /** 打开时预置的节点筛选（例如从「跨文件校验」工作区进入）。 */
   initialNodeFilter?: string | null;
+  /**
+   * 本任务真实配置的校验阶段（节点**能力类型**）。阶段下拉只列出它们——
+   * 固定列出全部阶段会让用户筛到一个本场景根本没配的阶段，然后看到空列表。
+   * 未给出时不提供阶段下拉。
+   */
+  nodeTypeOptions?: string[];
+  /**
+   * 任务编号。给出时，Agent 规则详情会按 `task_no + evaluation_id` 读取**真实账本**，
+   * 而不是只展示 `result_json.tool_calls` 摘要——摘要是投影，账本才是取证过程的事实来源。
+   */
+  taskNo?: string | null;
 }>();
 
-/* ---- 结果负载读取：全部来自服务端 result_json，不做前端推断 ---- */
+/* 结果负载读取：全部来自服务端 result_json，不做前端推断 */
 
 function payloadOf(rule: AuditRule): Record<string, JsonValue> {
   return rule.result && typeof rule.result === "object" ? rule.result : {};
@@ -341,7 +353,7 @@ function formatInputValue(item: RuleInputSnapshot): string {
   return formatBusinessValue(shown);
 }
 
-/* ---- 筛选 ---- */
+/* 筛选 */
 
 const search = ref("");
 const statusFilter = ref("ALL");
@@ -482,12 +494,15 @@ function clearFilters(): void {
   nodeFilter.value = null;
 }
 
-/* ---- 详情抽屉 ---- */
+/* 详情抽屉 */
 
 const detailRule = ref<AuditRule | null>(null);
 
 function openDetail(rule: AuditRule): void {
   detailRule.value = rule;
+  // Agent 规则按 task_no + evaluation_id 读真实账本；非 Agent 规则没有 evaluation_id，
+  // loadLedger 直接返回，页面继续用 result_json 里已有的内容。
+  void loadLedger(payloadOf(rule).evaluation_id as string | null | undefined);
 }
 
 function closeDetail(): void {
@@ -510,6 +525,10 @@ const detailStandardText = computed(() => (detailRule.value ? standardText(detai
 const detailStandardDetail = computed(() => (detailRule.value ? standardDetail(detailRule.value) : ""));
 const detailComparison = computed(() => (detailRule.value ? comparisonOf(detailRule.value) : null));
 const detailEvidenceNumbers = computed(() => (detailRule.value ? evidenceNumbers(detailRule.value) : []));
+const detailEvidenceQuotes = computed(() => {
+  const quotes = detailPayload.value.evidence_quotes;
+  return Array.isArray(quotes) ? quotes.filter((quote): quote is string => typeof quote === "string") : [];
+});
 const detailIsReviewed = computed(() => (detailRule.value ? manuallyReviewed(detailRule.value) : false));
 const detailTypeNotice = computed(() => (detailRule.value ? materialTypeNotice(detailRule.value) : null));
 const detailRetrievalCandidates = computed<JsonValue[]>(() => {
@@ -520,6 +539,122 @@ const detailRetrievalCandidates = computed<JsonValue[]>(() => {
   const candidates = (retrieval as Record<string, JsonValue>).candidates;
   return Array.isArray(candidates) ? candidates : [];
 });
+const detailHasOcrCandidates = computed(() => detailRetrievalCandidates.value.some((item) =>
+  item !== null && typeof item === "object" && !Array.isArray(item)
+  && (item as Record<string, JsonValue>).artifact_type === "OCR",
+));
+
+/**
+ * `result_json.tool_calls` 的摘要：工具名、状态、确定性比较结果与说明。
+ *
+ * 它是**投影**，用于列表与离线展示；页面只读它，不重新计算比较过程——
+ * 重新算一遍等于让页面与后端各说一套。
+ */
+const summaryToolCalls = computed<Record<string, JsonValue>[]>(() => {
+  const value = detailPayload.value.tool_calls;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+});
+
+/**
+ * 真实账本：按 `task_no + evaluation_id` 从只读接口读取。
+ *
+ * 摘要与账本的关系是「投影 vs 事实来源」：账本带冻结的目录/策略身份、快照身份、
+ * 参数原文、原始结果与错误、起止时间，摘要没有这些。给出 taskNo 时优先展示账本，
+ * 读不到时如实说明并回落到摘要——不把摘要冒充成完整账本。
+ */
+const ledgerCalls = ref<AgentToolCallRow[]>([]);
+const ledgerError = ref<string | null>(null);
+const ledgerLoading = ref(false);
+
+async function loadLedger(evaluationId: string | null | undefined): Promise<void> {
+  ledgerCalls.value = [];
+  ledgerError.value = null;
+  if (!props.taskNo || !evaluationId) {
+    return;
+  }
+  ledgerLoading.value = true;
+  try {
+    const payload = await listAgentToolCalls(props.taskNo, evaluationId);
+    ledgerCalls.value = payload.items;
+  } catch (error) {
+    ledgerError.value = error instanceof Error ? error.message : "工具账本读取失败";
+  } finally {
+    ledgerLoading.value = false;
+  }
+}
+
+/** 详情抽屉展示的工具调用：账本优先，没有账本时回落到摘要。 */
+const detailToolCalls = computed<Record<string, JsonValue>[]>(() =>
+  ledgerCalls.value.length
+    ? ledgerCalls.value.map((item) => item as unknown as Record<string, JsonValue>)
+    : summaryToolCalls.value,
+);
+
+/** 本次评估的账本是否已按 evaluation_id 读取（用于区分「没有调用」与「没读账本」）。 */
+const ledgerAvailable = computed(() => Boolean(props.taskNo && detailPayload.value.evaluation_id));
+
+/** 未解决事项：结论转人工或阻断的真实原因。 */
+const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
+  const value = detailPayload.value.unresolved_items;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+});
+
+function asRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, JsonValue>) : null;
+}
+
+/** 一次工具调用的「实际比较」文案：优先算式，其次比较双方，最后逐份材料分布。 */
+function toolComparisonText(row: Record<string, JsonValue>): string {
+  // 账本行把结果放在 `result` 里；摘要行把字段摊平在同一层。两者都读，
+  // 取到哪一份取决于上面用的是账本还是摘要。
+  const result = asRecord(row.result) ?? row;
+  const comparison = asRecord(result.comparison);
+  if (comparison?.expression) {
+    return String(comparison.expression);
+  }
+  if (comparison) {
+    const left = comparison.left_value ?? comparison.left_label ?? "—";
+    const right = comparison.right_value ?? comparison.right_label ?? "—";
+    return `${String(left)} → ${String(right)}`;
+  }
+  if (result.expression) {
+    return String(result.expression);
+  }
+  if (result.sum_value !== undefined && result.sum_value !== null) {
+    return `加总结果：${formatBusinessValue(result.sum_value)}`;
+  }
+  const perMaterial = Array.isArray(result.per_material) ? result.per_material : [];
+  if (perMaterial.length) {
+    return perMaterial
+      .map((item) => {
+        const entry = asRecord(item);
+        return entry ? `${String(entry.material_name ?? entry.material_key ?? "材料")}：${String(entry.status ?? "—")}` : "";
+      })
+      .filter(Boolean)
+      .join("；");
+  }
+  if (result.applicability !== undefined) {
+    const applicability = asRecord(result.applicability);
+    return applicability?.label ? `适用条件：${String(applicability.label)}` : "适用条件已记录";
+  }
+  return "该工具没有返回可比对的结果（见下方说明）";
+}
+
+function toolMessage(row: Record<string, JsonValue>): string {
+  const result = asRecord(row.result) ?? row;
+  if (result.message) {
+    return String(result.message);
+  }
+  // 账本里失败调用只有 error 字段：原样展示错误码与原因，不显示成成功。
+  const error = asRecord(row.error);
+  return error ? `${String(error.code ?? "执行失败")}：${String(error.message ?? "")}` : "";
+}
 </script>
 
 <template>
@@ -550,12 +685,12 @@ const detailRetrievalCandidates = computed<JsonValue[]>(() => {
         aria-label="按校验阶段筛选"
         class="rule-node-filter"
       >
-        <el-option value="INTERNAL_VALIDATE" :label="nodeLabel('INTERNAL_VALIDATE')" />
-        <el-option value="CROSS_VALIDATE" :label="nodeLabel('CROSS_VALIDATE')" />
-        <el-option value="MATERIAL_CHECK" :label="nodeLabel('MATERIAL_CHECK')" />
-        <el-option value="DOCUMENT_PREPARE" :label="nodeLabel('DOCUMENT_PREPARE')" />
-        <el-option value="FIELD_EXTRACTION" :label="nodeLabel('FIELD_EXTRACTION')" />
-        <el-option value="RISK_RATING" :label="nodeLabel('RISK_RATING')" />
+        <el-option
+          v-for="nodeType in props.nodeTypeOptions ?? []"
+          :key="nodeType"
+          :value="nodeType"
+          :label="nodeLabel(nodeType)"
+        />
       </el-select>
     </div>
 
@@ -747,9 +882,66 @@ const detailRetrievalCandidates = computed<JsonValue[]>(() => {
       </div>
       <div v-if="detailReason" class="text-muted detail-block">无法判断的具体原因：{{ detailReason }}</div>
 
+      <!-- 4b. 模型取证过程：这条结论是 Agent 路径得出时，列出它调用的工具与真实返回。
+           有 task_no + evaluation_id 时读**真实账本**；读不到时如实说明并回落到
+           `result_json.tool_calls` 摘要——不把摘要冒充成完整账本。 -->
+      <template v-if="detailToolCalls.length || ledgerLoading || ledgerError">
+        <h4 class="app-section-title">模型取证过程</h4>
+        <p class="text-hint">
+          以下为本次评估实际执行的工具调用与它们的确定性返回；模型结论必须与这些结果一致，冲突时系统不采信模型结论。
+        </p>
+        <p v-if="ledgerCalls.length" class="text-hint">
+          数据来源：工具调用账本（含冻结的工具目录与策略身份、事实快照身份、参数原文与错误）。
+        </p>
+        <el-alert
+          v-else-if="ledgerError"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="block-gap-sm"
+          :title="`工具账本读取失败，以下为规则结果中的摘要：${ledgerError}`"
+        />
+        <el-alert
+          v-else-if="!ledgerLoading && ledgerAvailable && !summaryToolCalls.length"
+          type="info"
+          show-icon
+          :closable="false"
+          class="block-gap-sm"
+          title="本次评估在账本里没有工具调用记录"
+        />
+        <el-table :data="detailToolCalls" size="small" border v-loading="ledgerLoading" empty-text="本次评估没有工具调用记录">
+          <el-table-column label="工具" min-width="160">
+            <template #default="{ row }">
+              <span class="cell-strong">{{ row.tool_name }}</span>
+              <div class="table-note mono">{{ row.tool_call_id }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="130">
+            <template #default="{ row }">
+              <StatusBadge v-if="row.status" :status="String(row.status)" />
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="实际比较 / 返回结果" min-width="320">
+            <template #default="{ row }">
+              <div>{{ toolComparisonText(row) }}</div>
+              <div v-if="toolMessage(row)" class="table-note">{{ toolMessage(row) }}</div>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="detailUnresolvedItems.length" class="detail-block">
+          <div class="text-muted">未解决事项（结论据此转人工或阻断，不会默认通过）：</div>
+          <ul class="constraint-list">
+            <li v-for="(item, index) in detailUnresolvedItems" :key="index">
+              {{ item.kind || "未说明类型" }}：{{ item.message || "未说明原因" }}
+            </li>
+          </ul>
+        </div>
+      </template>
+
       <!-- 5. 原文依据 -->
       <h4 class="app-section-title">原文依据</h4>
-      <div v-if="!(detailRule.evidence ?? []).length" class="text-muted detail-block">
+      <div v-if="!(detailRule.evidence ?? []).length && !detailEvidenceQuotes.length" class="text-muted detail-block">
         本条结果未保存原文片段，请结合上方取值内容与判定说明核对。
       </div>
       <div v-for="source in detailRule.evidence ?? []" :key="source.evidence_no" class="rule-source">
@@ -758,6 +950,10 @@ const detailRetrievalCandidates = computed<JsonValue[]>(() => {
           <template v-if="source.filename"> · {{ source.filename }}</template>
         </div>
         <blockquote class="rule-quote">{{ source.quote_text || "本条依据没有记录原文文字" }}</blockquote>
+      </div>
+      <div v-if="detailEvidenceQuotes.length" class="detail-block text-muted">语义判断引用的 OCR 原文：</div>
+      <div v-for="(quote, index) in detailEvidenceQuotes" :key="index" class="rule-source">
+        <blockquote class="rule-quote">{{ quote }}</blockquote>
       </div>
 
       <!-- 6. 人工复核 -->
@@ -776,7 +972,7 @@ const detailRetrievalCandidates = computed<JsonValue[]>(() => {
           <div class="text-muted">适用条件：{{ applicabilityText(detailRule) }}</div>
           <div class="text-muted">判定方式：{{ routeText(detailRule) }}</div>
           <div class="text-muted">
-            本条结果的取值是否保存了原文片段：{{ (detailRule.evidence ?? []).length ? `已保存 ${(detailRule.evidence ?? []).length} 段原文` : "未保存原文片段" }}
+            字段取值原文：{{ (detailRule.evidence ?? []).length ? `已保存 ${(detailRule.evidence ?? []).length} 段` : "未保存" }}；语义判断引文：{{ detailEvidenceQuotes.length }} 段
           </div>
           <div class="text-muted">
             判定能力：
@@ -798,8 +994,10 @@ const detailRetrievalCandidates = computed<JsonValue[]>(() => {
           <div v-if="detailRetrievalCandidates.length">
             <div class="text-muted">检索范围与候选（相似度仅用于排序，不构成结论）：</div>
             <el-table :data="detailRetrievalCandidates" size="small" border>
-              <el-table-column prop="subject_name" label="识别到的印章主体" min-width="160" show-overflow-tooltip />
+              <el-table-column v-if="detailHasOcrCandidates" prop="text" label="检索到的原文" min-width="280" show-overflow-tooltip />
+              <el-table-column v-else prop="subject_name" label="识别到的印章主体" min-width="160" show-overflow-tooltip />
               <el-table-column prop="material_name" label="归属材料" min-width="120" show-overflow-tooltip />
+              <el-table-column v-if="detailHasOcrCandidates" prop="page_no" label="产物页序" width="100" />
               <el-table-column prop="similarity" label="相似度" width="90" />
               <el-table-column label="候选身份" width="170">
                 <template #default="{ row }">

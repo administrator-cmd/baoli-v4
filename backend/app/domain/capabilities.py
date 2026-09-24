@@ -5,19 +5,10 @@
 
 为什么必须有一份目录
 --------------------
-在此之前，「有哪些能力、能力能挂在哪个节点、输入是什么、参数怎么填、取证与判定怎么做、
-是否已经实现」这六件事散落在至少七个地方：
-
-  - manifest.OPERATOR_NODE_CONSTRAINTS（节点约束）
-  - manifest.OPERATOR_LABELS（业务中文名）
-  - manifest.ROUTE_BY_OPERATOR（取证与判定路由）
-  - manifest._validate_rule_parameters（参数契约）
-  - operators.REGISTRY（真实 handler 名单）
-  - constants.registry 前端 SceneRuleEditView 的 OPERATOR_OPTIONS / OPERATOR_NODES
-  - quality_checks（文件检查子项的实现状态）
-
-它们互不校验，因此已经出现过真实漂移：后端允许 12 个算子，页面下拉只有 7 个；
-route.supported 与 report.format_support 写了但全仓无人读；大小写金额检查
+在此之前，「有哪些能力、能挂在哪个节点、输入是什么、参数怎么填、取证与判定怎么做、
+是否已经实现」这六件事散落在 manifest、operators.REGISTRY、前端下拉与 quality_checks
+至少七处，彼此互不校验，已经出现过真实漂移：后端允许 12 个算子而页面下拉只有 7 个；
+route.supported 与 report.format_support 写了却全仓无人读；大小写金额检查
 （DECIMAL_CN_EQUAL）未实现却不在能力缺口里，只在运行时返回不可判定。
 
 本目录把上述事实收敛到一处。其他模块从这里派生，不再各写一份名单。
@@ -205,6 +196,10 @@ class Capability:
     evidence: str
     judge: str
     output_keys: tuple[str, ...] = ()
+    # 执行结果**保证出现**的输出键。工具目录据此生成输出 Schema 的 `required`：
+    # 只列真正每条返回路径都会给出的键，没有验证过的能力留空。
+    # 把「可能出现」当成「保证出现」会让工具结果校验放行缺字段的结果。
+    required_output_keys: tuple[str, ...] = ()
     # 扩展数据所在的命名空间；没有能力专用数据时为 None。
     extension_namespace: str | None = None
     version: str = CAPABILITY_VERSION
@@ -224,6 +219,7 @@ class Capability:
             "input_kind": self.input_kind,
             "parameters": self.parameters.to_payload(),
             "output_keys": list(self.output_keys),
+            "required_output_keys": list(self.required_output_keys),
             "statuses": sorted(self.statuses),
             "supports_evidence": self.supports_evidence,
             "supports_comparison": self.supports_comparison,
@@ -241,11 +237,7 @@ class Capability:
 _COMPARE_NODES = frozenset({"INTERNAL_VALIDATE", "CROSS_VALIDATE"})
 _DECIDED_STATUSES = frozenset({"PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT"})
 
-# ---------------------------------------------------------------------------
-# 算子级能力
-#
-# 字段顺序与含义固定：其余模块从这里派生节点约束、中文标签、路由与分发方式。
-# ---------------------------------------------------------------------------
+# 算子级能力：字段顺序与含义固定，其余模块从这里派生节点约束、中文标签、路由与分发方式。
 
 _OPERATOR_CAPABILITIES: tuple[Capability, ...] = (
     Capability(
@@ -262,7 +254,10 @@ _OPERATOR_CAPABILITIES: tuple[Capability, ...] = (
         execution=EXEC_MATERIAL_EXISTS,
         evidence=EVIDENCE_DIRECT,
         judge=JUDGE_PROGRAM,
-        output_keys=("applicability", "standard", "comparison"),
+        output_keys=("applicability", "standard", "comparison", "missing_material_keys", "missing_material_names"),
+        # 这五项由 `quality_judgement.material_exists_result` 在**每条返回路径**上给出：
+        # 节点实现与 Agent adapter 都调它，因此「保证出现」是可核对的。
+        required_output_keys=("applicability", "standard", "comparison", "missing_material_keys", "missing_material_names"),
         note="按规则声明的材料位逐项核对是否已上传；比较对象是「已上传的材料位」与「本检查声明的材料位」。",
     ),
     Capability(
@@ -541,9 +536,7 @@ _OPERATOR_CAPABILITIES: tuple[Capability, ...] = (
     ),
 )
 
-# ---------------------------------------------------------------------------
-# 文件检查子能力（02_文件处理 的「检查项目」列）
-# ---------------------------------------------------------------------------
+# 文件检查子能力（02_文件处理规则 的「检查项目」列）
 
 _QUALITY_CAPABILITIES: tuple[Capability, ...] = tuple(
     Capability(
@@ -635,11 +628,13 @@ def status_label_of(status: str | None) -> str | None:
 
 
 def status_category_label_of(status: str | None) -> str | None:
+    """状态分档的中文名；未知状态码归入「未识别状态」。"""
     category = status_category_of(status)
     return STATUS_CATEGORY_LABELS.get(category)
 
 
 def status_note(status: str | None) -> str | None:
+    """某个「未判定」状态到底缺什么；未知状态码返回 None。"""
     if not isinstance(status, str):
         return None
     return STATUS_NOTES.get(status)

@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -41,6 +42,21 @@ AllowedOperator = Literal[
 ]
 # 风险疑点的来源节点：风险只能挂在材料质量或两条校验链路上，且必须与来源审核规则所在工作表一致。
 SourceNodeKind = Literal["MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE"]
+# 取数期间：同一个科目在不同期间是不同的数，因此每个字段都必须声明它取哪一期。
+# 计算参数不再重复声明这一项——字段自己声明，是唯一的来源。
+PeriodScope = Literal["CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING"]
+# 报表口径：同一科目在合并报表与母公司报表里是不同的数，不能混用。
+StatementScope = Literal["CONSOLIDATED", "PARENT"]
+
+# **字段**声明的口径：比计算结果的口径多一个「不适用」。
+#
+# 合同场景没有期间与合并/母公司的概念，03_字段 的这两列留空即表达「不适用」，
+# 因此字段这一侧必须能承载它。计算结果那一侧（PeriodScope / StatementScope）
+# 不需要：计算定义声明的是「这个指标算出来属于哪一期」，不存在「不适用」。
+FieldPeriodScope = Literal[
+    "CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", "NOT_APPLICABLE"
+]
+FieldStatementScope = Literal["CONSOLIDATED", "PARENT", "NOT_APPLICABLE"]
 
 
 class StrictModel(BaseModel):
@@ -60,11 +76,6 @@ class MaterialProposal(StrictModel):
     candidate_ref: str
     source_id: str | None = None
     name: str
-    # 材料位名称（业务叫法）与 8018 识别类型（doc_type 目录取值）是两个独立字段。
-    # 未声明时为 None——它表示「尚未确认识别类型」，不表示「等于材料名称」：
-    # 拿名称冒充类型会让 8018 的严格枚举校验被绕过或误判。
-    # 未声明的材料可以保存草稿，但发布必须阻断。
-    material_type: str | None = None
     required: bool
     # 「业务说明」列是业务含义的一部分，必须随材料一起保存，不能接收后丢弃。
     description: str = ""
@@ -90,6 +101,11 @@ class FieldProposal(StrictModel):
     # 主体核对必须按这一声明确定「待核对主体取自哪份材料的哪种产物」，
     # 不能靠字段名里是否含某些汉字来猜。留空表示字段由常规字段抽取提供。
     artifact_source: str | None = None
+    # 取数期间与报表口径：**由字段自己声明**。计算参数不再重复声明这两项，
+    # 因此这里是「这个数取的是哪一期、哪个口径」的唯一来源。
+    # 留空（合同场景的常态）落成显式的「不适用」，不是 NULL。
+    period_scope: FieldPeriodScope
+    statement_scope: FieldStatementScope
     config_status: str | None = None
     source: SourceRef
 
@@ -119,17 +135,23 @@ class UnsupportedCapability(StrictModel):
 
 class RuleProposal(StrictModel):
     candidate_ref: str
+    # 业务规则编号：直接来自 Excel 的「规则ID」列（FSCV-001、FIDX-006 …）。
+    # 它是新版本的规则身份；rule_key 只是历史身份，不再由这里派生。
+    # 旧格式没有编号列，此时为 None——不用派生值冒充业务编号。
+    rule_code: str | None = Field(default=None, max_length=80)
     source_id: str | None = None
     name: str
-    node: Literal[
-        "MATERIAL_CHECK",
-        "DOCUMENT_PREPARE",
-        "FIELD_EXTRACTION",
-        "INTERNAL_VALIDATE",
-        "CROSS_VALIDATE",
-        "RISK_RATING",
-        "REPORT_OUTPUT",
-    ]
+    # 财报风险规则的来源：上游计算规则的结果编号。它与 source_rule_ref（同表内的
+    # 检查规则候选引用）是两个口径，不能混在一个列表里——业务编号跨表引用，
+    # 候选引用只在本次导入内部有效。
+    source_rule_codes: list[str] = Field(default_factory=list)
+    # 规则归属的**节点实例码**（用户配置的 `scenario_draft_node.node_code`）。
+    # 它不再是能力类型：同一场景可以有两个同类节点（两张报表各一个字段抽取），
+    # 规则必须说清自己落在哪一个实例上。能力类型在同一条规则的 `node_type` 里。
+    node: str = Field(min_length=1, max_length=80)
+    # 能力类型：决定这条规则由谁执行、能挂哪张 Sheet。它来自统一模板协议的
+    # `node_types`。旧格式（节点码即能力类型）缺这一列时按 `node` 取值读取。
+    node_type: str | None = Field(default=None, max_length=40)
     operator: AllowedOperator
     inputs: list[RuleInputProposal] = Field(default_factory=list)
     output_field_refs: list[str] = Field(default_factory=list)
@@ -147,7 +169,7 @@ class RuleProposal(StrictModel):
     #   config_status：业务配置状态（已明确 / 待确认 / 停用）；
     #   check_operator：业务填写的「合格要求」原文取值，用于导出与预览；
     #   check_level / risk_level_value：检查等级与风险等级原文，两者独立保留、不相互覆盖；
-    #   risk_names / source_rule_refs：检查行的关联风险名称，与风险表的来源检查引用；
+    #   risk_names / source_rule_refs：前者沿用历史键名，现存关联风险编号；后者是风险来源检查引用；
     #   risk_condition：风险成立条件（任一关联检查不合格 / 全部关联检查不合格）；
     #   quality_supported：文件处理检查是否具备已确认的判定能力。
     # 这些是业务配置事实而非执行参数，因此不进入 parameters 契约。
@@ -227,35 +249,46 @@ class BusinessQuestion(StrictModel):
         return self
 
 
+class DisabledSourceColumn(StrictModel):
+    key: str
+    label: str
+    value: str
+    cell: str | None = None
+
+
+class DisabledSourceRow(StrictModel):
+    source: SourceRef
+    sheet_name: str
+    source_id: str | None = None
+    columns: list[DisabledSourceColumn]
+
+
 class SheetProposal(StrictModel):
     sheet_key: str
-    suggested_role: Literal[
-        "MATERIAL_LIST",
-        "MATERIAL_QUALITY",
-        "FIELD_EXTRACTION",
-        "INTERNAL_VALIDATE",
-        "CROSS_VALIDATE",
-        "RISK",
-        "REPORT_TEMPLATE",
-        "EXCLUDE",
-    ]
+    # Sheet 角色由**统一模板协议**声明（base Excel 的 10 张业务表）。
+    # 这里不做成封闭枚举：封闭枚举每加一张表就要改一次契约，而角色合法性已由
+    # 统一协议与绑定校验兜底（见 import_service.update_sheet_bindings：
+    # 角色必须存在于 unified_profile）。
+    suggested_role: str = Field(min_length=1, max_length=60)
     column_mapping: dict[str, str]
     materials: list[MaterialProposal] = Field(default_factory=list)
     fields: list[FieldProposal] = Field(default_factory=list)
     rules: list[RuleProposal] = Field(default_factory=list)
     report_sections: list[ReportSectionProposal] = Field(default_factory=list)
+    disabled_rows: list[DisabledSourceRow] = Field(default_factory=list)
     questions: list[BusinessQuestion] = Field(default_factory=list)
 
 
 class CoverageRow(StrictModel):
     """一条来源业务记录的处置。disposition 是该行的主状态：
 
-    CANDIDATE = 已形成候选；EXCLUDED = 明确排除并给出原因；QUESTION = 有业务内容但未形成候选。
+    CANDIDATE = 已形成候选；DISABLED = 停用且保留原始行；
+    EXCLUDED = 明确排除并给出原因；QUESTION = 有业务内容但未形成候选。
     一行既形成候选又留下待处理问题时记 CANDIDATE，question_count 反映未决数量。
     """
 
     row_no: int = Field(ge=1)
-    disposition: Literal["CANDIDATE", "EXCLUDED", "QUESTION"]
+    disposition: Literal["CANDIDATE", "DISABLED", "EXCLUDED", "QUESTION"]
     reason: str | None = None
     candidate_count: int = Field(default=0, ge=0)
     question_count: int = Field(default=0, ge=0)
@@ -274,8 +307,20 @@ class CoverageSheet(StrictModel):
 class CoverageTotals(StrictModel):
     business_rows: int = Field(default=0, ge=0)
     candidate_rows: int = Field(default=0, ge=0)
+    disabled_rows: int = Field(default=0, ge=0)
     excluded_rows: int = Field(default=0, ge=0)
     question_rows: int = Field(default=0, ge=0)
+
+
+def coverage_totals(sheets: list[dict[str, Any]]) -> dict[str, int]:
+    counts = Counter(row["disposition"] for sheet in sheets for row in sheet["rows"])
+    return {
+        "business_rows": sum(sheet["business_rows"] for sheet in sheets),
+        "candidate_rows": counts["CANDIDATE"],
+        "disabled_rows": counts["DISABLED"],
+        "excluded_rows": counts["EXCLUDED"],
+        "question_rows": counts["QUESTION"],
+    }
 
 
 class CoverageReport(StrictModel):
@@ -285,9 +330,61 @@ class CoverageReport(StrictModel):
     totals: CoverageTotals = Field(default_factory=CoverageTotals)
 
 
+class CalculationCandidate(StrictModel):
+    """一条计算规则候选：定义 + 参数 + 判定区间。
+
+    它跨 Sheet（定义 / 参数 / 判定三张表按 rule_code 关联），因此挂在 bundle 顶层
+    而不是某一张 Sheet 上。编译期由 manifest.compile_calculations 把它变成
+    已发布配置里的计算段（含受限 AST）。
+
+    这里只声明**结构契约**，业务语义（单位、期间、阈值）一律来自配置，
+    本契约不提供任何默认值。
+    """
+
+    candidate_ref: str
+    rule_code: str = Field(min_length=1, max_length=80)
+    rule_name: str = Field(min_length=1, max_length=255)
+    calculation_type: Literal["RATIO", "AMOUNT", "GROWTH", "DIFFERENCE"]
+    formula: str = Field(min_length=1, max_length=2000)
+    result_code: str = Field(min_length=1, max_length=80)
+    result_type: Literal["DECIMAL", "PERCENT", "INTEGER", "AMOUNT"]
+    unit: str | None = None
+    currency: str | None = None
+    # 「结果期间」：这条计算**算出来的数**属于哪一期，不是取数期间（取数期间在字段上）。
+    # 跨期指标（(本期-上期)/上期）不属于任何单一期间，因此必须由业务声明，不能推断。
+    period_policy: PeriodScope
+    # 计算结果的报表口径。派生事实按它落库，下游引用与报告都读它。
+    # 不给默认值：合并口径与母公司口径是不同的数，猜错会让下游引用到另一个数。
+    statement_scope: StatementScope
+    status: Literal["CLEAR", "PENDING", "DISABLED"]
+    remark: str = ""
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+    bands: list[dict[str, Any]] = Field(default_factory=list)
+    depends_on_result_codes: list[str] = Field(default_factory=list)
+    # 公式里引用了但当前未定义的标识符。转换期收集、发布期阻断：
+    # 有值时这条计算规则不能发布。
+    unresolved_identifiers: list[str] = Field(default_factory=list)
+    # 这条计算规则落在哪个**计算节点实例**上。计算三表按 Sheet 绑定到节点实例，
+    # 因此实例码随候选一起带过来；同一场景可以有两个计算节点（两张报表各一个），
+    # 用能力类型 `CALCULATION` 当实例码会把两条计算都挂到同一个节点上。
+    node_code: str = Field(min_length=1, max_length=80)
+    node_type: str = Field(default="CALCULATION", max_length=40)
+    # 业务说明与来源原文：随候选一起保存，导出与页面展示要看到业务真正写下的内容。
+    # 它们是**配置事实**，不参与执行判定，因此不进入已发布配置的计算段。
+    category: str = ""
+    description: str = ""
+    risk_level_text: str = ""
+    bands_text: str = ""
+    verification_logic: str = ""
+    review_advice: str = ""
+    source: SourceRef
+
+
 class ProposalBundle(StrictModel):
     sheets: list[SheetProposal]
     coverage: CoverageReport = Field(default_factory=CoverageReport)
+    # 计算规则候选：财报场景有，合同审核路径为空。
+    calculations: list[CalculationCandidate] = Field(default_factory=list)
 
 
 ALLOWED_OPERATORS = set(AllowedOperator.__args__)

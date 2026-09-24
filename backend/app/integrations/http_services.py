@@ -153,10 +153,9 @@ def validate_material_type(
     # 「文件不匹配声明的材料类型」。真正的判别字段是 error（两者均已实测）：
     #   error 非空（原文「无法提取文本内容」）→ 服务未能完成识别，属于调用失败；
     #   error 为空且 is_valid=false      → 识别成功但文件不匹配该材料类型。
-    # 后者是可裁决的业务结论：必须落成 matches_declared_material=false，
-    # 由 _apply_material_type_result 标 TYPE_MISMATCH 并挂人工复核。
-    # 旧实现按 success 一律抛错，使 MATERIAL_TYPE_MISMATCH 人工复核路永远走不到，
-    # 把一件该由人裁决的事变成了整个文件处理节点的硬失败。
+    # 后者是可裁决的业务结论：落成 matches_declared_material=false 随产物保存，由业务按
+    # 识别结论另行裁决（8018 只记录不判定，见 services/audit/artifacts.material_classify_content）。
+    # 按 success 一律抛错会把一件该由人裁决的事变成整个文件处理节点的硬失败。
     if provider_error:
         raise BusinessError(
             "EXTERNAL_SERVICE_REJECTED",
@@ -356,7 +355,7 @@ def detect_seals(
             raise ValueError
     except (KeyError, TypeError, ValueError) as exc:
         raise _contract_error("SEAL", "PREDICT") from exc
-    # pages=[] and total_seals=0 is a successful recognition result, not a service failure.
+    # pages 为空、total_seals=0 是识别成功的正常结果，不是服务故障。
     # 印章数量只表示识别到的印章个数，不代表盖章正确：漏盖、错盖、伪造都可能在数量上"正常"。
     # 这条语义显式写进 content，避免下游把数量当成盖章合规结论。
     return ExternalServiceResult(
@@ -490,11 +489,37 @@ def poll_ocr_job(*, job_id: str, deadline_at: datetime) -> ExternalServiceResult
             except (KeyError, TypeError) as exc:
                 raise _contract_error("OCR", "POLL") from exc
             if state == "failed":
+                provider_error = poll_data.get("error")
+                provider_code = poll_data.get("errorCode")
+                if isinstance(provider_error, dict):
+                    provider_code = provider_error.get("code") or provider_code
+                    provider_error = provider_error.get("message") or provider_error.get("msg")
+                if not isinstance(provider_error, str) or not provider_error.strip():
+                    provider_error = next(
+                        (
+                            value.strip()
+                            for key in ("errorMessage", "errorMsg", "message")
+                            if isinstance(value := poll_data.get(key), str) and value.strip()
+                        ),
+                        None,
+                    )
+                logger.warning(
+                    "PaddleOCR 作业失败 job_id=%s state=%s provider_code=%s provider_error=%s response_fields=%s",
+                    normalized_job_id,
+                    state,
+                    provider_code,
+                    provider_error,
+                    sorted(poll_data),
+                )
+                provider_reason = "；".join(
+                    str(item) for item in (provider_code, provider_error) if item is not None and str(item).strip()
+                )
                 raise BusinessError(
                     "OCR_JOB_FAILED",
-                    "PaddleOCR 作业返回失败状态",
+                    f"PaddleOCR 作业 {normalized_job_id} 返回失败状态"
+                    + (f"：{provider_reason}" if provider_reason else "；当前响应未提供可识别的失败原因"),
                     status_code=502,
-                    details={"service": "OCR", "operation": "POLL"},
+                    details={"service": "OCR", "operation": "POLL", "job_id": normalized_job_id},
                 )
             if state == "done":
                 break

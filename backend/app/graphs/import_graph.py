@@ -3,14 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import ValidationError
 
-from ..domain.manifest import compile_scene_manifest
 from ..domain.proposals import ProposalBundle
 from ..domain.workbook import WorkbookIR
 from ..errors import BusinessError
@@ -47,12 +45,6 @@ class ImportGraphState(TypedDict, total=False):
     needs_decision: bool
     decision_count: int
     decision_signature: str
-    compile_after_decision: bool
-    scene_code: str
-    scene_name: str
-    namespace: str
-    compiled_at: str
-    manifest: dict[str, Any]
     stage: str
     stage_history: list[str]
 
@@ -60,8 +52,6 @@ class ImportGraphState(TypedDict, total=False):
 _START_STAGES = {
     "read_workbook",
     "convert_sheet_chunks",
-    "await_import_decision",
-    "compile_scene_manifest",
 }
 
 
@@ -327,29 +317,6 @@ def _await_import_decision(state: ImportGraphState) -> dict[str, Any]:
     return _stage_update(state, "await_import_decision", decisions=decisions)
 
 
-def _compile_scene_manifest(state: ImportGraphState) -> dict[str, Any]:
-    workbook = _workbook_from_state(state)
-    proposals = _bundle_from_state(state)
-    decisions = state.get("decisions")
-    if not isinstance(decisions, list) or any(not isinstance(item, dict) for item in decisions):
-        raise _state_error("场景编译缺少有效的裁决结果")
-    compiled_at_text = _required_string(state, "compiled_at")
-    try:
-        compiled_at = datetime.fromisoformat(compiled_at_text)
-    except ValueError as exc:
-        raise _state_error("场景编译时间格式无效", details={"compiled_at": compiled_at_text}) from exc
-    manifest = compile_scene_manifest(
-        workbook_ir=workbook.model_dump(mode="json"),
-        proposals=proposals.model_dump(mode="json"),
-        decisions=decisions,
-        scene_code=_required_string(state, "scene_code"),
-        scene_name=_required_string(state, "scene_name"),
-        namespace=_required_string(state, "namespace"),
-        compiled_at=compiled_at,
-    )
-    return _stage_update(state, "compile_scene_manifest", manifest=manifest)
-
-
 def _route_start(state: ImportGraphState) -> str:
     stage = state.get("start_stage")
     if stage not in _START_STAGES:
@@ -361,37 +328,25 @@ def _after_build_workbook_ir(_: ImportGraphState) -> str:
     return "end"
 
 
-def _after_import_decision(state: ImportGraphState) -> str:
-    return "compile_scene_manifest" if state.get("compile_after_decision", False) else "end"
-
-
 _builder = StateGraph(ImportGraphState)
 _builder.add_node("read_workbook", _read_workbook)
 _builder.add_node("build_workbook_ir", _build_workbook_ir)
 _builder.add_node("convert_sheet_chunks", _convert_sheet_chunks)
 _builder.add_node("validate_proposals", _validate_proposals)
 _builder.add_node("await_import_decision", _await_import_decision)
-_builder.add_node("compile_scene_manifest", _compile_scene_manifest)
 _builder.add_conditional_edges(
     START,
     _route_start,
     {
         "read_workbook": "read_workbook",
         "convert_sheet_chunks": "convert_sheet_chunks",
-        "await_import_decision": "await_import_decision",
-        "compile_scene_manifest": "compile_scene_manifest",
     },
 )
 _builder.add_edge("read_workbook", "build_workbook_ir")
 _builder.add_conditional_edges("build_workbook_ir", _after_build_workbook_ir, {"end": END})
 _builder.add_edge("convert_sheet_chunks", "validate_proposals")
 _builder.add_edge("validate_proposals", "await_import_decision")
-_builder.add_conditional_edges(
-    "await_import_decision",
-    _after_import_decision,
-    {"compile_scene_manifest": "compile_scene_manifest", "end": END},
-)
-_builder.add_edge("compile_scene_manifest", END)
+_builder.add_edge("await_import_decision", END)
 
 
 def _config(job_no: str) -> dict[str, dict[str, str]]:
@@ -420,6 +375,29 @@ def _storage_unavailable(exc: Exception) -> BusinessError:
     )
 
 
+# 数据库驱动/连接层的异常模块前缀。只有来自它们的失败才是「存储暂时不可达」。
+_STORAGE_MODULES = ("sqlalchemy", "pymysql", "MySQLdb", "MySQLdb.connections")
+
+
+def _graph_failure(exc: Exception) -> BusinessError:
+    """图执行失败分类：**存储故障**与**代码缺陷**必须分开报。
+
+    图入口的 `.invoke()` 会执行全部节点，因此节点里抛出的 `NameError` / `KeyError`
+    一类的代码缺陷也会走到这里。把它们统一包装成「检查点存储暂时不可达，可稍后重试」
+    会让真实原因完全不可见——而重试永远不会成功，问题只能靠翻日志才发现。
+    因此只有来自数据库驱动/连接层的异常才按存储故障报，其余原样报出异常类型与消息。
+    """
+    module = type(exc).__module__ or ""
+    if module.startswith(_STORAGE_MODULES):
+        return _storage_unavailable(exc)
+    return BusinessError(
+        "IMPORT_GRAPH_EXECUTION_FAILED",
+        f"导入流程执行失败（{type(exc).__name__}）：{exc}",
+        status_code=500,
+        details={"exception": type(exc).__name__, "reason": str(exc)},
+    )
+
+
 def probe_interrupt(job_no: str, expected_node: str = IMPORT_DECISION_NODE) -> str:
     """把检查点读取结果分成三类，调用方不再只能靠异常区分“不可达”与“确实不在等待”。
 
@@ -432,7 +410,9 @@ def probe_interrupt(job_no: str, expected_node: str = IMPORT_DECISION_NODE) -> s
             snapshot = _compiled(saver).get_state(config)
     except BusinessError:
         raise
-    except Exception as exc:  # noqa: BLE001 - 这里是分类函数，必须把读取异常收敛为可识别结果
+    except Exception as exc:  # noqa: BLE001 - 区分存储故障与图执行缺陷
+        if not (type(exc).__module__ or "").startswith(_STORAGE_MODULES):
+            raise _graph_failure(exc) from exc
         logger.exception("导入流程检查点读取失败 job_no=%s", job_no, exc_info=exc)
         return "STORAGE_UNAVAILABLE"
     if snapshot is not None and expected_node in snapshot.next and snapshot.interrupts:
@@ -446,7 +426,7 @@ def _result_values(config: dict[str, dict[str, str]], result: dict[str, Any], sa
     except BusinessError:
         raise
     except Exception as exc:
-        raise _storage_unavailable(exc) from exc
+        raise _graph_failure(exc) from exc
     if not snapshot or not snapshot.values:
         raise BusinessError("IMPORT_CHECKPOINT_MISSING", "导入流程检查点不存在或未记录执行结果", status_code=409)
     values = dict(snapshot.values)
@@ -463,6 +443,7 @@ def run_workbook_read(
     source_size: int,
     source_sha256: str,
 ) -> dict[str, Any]:
+    """导入图入口：读取工作簿并产出 IR。"""
     config = _config(job_no)
     try:
         with mysql_saver() as saver:
@@ -483,7 +464,7 @@ def run_workbook_read(
     except BusinessError:
         raise
     except Exception as exc:
-        raise _storage_unavailable(exc) from exc
+        raise _graph_failure(exc) from exc
 
 
 def run_sheet_conversion(
@@ -493,6 +474,7 @@ def run_sheet_conversion(
     workbook_ir: dict[str, Any],
     bindings: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    """导入图入口：按工作表绑定转换出候选、问题与覆盖对账。"""
     config = _config(job_no)
     try:
         with mysql_saver() as saver:
@@ -503,7 +485,8 @@ def run_sheet_conversion(
                 "start_stage": "convert_sheet_chunks",
                 "workbook_ir": workbook_ir,
                 "bindings": bindings,
-                "compile_after_decision": False,
+                "decisions": [],
+                "stage_history": [],
             },
             config=config,
             )
@@ -511,7 +494,7 @@ def run_sheet_conversion(
     except BusinessError:
         raise
     except Exception as exc:
-        raise _storage_unavailable(exc) from exc
+        raise _graph_failure(exc) from exc
 
 
 def resume_import_decision(
@@ -522,22 +505,35 @@ def resume_import_decision(
     decision_count: int,
     decisions: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """导入图入口：从裁决等待点继续执行，裁决集合身份不符时明确拒绝。"""
     config = _config(job_no)
     try:
         with mysql_saver() as saver:
             graph = _compiled(saver)
             snapshot = graph.get_state(config)
-            if not snapshot or not snapshot.next:
+            if not snapshot:
                 raise BusinessError("IMPORT_CHECKPOINT_MISSING", "导入裁决流程检查点不存在或已失效", status_code=409)
             values = snapshot.values
             # 检查点存在不代表处于正确等待点：还要核对业务批次、问题集合内容版本与数量。
             if (
                 values.get("graph_namespace") != checkpoint_ns
+                or values.get("start_stage") != "convert_sheet_chunks"
                 or values.get("needs_decision") is not True
                 or values.get("decision_signature") != decision_signature
                 or values.get("decision_count") != decision_count
             ):
                 raise BusinessError("IMPORT_DECISION_CHECKPOINT_MISMATCH", "导入裁决流程检查点与当前问题集合不一致", status_code=409)
+            if not snapshot.next:
+                # 图与业务库分别提交：图已记录同一批裁决、业务库却未提交时，原请求可重试。
+                if (
+                    not snapshot.interrupts
+                    and values.get("stage") == IMPORT_DECISION_NODE
+                    and values.get("decisions") == decisions
+                ):
+                    return {**values, "interrupted": False}
+                raise BusinessError("IMPORT_CHECKPOINT_MISSING", "导入裁决流程检查点不存在或已失效", status_code=409)
+            if IMPORT_DECISION_NODE not in snapshot.next or not snapshot.interrupts:
+                raise BusinessError("IMPORT_CHECKPOINT_MISSING", "导入裁决流程检查点不在裁决等待点", status_code=409)
             result = graph.invoke(Command(resume=decisions), config=config)
             if result.get("__interrupt__"):
                 raise BusinessError("IMPORT_DECISION_RESUME_INCOMPLETE", "导入裁决流程恢复后仍处于等待状态", status_code=409)
@@ -545,44 +541,4 @@ def resume_import_decision(
     except BusinessError:
         raise
     except Exception as exc:
-        raise _storage_unavailable(exc) from exc
-
-
-def run_manifest_compile(
-    *,
-    job_no: str,
-    checkpoint_ns: str,
-    workbook_ir: dict[str, Any],
-    proposals: dict[str, Any],
-    decisions: list[dict[str, Any]],
-    scene_code: str,
-    scene_name: str,
-    namespace: str,
-    compiled_at: datetime,
-) -> dict[str, Any]:
-    config = _config(job_no)
-    try:
-        with mysql_saver() as saver:
-            result = _compiled(saver).invoke(
-            {
-                "job_no": job_no,
-                "graph_namespace": checkpoint_ns,
-                # 裁决已由导入服务校验并持久化；从同一等待节点继续，实际走向编译节点。
-                "start_stage": "await_import_decision",
-                "workbook_ir": workbook_ir,
-                "proposals": proposals,
-                "decisions": decisions,
-                "needs_decision": False,
-                "compile_after_decision": True,
-                "scene_code": scene_code,
-                "scene_name": scene_name,
-                "namespace": namespace,
-                "compiled_at": compiled_at.isoformat(),
-            },
-            config=config,
-            )
-            return _result_values(config, result, saver)
-    except BusinessError:
-        raise
-    except Exception as exc:
-        raise _storage_unavailable(exc) from exc
+        raise _graph_failure(exc) from exc

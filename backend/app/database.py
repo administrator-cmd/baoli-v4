@@ -23,7 +23,7 @@ def _validated_database_url() -> URL:
         raise RuntimeError("数据库连接配置无效：请检查 BAOLI_DATABASE_URL") from exc
     if url.drivername != "mysql+pymysql" or url.database != "baoli_v4":
         raise RuntimeError("数据库目标必须是 baoli_v4")
-    # Keep SQLAlchemy's parsed authority, credentials and query parameters intact.
+    # 只替换库名，保留 SQLAlchemy 已解析出的主机、账号与查询参数。
     return url.set(database="baoli_v4")
 
 

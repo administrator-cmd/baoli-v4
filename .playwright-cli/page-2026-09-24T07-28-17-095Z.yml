@@ -1,0 +1,94 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - strong [ref=e12]: 保理合同审核系统
+    - menubar [ref=e13]:
+      - menuitem "场景管理" [ref=e14]
+      - menuitem "方案管理" [expanded] [ref=e25]:
+        - menu [ref=e35]:
+          - menuitem "方案列表" [ref=e36] [cursor=pointer]
+          - menuitem "方案编辑" [ref=e37] [cursor=pointer]
+      - menuitem "审核管理" [ref=e38]
+      - menuitem "资料管理" [ref=e48]
+      - menuitem "报告管理" [ref=e57]
+      - menuitem "系统管理" [ref=e66]
+  - generic [ref=e76]:
+    - button "折叠菜单" [ref=e79] [cursor=pointer]
+    - main [ref=e85]:
+      - generic [ref=e87]:
+        - generic [ref=e88]:
+          - generic [ref=e91]:
+            - button "方案管理" [ref=e92] [cursor=pointer]
+            - separator [ref=e94]
+            - heading "方案列表" [level=1] [ref=e96]
+          - generic [ref=e97]: 基于已发布场景版本创建方案；启用且范围已生效的方案可用于创建审核任务。
+        - generic [ref=e99]:
+          - generic [ref=e100]:
+            - generic [ref=e101]: 方案名称
+            - textbox "方案名称" [ref=e105]:
+              - /placeholder: 请输入方案名称
+          - generic [ref=e107]:
+            - generic [ref=e108]: 所属场景
+            - generic [ref=e111]:
+              - generic [ref=e112]:
+                - combobox "所属场景" [ref=e114]
+                - generic [ref=e115]: 全部场景
+              - generic [ref=e117] [cursor=pointer]
+          - generic [ref=e120]:
+            - generic [ref=e121]: 启用状态
+            - generic [ref=e124] [cursor=pointer]:
+              - generic:
+                - combobox "启用状态" [ref=e126]
+                - generic [ref=e127]: 全部
+          - generic [ref=e132]:
+            - generic [ref=e133]: 范围状态
+            - generic [ref=e136] [cursor=pointer]:
+              - generic:
+                - combobox "范围状态" [ref=e138]
+                - generic [ref=e139]: 全部
+          - generic [ref=e145]:
+            - button "查询" [ref=e146] [cursor=pointer]
+            - button "刷新" [disabled]
+        - generic [ref=e148]:
+          - generic [ref=e149]:
+            - button "新增" [ref=e150] [cursor=pointer]
+            - button "编辑" [disabled] [ref=e152]
+          - generic [ref=e155] [cursor=pointer]:
+            - generic [ref=e156]:
+              - checkbox "已删除"
+            - generic [ref=e158]: 已删除
+        - generic [ref=e160]:
+          - table [ref=e162]:
+            - rowgroup [ref=e175]:
+              - row [ref=e176]:
+                - columnheader [ref=e177]:
+                  - generic "选择所有行" [ref=e179]:
+                    - generic [ref=e180] [cursor=pointer]:
+                      - checkbox "选择所有行" [disabled]
+                - columnheader "序号" [ref=e182]
+                - columnheader "方案编码" [ref=e184]
+                - columnheader "方案名称" [ref=e186]
+                - columnheader "所属场景" [ref=e188]
+                - columnheader "场景版本" [ref=e190]
+                - columnheader "范围状态" [ref=e192]
+                - columnheader "启用规则数" [ref=e194]
+                - columnheader "启用状态" [ref=e196]
+                - columnheader "更新时间" [ref=e198]
+                - columnheader "操作" [ref=e200]
+          - generic [ref=e205]:
+            - table:
+              - rowgroup
+            - generic [ref=e206]: 暂无数据
+        - generic [ref=e214]:
+          - generic [ref=e215]: 共 0 条
+          - generic [ref=e218] [cursor=pointer]:
+            - generic:
+              - combobox [ref=e220]
+              - generic [ref=e221]: 20条/页
+          - button "上一页" [disabled] [ref=e226]
+          - list [ref=e227]:
+            - listitem "第 1 页" [ref=e228]: "1"
+          - button "下一页" [disabled] [ref=e229]
+          - generic [ref=e230]:
+            - generic [ref=e231]: 前往
+            - spinbutton "页" [ref=e234]: "1"
+            - generic [ref=e235]: 页

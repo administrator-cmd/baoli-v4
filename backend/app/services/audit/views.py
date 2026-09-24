@@ -7,26 +7,28 @@
 - 风险命中只统计 ABNORMAL；「没有风险记录」不能写成「无风险」。
 - 证据的位置结论与内容依据结论分别透出，页面不能把「无法定位」显示成「原文不存在」。"""
 
+from ...domain.manifest import rule_node_type_of
 from ...errors import BusinessError
-from ...models import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, ScenarioVersion, StoredArtifact, TaskDocument, TaskFieldValue
+from ...models import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
 from ..task_lookup import task_or_404
 from .evidence import _quote_check_of
 from .reporting import _configured_format_support
-from .shared import QUOTE_CHECK_LABELS, _scenario
-from .state import _current_execution_ids
+from .shared import QUOTE_CHECK_LABELS, _task_manifest
+from .state import _current_execution_ids, _node_codes_of_type
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
 
 
 def risks_view(db: Session, task_no: str) -> dict[str, Any]:
+    """风险结果只读视图：只统计 ABNORMAL 为命中，未配置 / 未执行 / 无法判断分开表达。"""
     task = task_or_404(db, task_no)
-    manifest = _scenario(db, task).manifest_json
+    manifest = _task_manifest(task)
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
     risk_rules = [
         item
         for item in manifest["rules"]
-        if item["node"] == "RISK_RATING" and item["operator"] == "RISK_TRIGGER" and item["rule_key"] in enabled_keys
+        if rule_node_type_of(item) == "RISK_RATING" and item["operator"] == "RISK_TRIGGER" and item["rule_key"] in enabled_keys
     ]
     risk_configured = bool(risk_rules)
     risk_keys = {item["rule_key"] for item in risk_rules}
@@ -77,12 +79,22 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
     }
 
 def report_view(db: Session, task_no: str) -> dict[str, Any]:
+    """报告只读视图：正文取自 audit_report.content_md，三信号与范围快照取自本次执行结果。"""
     task = task_or_404(db, task_no)
+    # 报告节点的**实例码**由用户配置，不能写死能力类型当实例码查询。
+    report_node_codes = _node_codes_of_type(_task_manifest(task), "REPORT_OUTPUT")
+    if not report_node_codes:
+        raise BusinessError(
+            "AUDIT_NODE_UNKNOWN",
+            "本任务绑定的场景没有配置报告输出节点",
+            status_code=500,
+            details={"task_no": task.task_no},
+        )
     execution = db.scalar(
         select(NodeExecution)
         .where(
             NodeExecution.audit_task_id == task.id,
-            NodeExecution.node_code == "REPORT_OUTPUT",
+            NodeExecution.node_code.in_(report_node_codes),
             NodeExecution.status != "INVALIDATED",
         )
         .order_by(NodeExecution.id.desc())
@@ -92,7 +104,7 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
             select(NodeExecution.id)
             .where(
                 NodeExecution.audit_task_id == task.id,
-                NodeExecution.node_code == "REPORT_OUTPUT",
+                NodeExecution.node_code.in_(report_node_codes),
                 NodeExecution.status == "INVALIDATED",
             )
             .limit(1)
@@ -161,10 +173,9 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
     conclusion = result.get("conclusion") if isinstance(result.get("conclusion"), dict) else None
     format_support = result.get("format_support") if isinstance(result.get("format_support"), list) else []
     if not isinstance(result.get("format_support"), list):
-        # 需求中「报告输出格式」的声明来自已发布配置：报告结果里没有时从该版本配置取，
+        # 报告结果里没有时从任务冻结配置取，
         # 保证页面对旧报告也能显示格式缺口，而不是显示成「没有声明」。
-        configured = db.get(ScenarioVersion, task.scenario_version_id)
-        configured_manifest = configured.manifest_json if configured else {}
+        configured_manifest = _task_manifest(task)
         groups = configured_manifest.get("report_groups") or {}
         format_support = [
             entry
@@ -200,6 +211,7 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
     }
 
 def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]:
+    """单条证据只读视图：引用原文、依据类型与定位核对结论。"""
     task = task_or_404(db, task_no)
     evidence = db.scalar(
         select(Evidence).where(Evidence.audit_task_id == task.id, Evidence.evidence_no == evidence_no)

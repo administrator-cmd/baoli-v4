@@ -6,6 +6,7 @@
  */
 
 import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
+import type { DraftCalculationItem } from "./scenes";
 
 export interface ImportSheet {
   sheet_key: string;
@@ -13,8 +14,22 @@ export interface ImportSheet {
   visible: boolean;
   status: string;
   fixed_excluded: boolean;
+  /** 已确认的 Sheet 角色（用户确认后落库）；null 表示尚未绑定。 */
   role: string | null;
+  /** 已确认绑定的**节点实例码**；null 表示尚未绑定。 */
+  node_code: string | null;
+  /** 系统按表头给出的**建议**用途：只用于页面预选，不构成绑定。 */
+  suggested_role: string | null;
+  /** 建议用途的中文名，由服务端给出。 */
+  suggested_role_label: string;
+  /** 已确认用途的中文名，由服务端给出。 */
+  role_label: string;
   header_row: number | null;
+  /**
+   * 表头候选行（服务端识别结果）。**页面不展示它**：「前 10 行里填充单元格最多的行」
+   * 会把填满数据的数据行和真表头并列，展示出来只会制造歧义；表头行按默认值给出、可改。
+   */
+  header_candidates?: number[];
   summary: {
     max_row: number;
     max_column: number;
@@ -82,6 +97,9 @@ export interface RuleComparison {
   source_node: string | null;
   source_node_label: string | null;
   source_rule_name: string | null;
+  source_rule_refs: string[];
+  source_rule_names: string[];
+  scope_material_refs: string[];
   scope_material_names: Array<string | null>;
   output_field_names: Array<string | null>;
 }
@@ -89,7 +107,6 @@ export interface RuleComparison {
 export interface ProposalMaterial {
   candidate_ref: string;
   name: string;
-  material_type: string | null;
   required: boolean;
   description?: string | null;
   decision_state: CandidateDecisionState;
@@ -108,6 +125,7 @@ export interface ProposalField {
   currency?: string | null;
   required: boolean;
   instruction: string;
+  material_ref: string;
   material_name: string | null;
   decision_state: CandidateDecisionState;
   original: Record<string, JsonValue> | null;
@@ -142,6 +160,25 @@ export interface ProposalSheet {
   question_count: number;
 }
 
+export interface ProposalCalculation extends Pick<DraftCalculationItem, "origin" | "parameter_sources" | "band_sources"> {
+  candidate_ref: string;
+  rule_code: string;
+  rule_name: string;
+  formula: string;
+  result_code: string;
+  result_type: string;
+  node_code: string;
+  status: string;
+  parameters: Array<Record<string, JsonValue>>;
+  bands: Array<Record<string, JsonValue>>;
+  bands_text: string;
+  unresolved_identifiers: string[];
+  decision_state: CandidateDecisionState;
+  source_sheet: string;
+  source_row: number;
+  source_cells: string[];
+}
+
 export interface ImportJob extends ApiResponse {
   job_no: string;
   source_filename: string;
@@ -152,20 +189,27 @@ export interface ImportJob extends ApiResponse {
   issues: ImportIssue[];
   proposals: {
     sheets: ProposalSheet[];
+    calculations: ProposalCalculation[];
   } | null;
   manifest_draft: {
     scene_code: string | null;
     scene_name: string | null;
   } | null;
-  /** 每条来源业务记录的处置：已形成候选 / 明确排除 / 待处理问题。 */
+  /** 每条来源业务记录的处置：候选 / 停用保留 / 明确排除 / 待处理问题。 */
   coverage: {
+    notices?: Array<{
+      code: string;
+      message: string;
+      sheet_name: string;
+      row_no: number;
+    }>;
     sheets: Array<{
       sheet_key: string;
       sheet_name: string;
       business_rows: number;
       rows: Array<{
         row_no: number;
-        disposition: "CANDIDATE" | "EXCLUDED" | "QUESTION";
+        disposition: "CANDIDATE" | "DISABLED" | "EXCLUDED" | "QUESTION";
         reason: string | null;
         candidate_count: number;
         question_count: number;
@@ -177,7 +221,6 @@ export interface ImportJob extends ApiResponse {
   } | null;
   /** 草稿修订号：绑定、排除、裁决、候选原地修正都会递增。 */
   draft_revision: number;
-  precheck?: PrecheckResult | null;
   failure: { code: string; message: string } | null;
   latest_operation: OperationAccepted | null;
   created_at: string;
@@ -188,82 +231,6 @@ export interface ImportJobSummary extends ApiResponse {
   source_filename: string;
   status: string;
   created_at: string;
-}
-
-export interface PrecheckBinding {
-  profile_version: string;
-  draft_revision: number;
-  manifest_hash: string;
-  template_mode: "new" | "update";
-  target_scenario_code: string | null;
-  target_scenario_name: string;
-  scene_code: string;
-  scene_name: string;
-  checked_at: string;
-  /** 预检查时逐条确认过的能力缺口规则键；发布必须与它完全一致。 */
-  acknowledged_capability_gaps: string[];
-}
-
-export interface CapabilityCoverageRow {
-  rule_key: string | null;
-  rule_name: string | null;
-  node: string | null;
-  operator: string | null;
-  capability_id: string | null;
-  capability_label: string | null;
-  capability_version: string | null;
-  known?: boolean;
-  input_kind?: string;
-  statuses?: string[];
-  output_keys?: string[];
-  supports_evidence?: boolean;
-  supports_comparison?: boolean;
-  evidence?: string | null;
-  judge?: string | null;
-  extension_namespace?: string | null;
-  implemented: boolean;
-  unimplemented_reason: string | null;
-  parameters?: string[];
-}
-
-export interface CapabilityCoverage {
-  capability_version: string;
-  declared_rule_count: number;
-  implemented_rule_count: number;
-  unimplemented_rule_count: number;
-  rules: CapabilityCoverageRow[];
-}
-
-export interface PrecheckResult {
-  ready: boolean;
-  blockers: Array<{
-    code: string;
-    message: string;
-    details?: Record<string, JsonValue>;
-  }>;
-  summary: {
-    materials: number;
-    fields: number;
-    rules: number;
-    issues: number;
-  };
-  /** 这次预检查绑定到的发布意图；发布必须与它完全一致。 */
-  binding: PrecheckBinding | null;
-  /** 已配置但当前无法执行的检查：必须在预览里可见，不能发布时才发现永远无法执行。 */
-  capability_gaps: Array<{
-    rule_key?: string;
-    rule_name: string;
-    node?: string;
-    operator?: string;
-    capability_id?: string;
-    capability_version?: string;
-    gap: string;
-    message: string;
-  }>;
-  /** 尚未被逐条确认的能力缺口规则键：发布请求必须把它们补进确认集合才放行。 */
-  unacknowledged_capability_gaps?: string[];
-  /** 展开后的能力覆盖结果。 */
-  capability_coverage?: CapabilityCoverage | null;
 }
 
 export interface TemplateSummary extends ApiResponse {

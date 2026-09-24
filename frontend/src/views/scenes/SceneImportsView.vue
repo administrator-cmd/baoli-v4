@@ -1,35 +1,36 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import {
   abortImportJob,
   createImportJob,
   deleteImportJob,
-  importJobsExportUrl,
   listImportJobsPage,
-  listRulebookTemplateExamples,
-  rulebookTemplateUrl,
+  listTemplates,
   type ImportJobRow,
-  type RulebookTemplateExampleItem,
+  type TemplateOption,
 } from "@/api/imports";
 import { usePagedList } from "@/composables/usePagedList";
+import TemplateDownloadButton from "@/components/scenes/TemplateDownloadButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import { statusLabel } from "@/constants/labels";
 
 /**
- * 规则库导入（入口列表）：文件名、目标场景、状态与待处理数来自真实作业。
- * 新增导入后进入详情五步（文件/工作表/规则确认/发布预览/发布结果）；
- * 已发布作业不能删除（保留版本来源追溯），服务端会明确说明原因。
+ * 规则库导入（入口列表）：文件名、所属场景、状态与待处理数来自真实作业。
+ * 新增导入必须先选定已创建的场景。确认后写入场景配置，完整配置自动生效。
  */
 const router = useRouter();
+const route = useRoute();
+const scopedScenarioCode = computed(() => typeof route.query.scenario === "string" ? route.query.scenario : "");
 
 const list = usePagedList<ImportJobRow, { filename: string; status: string; created_from: string; created_to: string }>({
-  key: "scene-imports",
+  key: `scene-imports:${scopedScenarioCode.value || "all"}`,
   initialFilters: { filename: "", status: "", created_from: "", created_to: "" },
   fetch: (params) =>
     listImportJobsPage({
+      scenario_code: scopedScenarioCode.value || undefined,
       filename: params.filename || undefined,
       status: params.status || undefined,
       created_from: params.created_from || undefined,
@@ -49,40 +50,49 @@ const statusOptions = [
   { value: "PROPOSED", label: "已生成候选" },
   { value: "PENDING_DECISION", label: "待裁决" },
   { value: "CONFIRMED", label: "已确认" },
-  { value: "PRECHECKED", label: "已预检查" },
+  { value: "APPLIED", label: "已写入场景配置" },
+  // 保留历史作业的 PUBLISHED 状态；新导入写入后为 APPLIED。
   { value: "PUBLISHED", label: "已发布" },
 ];
-
-function exportUrl(): string {
-  return importJobsExportUrl({
-    filename: filters.filename || undefined,
-    status: filters.status || undefined,
-    created_from: filters.created_from || undefined,
-    created_to: filters.created_to || undefined,
-  });
-}
 
 function openJob(row: ImportJobRow): void {
   void router.push({ name: "scene-import-detail", params: { jobNo: row.job_no } });
 }
 
-/* ---- 新增导入 ---- */
+/* 新增导入 */
 const createVisible = ref(false);
 const selectedFile = ref<File | null>(null);
 const uploading = ref(false);
+/** 新增导入所属的场景编码：上传以场景为起点，作业必须明确属于哪个场景。 */
+const createScenarioCode = ref("");
+const scenariosError = ref<string | null>(null);
+const scenariosLoading = ref(false);
+
+function openCreate(): void {
+  createVisible.value = true;
+  void loadScenarios();
+}
 
 function onFileChange(file: { raw?: File }): void {
   selectedFile.value = file.raw ?? null;
 }
 
 async function submitCreate(): Promise<void> {
+  if (scopedScenarioCode.value && createScenarioCode.value !== scopedScenarioCode.value) {
+    ElMessage.error("当前导入页的场景范围已变化，请重新选择所属场景");
+    return;
+  }
+  if (!createScenarioCode.value) {
+    ElMessage.warning("请先选择本次导入所属的场景；系统不会从 Excel 内容猜场景");
+    return;
+  }
   if (!selectedFile.value) {
     ElMessage.warning("请选择规则库 Excel 文件");
     return;
   }
   uploading.value = true;
   try {
-    const job = await createImportJob(selectedFile.value);
+    const job = await createImportJob(selectedFile.value, createScenarioCode.value);
     ElMessage.success("导入作业已创建，请继续完成工作表识别与规则确认");
     createVisible.value = false;
     selectedFile.value = null;
@@ -113,12 +123,16 @@ async function removeJob(row: ImportJobRow): Promise<void> {
   }
 }
 
-function targetText(row: ImportJobRow): string {
-  if (!row.target_name) {
-    return "—（发布前选择）";
-  }
-  const mode = row.target_mode === "update" ? "更新" : row.target_mode === "new" ? "新建" : "";
-  return mode ? `${row.target_name}（${mode}）` : row.target_name;
+/**
+ * 这份规则库所属的场景。
+ *
+ * 显示服务端给出的场景名与保存时的 Profile 版本；旧格式作业明确标为「旧格式」，
+ * 不把旧合同 Profile 与新场景 Schema 混成同一个没有版本语义的名字。
+ */
+function sceneText(row: ImportJobRow): string {
+  // 作业所属场景在上传时指定；历史作业没有记录，如实显示「未记录场景」，
+  // 不按表头或文件名替它补一个。
+  return row.scenario_name || row.scenario_code || "未记录场景";
 }
 
 /**
@@ -152,20 +166,45 @@ async function abortJob(row: ImportJobRow): Promise<void> {
   }
 }
 
-/** 当前格式版本真实可下载的模板示例；由后端列出，不在前端写死示例 A/B。 */
-const templateExamples = ref<RulebookTemplateExampleItem[]>([]);
+/**
+ * 可选场景：上传必须以场景为起点，因此新增导入前必须先选场景。
+ * 列表来自后端场景目录，前端不写死任何场景。
+ */
+const scenarios = ref<TemplateOption[]>([]);
+const availableScenarios = computed(() => scopedScenarioCode.value
+  ? scenarios.value.filter((item) => item.scenario_code === scopedScenarioCode.value)
+  : scenarios.value);
 
-async function loadTemplateExamples(): Promise<void> {
+async function loadScenarios(): Promise<void> {
+  scenariosLoading.value = true;
+  scenariosError.value = null;
   try {
-    templateExamples.value = await listRulebookTemplateExamples();
-  } catch {
-    templateExamples.value = [];
+    // 管理员在场景发布之前就要能选中它。业务用户的已发布列表在这里选不到新建场景。
+    scenarios.value = await listTemplates();
+    const requestedScenario = scopedScenarioCode.value;
+    if (requestedScenario && scenarios.value.some((item) => item.scenario_code === requestedScenario)) {
+      createScenarioCode.value = requestedScenario;
+    } else if (!scenarios.value.some((item) => item.scenario_code === createScenarioCode.value)) {
+      createScenarioCode.value = "";
+    }
+  } catch (error) {
+    scenarios.value = [];
+    scenariosError.value = error instanceof Error ? error.message : "场景目录读取失败";
+  } finally {
+    scenariosLoading.value = false;
   }
 }
 
 onMounted(() => {
   void list.load();
-  void loadTemplateExamples();
+  if (route.query.create === "1" && scopedScenarioCode.value) {
+    openCreate();
+    void router.replace({ name: "scene-imports", query: { scenario: scopedScenarioCode.value } });
+  }
+});
+watch(scopedScenarioCode, () => {
+  createScenarioCode.value = "";
+  list.search();
 });
 </script>
 
@@ -174,7 +213,7 @@ onMounted(() => {
     <PageHeader
       eyebrow="场景管理"
       title="规则库导入"
-      subtitle="上传规则库 Excel，按五步完成工作表绑定、规则转换确认、发布前检查与模板发布。"
+      :subtitle="scopedScenarioCode ? `当前场景 ${scopedScenarioCode} 的规则库作业` : '规则库作业'"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -193,26 +232,14 @@ onMounted(() => {
       </el-form-item>
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
-        <el-button @click="list.reset()">重置</el-button>
-        <el-button tag="a" :href="exportUrl()">导出</el-button>
-        <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
 
     <div class="app-toolbar">
       <div class="app-toolbar__left">
-        <el-button type="primary" @click="createVisible = true">新增导入</el-button>
-        <el-dropdown trigger="click">
-          <el-button>下载模板</el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <!-- 只列出当前格式版本真实提供的示例，避免展示必然下载失败的入口。 -->
-              <el-dropdown-item v-for="item in templateExamples" :key="item.key">
-                <a :href="rulebookTemplateUrl(item.key)">{{ item.label }}</a>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <el-button type="primary" @click="openCreate">新增导入</el-button>
+        <TemplateDownloadButton v-if="scopedScenarioCode" :scenario-code="scopedScenarioCode" />
+        <el-button v-else @click="openCreate">选择场景并下载模板</el-button>
       </div>
     </div>
 
@@ -227,8 +254,8 @@ onMounted(() => {
           <el-button link type="primary" class="table-link" @click="openJob(row)">{{ row.source_filename }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="目标场景" min-width="180" show-overflow-tooltip>
-        <template #default="{ row }">{{ targetText(row) }}</template>
+      <el-table-column label="所属场景" min-width="180" show-overflow-tooltip>
+        <template #default="{ row }">{{ sceneText(row) }}</template>
       </el-table-column>
       <el-table-column label="导入状态" width="130">
         <template #default="{ row }">
@@ -282,9 +309,30 @@ onMounted(() => {
     </div>
 
     <el-dialog v-model="createVisible" title="新增导入" width="600px" :close-on-click-modal="false">
-      <el-alert type="info" show-icon :closable="false" title="上传规则库 Excel 后进入五步流程">
-        工作表识别 → 规则确认 → 发布预览 → 发布结果；新建/更新模板的目标在发布预览前选择并绑定。
+      <el-alert v-if="scenariosError" type="error" show-icon :closable="false" :title="`场景目录读取失败：${scenariosError}`">
+        <el-button size="small" @click="loadScenarios">重试</el-button>
       </el-alert>
+      <el-alert v-else-if="!scenariosLoading && availableScenarios.length === 0" type="warning" show-icon :closable="false" :title="scopedScenarioCode ? '当前场景不可用于导入' : '还没有可选场景'">
+        <el-button size="small" @click="router.push({ name: 'scenes' })">打开场景列表</el-button>
+      </el-alert>
+      <el-alert type="info" show-icon :closable="false" title="先选择场景，再上传规则库" />
+      <el-form label-width="100px" class="block-gap-sm">
+        <el-form-item label="所属场景" required>
+          <!-- 上传以场景为起点：作业明确属于该场景，系统不从 Excel 内容猜场景。 -->
+          <el-select v-model="createScenarioCode" filterable :loading="scenariosLoading" :disabled="Boolean(scenariosError) || Boolean(scopedScenarioCode)" placeholder="请选择本次导入所属的场景" style="width: 320px">
+            <el-option
+              v-for="item in availableScenarios"
+              :key="item.scenario_code"
+              :value="item.scenario_code"
+              :label="item.latest_version_no ? `${item.scenario_name}（已发布第 ${item.latest_version_no} 版）` : `${item.scenario_name}（尚未发布）`"
+            />
+          </el-select>
+          <div class="text-hint">包含尚未发布的场景。作业只属于这里选中的场景，系统不从 Excel 内容猜测。</div>
+          <div class="block-gap-sm">
+            <TemplateDownloadButton :scenario-code="createScenarioCode || null" :disabled="scenariosLoading || Boolean(scenariosError)" label="下载当前场景模板" />
+          </div>
+        </el-form-item>
+      </el-form>
       <div class="block-gap-sm">
         <el-upload
           drag
@@ -303,7 +351,7 @@ onMounted(() => {
       </div>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="uploading" @click="submitCreate">上传并进入处理</el-button>
+        <el-button type="primary" :loading="uploading" :disabled="scenariosLoading || Boolean(scenariosError)" @click="submitCreate">上传并进入处理</el-button>
       </template>
     </el-dialog>
   </div>

@@ -1,14 +1,13 @@
-"""节点版格式（contract_review_v3）的确定性解析。
+"""统一规则库中材料、字段、检查、风险与报告 Sheet 的确定性解析。
 
 设计要点（与填写规范逐条对应）：
 
 - 每个工作表只有一张连续表：第一行表头，之后一行一个业务对象。解析只按表头名称建立
   列映射，不依赖列位置，列顺序变化不改变含义。
-- 「配置状态」是业务配置状态（已明确 / 待确认 / 停用），与运行状态无关。待确认且未停用的
-  行属于未完成配置：可以保存草稿与修正，但不能参与发布；停用行不参与执行。
-- 材料、字段、风险引用一律按中文名称解析到稳定候选引用：材料名称唯一；字段由
-  「所属材料 + 字段名称」唯一确定；风险名称唯一。解析不出或有多义时明确报错，
-  绝不使用向量相似度或名称猜测。
+- 「是否生效」填「否」的行保留原始来源，不形成可执行候选。Excel 里没有「配置状态」列。
+- 跨表引用支持业务名称或编号；名称在当前规则库内必须唯一，解析后统一转换为内部编号。
+  交叉校验和报告按材料作用域解析字段，内部校验的一行可用于多个材料。
+  解析不出时明确报错，不使用向量相似度或名称猜测。
 - 引用完整性在整份规则库范围内检查：未知引用、跨材料错误引用、停用依赖都指向
   Sheet / 行 / 列 / 原值。
 - 本模块不做任何模型调用：格式识别、表头映射、编号、引用、清单、加总式与显式参数
@@ -23,38 +22,39 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from openpyxl.utils.cell import coordinate_from_string
+from openpyxl.utils.cell import coordinate_from_string, get_column_letter
 
 from ..errors import BusinessError
-from . import file_quality, profile
+from . import file_quality, unified_profile
+from .audit_vocab import SCOPE_NOT_APPLICABLE
 from .manifest import (
     APPLICABILITY_LABELS,
     label_resolver,
     validate_rule_parameters,
 )
+from .proposals import coverage_totals
 from .rule_expression import (
     CellLocation,
+    LIST_SEPARATOR,
     check_business_name,
     parse_field_expression,
     parse_non_negative_decimal,
     parse_positive_int,
-    parse_report_field_reference,
     split_list,
 )
 from .workbook import WorkbookIR
 
 
-PROFILE_VERSION = "contract_review_v3"
-
 # 业务配置状态。它不是 PM 原状态，也不是系统运行/发布状态。
+# Excel 里只有「是否生效」（是/否），因此本模块只产出 CLEAR 与 DISABLED；
+# PENDING（待确认）是系统内部状态，不再由 Excel 填写。
 STATUS_CLEAR = "CLEAR"
-STATUS_PENDING = "PENDING"
 STATUS_DISABLED = "DISABLED"
 
-# 01_材料检查：材料位名称与 8018 识别类型是两个独立字段。
-# 名称是业务叫法（主合同、结算协议），识别类型是 8018 doc_type 目录中的取值
-# （合同、结算报告），由 v4 的「材料识别类型」列声明；v3 没有该列，读出的类型为空，
-# 发布时按「未确认」阻断，不用材料名称冒充。
+# 01_材料位 只声明材料位本身：材料编号、材料名称、是否必传、是否生效、备注。
+# 8018 的材料类型**不在这里声明**：用户在界面上看不到 8018 的类型目录，让他在配置表里
+# 预先声明一件他不可能知道答案的事没有意义。类型改为上传文件时从真实目录中选择，
+# 随本次上传保存（见 services/task_service._verified_material_type）。
 CHECK_VALUES = ("是", "否")
 
 # 04/05 的检查方式分组。
@@ -116,7 +116,7 @@ OPERATOR_ALLOWED_TYPES: dict[str, OperatorTypeRule] = {
     "CLAUSE_ABSENT": frozenset({"CLAUSE"}),
 }
 
-# 02_文件处理：检查项目、产物依赖、合格要求与实现状态的事实定义在 file_quality，
+# 02_文件处理规则：检查项目、产物依赖、合格要求与实现状态的事实定义在 file_quality，
 # 这里只做引用，不再各写一份——两份名单漂移会让「能不能执行」在校验与执行之间不一致。
 # 判定实现同在 domain/file_quality.py。
 QUALITY_ITEM_REQUIREMENTS = file_quality.QUALITY_ITEM_REQUIREMENTS
@@ -125,7 +125,7 @@ QUALITY_ITEM_LABELS = file_quality.QUALITY_ITEM_LABELS
 # 「合格要求」的中文口径与检查项目一样是配置事实，只维护一份，供本模块报错与执行端展示共用。
 REQUIREMENT_LABELS = file_quality.QUALITY_REQUIREMENT_LABELS
 
-# 07_报告输出：输出格式。
+# 10_报告模板：输出格式。
 REPORT_FORMAT_CODES = {"PDF": "PDF", "WORD": "Word", "EXCEL": "Excel"}
 # 内容类型 → 章节数据来源。
 CONTENT_TYPE_LABELS = {
@@ -153,10 +153,9 @@ RISK_CONDITION_LABELS = {
 
 # 取值校对：既有 manifest 的风险等级集合只有「高/中/低/待确认」，本格式的检查等级与
 # 风险等级使用「最高/一级/二级/三级」。PM 原「高/低」没有明确映射，因此不能凭代码
-# 猜测层级关系，也不能把不认识的等级塞进执行契约。这里显式保留原文，并把需要业务
-# 确认的映射作为待确认问题提出：用户明确作答后才写入执行参数。
-PENDING_CHECK_LEVEL_REF = "unmapped_check_level"
-PENDING_RISK_LEVEL_REF = "unmapped_risk_level"
+# 猜测层级关系，也不能把不认识的等级塞进执行契约。系统显式保留原文，并把需要业务
+# 确认的映射作为待确认问题提出（见各解析函数里的 ConversionNote）：用户明确作答后
+# 才写入执行参数。
 
 
 @dataclass
@@ -207,7 +206,7 @@ class RowOutcome:
     """一行业务记录的处置结果，供逐行对账使用。"""
 
     row_no: int
-    disposition: str  # CANDIDATE / EXCLUDED / QUESTION
+    disposition: str  # CANDIDATE / DISABLED / EXCLUDED / QUESTION
     reason: str | None
     candidate_refs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -232,9 +231,17 @@ class SheetReader:
     ) -> None:
         self.sheet_key = sheet_key
         self.sheet_name = sheet_name
+        self.code_prefix = str(role_definition["code_prefix"])
         self.header_row = header_row
         self.rows = rows
-        self.column_keys = self._map_columns(role_definition, header_values)
+        self.column_keys = unified_profile.map_sheet_columns(
+            role_definition,
+            header_values,
+            sheet_key=sheet_key,
+            sheet_name=sheet_name,
+            header_row=header_row,
+            required_keys={column["key"] for column in role_definition["columns"] if not column.get("optional_column")},
+        )
         self.column_names = {column["key"]: column["name"] for column in role_definition["columns"]}
         self.row_required: dict[str, bool] = {
             column["key"]: column.get("row_required", False) for column in role_definition["columns"]
@@ -243,103 +250,6 @@ class SheetReader:
             column["key"]: label_resolver(column)
             for column in role_definition["columns"]
         }
-
-    def _map_columns(self, role_definition: dict[str, Any], header_values: dict[str, Any]) -> dict[str, str]:
-        """按表头名称建立「列 key → 表头坐标」。
-
-        `by_name` 是「列名 → 坐标」，`used` 保存已用掉的**坐标**；两者不能混用，
-        否则合法性判断会拿坐标去和坐标集合比较，把未知列误判成合法列。
-
-        同一列名在两列重复出现时必须显式报错：字典只能保留一个坐标，
-        静默覆盖会让后面那一列的数据被悄悄丢掉。
-        """
-        by_name: dict[str, str] = {}
-        duplicated: list[str] = []
-        for address, value in header_values.items():
-            label = str(value).strip()
-            if not label:
-                continue
-            if label in by_name:
-                duplicated.append(label)
-                continue
-            by_name[label] = address
-        mapping: dict[str, str] = {}
-        used: set[str] = set()
-        missing: list[str] = []
-        if duplicated:
-            names = sorted(set(duplicated))
-            raise BusinessError(
-                "SHEET_HEADER_DUPLICATED",
-                f"工作表「{self.sheet_name}」第 {self.header_row} 行的表头重复出现："
-                + "、".join(f"「{name}」" for name in names)
-                + "。同一列名只能出现一次，否则后一列的内容会被覆盖",
-                details={
-                    "sheet_key": self.sheet_key,
-                    "sheet_name": self.sheet_name,
-                    "row_no": self.header_row,
-                    "duplicated": names,
-                },
-            )
-        # 列识别用 profile 的 name + aliases。别名让业务可以写「检查项」这类同义表头，
-        # 而不必逐字照抄模板；它仍然是**确定性映射**：别名在 profile 里显式声明，
-        # 系统不猜、不做相似度匹配。未知列、别名冲突、重复列与缺少必需列照旧明确报错。
-        alias_owners: dict[str, str] = {}
-        for column in role_definition["columns"]:
-            for label in (column["name"], *(column.get("aliases") or [])):
-                normalized_label = str(label).strip()
-                if not normalized_label:
-                    continue
-                owner = alias_owners.get(normalized_label)
-                if owner is not None and owner != column["key"]:
-                    raise BusinessError(
-                        "SHEET_HEADER_ALIAS_CONFLICT",
-                        f"工作表「{self.sheet_name}」的模板配置中，表头“{normalized_label}”"
-                        f"同时指向「{owner}」与「{column['key']}」两列：别名必须唯一",
-                        details={
-                            "sheet_key": self.sheet_key,
-                            "sheet_name": self.sheet_name,
-                            "alias": normalized_label,
-                            "columns": sorted({owner, column["key"]}),
-                        },
-                    )
-                alias_owners[normalized_label] = column["key"]
-        for column in role_definition["columns"]:
-            labels = [column["name"], *(column.get("aliases") or [])]
-            address = next(
-                (by_name[str(label).strip()] for label in labels if str(label).strip() in by_name),
-                None,
-            )
-            if address is None:
-                # 可选列（例如 03 的「产物来源」）允许在既有模板中不存在：
-                # 列不存在时该属性没有声明，按未填写处理，不当作配置错误。
-                # 必填列缺失仍然明确报错，表头不许增删改名。
-                if column.get("optional_column"):
-                    continue
-                missing.append(column["name"])
-                continue
-            mapping[column["key"]] = address
-            used.add(address)
-        unknown = [name for name, address in by_name.items() if address not in used]
-        if missing or unknown:
-            parts: list[str] = []
-            if missing:
-                parts.append("缺少列：" + "、".join(f"「{name}」" for name in missing))
-            if unknown:
-                parts.append("表头中多出无法识别的列：" + "、".join(f"「{name}」" for name in unknown))
-            raise BusinessError(
-                "SHEET_HEADER_MISMATCH",
-                f"工作表「{self.sheet_name}」第 {self.header_row} 行的表头不符合节点版模板（"
-                + "；".join(parts)
-                + "）。请使用模板给出的列名，不要增删或改名后重新上传",
-                details={
-                    "sheet_key": self.sheet_key,
-                    "sheet_name": self.sheet_name,
-                    "row_no": self.header_row,
-                    "missing": missing,
-                    "unknown": unknown,
-                },
-            )
-        return mapping
 
     def cell(self, row: dict[str, Any], key: str) -> tuple[str | None, str | None]:
         """返回（单元格地址, 原格文本）。列未映射或单元格为空时文本为 None。"""
@@ -383,6 +293,17 @@ class SheetReader:
             )
         return text
 
+    def required_code(self, row: dict[str, Any], key: str) -> str:
+        value = self.required_text(row, key)
+        if not value.startswith(self.code_prefix) or len(value) == len(self.code_prefix):
+            raise BusinessError(
+                "RULE_CODE_PREFIX_INVALID",
+                f"工作表「{self.sheet_name}」第 {row['row_no']} 行的「{self.column_names[key]}」"
+                f"必须以“{self.code_prefix}”开头且包含编号内容",
+                details=self.location(row, key, value=value).detail(expected_prefix=self.code_prefix),
+            )
+        return value
+
     def enum(self, row: dict[str, Any], key: str, *, required: bool = True) -> str | None:
         _, text = self.cell(row, key)
         if text is None:
@@ -400,7 +321,10 @@ class SheetReader:
             resolved = text if text in (self.value_labels.get(key, {}) or {}) else None
         if resolved is None:
             location = self.location(row, key, value=text)
-            allowed = sorted((self.value_labels.get(key) or {}).keys())
+            # 提示里给**中文标签**：模板下拉里就是这些，业务看到的是它们。
+            # `value_labels` 的方向是「内部取值 → 中文标签」，因此取 values。
+            labels = self.value_labels.get(key) or {}
+            allowed = sorted(str(item) for item in (labels.values() or labels.keys()))
             raise BusinessError(
                 "RULE_ENUM_VALUE_INVALID",
                 f"工作表「{self.sheet_name}」第 {row['row_no']} 行的「{self.column_names[key]}」"
@@ -475,13 +399,165 @@ def _blank_row(row: dict[str, Any], reader: SheetReader) -> bool:
     return True
 
 
-def _row_config_status(reader: SheetReader, row: dict[str, Any]) -> str | None:
-    """该行的业务配置状态；未填或列不存在时返回 None（按未声明处理）。
+def _row_config_status(
+    reader: SheetReader, row: dict[str, Any], *, required: bool = False
+) -> str | None:
+    """该行「是否生效」→ 内部配置状态（已明确 / 停用）。
+
+    Excel 里只有「是否生效」一列（是 / 否），**没有**「配置状态」：业务在表里不表达
+    「系统配没配好」，只表达「这一行参不参与审核」。因此这里只会得到 CLEAR 或 DISABLED，
+    不再产生 PENDING（待确认是系统内部状态，不由 Excel 填写）。
 
     用于在读取其余必填列之前判断「停用」：停用行不参与本次规则库，
     它的半成品口径列不该让整份规则库解析失败。取值非法仍然明确报错。
     """
-    return reader.enum(row, "config_status", required=False)
+    enabled = reader.boolean(row, "enabled", required=required)
+    if enabled is None:
+        return None
+    return STATUS_CLEAR if enabled else STATUS_DISABLED
+
+
+def _retain_disabled_row(reader: SheetReader, row: dict[str, Any], outcomes: list[RowOutcome]) -> bool:
+    if _row_config_status(reader, row) != STATUS_DISABLED:
+        return False
+    outcomes.append(RowOutcome(row["row_no"], "DISABLED", "该行已停用，原始填写内容保留在场景草稿中"))
+    return True
+
+
+def _disabled_row_payload(reader: SheetReader, row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": _source_ref(reader, row),
+        "sheet_name": reader.sheet_name,
+        "source_id": reader.text(row, "source_id") or reader.text(row, "report_code"),
+        "columns": [
+            {
+                "key": key,
+                "label": label,
+                "value": reader.text(row, key) or "",
+                "cell": reader.location(row, key).cell,
+            }
+            for key, label in reader.column_names.items()
+        ],
+    }
+
+
+def _disabled_rows_of_conversion(conversion: SheetConversion) -> list[dict[str, Any]]:
+    disabled = {outcome.row_no for outcome in conversion.outcomes if outcome.disposition == "DISABLED"}
+    return [
+        _disabled_row_payload(conversion.reader, row)
+        for row in conversion.reader.business_rows()
+        if row["row_no"] in disabled
+    ]
+
+
+def convert_disabled_config_row(
+    source_row: dict[str, Any], *, profile_version: str,
+    material_by_code: dict[str, dict[str, Any]], field_by_code: dict[str, dict[str, Any]],
+    field_catalog: dict[tuple[str, str], dict[str, Any]] | None = None,
+) -> SheetConversion:
+    """将编辑后的停用配置行交回对应的原始 Sheet 解析器。"""
+    reader = _disabled_source_reader(source_row, profile_version=profile_version)
+    role = source_row["sheet_role"]
+    if field_catalog is None:
+        field_catalog = _build_field_catalog(list(field_by_code.values()), list(material_by_code.values()))
+    if role == "MATERIAL_LIST":
+        return _convert_materials(reader)
+    if role == "FIELD_EXTRACTION":
+        return _convert_fields(reader, material_by_code=material_by_code)
+    if role == "REPORT_TEMPLATE":
+        return _convert_reports(
+            reader, material_by_code=material_by_code, field_by_code=field_by_code,
+            field_catalog=field_catalog,
+        )
+    if role == "MATERIAL_QUALITY":
+        return _convert_material_quality(reader, material_by_code=material_by_code)
+    if role == "RISK":
+        return _convert_risks(reader)
+    if role == "INTERNAL_VALIDATE":
+        return _convert_internal_validate(
+            reader, material_by_code=material_by_code, field_catalog=field_catalog, field_by_code=field_by_code
+        )
+    return _convert_cross_validate(
+        reader, material_by_code=material_by_code, field_catalog=field_catalog, field_by_code=field_by_code
+    )
+
+
+def disabled_check_risk_codes(source_row: dict[str, Any]) -> list[str]:
+    """只读取关联编号以计算依赖闭包；选中的行仍由原解析器完整校验。"""
+    if source_row["sheet_role"] not in {"MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE"}:
+        raise BusinessError("DISABLED_SOURCE_ROW_ROLE_UNSUPPORTED", "该来源行不是检查规则", status_code=409)
+    column = next((item for item in source_row["columns"] if item["key"] == "risk_refs"), None)
+    if column is None:
+        raise BusinessError("DISABLED_SOURCE_ROW_PROFILE_CHANGED", "停用检查行缺少关联风险列，不能计算依赖")
+    value = column["value"]
+    source = source_row["source"]
+    return split_list(
+        value,
+        location=CellLocation(
+            sheet_key=source["sheet_key"],
+            sheet_name=source_row["sheet_name"],
+            row_no=source["row_no"],
+            cell=column.get("cell"),
+            column_label=column["label"],
+            value=value,
+        ),
+    )
+
+
+def _disabled_source_reader(source_row: dict[str, Any], *, profile_version: str) -> SheetReader:
+    profile = unified_profile.load_unified_profile()
+    if profile_version != profile["profile_version"]:
+        raise BusinessError(
+            "DISABLED_SOURCE_ROW_PROFILE_CHANGED",
+            "停用来源行使用的模板协议与当前协议不同，不能按新列定义启用",
+            status_code=409,
+            details={"draft_profile_version": profile_version, "current_profile_version": profile["profile_version"]},
+        )
+    role = source_row["sheet_role"]
+    if role not in {
+        "MATERIAL_LIST", "FIELD_EXTRACTION", "MATERIAL_QUALITY", "INTERNAL_VALIDATE",
+        "CROSS_VALIDATE", "RISK", "REPORT_TEMPLATE",
+    }:
+        raise BusinessError(
+            "DISABLED_SOURCE_ROW_ROLE_UNSUPPORTED",
+            "该工作表的停用行尚无直接启用转换路径",
+            status_code=409,
+            details={"sheet_role": role},
+        )
+    definition = unified_profile.sheet_definition(profile, role)
+    columns = source_row["columns"]
+    if [column["key"] for column in columns] != [column["key"] for column in definition["columns"]]:
+        raise BusinessError(
+            "DISABLED_SOURCE_ROW_PROFILE_CHANGED",
+            "停用来源行的列结构与当前模板协议不同，不能启用",
+            status_code=409,
+            details={"row_key": source_row["row_key"], "sheet_role": role},
+        )
+    row_no = source_row["source"]["row_no"]
+    if row_no <= 1:
+        raise BusinessError(
+            "DISABLED_SOURCE_ROW_INVALID",
+            "停用来源行的行号无效，不能按工作表记录解析",
+            status_code=409,
+            details={"row_key": source_row["row_key"], "row_no": row_no},
+        )
+    header = {
+        f"{get_column_letter(index)}1": column["name"]
+        for index, column in enumerate(definition["columns"], start=1)
+    }
+    cells = {
+        f"{get_column_letter(index)}{row_no}": column["value"]
+        for index, column in enumerate(columns, start=1)
+        if column["value"] != ""
+    }
+    return SheetReader(
+        sheet_key=source_row["source"]["sheet_key"],
+        sheet_name=source_row["sheet_name"],
+        role_definition=definition,
+        header_row=1,
+        header_values=header,
+        rows=[{"row_no": row_no, "cells": cells}],
+    )
 
 
 def _partial_row(row: dict[str, Any], reader: SheetReader) -> list[str]:
@@ -533,9 +609,7 @@ def _assert_row_required_filled(reader: SheetReader, row: dict[str, Any]) -> Non
         )
 
 
-# ---------------------------------------------------------------------------
-# 01_材料检查
-# ---------------------------------------------------------------------------
+# 01_材料位
 
 
 def _convert_materials(reader: SheetReader) -> SheetConversion:
@@ -548,13 +622,15 @@ def _convert_materials(reader: SheetReader) -> SheetConversion:
         if _blank_row(row, reader):
             outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行在所有业务列上都没有内容"))
             continue
+        if _retain_disabled_row(reader, row, outcomes):
+            continue
         filled = _partial_row(row, reader)
         if len(filled) < 2:
             outcomes.append(
                 RowOutcome(row["row_no"], "EXCLUDED", f"该行只填写了「{filled[0] if filled else '无'}」，未形成完整业务记录")
             )
             continue
-        source_id = reader.required_text(row, "source_id")
+        source_id = reader.required_code(row, "source_id")
         name_location = reader.location(row, "name", value=reader.text(row, "name"))
         name = check_business_name(reader.required_text(row, "name"), location=name_location)
         if name in seen_names:
@@ -573,68 +649,53 @@ def _convert_materials(reader: SheetReader) -> SheetConversion:
             )
         seen_names[name] = row["row_no"]
         seen_ids[source_id] = row["row_no"]
-        # 停用材料不参与本次规则库：缺少「是否必传」等口径列不构成配置错误。
         status = _row_config_status(reader, row)
-        if status == STATUS_DISABLED:
-            outcomes.append(
-                RowOutcome(row["row_no"], "EXCLUDED", "该行配置状态为「停用」，不参与本次规则库")
-            )
-            continue
         _assert_row_required_filled(reader, row)
         required = reader.boolean(row, "required")
         remark = reader.text(row, "remark") or ""
-        # 材料位名称与 8018 识别类型是两个独立字段。名称是业务叫法（主合同、结算协议），
-        # 识别类型是 8018 doc_type 目录里的取值（合同、结算报告）。
-        # 不能拿名称当类型：8018 的 doc_type 是严格枚举，目录里没有的名字会被直接拒绝；
-        # 更不能硬编码「主合同→合同」「结算协议→结算报告」这类映射——结算协议与结算报告
-        # 是两种不同的业务材料，替业务认定它们同义会掩盖真实的配置差异。
-        recognize_type = reader.text(row, "recognize_type") if "recognize_type" in reader.column_keys else None
-        recognize_type = (recognize_type or "").strip() or None
         ref = _candidate_ref("mat", reader.sheet_key, row["row_no"])
         proposals["materials"].append(
             {
                 "candidate_ref": ref,
                 "source_id": source_id,
                 "name": name,
-                "material_type": recognize_type,
                 "required": bool(required),
                 "description": remark,
                 "config_status": status,
                 "source": _source_ref(reader, row),
             }
         )
-        if status == STATUS_PENDING:
-            notes.append(
-                ConversionNote(
-                    code="MATERIAL_CONFIG_PENDING",
-                    message=f"材料「{name}」标记为待确认：未解决前不能发布为可执行版本。",
-                    sheet_key=reader.sheet_key,
-                    sheet_name=reader.sheet_name,
-                    row_no=row["row_no"],
-                    cell=reader.location(row, "config_status").cell,
-                    column=reader.column_names["config_status"],
-                    value="待确认",
-                    question_title=f"材料「{name}」的业务定义尚未确认：请确认可以执行，或明确停用",
-                    question_options=[
-                        {"label": "确认，按该材料执行", "value": STATUS_CLEAR},
-                        {"label": "明确停用该材料", "value": STATUS_DISABLED},
-                    ],
-                    resolve={"mode": "REPLACE", "target_type": "MATERIAL", "target_ref": ref, "property": "config_status"},
-                )
-            )
+
         outcomes.append(RowOutcome(row["row_no"], "CANDIDATE", None, [ref]))
     return SheetConversion(reader, proposals, outcomes, notes)
 
 
-# ---------------------------------------------------------------------------
-# 03_字段抽取
-# ---------------------------------------------------------------------------
+def _reference_index(items: list[dict[str, Any]], *, kind: str) -> dict[str, dict[str, Any]]:
+    """为业务对象建立「编号 + 名称」索引，名称重复时不允许导入继续猜。"""
+    index: dict[str, dict[str, Any]] = {}
+    for item in items:
+        for value in (item.get("source_id"), item.get("name")):
+            key = str(value or "").strip()
+            if not key:
+                continue
+            existing = index.get(key)
+            if existing is not None and existing["candidate_ref"] != item["candidate_ref"]:
+                raise BusinessError(
+                    f"{kind.upper()}_REFERENCE_AMBIGUOUS",
+                    f"{kind}引用值“{key}”同时对应多个对象，请修改冲突的名称或编号",
+                    details={"value": key, "kind": kind},
+                )
+            index[key] = item
+    return index
+
+
+# 03_字段
 
 
 def _convert_fields(
     reader: SheetReader,
     *,
-    material_by_name: dict[str, dict[str, Any]],
+    material_by_code: dict[str, dict[str, Any]],
 ) -> SheetConversion:
     proposals: dict[str, Any] = {"materials": [], "fields": [], "rules": [], "report_sections": [], "questions": []}
     outcomes: list[RowOutcome] = []
@@ -645,22 +706,24 @@ def _convert_fields(
         if _blank_row(row, reader):
             outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行在所有业务列上都没有内容"))
             continue
+        if _retain_disabled_row(reader, row, outcomes):
+            continue
         filled = _partial_row(row, reader)
         if len(filled) < 2:
             outcomes.append(
                 RowOutcome(row["row_no"], "EXCLUDED", f"该行只填写了「{filled[0] if filled else '无'}」，未形成完整业务记录")
             )
             continue
-        source_id = reader.required_text(row, "source_id")
-        material_name = reader.required_text(row, "material_ref")
-        material = material_by_name.get(material_name)
+        source_id = reader.required_code(row, "source_id")
+        material_code = reader.required_text(row, "material_ref")
+        material = material_by_code.get(material_code)
         if material is None:
-            location = reader.location(row, "material_ref", value=material_name)
+            location = reader.location(row, "material_ref", value=material_code)
             raise BusinessError(
                 "FIELD_MATERIAL_UNKNOWN",
-                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「所属材料」填写的“{material_name}”"
-                "不在 01_材料检查 中，请先登记该材料或修正名称后重新上传",
-                details=location.detail(known=sorted(material_by_name)),
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「所属材料」“{material_code}”"
+                "不在 01_材料位 中，请核对材料名称或编号后重新上传",
+                details=location.detail(known=sorted(material_by_code)),
             )
         name_location = reader.location(row, "name", value=reader.text(row, "name"))
         name = check_business_name(reader.required_text(row, "name"), location=name_location)
@@ -668,7 +731,7 @@ def _convert_fields(
         if scoped in seen_scoped:
             raise BusinessError(
                 "FIELD_NAME_DUPLICATED",
-                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行在材料“{material_name}”下重复定义了字段“{name}”"
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行在材料“{material['name']}”下重复定义了字段“{name}”"
                 f"（与第 {seen_scoped[scoped]} 行重复），同一材料内字段名称必须唯一",
                 details=name_location.detail(),
             )
@@ -680,13 +743,7 @@ def _convert_fields(
             )
         seen_scoped[scoped] = row["row_no"]
         seen_ids[source_id] = row["row_no"]
-        # 停用字段不参与本次规则库：缺失的口径列不构成配置错误。
         status = _row_config_status(reader, row)
-        if status == STATUS_DISABLED:
-            outcomes.append(
-                RowOutcome(row["row_no"], "EXCLUDED", "该行配置状态为「停用」，不参与本次规则库")
-            )
-            continue
         _assert_row_required_filled(reader, row)
         value_type = reader.enum(row, "value_type")
         unit = reader.text(row, "unit")
@@ -695,6 +752,14 @@ def _convert_fields(
         instruction = reader.text(row, "instruction")
         # 产物来源是可选列：没有该列时字段按常规字段抽取处理，不推断产物归属。
         artifact_source = reader.enum(row, "artifact_source", required=False)
+        # 取数期间与报表口径：**由字段自己声明**。计算参数不再重复声明这两项，
+        # 因此字段这一行就是「这个数取的是哪一期、哪个口径」的唯一来源。
+        #
+        # 这两列可以留空——合同场景本来就没有期间与合并/母公司的概念。
+        # 留空落成**显式的「不适用」**，不是 NULL：统一事实表的当前版本唯一键
+        # 由这几个口径 CONCAT 而成，NULL 会让唯一键整体失效（见 audit_vocab）。
+        period_scope = reader.enum(row, "period_scope", required=False) or SCOPE_NOT_APPLICABLE
+        statement_scope = reader.enum(row, "statement_scope", required=False) or SCOPE_NOT_APPLICABLE
         ref = _candidate_ref("fld", reader.sheet_key, row["row_no"])
         proposals["fields"].append(
             {
@@ -708,6 +773,10 @@ def _convert_fields(
                 "required": bool(required),
                 "instruction": instruction or "",
                 "artifact_source": artifact_source,
+                # 期间与报表口径随字段进入候选，发布期写进编译产物，
+                # 执行期按它建立字段事实的定位键。
+                "period_scope": period_scope,
+                "statement_scope": statement_scope,
                 "config_status": status,
                 "source": _source_ref(reader, row),
             }
@@ -717,7 +786,7 @@ def _convert_fields(
                 ConversionNote(
                     code="MONEY_UNIT_MISSING",
                     message=(
-                        f"字段「{material_name}·{name}」是{('大写金额' if value_type == 'DECIMAL_CN' else '金额')}，"
+                        f"字段「{material['name']}·{name}」是{('大写金额' if value_type == 'DECIMAL_CN' else '金额')}，"
                         "但没有填写归一化单位。系统不默认人民币或元：缺少单位时该字段的数值比较与加总不可执行。"
                     ),
                     sheet_key=reader.sheet_key,
@@ -726,7 +795,7 @@ def _convert_fields(
                     cell=reader.location(row, "unit").cell,
                     column=reader.column_names["unit"],
                     value=None,
-                    question_title=f"字段「{material_name}·{name}」缺少金额单位，请填写归一化单位",
+                    question_title=f"字段「{material['name']}·{name}」缺少金额单位，请填写归一化单位",
                     question_options=[],
                     input_kind="TEXT",
                     resolve={"mode": "REPLACE", "target_type": "FIELD", "target_ref": ref, "property": "unit"},
@@ -737,7 +806,7 @@ def _convert_fields(
                 ConversionNote(
                     code="MONEY_CURRENCY_MISSING",
                     message=(
-                        f"字段「{material_name}·{name}」是{('大写金额' if value_type == 'DECIMAL_CN' else '金额')}，"
+                        f"字段「{material['name']}·{name}」是{('大写金额' if value_type == 'DECIMAL_CN' else '金额')}，"
                         "但没有填写币种。系统不默认人民币，币种未知时不做数值比较或求和。"
                     ),
                     sheet_key=reader.sheet_key,
@@ -746,52 +815,32 @@ def _convert_fields(
                     cell=reader.location(row, "currency").cell,
                     column=reader.column_names["currency"],
                     value=None,
-                    question_title=f"字段「{material_name}·{name}」缺少币种，请填写明确币种或“按材料原文”",
+                    question_title=f"字段「{material['name']}·{name}」缺少币种，请填写明确币种或“按材料原文”",
                     question_options=[],
                     input_kind="TEXT",
                     resolve={"mode": "REPLACE", "target_type": "FIELD", "target_ref": ref, "property": "currency"},
                 )
             )
-        if status == STATUS_PENDING:
-            notes.append(
-                ConversionNote(
-                    code="FIELD_CONFIG_PENDING",
-                    message=f"字段「{material_name}·{name}」标记为待确认：未解决前不能发布为可执行版本。",
-                    sheet_key=reader.sheet_key,
-                    sheet_name=reader.sheet_name,
-                    row_no=row["row_no"],
-                    cell=reader.location(row, "config_status").cell,
-                    column=reader.column_names["config_status"],
-                    value="待确认",
-                    question_title=f"字段「{material_name}·{name}」的抽取口径尚未确认：请确认可以执行，或明确停用",
-                    question_options=[
-                        {"label": "确认，按该口径抽取", "value": STATUS_CLEAR},
-                        {"label": "明确停用该字段", "value": STATUS_DISABLED},
-                    ],
-                    resolve={"mode": "REPLACE", "target_type": "FIELD", "target_ref": ref, "property": "config_status"},
-                )
-            )
+
         outcomes.append(RowOutcome(row["row_no"], "CANDIDATE", None, [ref]))
     return SheetConversion(reader, proposals, outcomes, notes)
 
 
-# ---------------------------------------------------------------------------
 # 字段引用解析（04/05 共用）
-# ---------------------------------------------------------------------------
 
 
 def _build_field_catalog(
     field_proposals: list[dict[str, Any]],
     material_proposals: list[dict[str, Any]],
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """(材料名称, 字段名称) → 字段候选。字段引用必须同时给出材料，不能用字段名猜材料。"""
-    material_names = {item["candidate_ref"]: item["name"] for item in material_proposals}
+    """(材料编号, 字段名称) → 字段候选。字段引用必须带材料作用域。"""
+    material_codes = {item["candidate_ref"]: item["source_id"] for item in material_proposals}
     catalog: dict[tuple[str, str], dict[str, Any]] = {}
     for field in field_proposals:
-        material_name = material_names.get(field["material_ref"])
-        if material_name is None:
+        material_code = material_codes.get(field["material_ref"])
+        if material_code is None or not field.get("name"):
             continue
-        catalog[(material_name, field["name"])] = field
+        catalog[(material_code, field["name"])] = field
     return catalog
 
 
@@ -804,6 +853,7 @@ def _resolve_field_names(
     row: dict[str, Any],
     column_key: str,
     original: str,
+    field_by_code: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """把字段名称解析成规则输入候选。
 
@@ -813,22 +863,84 @@ def _resolve_field_names(
     """
     resolved: list[dict[str, Any]] = []
     for name in names:
-        field = catalog.get((material["name"], name))
+        field = catalog.get((material["source_id"], name))
+        coded = field_by_code.get(name) if field_by_code is not None else None
+        if coded is not None and field is not None and coded["candidate_ref"] != field["candidate_ref"]:
+            raise BusinessError(
+                "RULE_FIELD_REF_AMBIGUOUS",
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的字段引用“{name}”同时是字段编号和其他字段名称，无法确定目标",
+                details=reader.location(row, column_key, value=name).detail(),
+            )
+        if coded is not None and coded["material_ref"] == material["candidate_ref"]:
+            field = coded
         if field is None:
             location = reader.location(row, column_key, value=original)
             raise BusinessError(
                 "RULE_FIELD_REF_UNKNOWN",
                 f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「{reader.column_names[column_key]}」引用的字段"
-                f"“{name}”在材料“{material['name']}”下不存在，请核对 03_字段抽取 的字段名称后重新上传",
-                details=location.detail(material_name=material["name"]),
+                f"“{name}”在材料“{material['name']}”下不存在，请核对 03_字段 的字段编号或字段名称后重新上传",
+                details=location.detail(material_code=material["source_id"], material_name=material["name"]),
             )
         resolved.append({"field_ref": field["candidate_ref"], "material_ref": material["candidate_ref"]})
     return resolved
 
 
-# ---------------------------------------------------------------------------
-# 04_文件内部校验 / 05_文件交叉校验
-# ---------------------------------------------------------------------------
+def _resolve_field_codes(
+    codes: list[str],
+    *,
+    material: dict[str, Any],
+    field_by_code: dict[str, dict[str, Any]],
+    reader: SheetReader,
+    row: dict[str, Any],
+    column_key: str,
+    field_catalog: dict[tuple[str, str], dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    resolved: list[dict[str, Any]] = []
+    for code in codes:
+        field = field_by_code.get(code)
+        named = field_catalog.get((material["source_id"], code)) if field_catalog is not None else None
+        if field is not None and named is not None and field["candidate_ref"] != named["candidate_ref"]:
+            raise BusinessError(
+                "RULE_FIELD_REF_AMBIGUOUS",
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的字段引用“{code}”同时是字段编号和其他字段名称，无法确定目标",
+                details=reader.location(row, column_key, value=code).detail(),
+            )
+        if field is None:
+            field = named
+        if field is None:
+            raise BusinessError(
+                "RULE_FIELD_REF_UNKNOWN",
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的字段编号或名称“{code}”不在 03_字段 中",
+                details=reader.location(row, column_key, value=code).detail(),
+            )
+        if field["material_ref"] != material["candidate_ref"]:
+            raise BusinessError(
+                "RULE_FIELD_MATERIAL_MISMATCH",
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的字段“{code}”"
+                f"不属于材料“{material['source_id']}”",
+                details=reader.location(row, column_key, value=code).detail(
+                    material_code=material["source_id"],
+                ),
+            )
+        resolved.append({"field_ref": field["candidate_ref"], "material_ref": material["candidate_ref"]})
+    return resolved
+
+
+def _field_for_reference(
+    value: str,
+    *,
+    material: dict[str, Any],
+    field_by_code: dict[str, dict[str, Any]],
+    field_catalog: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """按字段编号或当前材料下的字段名称取字段对象。"""
+    field = field_by_code.get(value) or field_catalog.get((material["source_id"], value))
+    if field is None or field["material_ref"] != material["candidate_ref"]:
+        raise KeyError(value)
+    return field
+
+
+# 04_文件内部校验规则 / 05_文件交叉校验规则
 
 
 def _comparison_parameters(
@@ -1010,28 +1122,32 @@ def _resolve_check_level(
 def _convert_internal_validate(
     reader: SheetReader,
     *,
-    material_by_name: dict[str, dict[str, Any]],
+    material_by_code: dict[str, dict[str, Any]],
     field_catalog: dict[tuple[str, str], dict[str, Any]],
+    field_by_code: dict[str, dict[str, Any]],
 ) -> SheetConversion:
     return _convert_comparison_sheet(
         reader,
         role="INTERNAL_VALIDATE",
-        material_by_name=material_by_name,
+        material_by_code=material_by_code,
         field_catalog=field_catalog,
+        field_by_code=field_by_code,
     )
 
 
 def _convert_cross_validate(
     reader: SheetReader,
     *,
-    material_by_name: dict[str, dict[str, Any]],
+    material_by_code: dict[str, dict[str, Any]],
     field_catalog: dict[tuple[str, str], dict[str, Any]],
+    field_by_code: dict[str, dict[str, Any]],
 ) -> SheetConversion:
     return _convert_comparison_sheet(
         reader,
         role="CROSS_VALIDATE",
-        material_by_name=material_by_name,
+        material_by_code=material_by_code,
         field_catalog=field_catalog,
+        field_by_code=field_by_code,
     )
 
 
@@ -1039,8 +1155,9 @@ def _convert_comparison_sheet(
     reader: SheetReader,
     *,
     role: str,
-    material_by_name: dict[str, dict[str, Any]],
+    material_by_code: dict[str, dict[str, Any]],
     field_catalog: dict[tuple[str, str], dict[str, Any]],
+    field_by_code: dict[str, dict[str, Any]],
 ) -> SheetConversion:
     proposals: dict[str, Any] = {"materials": [], "fields": [], "rules": [], "report_sections": [], "questions": []}
     outcomes: list[RowOutcome] = []
@@ -1050,13 +1167,15 @@ def _convert_comparison_sheet(
         if _blank_row(row, reader):
             outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行在所有业务列上都没有内容"))
             continue
+        if _retain_disabled_row(reader, row, outcomes):
+            continue
         filled = _partial_row(row, reader)
         if len(filled) < 2:
             outcomes.append(
                 RowOutcome(row["row_no"], "EXCLUDED", f"该行只填写了「{filled[0] if filled else '无'}」，未形成完整业务记录")
             )
             continue
-        source_id = reader.required_text(row, "source_id")
+        source_id = reader.required_code(row, "source_id")
         if source_id in seen_ids:
             raise BusinessError(
                 "RULE_ID_DUPLICATED",
@@ -1064,17 +1183,9 @@ def _convert_comparison_sheet(
                 details=reader.location(row, "source_id", value=source_id).detail(),
             )
         seen_ids[source_id] = row["row_no"]
-        # 停用行的其余业务列允许留空：业务用「配置状态=停用」明确表达了「这一行不参与本次
-        # 规则库」，此时未填的口径列不构成配置错误。因此必须在读取下列必填列**之前**短路，
-        # 否则一行已停用的半成品会让整份规则库解析中止。
         status = _row_config_status(reader, row)
-        if status == STATUS_DISABLED:
-            outcomes.append(
-                RowOutcome(row["row_no"], "EXCLUDED", "该行配置状态为「停用」，不参与本次规则库")
-            )
-            continue
         _assert_row_required_filled(reader, row)
-        row_first_ref: str | None = None
+        row_refs: list[str] = []
         name_location = reader.location(row, "name", value=reader.text(row, "name"))
         name = check_business_name(reader.required_text(row, "name"), location=name_location)
         operator = reader.enum(row, "operator")
@@ -1090,11 +1201,11 @@ def _convert_comparison_sheet(
         )
 
         if role == "INTERNAL_VALIDATE":
-            material_names = split_list(
+            material_codes = split_list(
                 reader.text(row, "material_refs"),
                 location=reader.location(row, "material_refs", value=reader.text(row, "material_refs")),
             )
-            if not material_names:
+            if not material_codes:
                 raise BusinessError(
                     "RULE_MATERIAL_SCOPE_EMPTY",
                     f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「适用材料」为空："
@@ -1102,14 +1213,14 @@ def _convert_comparison_sheet(
                     details=reader.location(row, "material_refs").detail(),
                 )
             materials = []
-            for material_name in material_names:
-                material = material_by_name.get(material_name)
+            for material_code in material_codes:
+                material = material_by_code.get(material_code)
                 if material is None:
                     raise BusinessError(
                         "RULE_MATERIAL_REF_UNKNOWN",
-                        f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「适用材料」引用的“{material_name}”"
-                        "不在 01_材料检查 中，请先登记该材料或修正名称后重新上传",
-                        details=reader.location(row, "material_refs", value=material_name).detail(),
+                        f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「适用材料」引用“{material_code}”"
+                        "不在 01_材料位 中，请核对材料名称或编号后重新上传",
+                        details=reader.location(row, "material_refs", value=material_code).detail(),
                     )
                 materials.append(material)
             # 内部校验的字段来自同一份材料：多个适用材料分别执行，每个材料的字段都不能混用。
@@ -1147,6 +1258,7 @@ def _convert_comparison_sheet(
                     row=row,
                     column_key="left_field_ref",
                     original=left_expression[0],
+                    field_by_code=field_by_code,
                 )
                 inputs += _resolve_field_names(
                     right_names,
@@ -1156,14 +1268,20 @@ def _convert_comparison_sheet(
                     row=row,
                     column_key="right_field_ref",
                     original=reader.text(row, "right_field_ref") or "",
+                    field_by_code=field_by_code,
                 )
-                left_field = field_catalog[(material["name"], left_expression[0])]
+                left_field = _field_for_reference(
+                    left_expression[0], material=material, field_by_code=field_by_code, field_catalog=field_catalog
+                )
                 _assert_operator_field_types(
                     reader=reader,
                     row=row,
                     operator=operator,
                     left_field=left_field,
-                    right_fields=[field_catalog[(material["name"], name)] for name in right_names],
+                    right_fields=[
+                        _field_for_reference(name, material=material, field_by_code=field_by_code, field_catalog=field_catalog)
+                        for name in right_names
+                    ],
                 )
                 engine_operator = _engine_of(operator=operator, addend_count=len(right_names))
                 ref = _candidate_ref("rule", reader.sheet_key, row["row_no"]) + f":{material['candidate_ref']}"
@@ -1193,85 +1311,83 @@ def _convert_comparison_sheet(
                         row=row,
                     )
                 )
-                outcomes.append(RowOutcome(row["row_no"], "CANDIDATE", None, [ref]))
-                row_first_ref = row_first_ref or ref
+                row_refs.append(ref)
+            outcomes.append(RowOutcome(row["row_no"], "CANDIDATE", None, row_refs))
             _resolve_check_level(
                 reader=reader,
                 row=row,
                 rule_name=name,
-                rule_ref=row_first_ref or _candidate_ref("rule", reader.sheet_key, row["row_no"]),
+                rule_ref=row_refs[0],
                 check_level=check_level,
                 notes=notes,
             )
-            _append_rule_notes(
-                reader,
-                row,
-                name,
-                status,
-                notes,
-                rule_ref=row_first_ref or _candidate_ref("rule", reader.sheet_key, row["row_no"]),
-            )
+
             continue
 
-        # 05_文件交叉校验：左侧属于「材料」，右侧全部加数属于同一份「对照材料」。
-        left_material_name = reader.required_text(row, "material_ref")
-        left_material = material_by_name.get(left_material_name)
+        # 05_文件交叉校验规则：左侧属于「材料」，右侧全部加数属于同一份「对照材料」。
+        left_material_code = reader.required_text(row, "material_ref")
+        left_material = material_by_code.get(left_material_code)
         if left_material is None:
             raise BusinessError(
                 "RULE_MATERIAL_REF_UNKNOWN",
-                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「材料」引用的“{left_material_name}”"
-                "不在 01_材料检查 中，请先登记该材料或修正名称后重新上传",
-                details=reader.location(row, "material_ref", value=left_material_name).detail(),
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「材料」“{left_material_code}”"
+                "不在 01_材料位 中，请核对材料名称或编号后重新上传",
+                details=reader.location(row, "material_ref", value=left_material_code).detail(),
             )
-        right_material_name = reader.required_text(row, "right_material_ref")
-        right_material = material_by_name.get(right_material_name)
+        right_material_code = reader.required_text(row, "right_material_ref")
+        right_material = material_by_code.get(right_material_code)
         if right_material is None:
             raise BusinessError(
                 "RULE_MATERIAL_REF_UNKNOWN",
-                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「对照材料」引用的“{right_material_name}”"
-                "不在 01_材料检查 中，请先登记该材料或修正名称后重新上传",
-                details=reader.location(row, "right_material_ref", value=right_material_name).detail(),
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「对照材料」“{right_material_code}”"
+                "不在 01_材料位 中，请核对材料名称或编号后重新上传",
+                details=reader.location(row, "right_material_ref", value=right_material_code).detail(),
             )
-        right_names = parse_field_expression(
+        right_codes = parse_field_expression(
             reader.text(row, "right_field_ref"),
             location=reader.location(row, "right_field_ref", value=reader.text(row, "right_field_ref")),
         )
-        left_name = reader.required_text(row, "left_field_ref")
+        left_code = reader.required_text(row, "left_field_ref")
         _check_operator_shape(
             reader=reader,
             row=row,
             operator=operator,
             check_level=check_level,
-            right_names=right_names,
+            right_names=right_codes,
             original_right=reader.text(row, "right_field_ref"),
             threshold=threshold,
             threshold_unit=threshold_unit,
         )
-        inputs = _resolve_field_names(
-            [left_name],
+        inputs = _resolve_field_codes(
+            [left_code],
             material=left_material,
-            catalog=field_catalog,
+            field_by_code=field_by_code,
             reader=reader,
             row=row,
             column_key="left_field_ref",
-            original=left_name,
+            field_catalog=field_catalog,
         )
-        inputs += _resolve_field_names(
-            right_names,
+        inputs += _resolve_field_codes(
+            right_codes,
             material=right_material,
-            catalog=field_catalog,
+            field_by_code=field_by_code,
             reader=reader,
             row=row,
             column_key="right_field_ref",
-            original=reader.text(row, "right_field_ref") or "",
+            field_catalog=field_catalog,
         )
-        left_field = field_catalog[(left_material["name"], left_name)]
+        left_field = _field_for_reference(
+            left_code, material=left_material, field_by_code=field_by_code, field_catalog=field_catalog
+        )
         _assert_operator_field_types(
             reader=reader,
             row=row,
             operator=operator,
             left_field=left_field,
-            right_fields=[field_catalog[(right_material["name"], name)] for name in right_names],
+            right_fields=[
+                _field_for_reference(code, material=right_material, field_by_code=field_by_code, field_catalog=field_catalog)
+                for code in right_codes
+            ],
         )
         ref = _candidate_ref("rule", reader.sheet_key, row["row_no"])
         proposals["rules"].append(
@@ -1280,7 +1396,7 @@ def _convert_comparison_sheet(
                 source_id=source_id,
                 name=name,
                 node="CROSS_VALIDATE",
-                engine_operator=_engine_of(operator=operator, addend_count=len(right_names)),
+                engine_operator=_engine_of(operator=operator, addend_count=len(right_codes)),
                 inputs=inputs,
                 materials=[left_material["candidate_ref"], right_material["candidate_ref"]],
                 parameters=_comparison_parameters(
@@ -1294,7 +1410,10 @@ def _convert_comparison_sheet(
                 # 结果归属按实际参与比较的字段所属材料取得：待核对主体取自左材料、
                 # 印章主体候选取自右材料，两者都是这条规则的真实依据。
                 left_field=left_field,
-                right_fields=[field_catalog[(right_material["name"], item)] for item in right_names],
+                right_fields=[
+                    _field_for_reference(code, material=right_material, field_by_code=field_by_code, field_catalog=field_catalog)
+                    for code in right_codes
+                ],
                 check_level=check_level,
                 check_level_value=check_level,
                 risk_names=risk_names,
@@ -1312,7 +1431,7 @@ def _convert_comparison_sheet(
             check_level=check_level,
             notes=notes,
         )
-        _append_rule_notes(reader, row, name, status, notes, rule_ref=ref)
+
     return SheetConversion(reader, proposals, outcomes, notes)
 
 
@@ -1427,7 +1546,7 @@ def _rule_material_refs(
 ) -> list[str]:
     """规则材料范围 = 声明列 + 实际参与比较的字段所属材料（去重，保持稳定顺序）。
 
-    节点版的 05_文件交叉校验把两侧材料分列维护，单侧引用声明列就够；
+    节点版的 05_文件交叉校验规则把两侧材料分列维护，单侧引用声明列就够；
     内部校验按「适用材料」逐份展开。这里统一补齐两侧真实字段的材料，
     使风险汇总、报告材料归属与主体检索范围都拿到完整依据。
     """
@@ -1442,53 +1561,13 @@ def _rule_material_refs(
     return ordered
 
 
-def _append_rule_notes(
-    reader: SheetReader,
-    row: dict[str, Any],
-    name: str,
-    status: str,
-    notes: list[ConversionNote],
-    rule_ref: str | None = None,
-) -> None:
-    if status == STATUS_PENDING:
-        notes.append(
-            ConversionNote(
-                code="RULE_CONFIG_PENDING",
-                message=f"检查「{name}」标记为待确认：口径未确认前不能发布为可执行版本。",
-                sheet_key=reader.sheet_key,
-                sheet_name=reader.sheet_name,
-                row_no=row["row_no"],
-                cell=reader.location(row, "config_status").cell,
-                column=reader.column_names["config_status"],
-                value="待确认",
-                question_title=f"检查「{name}」的业务口径尚未确认：请确认可以执行，或明确停用",
-                question_options=[
-                    {"label": "确认，按该口径执行", "value": STATUS_CLEAR},
-                    {"label": "明确停用该检查", "value": STATUS_DISABLED},
-                ],
-                # 待确认的行必须真的能被处理：只留一句说明、不进裁决集合，
-                # 会让“不能发布为可执行版本”的配置悄悄通过发布。
-                resolve={
-                    "mode": "REPLACE",
-                    "target_type": "RULE",
-                    "target_ref": rule_ref,
-                    "property": "config_status",
-                }
-                if rule_ref
-                else None,
-            )
-        )
-
-
-# ---------------------------------------------------------------------------
-# 02_文件处理
-# ---------------------------------------------------------------------------
+# 02_文件处理规则
 
 
 def _convert_material_quality(
     reader: SheetReader,
     *,
-    material_by_name: dict[str, dict[str, Any]],
+    material_by_code: dict[str, dict[str, Any]],
 ) -> SheetConversion:
     proposals: dict[str, Any] = {"materials": [], "fields": [], "rules": [], "report_sections": [], "questions": []}
     outcomes: list[RowOutcome] = []
@@ -1498,13 +1577,15 @@ def _convert_material_quality(
         if _blank_row(row, reader):
             outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行在所有业务列上都没有内容"))
             continue
+        if _retain_disabled_row(reader, row, outcomes):
+            continue
         filled = _partial_row(row, reader)
         if len(filled) < 2:
             outcomes.append(
                 RowOutcome(row["row_no"], "EXCLUDED", f"该行只填写了「{filled[0] if filled else '无'}」，未形成完整业务记录")
             )
             continue
-        source_id = reader.required_text(row, "source_id")
+        source_id = reader.required_code(row, "source_id")
         if source_id in seen_ids:
             raise BusinessError(
                 "RULE_ID_DUPLICATED",
@@ -1512,13 +1593,7 @@ def _convert_material_quality(
                 details=reader.location(row, "source_id", value=source_id).detail(),
             )
         seen_ids[source_id] = row["row_no"]
-        # 停用行不参与本次规则库：它的口径列允许留空，必须在读必填列之前短路。
         status = _row_config_status(reader, row)
-        if status == STATUS_DISABLED:
-            outcomes.append(
-                RowOutcome(row["row_no"], "EXCLUDED", "该行配置状态为「停用」，不参与本次规则库")
-            )
-            continue
         _assert_row_required_filled(reader, row)
         name_location = reader.location(row, "name", value=reader.text(row, "name"))
         name = check_business_name(reader.required_text(row, "name"), location=name_location)
@@ -1536,11 +1611,11 @@ def _convert_material_quality(
                     check_item=check_item, allowed=sorted(allowed)
                 ),
             )
-        material_names = split_list(
+        material_codes = split_list(
             reader.text(row, "material_refs"),
             location=reader.location(row, "material_refs", value=reader.text(row, "material_refs")),
         )
-        if not material_names:
+        if not material_codes:
             raise BusinessError(
                 "RULE_MATERIAL_SCOPE_EMPTY",
                 f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「适用材料」为空："
@@ -1548,14 +1623,14 @@ def _convert_material_quality(
                 details=reader.location(row, "material_refs").detail(),
             )
         materials: list[dict[str, Any]] = []
-        for material_name in material_names:
-            material = material_by_name.get(material_name)
+        for material_code in material_codes:
+            material = material_by_code.get(material_code)
             if material is None:
                 raise BusinessError(
                     "RULE_MATERIAL_REF_UNKNOWN",
-                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「适用材料」引用的“{material_name}”"
-                    "不在 01_材料检查 中，请先登记该材料或修正名称后重新上传",
-                    details=reader.location(row, "material_refs", value=material_name).detail(),
+                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「适用材料」引用“{material_code}”"
+                    "不在 01_材料位 中，请核对材料名称或编号后重新上传",
+                    details=reader.location(row, "material_refs", value=material_code).detail(),
                 )
             materials.append(material)
         standard_value = reader.text(row, "standard_value")
@@ -1687,13 +1762,11 @@ def _convert_material_quality(
             check_level=check_level,
             notes=notes,
         )
-        _append_rule_notes(reader, row, name, status, notes, rule_ref=ref)
+
     return SheetConversion(reader, proposals, outcomes, notes)
 
 
-# ---------------------------------------------------------------------------
-# 06_风险评定
-# ---------------------------------------------------------------------------
+# 09_风险规则
 
 
 def _convert_risks(reader: SheetReader) -> SheetConversion:
@@ -1706,13 +1779,23 @@ def _convert_risks(reader: SheetReader) -> SheetConversion:
         if _blank_row(row, reader):
             outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行在所有业务列上都没有内容"))
             continue
+        if _retain_disabled_row(reader, row, outcomes):
+            continue
         filled = _partial_row(row, reader)
         if len(filled) < 2:
             outcomes.append(
                 RowOutcome(row["row_no"], "EXCLUDED", f"该行只填写了「{filled[0] if filled else '无'}」，未形成完整业务记录")
             )
             continue
-        source_id = reader.required_text(row, "source_id")
+        source_id = reader.required_code(row, "source_id")
+        if source_id in seen_ids:
+            raise BusinessError(
+                "RISK_ID_DUPLICATED",
+                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的风险编号“{source_id}”与第 {seen_ids[source_id]} 行重复",
+                details=reader.location(row, "source_id", value=source_id).detail(),
+            )
+        seen_ids[source_id] = row["row_no"]
+        status = _row_config_status(reader, row, required=True)
         name_location = reader.location(row, "name", value=reader.text(row, "name"))
         name = check_business_name(reader.required_text(row, "name"), location=name_location)
         if name in seen_names:
@@ -1722,24 +1805,12 @@ def _convert_risks(reader: SheetReader) -> SheetConversion:
                 "风险名称必须唯一",
                 details=name_location.detail(),
             )
-        if source_id in seen_ids:
-            raise BusinessError(
-                "RISK_ID_DUPLICATED",
-                f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的风险编号“{source_id}”与第 {seen_ids[source_id]} 行重复",
-                details=reader.location(row, "source_id", value=source_id).detail(),
-            )
         seen_names[name] = row["row_no"]
-        seen_ids[source_id] = row["row_no"]
         risk_level_value = reader.enum(row, "risk_level")
         condition = reader.enum(row, "condition", required=False)
         description = reader.text(row, "description") or ""
         action = reader.text(row, "action") or ""
-        status = reader.enum(row, "config_status")
         ref = _candidate_ref("risk", reader.sheet_key, row["row_no"])
-        if status == STATUS_DISABLED:
-            # 停用的风险不参与本次规则库：不进入候选，也不因为缺成立条件或等级未映射而阻塞发布。
-            outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行配置状态为「停用」，不参与本次规则库"))
-            continue
         if risk_level_value in {"高", "低"}:
             # 「高/低」与「最高/一级/二级/三级」的业务对应关系尚未确认，系统不代填：
             # 这是一条可作答的待确认事项，不是导入失败。
@@ -1821,28 +1892,25 @@ def _convert_risks(reader: SheetReader) -> SheetConversion:
                 "risk_condition": condition,
                 "risk_level_value": risk_level_value,
                 "source_rule_refs": [],
-                "check_operator": None,
-                "check_level": None,
                 "quality_supported": None,
                 "config_status": status,
                 "source": _source_ref(reader, row),
             }
         )
         outcomes.append(RowOutcome(row["row_no"], "CANDIDATE", None, [ref]))
-        _append_rule_notes(reader, row, name, status, notes, rule_ref=ref)
+
     return SheetConversion(reader, proposals, outcomes, notes)
 
 
-# ---------------------------------------------------------------------------
-# 07_报告输出
-# ---------------------------------------------------------------------------
+# 10_报告模板
 
 
 def _convert_reports(
     reader: SheetReader,
     *,
-    material_by_name: dict[str, dict[str, Any]],
-    field_catalog: dict[tuple[str, str], dict[str, Any]],
+    material_by_code: dict[str, dict[str, Any]],
+    field_by_code: dict[str, dict[str, Any]],
+    field_catalog: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> SheetConversion:
     proposals: dict[str, Any] = {"materials": [], "fields": [], "rules": [], "report_sections": [], "questions": []}
     outcomes: list[RowOutcome] = []
@@ -1851,28 +1919,24 @@ def _convert_reports(
         if _blank_row(row, reader):
             outcomes.append(RowOutcome(row["row_no"], "EXCLUDED", "该行在所有业务列上都没有内容"))
             continue
+        if _retain_disabled_row(reader, row, outcomes):
+            continue
         filled = _partial_row(row, reader)
         if len(filled) < 2:
             outcomes.append(
                 RowOutcome(row["row_no"], "EXCLUDED", f"该行只填写了「{filled[0] if filled else '无'}」，未形成完整业务记录")
             )
             continue
-        report_code = reader.required_text(row, "report_code")
-        # 停用章节不参与本次规则库：它的其余业务列允许留空，必须在读必填列之前短路。
+        report_code = reader.required_code(row, "report_code")
         status = _row_config_status(reader, row)
-        if status == STATUS_DISABLED:
-            outcomes.append(
-                RowOutcome(row["row_no"], "EXCLUDED", "该行配置状态为「停用」，不参与本次规则库")
-            )
-            continue
         _assert_row_required_filled(reader, row)
         report_name_location = reader.location(row, "report_name", value=reader.text(row, "report_name"))
         report_name = check_business_name(reader.required_text(row, "report_name"), location=report_name_location)
-        material_names = split_list(
+        material_codes = split_list(
             reader.text(row, "material_refs"),
             location=reader.location(row, "material_refs", value=reader.text(row, "material_refs")),
         )
-        if not material_names:
+        if not material_codes:
             raise BusinessError(
                 "REPORT_SCOPE_EMPTY",
                 f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「材料范围」为空："
@@ -1880,14 +1944,14 @@ def _convert_reports(
                 details=reader.location(row, "material_refs").detail(),
             )
         materials: list[dict[str, Any]] = []
-        for material_name in material_names:
-            material = material_by_name.get(material_name)
+        for material_code in material_codes:
+            material = material_by_code.get(material_code)
             if material is None:
                 raise BusinessError(
                     "REPORT_MATERIAL_REF_UNKNOWN",
-                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「材料范围」引用的“{material_name}”"
-                    "不在 01_材料检查 中，请先登记该材料或修正名称后重新上传",
-                    details=reader.location(row, "material_refs", value=material_name).detail(),
+                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的「材料范围」引用“{material_code}”"
+                    "不在 01_材料位 中，请核对材料名称或编号后重新上传",
+                    details=reader.location(row, "material_refs", value=material_code).detail(),
                 )
             materials.append(material)
         formats = split_list(
@@ -1934,31 +1998,49 @@ def _convert_reports(
             location=reader.location(row, "field_refs", value=reader.text(row, "field_refs")),
         )
         field_keys: list[str] = []
-        for raw_ref in raw_field_refs:
-            material_name, field_name = parse_report_field_reference(
-                raw_ref, location=reader.location(row, "field_refs", value=raw_ref)
-            )
-            material = material_by_name.get(material_name)
-            if material is None:
+        scope_refs = {item["candidate_ref"] for item in materials}
+        for field_code in raw_field_refs:
+            field = field_by_code.get(field_code)
+            named_field = None
+            if field is None and field_catalog is not None and "." in field_code:
+                material_name, field_name = field_code.split(".", 1)
+                material = material_by_code.get(material_name)
+                if material is not None:
+                    field = field_catalog.get((material["source_id"], field_name))
+            if field_catalog is not None and "." not in field_code:
+                scoped = [
+                    field_catalog.get((material["source_id"], field_code))
+                    for material in materials
+                ]
+                matches = {item["candidate_ref"]: item for item in scoped if item is not None}
+                if len(matches) > 1:
+                    raise BusinessError(
+                        "REPORT_FIELD_AMBIGUOUS",
+                        f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{field_code}”"
+                        "在多个材料下都有定义，请写成“材料名称.字段名称”或使用字段编号",
+                        details=reader.location(row, "field_refs", value=field_code).detail(),
+                    )
+                named_field = next(iter(matches.values()), None)
+            if field is not None and named_field is not None and field["candidate_ref"] != named_field["candidate_ref"]:
                 raise BusinessError(
-                    "REPORT_FIELD_MATERIAL_UNKNOWN",
-                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{raw_ref}”引用的材料"
-                    f"“{material_name}”不在 01_材料检查 中",
-                    details=reader.location(row, "field_refs", value=raw_ref).detail(),
+                    "REPORT_FIELD_AMBIGUOUS",
+                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{field_code}”同时是字段编号和其他字段名称，无法确定目标",
+                    details=reader.location(row, "field_refs", value=field_code).detail(),
                 )
-            if material["candidate_ref"] not in {item["candidate_ref"] for item in materials}:
-                raise BusinessError(
-                    "REPORT_FIELD_OUT_OF_SCOPE",
-                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{raw_ref}”所属材料"
-                    f"“{material_name}”不在本报告的材料范围内，请补入材料范围或改掉该字段",
-                    details=reader.location(row, "field_refs", value=raw_ref).detail(),
-                )
-            field = field_catalog.get((material_name, field_name))
+            if field is None:
+                field = named_field
             if field is None:
                 raise BusinessError(
                     "REPORT_FIELD_UNKNOWN",
-                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{raw_ref}”在 03_字段抽取 中不存在",
-                    details=reader.location(row, "field_refs", value=raw_ref).detail(),
+                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{field_code}”在 03_字段 中不存在",
+                    details=reader.location(row, "field_refs", value=field_code).detail(),
+                )
+            if field["material_ref"] not in scope_refs:
+                raise BusinessError(
+                    "REPORT_FIELD_OUT_OF_SCOPE",
+                    f"工作表「{reader.sheet_name}」第 {row['row_no']} 行的展示字段“{field_code}”"
+                    "不在本报告的材料范围内，请补入所属材料或改掉该字段",
+                    details=reader.location(row, "field_refs", value=field_code).detail(),
                 )
             field_keys.append(field["candidate_ref"])
         if content_type in FIELD_LIST_CONTENT_TYPES and not field_keys:
@@ -1989,36 +2071,7 @@ def _convert_reports(
             }
         )
         outcomes.append(RowOutcome(row["row_no"], "CANDIDATE", None, [ref]))
-        if status == STATUS_PENDING:
-            notes.append(
-                ConversionNote(
-                    code="REPORT_SECTION_PENDING",
-                    message=(
-                        f"报告“{report_name}”的章节“{section_name}”标记为待确认："
-                        "非停用章节待确认时该报告仍是未完成配置。"
-                    ),
-                    sheet_key=reader.sheet_key,
-                    sheet_name=reader.sheet_name,
-                    row_no=row["row_no"],
-                    cell=reader.location(row, "config_status").cell,
-                    column=reader.column_names["config_status"],
-                    value="待确认",
-                    question_title=f"报告“{report_name}”的章节“{section_name}”尚未确认，请处理后重新上传",
-                    question_options=[
-                        {"label": "确认，按该章节输出", "value": STATUS_CLEAR},
-                        {"label": "明确停用该章节", "value": STATUS_DISABLED},
-                    ],
-                    # 与 01/03 同口径：待确认的章节必须真的能被处理。只留一句说明、
-                    # 不进裁决集合，会让“非停用章节待确认时该报告仍是未完成配置”
-                    # 悄悄通过发布。
-                    resolve={
-                        "mode": "REPLACE",
-                        "target_type": "REPORT_SECTION",
-                        "target_ref": ref,
-                        "property": "config_status",
-                    },
-                )
-            )
+
 
     return SheetConversion(reader, proposals, outcomes, notes)
 
@@ -2098,34 +2151,32 @@ def _resolve_risk_references(
     comparison_rules: list[dict[str, Any]],
     risk_rules: list[dict[str, Any]],
 ) -> None:
-    """把检查行的「关联风险」按唯一中文名称解析到风险候选引用。
+    """把检查行的「关联风险」按风险名称或编号解析到风险候选引用。
 
-    没有任何关联检查是配置错误；指向停用检查的风险同样明确报出。
+    没有任何关联检查是配置错误；停用来源关系由调用方先核对。
     """
-    risk_by_name = {rule["name"]: rule for rule in risk_rules}
+    risk_by_code = _reference_index(risk_rules, kind="风险")
     sources_by_risk: dict[str, list[dict[str, Any]]] = {rule["candidate_ref"]: [] for rule in risk_rules}
     for rule in comparison_rules:
         source = rule["source"]
-        for risk_name in rule["risk_names"]:
-            risk = risk_by_name.get(risk_name)
+        for risk_code in rule["risk_names"]:
+            risk = risk_by_code.get(risk_code)
             if risk is None:
                 raise BusinessError(
                     "RISK_REF_UNKNOWN",
-                    f"检查「{rule['name']}」的「关联风险」引用的“{risk_name}”不在 06_风险评定 中，"
-                    "请先登记该风险或修正名称后重新上传",
+                    f"检查「{rule['name']}」的「关联风险」“{risk_code}”不在 09_风险规则 中，"
+                    "请核对风险名称或编号后重新上传",
                     details={
                         "sheet_key": source["sheet_key"],
                         "row_no": source["row_no"],
                         "rule_name": rule["name"],
-                        "value": risk_name,
+                        "value": risk_code,
                     },
                 )
-            if rule["config_status"] == STATUS_DISABLED:
-                continue
             sources_by_risk[risk["candidate_ref"]].append(rule)
     for risk in risk_rules:
         sources = sources_by_risk[risk["candidate_ref"]]
-        if not sources and risk["config_status"] != STATUS_DISABLED:
+        if not sources:
             source = risk["source"]
             raise BusinessError(
                 "RISK_SOURCE_MISSING",
@@ -2138,6 +2189,60 @@ def _resolve_risk_references(
                 },
             )
         risk["source_rule_refs"] = [rule["candidate_ref"] for rule in sources]
+
+
+def _assert_no_disabled_risk_links(
+    check_conversions: tuple[SheetConversion | None, ...],
+    risk_conversion: SheetConversion | None,
+) -> None:
+    if risk_conversion is None:
+        return
+    active_risks = _reference_index(risk_conversion.proposals["rules"], kind="风险")
+    disabled_risks: dict[str, dict[str, Any]] = {}
+    for row in _disabled_rows_of_conversion(risk_conversion):
+        for value in (
+            row.get("source_id"),
+            next((column["value"] for column in row["columns"] if column["key"] == "name"), None),
+        ):
+            if value:
+                disabled_risks[str(value).strip()] = row
+    for conversion in check_conversions:
+        if conversion is None:
+            continue
+        for check in conversion.proposals["rules"]:
+            for risk_code in check["risk_names"]:
+                disabled = disabled_risks.get(risk_code)
+                if disabled is None:
+                    continue
+                source = check["source"]
+                raise BusinessError(
+                    "DISABLED_DEPENDENCY",
+                    f"检查“{check['name']}”关联的风险“{risk_code}”已停用；请明确处理这条跨表关系",
+                    details={
+                        "sheet_key": source["sheet_key"], "row_no": source["row_no"],
+                        "risk_sheet_key": disabled["source"]["sheet_key"],
+                        "risk_row_no": disabled["source"]["row_no"],
+                        "risk_code": risk_code,
+                    },
+                )
+        for disabled in _disabled_rows_of_conversion(conversion):
+            raw_refs = next((column["value"] for column in disabled["columns"] if column["key"] == "risk_refs"), "")
+            for risk_code in (part.strip() for part in raw_refs.split(LIST_SEPARATOR) if part.strip()):
+                risk = active_risks.get(risk_code)
+                if risk is None:
+                    continue
+                source = disabled["source"]
+                raise BusinessError(
+                    "DISABLED_DEPENDENCY",
+                    f"启用风险“{risk['name']}”仍关联已停用的检查行；请明确处理这条跨表关系",
+                    details={
+                        "sheet_key": source["sheet_key"], "row_no": source["row_no"],
+                        "check_code": disabled["source_id"],
+                        "risk_sheet_key": risk["source"]["sheet_key"],
+                        "risk_row_no": risk["source"]["row_no"],
+                        "risk_code": risk_code,
+                    },
+                )
 
 
 def _assert_level_conflicts(
@@ -2183,9 +2288,83 @@ def _assert_level_conflicts(
     return notes
 
 
-# ---------------------------------------------------------------------------
-# 顶层入口
-# ---------------------------------------------------------------------------
+# 本模块负责材料、字段、检查、风险与报告 Sheet；计算三表由 financial_report 负责。
+OWNED_ROLES: frozenset[str] = frozenset(
+    {
+        "MATERIAL_LIST",
+        "MATERIAL_QUALITY",
+        "FIELD_EXTRACTION",
+        "INTERNAL_VALIDATE",
+        "CROSS_VALIDATE",
+        "RISK",
+        "REPORT_TEMPLATE",
+    }
+)
+
+
+def _stamp_rule_node(
+    conversion: SheetConversion,
+    *,
+    node_code_by_sheet: dict[str, str],
+) -> None:
+    """把一条规则的能力类型换成它所属 Sheet 绑定的**节点实例码**。
+
+    转换函数按业务语义写的是能力类型（`INTERNAL_VALIDATE`、`RISK_RATING` …），
+    而规则在已发布配置里的归属必须是用户配置的实例码：同一场景可以有两个同类节点，
+    能力类型不足以定位到其中哪一个。
+
+    实例码来自这张 Sheet 的绑定结果（`import_sheet.bound_node_code`）。绑定缺失时
+    明确报错——静默退回能力类型会让规则挂到一个用户并没有建立的节点上，
+    发布期才以「规则指向不存在的节点」报出，那时已经看不出真实原因。
+    """
+    if not conversion.proposals["rules"]:
+        return
+    sheet_key = conversion.reader.sheet_key
+    node_code = node_code_by_sheet.get(sheet_key)
+    if node_code is None:
+        raise BusinessError(
+            "SHEET_NODE_REQUIRED",
+            f"工作表「{conversion.reader.sheet_name}」上的规则没有可归属的节点实例："
+            "该工作表没有绑定业务节点",
+            details={"sheet_key": sheet_key, "sheet_name": conversion.reader.sheet_name},
+        )
+    for rule in conversion.proposals["rules"]:
+        rule["node_type"] = rule["node"]
+        rule["node"] = node_code
+
+
+def _optional_conversion(convert: Any, reader: SheetReader | None, **kwargs: Any) -> SheetConversion | None:
+    """本场景没绑定这张表时返回 None，否则照常转换。
+
+    「没绑定」与「绑定了但内容不合法」是两件事：前者是配置事实（这个场景不配这类检查），
+    后者由转换函数照常明确报错。这里只处理前者，不吞任何异常。
+    """
+    if reader is None:
+        return None
+    return convert(reader, **kwargs)
+
+
+def _reader(readers: dict[str, SheetReader], role: str) -> SheetReader:
+    """读取材料位表；没有材料身份时字段和检查无法建立来源关系。"""
+    reader = readers.get(role)
+    if reader is None:
+        raise BusinessError(
+            "SHEET_ROLE_MISSING",
+            f"当前导入没有绑定「{role}」对应的 Sheet；请在绑定步骤把相关工作表绑定到对应节点",
+            details={"sheet_role": role, "bound_roles": sorted(readers)},
+        )
+    return reader
+
+
+def _optional_reader(readers: dict[str, SheetReader], role: str) -> SheetReader | None:
+    """按角色取读取器；本场景没有绑定这张表时返回 None。
+
+    材料位表是本转换器的身份基础；字段、检查、风险与报告表按实际绑定读取。
+
+    它**不吞掉**任何真实问题：表绑定了但列缺失、表头行不存在、内容填错，
+    仍由 `SheetReader` 与各转换函数照常明确报错。
+    """
+    return readers.get(role)
 
 
 @dataclass
@@ -2200,28 +2379,49 @@ def build_convert_bundle(
     ir: WorkbookIR,
     bindings: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """把节点版规则库确定性转换成候选集合。
+    """把已绑定的非计算 Sheet 确定性转换成候选集合。
 
     返回结构与 `ProposalBundle` 兼容的字典，并附带：
       - `node_notes`：必须留给业务处理的待确认事项与能力缺口；
       - `coverage`：逐业务行的处置对账。
 
+    只转换**用户已绑定**的 Sheet：未绑定或被排除的 Sheet 不进入转换，
+    也不产生候选——绑定结果是本次场景配置的明确输入，系统不按表头自动推断用途。
+
     本函数不调用任何模型，不读取向量索引。
     """
-    # 用**本工作簿自己识别出的**格式版本，而不是写死 v3：v3 与 v4 的 01 表列不同，
-    # 写死会让 v4 的「材料识别类型」被当成未知列而拒绝。
-    profiles = profile.role_index(ir.profile_version)
+    # 统一模板协议是全系统唯一的一份：列协议按它取。
+    # 转换分派只使用用户确认的 sheet_role，不按名称或表头猜。
+    profile = unified_profile.load_unified_profile()
+    sheet_definitions = unified_profile.sheet_index(profile)
     readers: dict[str, SheetReader] = {}
+    # Sheet 键 → 用户绑定的**节点实例码**。规则必须落在实例上，不能落在能力类型上：
+    # 同一场景可以有两个同类节点，用能力类型当归属会让两条检查都挂到同一个节点上，
+    # 而发布期的节点覆盖校验只看实例码，于是规则会被判成「指向不存在的节点」。
+    node_code_by_sheet: dict[str, str] = {}
     for sheet in ir.sheets:
         binding = bindings.get(sheet.sheet_key, {})
-        role = binding.get("role") or sheet.suggested_role
-        if binding.get("excluded") or not sheet.visible:
+        # 判断依据只有用户绑定或明确排除：**不看 `sheet.visible`**。
+        # 隐藏只是 Excel 的展示属性，隐藏的业务 Sheet 仍然可以由用户绑定与导入；
+        # 按隐藏跳过会让一份用户明确绑定好的表在转换期被静默丢掉。
+        if binding.get("excluded"):
             continue
-        if role not in profiles:
+        unified_role = str(binding.get("role"))
+        if unified_role not in OWNED_ROLES:
             continue
+        short_role = unified_role
+        node_code = binding.get("node_code")
+        if not isinstance(node_code, str) or not node_code:
+            raise BusinessError(
+                "SHEET_NODE_REQUIRED",
+                f"工作表「{sheet.name}」没有绑定业务节点，无法确定它上面的规则归属哪个节点实例",
+                details={"sheet_key": sheet.sheet_key, "sheet_name": sheet.name, "role": unified_role},
+            )
+        node_code_by_sheet[sheet.sheet_key] = node_code
+
         # 空白模板可以读取和填写：只有表头、没有任何业务数据行的 Sheet，只要它绑定了
-        # 七张业务表之一的角色，就必须保留该角色并转换成**零行业务集合**。
-        # 在预处理阶段按「无业务数据」把它排除、之后又报缺少七张表，会让空白模板
+        # 业务角色，就必须保留该角色并转换成**零行业务集合**。
+        # 在预处理阶段按「无业务数据」把它排除、之后又报缺少业务表，会让空白模板
         # 永远无法通过转换——两处说法必须一致。
         header_row = binding.get("header_row")
         if header_row is None:
@@ -2237,93 +2437,116 @@ def build_convert_bundle(
                 f"工作表「{sheet.name}」不存在所选表头行",
                 details={"sheet_key": sheet.sheet_key, "sheet_name": sheet.name, "row_no": header_row},
             )
-        if role in readers:
+        if short_role in readers:
             # 同一角色绑定多个 Sheet 必须明确报错：readers[role] 只能保留一个，
             # 后一个覆盖前一个会让前一张表的数据被静默丢掉，转换结果看起来正常却少了内容。
             raise BusinessError(
                 "SHEET_ROLE_DUPLICATED",
-                f"工作表「{sheet.name}」与「{readers[role].sheet_name}」都被绑定为"
-                f"「{profiles[role]['display_name']}」：同一用途只能绑定一张工作表",
+                f"工作表「{sheet.name}」与「{readers[short_role].sheet_name}」都被绑定为"
+                f"「{sheet_definitions[unified_role]['display_name']}」：同一用途只能绑定一张工作表",
                 details={
-                    "role": role,
-                    "sheet_names": [readers[role].sheet_name, sheet.name],
+                    "role": unified_role,
+                    "sheet_names": [readers[short_role].sheet_name, sheet.name],
                 },
             )
-        readers[role] = SheetReader(
+        readers[short_role] = SheetReader(
             sheet_key=sheet.sheet_key,
             sheet_name=sheet.name,
-            role_definition=profiles[role],
+            role_definition=sheet_definitions[unified_role],
             header_row=header_row,
             header_values=header.cells,
             rows=[{"row_no": row.row_no, "cells": row.cells} for row in sheet.rows],
         )
 
-    missing_roles = [role for role in profiles if role not in readers]
-    if missing_roles:
-        raise BusinessError(
-            "SHEET_ROLE_MISSING",
-            "节点版规则库缺少工作表："
-            + "、".join(profiles[role]["display_name"] for role in missing_roles)
-            + "。七张业务表都必须提供；空白模板可以没有任何数据行，但工作表不能缺失",
-            details={"missing_roles": missing_roles},
-        )
-
-    materials_conversion = _convert_materials(readers["MATERIAL_LIST"])
+    # 材料位表提供字段与检查引用的材料身份；其余 Sheet 按实际绑定转换。
+    materials_conversion = _convert_materials(_reader(readers, "MATERIAL_LIST"))
     material_proposals = materials_conversion.proposals["materials"]
-    material_by_name = {item["name"]: item for item in material_proposals}
+    material_by_code = _reference_index(material_proposals, kind="材料")
 
-    fields_conversion = _convert_fields(readers["FIELD_EXTRACTION"], material_by_name=material_by_name)
-    field_proposals = fields_conversion.proposals["fields"]
+    fields_conversion = _optional_conversion(
+        _convert_fields,
+        _optional_reader(readers, "FIELD_EXTRACTION"),
+        material_by_code=material_by_code,
+    )
+    field_proposals = fields_conversion.proposals["fields"] if fields_conversion is not None else []
     field_catalog = _build_field_catalog(field_proposals, material_proposals)
+    field_by_code = {item["source_id"]: item for item in field_proposals}
 
-    quality_conversion = _convert_material_quality(readers["MATERIAL_QUALITY"], material_by_name=material_by_name)
-    internal_conversion = _convert_internal_validate(
-        readers["INTERNAL_VALIDATE"],
-        material_by_name=material_by_name,
+    quality_conversion = _optional_conversion(
+        _convert_material_quality,
+        _optional_reader(readers, "MATERIAL_QUALITY"),
+        material_by_code=material_by_code,
+    )
+    internal_conversion = _optional_conversion(
+        _convert_internal_validate,
+        _optional_reader(readers, "INTERNAL_VALIDATE"),
+        material_by_code=material_by_code,
+        field_catalog=field_catalog,
+        field_by_code=field_by_code,
+    )
+    cross_conversion = _optional_conversion(
+        _convert_cross_validate,
+        _optional_reader(readers, "CROSS_VALIDATE"),
+        material_by_code=material_by_code,
+        field_catalog=field_catalog,
+        field_by_code=field_by_code,
+    )
+    risk_conversion = _optional_conversion(
+        _convert_risks,
+        _optional_reader(readers, "RISK"),
+    )
+    report_conversion = _optional_conversion(
+        _convert_reports,
+        _optional_reader(readers, "REPORT_TEMPLATE"),
+        material_by_code=material_by_code,
+        field_by_code=field_by_code,
         field_catalog=field_catalog,
     )
-    cross_conversion = _convert_cross_validate(
-        readers["CROSS_VALIDATE"],
-        material_by_name=material_by_name,
-        field_catalog=field_catalog,
-    )
-    risk_conversion = _convert_risks(readers["RISK"])
-    report_conversion = _convert_reports(
-        readers["REPORT_TEMPLATE"],
-        material_by_name=material_by_name,
-        field_catalog=field_catalog,
-    )
+
+    quality_rules = quality_conversion.proposals["rules"] if quality_conversion is not None else []
+    internal_rules = internal_conversion.proposals["rules"] if internal_conversion is not None else []
+    cross_rules = cross_conversion.proposals["rules"] if cross_conversion is not None else []
+    risk_rules = risk_conversion.proposals["rules"] if risk_conversion is not None else []
 
     comparison_rules = [
-        *quality_conversion.proposals["rules"],
-        *internal_conversion.proposals["rules"],
-        *cross_conversion.proposals["rules"],
+        *quality_rules,
+        *internal_rules,
+        *cross_rules,
     ]
-    risk_rules = risk_conversion.proposals["rules"]
+    _assert_no_disabled_risk_links(
+        (quality_conversion, internal_conversion, cross_conversion), risk_conversion
+    )
     _resolve_risk_references(comparison_rules, risk_rules)
 
+    # 规则归属改为**用户绑定的节点实例码**：转换函数内部按业务书写习惯写的是能力类型
+    # （「这条检查是内部校验」），这里把它换成该 Sheet 绑定的实例码，并把能力类型
+    # 记进 `node_type`。转换函数因此不必各自知道实例码，归属只有一个改写点。
+    for conversion in (quality_conversion, internal_conversion, cross_conversion, risk_conversion):
+        if conversion is not None:
+            _stamp_rule_node(conversion, node_code_by_sheet=node_code_by_sheet)
+
     rule_by_ref = {rule["candidate_ref"]: rule for rule in [*comparison_rules, *risk_rules]}
-    risk_level_notes = _assert_level_conflicts(risk_rules, rule_by_ref, readers["RISK"])
-    _assert_report_group_consistency(report_conversion.proposals["report_sections"], readers["REPORT_TEMPLATE"])
-
-    # 停用对象的引用必须明确报出：不能为了发布自动停用一条链路。
-    disabled_materials = {item["candidate_ref"] for item in material_proposals if item["config_status"] == STATUS_DISABLED}
-    _assert_no_disabled_dependency(
-        material_proposals,
-        field_proposals,
-        comparison_rules,
-        risk_rules,
-        disabled_materials,
+    risk_level_notes = (
+        _assert_level_conflicts(risk_rules, rule_by_ref, risk_conversion.reader)
+        if risk_conversion is not None
+        else []
     )
+    if report_conversion is not None:
+        _assert_report_group_consistency(report_conversion.proposals["report_sections"], report_conversion.reader)
 
+    # 本场景没绑定的表不进入候选集合，也不产生覆盖对账行——它不参与本次转换。
     conversions = [
-        materials_conversion,
-        fields_conversion,
-        quality_conversion,
-        internal_conversion,
-        cross_conversion,
-        risk_conversion,
-        report_conversion,
+        conversion
+        for conversion in (
+            materials_conversion,
+            fields_conversion,
+            quality_conversion,
+            internal_conversion,
+            cross_conversion,
+            risk_conversion,
+            report_conversion,
+        )
+        if conversion is not None
     ]
     notes: list[ConversionNote] = [*risk_level_notes]
     for conversion in conversions:
@@ -2338,6 +2561,7 @@ def build_convert_bundle(
             "fields": conversion.proposals["fields"],
             "rules": conversion.proposals["rules"],
             "report_sections": conversion.proposals["report_sections"],
+            "disabled_rows": _disabled_rows_of_conversion(conversion),
             "questions": [],
         }
         for conversion in conversions
@@ -2362,25 +2586,19 @@ def build_convert_bundle(
         }
         for conversion in conversions
     ]
-    totals = {
-        "business_rows": sum(sheet["business_rows"] for sheet in coverage_sheets),
-        "candidate_rows": sum(
-            1 for sheet in coverage_sheets for row in sheet["rows"] if row["disposition"] == "CANDIDATE"
-        ),
-        "excluded_rows": sum(
-            1 for sheet in coverage_sheets for row in sheet["rows"] if row["disposition"] == "EXCLUDED"
-        ),
-        "question_rows": sum(
-            1 for sheet in coverage_sheets for row in sheet["rows"] if row["disposition"] == "QUESTION"
-        ),
-    }
+    totals = coverage_totals(coverage_sheets)
     bundle_hash = hashlib.sha256(
         json.dumps(
             {
                 "materials": [item["candidate_ref"] for item in material_proposals],
                 "fields": [item["candidate_ref"] for item in field_proposals],
                 "rules": [item["candidate_ref"] for item in [*comparison_rules, *risk_rules]],
-                "sections": [item["candidate_ref"] for item in report_conversion.proposals["report_sections"]],
+                "disabled_rows": [sheet["disabled_rows"] for sheet in sheets],
+                "sections": (
+                    [item["candidate_ref"] for item in report_conversion.proposals["report_sections"]]
+                    if report_conversion is not None
+                    else []
+                ),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -2399,57 +2617,3 @@ def _role_of(sheet_key: str, readers: dict[str, SheetReader]) -> str:
         if reader.sheet_key == sheet_key:
             return role
     raise BusinessError("SHEET_ROLE_MISSING", "工作表用途缺失", status_code=500)
-
-
-def _assert_no_disabled_dependency(
-    material_proposals: list[dict[str, Any]],
-    field_proposals: list[dict[str, Any]],
-    comparison_rules: list[dict[str, Any]],
-    risk_rules: list[dict[str, Any]],
-    disabled_materials: set[str],
-) -> None:
-    """停用对象的依赖必须指出，不能为了发布自动停用一条链路。"""
-    disabled_fields = {
-        item["candidate_ref"] for item in field_proposals if item["config_status"] == STATUS_DISABLED
-    }
-    disabled_rules = {
-        item["candidate_ref"] for item in comparison_rules if item["config_status"] == STATUS_DISABLED
-    }
-    for field in field_proposals:
-        if field["config_status"] == STATUS_DISABLED:
-            continue
-        if field["material_ref"] in disabled_materials:
-            source = field["source"]
-            raise BusinessError(
-                "DISABLED_DEPENDENCY",
-                f"字段“{field['name']}”依赖的材料已被停用，停用依赖必须一并处理，"
-                "系统不会为了发布而自动停用这条链路",
-                details={"sheet_key": source["sheet_key"], "row_no": source["row_no"], "field_name": field["name"]},
-            )
-    for rule in comparison_rules:
-        if rule["config_status"] == STATUS_DISABLED:
-            continue
-        if any(item["field_ref"] in disabled_fields for item in rule["inputs"]):
-            source = rule["source"]
-            raise BusinessError(
-                "DISABLED_DEPENDENCY",
-                f"检查“{rule['name']}”引用的字段已被停用，请先处理该字段的停用决定",
-                details={"sheet_key": source["sheet_key"], "row_no": source["row_no"], "rule_name": rule["name"]},
-            )
-        if any(item in disabled_materials for item in rule["material_refs"]):
-            source = rule["source"]
-            raise BusinessError(
-                "DISABLED_DEPENDENCY",
-                f"检查“{rule['name']}”的适用材料已被停用，请先处理该材料的停用决定",
-                details={"sheet_key": source["sheet_key"], "row_no": source["row_no"], "rule_name": rule["name"]},
-            )
-    for risk in risk_rules:
-        if risk["config_status"] == STATUS_DISABLED:
-            continue
-        if any(ref in disabled_rules for ref in risk.get("source_rule_refs", [])):
-            source = risk["source"]
-            raise BusinessError(
-                "DISABLED_DEPENDENCY",
-                f"风险“{risk['name']}”的关联检查已被停用，请先处理该检查的停用决定",
-                details={"sheet_key": source["sheet_key"], "row_no": source["row_no"], "risk_name": risk["name"]},
-            )

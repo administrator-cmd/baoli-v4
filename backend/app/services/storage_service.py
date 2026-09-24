@@ -12,6 +12,7 @@ DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xlsm", ".png", ".jpg", ".jpeg
 
 
 def resolve_storage_path(relative_path: str) -> Path:
+    """把相对路径解析到存储根目录下；越出根目录时明确报错。"""
     root = get_settings().storage_root
     target = (root / relative_path).resolve()
     if root != target and root not in target.parents:
@@ -26,6 +27,7 @@ async def save_upload(
     allowed_extensions: set[str],
     max_bytes: int,
 ) -> tuple[int, str]:
+    """把上传写入存储并返回（字节数, sha256）；扩展名不允许或超出上限时明确报错。"""
     suffix = Path(upload.filename or "").suffix.lower()
     if suffix not in allowed_extensions:
         raise BusinessError(

@@ -154,13 +154,6 @@ a {
   min-width: 0;
 }
 
-.app-header__right {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-}
-
 .app-header__toggle {
   flex: 0 0 auto;
 }
@@ -483,36 +476,6 @@ a {
   justify-content: space-between;
   gap: 16px;
   width: 100%;
-}
-
-/* 材料位卡片 */
-.material-item {
-  height: 100%;
-}
-
-.material-item__title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-weight: 600;
-}
-
-.material-item__file {
-  margin-top: 8px;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-/* 材料卡片上的 8018 识别结论：中性呈现，不表达通过/不通过 */
-.material-classify {
-  padding: 8px 10px;
-  border-radius: 4px;
-  background: var(--el-fill-color-lighter);
-  color: var(--el-text-color-regular);
-  font-size: 13px;
-  line-height: 1.7;
 }
 
 /* 复核项：左侧列表 + 右侧详情 */

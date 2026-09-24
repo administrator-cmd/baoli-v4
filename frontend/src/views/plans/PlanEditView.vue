@@ -3,447 +3,731 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { PlanScopePreview, PlanSelection } from "@/api/contracts";
+import type { PlanAdjustments, PlanConfig, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
+import { createPlan, getPlan, getPlanAdjustments, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
-import {
-  createPlan,
-  getPlan,
-  previewPlanScope,
-  savePlan,
-  updatePlan,
-} from "@/api/plans";
-import { nodeLabel, planRuleEmptyHint } from "@/constants/labels";
+import PageHeader from "@/components/PageHeader.vue";
+import CalculationSources from "@/components/CalculationSources.vue";
+import { nodeLabel, reportContentTypeOptions, reportFormatOptions, reportResultSortOptions, valueTypeOptions } from "@/constants/labels";
 
 /**
- * 方案编辑：独立页面维护「对某个场景版本的规则选择」，保存即生效。
- * 上方保存基本资料；下方规则选择表实时显示显式选择、自动依赖与未选规则。
- * 方案不自动跟随场景升级；修改方案只影响之后新建的任务。
+ * 方案编辑：以已发布场景版本为基准的个性化配置。
+ *
+ * 新建 = 选一个已发布且启用的场景版本，服务端把那一版的配置（材料 / 字段 / 规则 /
+ * 报告章节）整份复制过来并立即编译一次；**新建时不再挑规则**，规则在方案里逐条勾。
+ *
+ * 编辑 = 调整方案自己的规则、材料、字段和报告章节。
  */
 const route = useRoute();
 const router = useRouter();
 
 const planCode = computed(() => (typeof route.params.planCode === "string" ? route.params.planCode : null));
 const isCreate = computed(() => planCode.value === null);
+const previousCode = computed(() => isCreate.value && typeof route.query.previous === "string" ? route.query.previous : null);
+const requestedSceneCode = computed(() => isCreate.value && typeof route.query.scenario === "string" ? route.query.scenario : null);
+const PLAN_TAB_NAMES = ["basic", "materials", "fields", "rules", "calculations", "sections"];
+const activeTab = computed({
+  get: () => {
+    const requested = route.query.tab;
+    return typeof requested === "string" && PLAN_TAB_NAMES.includes(requested) ? requested : "basic";
+  },
+  set: (value: string) => {
+    void router.replace({ query: { ...route.query, tab: value } });
+  },
+});
 
 const scenes = ref<ScenarioOption[]>([]);
+const scenesError = ref<string | null>(null);
+const scenesLoading = ref(false);
 const plan = ref<PlanSelection | null>(null);
-const preview = ref<PlanScopePreview | null>(null);
+const config = ref<PlanConfig | null>(null);
+const savedConfigJson = ref("");
 const loading = ref(false);
 const loadError = ref<string | null>(null);
+const planStatusError = ref<string | null>(null);
 const saving = ref(false);
-const previewLoading = ref(false);
-const previewError = ref<string | null>(null);
+const reference = ref<PlanAdjustments | null>(null);
+const referenceLoading = ref(false);
+const referenceError = ref<string | null>(null);
+let loadRequest = 0;
+let referenceRequest = 0;
 
 const basicForm = reactive({ plan_name: "", scenario_code: "", description: "", enabled: true });
-const draftForm = reactive({ rule_keys: [] as string[], stage: "" });
-
-const explicitKeys = computed(() => new Set(draftForm.rule_keys));
-
-// 规则表必须渲染全部三类（显式/自动依赖/未启用）：未启用行可勾选，
-// 否则“0 条显式选择”的新方案永远无法勾上第一条规则（历史缺陷：未启用行被过滤后不可见）。
-const businessRows = computed(() => preview.value?.rows ?? []);
-const unenabledRows = computed(() => (preview.value?.rows ?? []).filter((row) => row.selection === "UNENABLED"));
-const stageOptions = computed(() => {
-  const codes = Array.from(new Set((preview.value?.rows ?? []).map((row) => row.node).filter((code): code is string => Boolean(code))));
-  return codes.map((code) => ({ value: code, label: nodeLabel(code) }));
+const hasUnsavedBasic = computed(() => plan.value !== null && (
+  basicForm.plan_name.trim() !== plan.value.plan_name
+  || (basicForm.description.trim() || null) !== plan.value.description
+  || basicForm.enabled !== plan.value.enabled
+));
+const hasUnsavedConfig = computed(() => config.value !== null && JSON.stringify(config.value) !== savedConfigJson.value);
+const canCreateTask = computed(() => Boolean(
+  plan.value?.enabled && plan.value.effective && !plan.value.deleted
+  && !hasUnsavedBasic.value && !hasUnsavedConfig.value && !planStatusError.value && !saving.value,
+));
+const sectionDialogVisible = ref(false);
+const editingSectionKey = ref<string | null>(null);
+const sectionForm = reactive({
+  title: "",
+  content_instruction: "",
+  field_keys: [] as string[],
+  report_code: "",
+  report_name: "",
+  material_keys: [] as string[],
+  formats: [] as string[],
+  section_order: null as number | null,
+  content_type: "",
+  result_sort: "",
+  config_status: null as string | null,
 });
-const autoKeys = computed(() => new Set(preview.value?.auto_included_rule_keys ?? []));
+const fieldOptions = computed(() => (config.value?.fields ?? []).map((field) => ({
+  value: field.field_key,
+  label: `${config.value?.materials.find((material) => material.material_key === field.material_key)?.name ?? field.material_key} · ${field.name}`,
+})));
+
+const selectedScene = computed(() => scenes.value.find((item) => item.scenario_code === basicForm.scenario_code) ?? null);
+
+const scenesUsable = computed(() => scenes.value.filter((item) => item.available !== false));
 
 async function loadScenes(): Promise<void> {
-  const payload = await listSceneOptions();
-  scenes.value = payload.items;
-}
-
-async function loadPlan(): Promise<void> {
-  if (!planCode.value) {
-    return;
-  }
-  const payload = await getPlan(planCode.value);
-  plan.value = payload;
-  basicForm.plan_name = payload.plan_name;
-  basicForm.scenario_code = payload.scenario_code;
-  basicForm.description = payload.description ?? "";
-  basicForm.enabled = payload.enabled;
-  draftForm.rule_keys = [...payload.selected_rule_keys];
-  await refreshPreview();
-}
-
-async function refreshPreview(): Promise<void> {
-  if (!basicForm.scenario_code) {
-    preview.value = null;
-    return;
-  }
-  previewLoading.value = true;
-  previewError.value = null;
+  scenesLoading.value = true;
+  scenesError.value = null;
   try {
-    preview.value = await previewPlanScope({
-      scenario_code: basicForm.scenario_code,
-      rule_keys: draftForm.rule_keys,
-    });
-  } catch (failure) {
-    // 预览失败时保留上一次成功的规则清单：否则用户取消最后一条规则后会无法再勾选回来。
-    previewError.value = failure instanceof Error ? failure.message : "范围预览失败";
+    const payload = await listSceneOptions();
+    scenes.value = payload.items;
+  } catch (error) {
+    scenes.value = [];
+    scenesError.value = describeError(error);
   } finally {
-    previewLoading.value = false;
+    scenesLoading.value = false;
   }
 }
 
-watch(
-  () => draftForm.rule_keys.slice().sort().join(","),
-  () => void refreshPreview(),
-);
-
-/**
- * 一步创建方案：先建基本资料，再按已勾选的规则保存一次范围。
- *
- * 保存即生效——没有「已创建但未发布」的中间态：创建成功就是可用方案。
- * 保存失败时保留已创建出来的方案，用户可以在编辑页看到它并继续改，
- * 不回滚成“什么都没发生”，那会让已落库的方案变成看不见的孤儿。
- */
-async function createAndSave(): Promise<void> {
-  if (!basicForm.plan_name.trim() || !basicForm.scenario_code) {
-    ElMessage.warning("请填写方案名称并选择所属场景");
+async function load(): Promise<void> {
+  const code = planCode.value;
+  const request = ++loadRequest;
+  if (!code) {
+    plan.value = null;
+    config.value = null;
+    savedConfigJson.value = "";
+    loading.value = false;
+    loadError.value = null;
+    planStatusError.value = null;
+    basicForm.plan_name = "";
+    basicForm.scenario_code = requestedSceneCode.value ?? "";
+    basicForm.description = "";
+    basicForm.enabled = true;
     return;
   }
-  if (!draftForm.rule_keys.length) {
-    // 与后端 PLAN_RULE_EMPTY 同一口径的文案，直接取用，不另写一套说法。
-    ElMessage.warning(planRuleEmptyHint);
+  loading.value = true;
+  loadError.value = null;
+  planStatusError.value = null;
+  plan.value = null;
+  config.value = null;
+  savedConfigJson.value = "";
+  basicForm.plan_name = "";
+  basicForm.scenario_code = "";
+  basicForm.description = "";
+  basicForm.enabled = true;
+  try {
+    const [detail, planConfig] = await Promise.all([getPlan(code), getPlanConfig(code)]);
+    if (request !== loadRequest || planCode.value !== code) return;
+    plan.value = detail;
+    config.value = planConfig;
+    savedConfigJson.value = JSON.stringify(planConfig);
+    basicForm.plan_name = detail.plan_name;
+    basicForm.scenario_code = detail.scenario_code;
+    basicForm.description = detail.description ?? "";
+    basicForm.enabled = detail.enabled;
+  } catch (error) {
+    if (request !== loadRequest || planCode.value !== code) return;
+    plan.value = null;
+    config.value = null;
+    savedConfigJson.value = "";
+    loadError.value = error instanceof Error ? error.message : "方案读取失败";
+  } finally {
+    if (request === loadRequest) loading.value = false;
+  }
+}
+
+watch(() => planCode.value, () => void load(), { immediate: true });
+watch(previousCode, () => void loadReference(), { immediate: true });
+watch([previousCode, requestedSceneCode], ([previous, code]) => {
+  if (!previous) basicForm.scenario_code = code ?? "";
+}, { immediate: true });
+onMounted(() => void loadScenes());
+
+async function loadReference(): Promise<void> {
+  const code = previousCode.value;
+  const request = ++referenceRequest;
+  reference.value = null;
+  referenceError.value = null;
+  if (!code) {
+    referenceLoading.value = false;
+    return;
+  }
+  basicForm.scenario_code = "";
+  referenceLoading.value = true;
+  try {
+    const result = await getPlanAdjustments(code);
+    if (request !== referenceRequest || previousCode.value !== code) {
+      return;
+    }
+    reference.value = result;
+    basicForm.scenario_code = result.scenario_code;
+  } catch (error) {
+    if (request === referenceRequest && previousCode.value === code) {
+      referenceError.value = describeError(error);
+    }
+  } finally {
+    if (request === referenceRequest) {
+      referenceLoading.value = false;
+    }
+  }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : "操作失败";
+}
+
+function openCreateTask(): void {
+  if (!plan.value || !canCreateTask.value) return;
+  void router.push({ name: "audit-tasks", query: { createPlan: plan.value.plan_code } });
+}
+
+async function submitCreate(): Promise<void> {
+  const createRoute = route.fullPath;
+  const scene = selectedScene.value;
+  if (previousCode.value && (!reference.value || referenceLoading.value || referenceError.value)) {
+    ElMessage.warning("旧方案调整尚未读取成功");
+    return;
+  }
+  if (!basicForm.plan_name.trim() || !scene || scene.available === false) {
+    // 下拉里只列「已启用且已有已发布版本」的场景，选不到就是还不具备建方案的条件。
+    ElMessage.warning("请填写方案名称，并选择一个已发布且已启用的场景");
     return;
   }
   saving.value = true;
   try {
     const created = await createPlan({
       plan_name: basicForm.plan_name.trim(),
-      scenario_code: basicForm.scenario_code,
+      scenario_code: scene.scenario_code,
+      scenario_version_no: scene.latest_version_no,
       description: basicForm.description.trim() || null,
       enabled: basicForm.enabled,
     });
-    // 直接按创建结果的 plan_code 继续，不等路由跳转的副作用：
-    // 从 plan-new 到 plan-edit 复用同一组件实例，loadPlan 由 watcher 异步触发，
-    // 依赖它会让下面的保存读到还没加载完的 plan。
-    const saved = await savePlan(created.plan_code, { rule_keys: [...draftForm.rule_keys] });
+    if (route.fullPath !== createRoute) return;
+    ElMessage.success("方案已创建，配置已从场景版本复制");
     await router.replace({ name: "plan-edit", params: { planCode: created.plan_code } });
-    if (saved.dropped_rule_keys.length) {
-      // 有规则在当前场景配置里不存在：选择已被服务端裁剪，如实说明，不假装全部选中。
-      ElMessage.warning(
-        `方案已创建，但以下规则在当前场景配置中不存在，已从选择中移除：${saved.dropped_rule_keys.join("、")}。`,
-      );
-      return;
-    }
-    ElMessage.success("方案已创建并生效");
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "创建失败");
+  } catch (error) {
+    if (route.fullPath === createRoute) ElMessage.error(describeError(error));
   } finally {
     saving.value = false;
   }
 }
 
-async function saveBasic(): Promise<void> {
-  if (!planCode.value || !basicForm.plan_name.trim()) {
-    ElMessage.warning("请填写方案名称");
-    return;
+async function saveBasic(): Promise<boolean> {
+  const code = planCode.value;
+  const request = loadRequest;
+  if (!code || loading.value || !plan.value) {
+    return false;
   }
   saving.value = true;
   try {
-    await updatePlan(planCode.value, {
+    const updated = await updatePlan(code, {
       plan_name: basicForm.plan_name.trim(),
       description: basicForm.description.trim() || null,
       enabled: basicForm.enabled,
     });
-    ElMessage.success("方案资料已保存");
-    await loadPlan();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "保存失败");
+    if (request !== loadRequest || planCode.value !== code) return false;
+    plan.value = updated;
+    planStatusError.value = null;
+    ElMessage.success("基本资料已保存");
+    return true;
+  } catch (error) {
+    if (request === loadRequest && planCode.value === code) ElMessage.error(describeError(error));
+    return false;
   } finally {
     saving.value = false;
   }
 }
 
-/**
- * 保存方案：写规则选择并立即重算范围（保存即生效）。
- *
- * 被裁剪的规则必须如实回给用户：规则在当前场景配置里不存在时服务端会直接移除，
- * 如果只弹一句「保存成功」，用户会以为选中的规则都还在。
- */
-async function saveDraft(): Promise<boolean> {
-  if (!planCode.value) {
-    return false;
+async function refreshPlanStatus(): Promise<PlanSelection | null> {
+  const code = planCode.value;
+  const request = loadRequest;
+  if (!code) return null;
+  try {
+    const detail = await getPlan(code);
+    if (request !== loadRequest || planCode.value !== code) return null;
+    plan.value = detail;
+    planStatusError.value = null;
+    return detail;
+  } catch (error) {
+    if (request === loadRequest && planCode.value === code) {
+      planStatusError.value = describeError(error);
+    }
+    return null;
   }
-  if (!draftForm.rule_keys.length) {
-    ElMessage.warning(planRuleEmptyHint);
-    return false;
+}
+
+async function saveConfig(): Promise<void> {
+  const code = planCode.value;
+  const request = loadRequest;
+  const currentConfig = config.value;
+  if (!code || !currentConfig || saving.value) {
+    return;
   }
+  const submittedConfigJson = JSON.stringify(currentConfig);
   saving.value = true;
   try {
-    const payload = await savePlan(planCode.value, {
-      rule_keys: [...draftForm.rule_keys],
+    // 整体提交配置及计算规则选择。
+    const updated = await updatePlanConfig(code, {
+      materials: currentConfig.materials,
+      fields: currentConfig.fields,
+      rules: currentConfig.rules,
+      sections: currentConfig.sections,
+      calculation_rules: currentConfig.calculation_rules.map(({ rule_code, enabled }) => ({ rule_code, enabled })),
     });
-    await loadPlan();
-    if (payload.dropped_rule_keys.length) {
-      ElMessage.warning(
-        `方案已保存，但以下规则在当前场景配置中不存在，已从选择中移除：${payload.dropped_rule_keys.join("、")}。`,
-      );
-    } else if (payload.effective) {
-      ElMessage.success("方案已保存并生效");
+    if (request !== loadRequest || planCode.value !== code) return;
+    const editedDuringSave = JSON.stringify(currentConfig) !== submittedConfigJson;
+    savedConfigJson.value = JSON.stringify(updated);
+    config.value = editedDuringSave ? currentConfig : updated;
+    const refreshedPlan = await refreshPlanStatus();
+    if (request !== loadRequest || planCode.value !== code) return;
+    if (!refreshedPlan) return;
+    if (editedDuringSave) {
+      ElMessage.warning("本次配置已保存，保存期间的新修改仍待保存");
+    } else if (refreshedPlan.effective) {
+      ElMessage.success("方案配置已保存并生效");
     } else {
-      // 保存成功但范围没算出来：如实说明原因，不谎报「已生效」。
-      ElMessage.warning(`方案已保存，但范围尚未生效：${payload.sync_error?.message ?? "配置不完整"}。`);
+      ElMessage.warning(`方案配置已保存，尚未生效：${refreshedPlan.sync_error?.message ?? "请核对配置"}`);
     }
-    return true;
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "保存失败");
-    return false;
+  } catch (error) {
+    if (request === loadRequest && planCode.value === code) ElMessage.error(describeError(error));
   } finally {
     saving.value = false;
   }
 }
 
-function toggleRule(ruleKey: string, checked: boolean): void {
-  if (checked) {
-    if (!draftForm.rule_keys.includes(ruleKey)) {
-      draftForm.rule_keys = [...draftForm.rule_keys, ruleKey];
-    }
+async function saveAll(): Promise<void> {
+  if (hasUnsavedBasic.value) {
+    const saved = await saveBasic();
+    if (!saved) return;
+  }
+  if (hasUnsavedConfig.value) {
+    await saveConfig();
+  }
+}
+
+const enabledRules = computed(() => (config.value?.rules ?? []).filter((item) => item.enabled));
+const disabledRules = computed(() => (config.value?.rules ?? []).filter((item) => !item.enabled));
+
+function openSectionEditor(item?: PlanSectionItem): void {
+  editingSectionKey.value = item?.section_key ?? null;
+  sectionForm.title = item?.title ?? "";
+  sectionForm.content_instruction = item?.content_instruction ?? "";
+  sectionForm.field_keys = [...(item?.field_keys ?? [])];
+  sectionForm.report_code = item?.report_code ?? "";
+  sectionForm.report_name = item?.report_name ?? "";
+  sectionForm.material_keys = [...(item?.material_keys ?? [])];
+  sectionForm.formats = [...(item?.formats ?? [])];
+  sectionForm.section_order = item?.section_order ?? null;
+  sectionForm.content_type = item?.content_type ?? "";
+  sectionForm.result_sort = item?.result_sort ?? "";
+  sectionForm.config_status = item ? item.config_status ?? null : "PENDING";
+  sectionDialogVisible.value = true;
+}
+
+function applySection(): void {
+  if (!config.value || !sectionForm.title.trim()) {
+    ElMessage.warning("请填写章节名称");
+    return;
+  }
+  const existing = config.value.sections.find((item) => item.section_key === editingSectionKey.value);
+  const section: PlanSectionItem = {
+    section_key: existing?.section_key ?? crypto.randomUUID(),
+    title: sectionForm.title.trim(),
+    content_instruction: sectionForm.content_instruction,
+    field_keys: [...sectionForm.field_keys],
+    report_code: sectionForm.report_code.trim() || null,
+    report_name: sectionForm.report_name.trim() || null,
+    material_keys: [...sectionForm.material_keys],
+    formats: [...sectionForm.formats],
+    section_order: sectionForm.section_order,
+    content_type: sectionForm.content_type || null,
+    result_sort: sectionForm.result_sort || null,
+    config_status: sectionForm.config_status,
+    sort_no: existing?.sort_no ?? config.value.sections.length + 1,
+  };
+  if (existing) {
+    Object.assign(existing, section);
   } else {
-    draftForm.rule_keys = draftForm.rule_keys.filter((key) => key !== ruleKey);
+    config.value.sections.push(section);
   }
+  sectionDialogVisible.value = false;
 }
 
-/** 当前阶段筛选下实际渲染的业务规则行；未选阶段时是整表。 */
-const filteredRows = computed(() => {
-  const stage = draftForm.stage;
-  const rows = [...businessRows.value];
-  return stage ? rows.filter((row) => row.node === stage) : rows;
-});
-
-/** 当前阶段筛选下可批量勾选的业务规则（自动依赖不能单独取消，未启用规则不在表内）。 */
-const stageToggleKeys = computed(() =>
-  filteredRows.value.filter((row) => row.selection !== "AUTO").map((row) => row.rule_key),
-);
-
-/** 当前阶段是否已全部显式选入；用于给批量按钮一个准确的动作文案。 */
-const stageAllSelected = computed(
-  () => stageToggleKeys.value.length > 0 && stageToggleKeys.value.every((key) => explicitKeys.value.has(key)),
-);
-
-/**
- * 按当前阶段筛选批量勾选。
- * 不筛选（全部阶段）时对整表生效；按钮文案只说事实，不写成“全选/取消”这种先点再看的说法。
- */
-function toggleCurrentStage(): void {
-  const next = new Set(draftForm.rule_keys);
-  for (const key of stageToggleKeys.value) {
-    if (stageAllSelected.value) {
-      next.delete(key);
-    } else {
-      next.add(key);
-    }
-  }
-  draftForm.rule_keys = Array.from(next);
+function fieldNames(keys: string[]): string {
+  return keys.map((key) => config.value?.fields.find((field) => field.field_key === key)?.name ?? key).join("、") || "未绑定";
 }
 
-async function unsavedHint(): Promise<boolean> {
-  if (!plan.value) {
-    return true;
-  }
-  const current = [...draftForm.rule_keys].sort().join(",");
-  const saved = [...plan.value.selected_rule_keys].sort().join(",");
-  if (current !== saved) {
-    try {
-      await ElMessageBox.confirm("规则选择有未保存的改动，确认离开？", "未保存的改动", {
-        type: "warning",
-        confirmButtonText: "离开",
-        cancelButtonText: "留下",
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  return true;
+function materialNames(keys: string[] | null | undefined): string {
+  return (keys ?? []).map((key) => config.value?.materials.find((material) => material.material_key === key)?.name ?? key).join("、") || "未限定";
 }
 
-async function back(): Promise<void> {
-  if (await unsavedHint()) {
-    await router.push({ name: "plans" });
-  }
+function ruleMaterialNames(rule: PlanRuleItem): string {
+  const keys = rule.rule_json.materials;
+  return materialNames(Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : []);
 }
 
-async function switchScenario(): Promise<void> {
-  const previous = plan.value?.scenario_code;
-  if (previous && previous !== basicForm.scenario_code) {
-    try {
-      await ElMessageBox.confirm(
-        "切换所属场景会清空当前规则选择（不同场景的规则不可混用），需要重新选择并保存。是否继续？",
-        "切换所属场景",
-        { type: "warning", confirmButtonText: "切换", cancelButtonText: "取消" },
-      );
-    } catch {
-      basicForm.scenario_code = previous;
-      return;
-    }
-    draftForm.rule_keys = [];
-  }
-}
-
-async function applyScenarioChange(): Promise<void> {
-  await switchScenario();
-  await refreshPreview();
-}
-
-async function initialise(): Promise<void> {
-  loading.value = true;
-  loadError.value = null;
+async function removeSection(item: PlanSectionItem): Promise<void> {
+  if (!config.value) return;
   try {
-    await loadScenes();
-    if (isCreate.value) {
-      // 从场景页跳进来时带 scenario；直接进新增页时默认落在第一个启用场景，
-      // 否则规则选择区一开始是空的，用户得先手动选一次场景才能看到可选规则。
-      const scenarioFromQuery = typeof route.query.scenario === "string" ? route.query.scenario : "";
-      const fallback = scenes.value.find((item) => item.enabled) ?? scenes.value[0] ?? null;
-      basicForm.scenario_code = scenarioFromQuery || fallback?.scenario_code || "";
-      if (basicForm.scenario_code) {
-        await refreshPreview();
-      }
-    } else {
-      await loadPlan();
-    }
-  } catch (failure) {
-    loadError.value = failure instanceof Error ? failure.message : "加载失败";
-  } finally {
-    loading.value = false;
+    await ElMessageBox.confirm(`确认移除报告章节「${item.title}」？`, "移除章节", {
+      type: "warning", confirmButtonText: "移除", cancelButtonText: "取消",
+    });
+  } catch {
+    return;
   }
+  config.value.sections = config.value.sections.filter((section) => section.section_key !== item.section_key);
 }
 
-// 创建方案后 router.replace 从 plan-new 到 plan-edit 复用同一组件实例，onMounted 不会重跑；
-// 必须侦听方案编码变化重新加载，否则规则清单为空。
-watch(planCode, () => {
-  void initialise();
-});
-
-onMounted(() => {
-  void initialise();
-});
+function adjustmentValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "未填写";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (Array.isArray(value)) return value.map(adjustmentValue).join("、") || "空列表";
+  if (typeof value === "object") return JSON.stringify(value) ?? "未填写";
+  return String(value);
+}
 </script>
 
 <template>
   <div class="app-panel">
-    <div class="app-detail-head">
-      <el-button text aria-label="返回方案列表" @click="back">← 返回</el-button>
-      <span class="app-detail-head__name">{{ isCreate ? "新增方案" : `编辑方案：${basicForm.plan_name}` }}</span>
-      <el-tag v-if="plan" size="small" effect="plain" disable-transitions>
-        {{ plan.effective ? "已生效" : "待核对" }}
-      </el-tag>
-    </div>
+    <PageHeader
+      eyebrow="方案管理"
+      :title="isCreate ? '新增方案' : `方案编辑：${basicForm.plan_name || planCode}`"
+      subtitle="基于已发布场景版本创建个性化方案。"
+      :show-refresh="false"
+    >
+      <template #actions>
+        <el-button
+          v-if="planCode"
+          type="primary"
+          :loading="saving"
+          :disabled="loading || (!hasUnsavedBasic && !hasUnsavedConfig)"
+          @click="saveAll"
+        >保存修改</el-button>
+        <el-button
+          v-if="planCode"
+          type="primary"
+          :disabled="!canCreateTask"
+          @click="openCreateTask"
+        >创建任务</el-button>
+        <el-button v-if="planCode" @click="router.push({ name: 'plan-new', query: { previous: planCode } })">基于当前场景重新生成</el-button>
+        <el-button @click="router.push({ name: 'plans' })">返回列表</el-button>
+      </template>
+    </PageHeader>
 
-    <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="loadError" />
+    <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="`读取失败：${loadError}`">
+      <el-button size="small" @click="load">重试</el-button>
+    </el-alert>
+    <el-alert v-if="isCreate && scenesError" type="error" show-icon :closable="false" :title="`场景列表读取失败：${scenesError}`">
+      <el-button size="small" @click="loadScenes">重试</el-button>
+    </el-alert>
+    <el-alert v-if="planStatusError" type="error" show-icon :closable="false" :title="`配置已保存，但方案状态读取失败：${planStatusError}`">
+      <el-button size="small" @click="refreshPlanStatus">重试</el-button>
+    </el-alert>
+    <el-alert
+      v-if="plan && (hasUnsavedBasic || hasUnsavedConfig)"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="方案有未保存修改，保存后才能创建任务"
+      class="block-gap-sm"
+    />
 
-    <div v-else v-loading="loading">
-      <h3 class="app-section-title">基本信息</h3>
-      <el-form label-width="110px" class="app-reading">
-        <el-form-item label="方案名称" required>
-          <el-input v-model="basicForm.plan_name" maxlength="255" placeholder="例如：采购合同全流程审核方案" />
-        </el-form-item>
-        <el-form-item label="所属场景" required>
-          <el-select
-            v-model="basicForm.scenario_code"
-            filterable
-            :disabled="!isCreate"
-            placeholder="选择审核场景"
-            style="width: 100%"
-            @change="applyScenarioChange"
-          >
-            <el-option v-for="item in scenes" :key="item.scenario_code" :value="item.scenario_code" :label="`${item.scenario_name}${item.enabled ? '' : '（已停用）'}`" />
-          </el-select>
-          <div class="text-hint">方案保存的是对该场景的规则选择；不复制字段与规则定义。</div>
-        </el-form-item>
-        <el-form-item label="方案说明">
-          <el-input v-model="basicForm.description" type="textarea" :rows="2" maxlength="4000" />
-        </el-form-item>
-        <el-form-item label="启用状态">
-          <el-switch v-model="basicForm.enabled" active-text="启用" inactive-text="停用" />
-        </el-form-item>
-        <el-form-item v-if="!isCreate">
-          <el-button :loading="saving" @click="saveBasic">保存基本资料</el-button>
-        </el-form-item>
-      </el-form>
-
-      <div class="app-section-head">
-        <h3 class="app-section-title">审核范围（规则选择）</h3>
-        <div class="card-actions">
-          <template v-if="isCreate">
-            <el-button type="primary" :loading="saving" :disabled="!preview" @click="createAndSave">
-              创建方案
-            </el-button>
-          </template>
-          <template v-else>
-            <el-button type="primary" :loading="saving" :disabled="!preview" @click="saveDraft">
-              保存方案
-            </el-button>
-          </template>
+    <!-- 基本信息 -->
+      <el-card v-if="isCreate" shadow="never" v-loading="loading" class="block-gap-sm">
+        <template #header>基本信息</template>
+        <el-form label-width="100px">
+          <el-form-item label="方案名称" required>
+            <el-input v-model="basicForm.plan_name" maxlength="255" placeholder="例如：采购合同全流程审核方案" />
+          </el-form-item>
+          <el-form-item label="所属场景" required>
+            <el-select
+              v-model="basicForm.scenario_code"
+              :disabled="!isCreate || !!previousCode"
+              placeholder="选择审核场景"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="item in scenesUsable"
+                :key="item.scenario_code"
+                :value="item.scenario_code"
+                :label="`${item.scenario_name}（第 ${item.latest_version_no} 版）`"
+              />
+            </el-select>
+            <div class="text-hint">
+              <template v-if="isCreate">
+                基于所选版本创建；场景更新不会改动已有方案。
+              </template>
+              <template v-else>
+                本方案固定到创建时的场景版本。
+              </template>
+            </div>
+          </el-form-item>
+          <el-alert
+            v-if="isCreate && previousCode && reference && !scenesLoading && (!selectedScene || selectedScene.available === false) && !scenesError"
+            type="warning"
+            show-icon
+            :closable="false"
+            title="该场景当前没有可用于生成方案的已发布版本"
+          />
+          <el-form-item label="方案说明">
+            <el-input v-model="basicForm.description" type="textarea" :rows="2" maxlength="4000" />
+          </el-form-item>
+          <el-form-item label="启用状态">
+            <el-switch v-model="basicForm.enabled" active-text="启用" inactive-text="停用" />
+          </el-form-item>
+        </el-form>
+        <div v-if="!previousCode" class="card-actions">
+          <el-button type="primary" :loading="saving" :disabled="scenesLoading || !!scenesError" @click="submitCreate">创建方案</el-button>
         </div>
-      </div>
-      <el-form inline class="app-query">
-        <el-form-item label="阶段筛选">
-          <el-select v-model="draftForm.stage" clearable placeholder="全部阶段" style="width: 180px">
-            <el-option v-for="item in stageOptions" :key="item.value" :value="item.value" :label="item.label" />
-          </el-select>
-        </el-form-item>
-        <el-form-item>
-          <el-button :disabled="!stageToggleKeys.length" @click="toggleCurrentStage">
-            {{ draftForm.stage ? `本阶段${stageAllSelected ? "取消全选" : "全选"}` : stageAllSelected ? "取消全选" : "全选" }}（{{ stageToggleKeys.length }} 条）
-          </el-button>
-        </el-form-item>
-        <el-form-item>
-          <span class="text-muted">
-            已选 {{ draftForm.rule_keys.length }} 条显式规则 · 自动依赖 {{ preview?.auto_included_rule_keys.length ?? 0 }} 条 ·
-            未启用 {{ unenabledRows.length }} 条 · 字段 {{ preview?.field_count ?? 0 }} 个
-          </span>
-        </el-form-item>
-      </el-form>
+      </el-card>
 
-      <el-alert v-if="previewError" type="error" show-icon :closable="false" :title="`范围预览失败：${previewError}`">
-        规则表仍按上一次成功的范围显示；修正后点「重试」重新预览。
-        <el-button size="small" @click="refreshPreview">重试</el-button>
-      </el-alert>
+      <el-card v-if="previousCode" shadow="never" class="block-gap-sm" v-loading="referenceLoading">
+        <template #header>旧方案调整参考</template>
+        <el-alert v-if="referenceError" type="error" show-icon :closable="false" :title="`读取失败：${referenceError}`">
+          <el-button size="small" @click="loadReference">重试</el-button>
+        </el-alert>
+        <template v-else-if="reference">
+          <p class="text-hint">
+            {{ reference.plan_name }} 基于场景第 {{ reference.base_scenario_version_no }} 版；
+            新方案将基于当前第 {{ selectedScene?.latest_version_no ?? "—" }} 版创建。旧调整仅供参考，不会自动套用。
+          </p>
+          <el-table :data="reference.items" border stripe size="small" max-height="320" empty-text="旧方案没有相对来源场景的调整">
+            <el-table-column prop="category" label="类别" width="100" />
+            <el-table-column prop="name" label="配置项" min-width="170" show-overflow-tooltip />
+            <el-table-column label="调整" width="75">
+              <template #default="{ row }">{{ row.change === "ADDED" ? "新增" : row.change === "REMOVED" ? "移除" : "修改" }}</template>
+            </el-table-column>
+            <el-table-column label="内容" min-width="300">
+              <template #default="{ row }">
+                <span v-if="!row.fields.length">{{ row.change === "ADDED" ? "新增整项" : "移除整项" }}</span>
+                <div v-for="field in row.fields" :key="field.label" class="adjustment-line">
+                  {{ field.label }}：{{ adjustmentValue(field.before) }} → {{ adjustmentValue(field.after) }}
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="card-actions block-gap-sm">
+            <el-button type="primary" :loading="saving" :disabled="scenesLoading || !!scenesError || !selectedScene || selectedScene.available === false" @click="submitCreate">创建方案</el-button>
+          </div>
+        </template>
+      </el-card>
 
-      <el-empty v-if="!preview" description="请选择所属场景以加载可选规则" />
-      <el-table v-else :data="filteredRows" border v-loading="previewLoading" empty-text="暂无规则">
-        <el-table-column label="选择" width="70">
-          <template #default="{ row }">
-            <el-checkbox
-              :model-value="row.selection !== 'UNENABLED'"
-              :disabled="row.selection === 'AUTO'"
-              @update:model-value="(value: string | number | boolean) => toggleRule(row.rule_key, Boolean(value))"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column prop="name" label="规则名称" min-width="220" show-overflow-tooltip />
-        <el-table-column label="阶段" width="130">
-          <template #default="{ row }">{{ nodeLabel(row.node) }}</template>
-        </el-table-column>
-        <el-table-column label="选入方式" width="140">
-          <template #default="{ row }">
-            <el-tag v-if="row.selection === 'EXPLICIT'" type="success" size="small" effect="plain" disable-transitions>显式选择</el-tag>
-            <el-tag v-else-if="row.selection === 'AUTO'" type="warning" size="small" effect="plain" disable-transitions>
-              自动依赖{{ row.system ? "（系统）" : "" }}
+      <!-- 配置：只有编辑模式才有。内容按配置对象拆成横向标签，避免长页面滚动查找。 -->
+      <template v-if="!isCreate && config">
+        <section class="plan-config-workspace block-gap-sm">
+          <div class="plan-status-line">
+            <span>范围状态</span>
+            <el-tag :type="plan?.effective ? 'success' : 'warning'" size="small" effect="light">
+              {{ plan?.effective ? "已生效" : "待核对" }}
             </el-tag>
-            <el-tag v-else type="info" size="small" effect="plain" disable-transitions>未启用</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="260">
-          <template #default="{ row }">
-            <span v-if="row.selection === 'AUTO' && row.reason">{{ row.reason }}</span>
-            <span v-else-if="row.selection === 'AUTO'" class="text-hint">由所选规则的依赖或系统能力自动包含，不能单独取消</span>
-            <span v-else-if="row.selection === 'UNENABLED'" class="text-hint">当前未选入本方案</span>
-            <span v-else class="text-hint">本方案显式选择</span>
-          </template>
-        </el-table-column>
-      </el-table>
+            <span v-if="plan?.sync_error?.message" class="text-hint">{{ plan.sync_error.message }}</span>
+            <span v-if="hasUnsavedBasic || hasUnsavedConfig" class="text-hint">有未保存修改</span>
+          </div>
+          <el-tabs v-model="activeTab" type="card" class="plan-tabs">
+            <el-tab-pane label="基本信息" name="basic">
+              <el-form label-width="100px" class="plan-basic-form">
+                <el-form-item label="方案名称" required>
+                  <el-input v-model="basicForm.plan_name" maxlength="255" placeholder="请输入方案名称" />
+                </el-form-item>
+                <el-form-item label="所属场景">
+                  <span>{{ plan?.base_scenario_version?.scenario_name ?? plan?.scenario_code }}（第 {{ plan?.base_scenario_version?.version_no ?? "—" }} 版）</span>
+                </el-form-item>
+                <el-form-item label="方案说明">
+                  <el-input v-model="basicForm.description" type="textarea" :rows="3" maxlength="4000" />
+                </el-form-item>
+                <el-form-item label="启用状态">
+                  <el-switch v-model="basicForm.enabled" active-text="启用" inactive-text="停用" />
+                </el-form-item>
+              </el-form>
+            </el-tab-pane>
 
-      <el-alert class="block-gap-sm" type="info" show-icon :closable="false" title="保存即生效">
-        保存后本方案立即生效，可以用于新建审核任务。修改本方案只影响之后新建的任务：已建任务保留创建时的规则范围快照，不会跟着变。
-      </el-alert>
+            <el-tab-pane :label="`材料（${config.materials.length}）`" name="materials">
+              <el-table :data="config.materials" border stripe size="small" max-height="420">
+                <el-table-column label="材料名称" min-width="240">
+                  <template #default="{ row }"><el-input v-model="row.name" maxlength="255" aria-label="材料名称" /></template>
+                </el-table-column>
+                <el-table-column label="是否必传" width="120">
+                  <template #default="{ row }"><el-switch v-model="row.required" aria-label="是否必传" /></template>
+                </el-table-column>
+              </el-table>
+            </el-tab-pane>
 
-    </div>
+            <el-tab-pane :label="`字段（${config.fields.length}）`" name="fields">
+              <el-table :data="config.fields" border stripe size="small" max-height="420">
+                <el-table-column label="字段名称" min-width="180">
+                  <template #default="{ row }"><el-input v-model="row.name" maxlength="255" aria-label="字段名称" /></template>
+                </el-table-column>
+                <el-table-column label="所属材料" min-width="170">
+                  <template #default="{ row }">
+                    <el-select v-model="row.material_key" aria-label="所属材料">
+                      <el-option v-for="material in config.materials" :key="material.material_key" :label="material.name" :value="material.material_key" />
+                    </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column label="数据类型" width="150">
+                  <template #default="{ row }">
+                    <el-select v-model="row.value_type" :aria-label="`${row.name}的数据类型`">
+                      <el-option v-for="item in valueTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
+                    </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column label="必抽" width="75">
+                  <template #default="{ row }"><el-switch v-model="row.required" aria-label="是否必抽" /></template>
+                </el-table-column>
+                <el-table-column label="单位" width="110">
+                  <template #default="{ row }"><el-input v-model="row.unit" aria-label="单位" /></template>
+                </el-table-column>
+                <el-table-column label="币种" width="110">
+                  <template #default="{ row }"><el-input v-model="row.currency" aria-label="币种" /></template>
+                </el-table-column>
+                <el-table-column label="提取要求" min-width="260">
+                  <template #default="{ row }"><el-input v-model="row.instruction" aria-label="提取要求" /></template>
+                </el-table-column>
+              </el-table>
+            </el-tab-pane>
+
+            <el-tab-pane :label="`审核规则（${enabledRules.length} 启用）`" name="rules">
+              <el-table :data="config.rules" border stripe size="small" max-height="420">
+                <el-table-column label="启用" width="80">
+                  <template #default="{ row }">
+                    <el-switch v-model="row.enabled" :aria-label="`启用规则 ${row.name}，适用材料 ${ruleMaterialNames(row)}`" />
+                  </template>
+                </el-table-column>
+                <el-table-column prop="name" label="规则名称" min-width="220" show-overflow-tooltip />
+                <el-table-column label="阶段" width="130"><template #default="{ row }">{{ nodeLabel(row.node_code) }}</template></el-table-column>
+                <el-table-column label="类型" width="90"><template #default="{ row }">{{ row.is_system ? "系统" : "业务" }}</template></el-table-column>
+                <el-table-column label="适用材料" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
+              </el-table>
+              <div class="text-hint tab-hint">已启用 {{ enabledRules.length }} 条，已取消 {{ disabledRules.length }} 条。保存后才会影响后续任务。</div>
+            </el-tab-pane>
+
+            <el-tab-pane :label="`计算规则（${config.calculation_rules.length}）`" name="calculations">
+              <el-table :data="config.calculation_rules" border stripe size="small" max-height="420" empty-text="当前方案没有计算规则">
+                <el-table-column type="expand" width="48"><template #default="{ row }"><CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" :band-sources="row.band_sources" /></template></el-table-column>
+                <el-table-column label="启用" width="80"><template #default="{ row }"><el-switch v-model="row.enabled" :aria-label="`启用计算规则 ${row.rule_code}`" /></template></el-table-column>
+                <el-table-column prop="rule_name" label="指标名称" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="rule_code" label="编号" width="150" />
+                <el-table-column label="计算节点" min-width="150"><template #default="{ row }">{{ nodeLabel(row.node_code) }}</template></el-table-column>
+              </el-table>
+            </el-tab-pane>
+
+            <el-tab-pane :label="`报告章节（${config.sections.length}）`" name="sections">
+              <div class="app-toolbar">
+                <div class="app-toolbar__left"><el-button @click="openSectionEditor()">新增章节</el-button></div>
+              </div>
+              <el-table :data="config.sections" border stripe size="small" max-height="420" empty-text="当前方案没有报告章节">
+                <el-table-column prop="report_code" label="报告编号" width="130" show-overflow-tooltip />
+                <el-table-column prop="title" label="章节名称" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="report_name" label="所属报告" min-width="150" show-overflow-tooltip />
+                <el-table-column label="材料范围" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
+                <el-table-column label="绑定字段" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ fieldNames(row.field_keys) }}</template></el-table-column>
+                <el-table-column label="章节处理" width="115"><template #default="{ row }">{{ row.config_status === "PENDING" ? "待核对" : row.config_status === "DISABLED" ? "不生成" : "生成" }}</template></el-table-column>
+                <el-table-column label="操作" width="120" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
+              </el-table>
+            </el-tab-pane>
+
+          </el-tabs>
+
+        </section>
+
+        <el-dialog v-model="sectionDialogVisible" :title="editingSectionKey ? '编辑报告章节' : '新增报告章节'" width="min(680px, 96vw)" :close-on-click-modal="false">
+          <el-form label-width="100px">
+            <el-form-item label="章节名称" required>
+              <el-input v-model="sectionForm.title" maxlength="255" />
+            </el-form-item>
+            <el-form-item label="绑定字段">
+              <el-select v-model="sectionForm.field_keys" multiple filterable style="width: 100%">
+                <el-option v-for="field in fieldOptions" :key="field.value" :value="field.value" :label="field.label" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="内容要求">
+              <el-input v-model="sectionForm.content_instruction" type="textarea" :rows="3" />
+            </el-form-item>
+            <el-form-item label="报告编号">
+              <el-input v-model="sectionForm.report_code" maxlength="80" />
+            </el-form-item>
+            <el-form-item label="报告名称">
+              <el-input v-model="sectionForm.report_name" maxlength="255" />
+            </el-form-item>
+            <el-form-item label="材料范围">
+              <el-select v-model="sectionForm.material_keys" multiple filterable style="width: 100%">
+                <el-option v-for="material in config.materials" :key="material.material_key" :value="material.material_key" :label="material.name" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="输出格式">
+              <el-select v-model="sectionForm.formats" multiple style="width: 100%">
+                <el-option v-for="format in reportFormatOptions" :key="format.value" :value="format.value" :label="format.label" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="章节顺序">
+              <el-input-number v-model="sectionForm.section_order" :min="1" :step="1" />
+            </el-form-item>
+            <el-form-item label="内容类型">
+              <el-select v-model="sectionForm.content_type" clearable style="width: 100%">
+                <el-option v-for="item in reportContentTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="结果排序">
+              <el-select v-model="sectionForm.result_sort" clearable style="width: 100%">
+                <el-option v-for="item in reportResultSortOptions" :key="item.value" :value="item.value" :label="item.label" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="章节处理">
+              <el-select v-model="sectionForm.config_status" style="width: 100%">
+                <el-option value="CLEAR" label="生成（已核对）" />
+                <el-option value="PENDING" label="待核对（方案暂不可用）" />
+                <el-option value="DISABLED" label="不生成" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <template #footer>
+            <el-button @click="sectionDialogVisible = false">取消</el-button>
+            <el-button type="primary" @click="applySection">应用修改</el-button>
+          </template>
+        </el-dialog>
+
+      </template>
   </div>
 </template>
+
+<style scoped>
+.adjustment-line {
+  overflow-wrap: anywhere;
+}
+
+.plan-tabs {
+  margin-top: 8px;
+}
+
+.plan-tabs :deep(.el-tab-pane) {
+  min-height: 280px;
+}
+
+.plan-status-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.plan-basic-form {
+  max-width: 720px;
+}
+
+.tab-hint {
+  margin-top: 10px;
+}
+</style>

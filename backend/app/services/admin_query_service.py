@@ -36,6 +36,7 @@ from ..models import (
     NodeExecution,
     RuleResult,
     ScenarioNode,
+    ScenarioTemplate,
     ScenarioVersion,
     TaskDocument,
     TaskFieldValue,
@@ -45,9 +46,7 @@ from .operation_log_service import OBJECT_REPORT, record_operation
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # 审核材料（跨任务）
-# ---------------------------------------------------------------------------
 
 
 def list_documents_page(
@@ -60,6 +59,7 @@ def list_documents_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """审核材料分页列表（跨任务）。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
@@ -140,6 +140,7 @@ def list_documents_page(
 
 
 def document_detail(db: Session, document_no: str) -> dict[str, Any]:
+    """材料位详情：当前文件与历史上传版本。"""
     document = db.scalar(select(TaskDocument).where(TaskDocument.document_no == document_no))
     if not document:
         raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "材料位不存在", status_code=404, details={"document_no": document_no})
@@ -177,6 +178,7 @@ def document_detail(db: Session, document_no: str) -> dict[str, Any]:
 
 
 def document_upload_by_no(db: Session, document_no: str, upload_no: str) -> tuple[TaskDocument, DocumentUpload]:
+    """按材料位与上传编号取上传记录；取不到即 404。"""
     document = db.scalar(select(TaskDocument).where(TaskDocument.document_no == document_no))
     if not document:
         raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "材料位不存在", status_code=404, details={"document_no": document_no})
@@ -212,9 +214,7 @@ def upload_file_response(db: Session, document_no: str, upload_no: str, *, previ
     )
 
 
-# ---------------------------------------------------------------------------
 # 证据记录（跨任务）
-# ---------------------------------------------------------------------------
 
 
 def list_evidence_page(
@@ -227,6 +227,7 @@ def list_evidence_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """证据记录分页列表（跨任务）。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
@@ -327,9 +328,7 @@ def list_evidence_page(
     return {"items": items, "total": int(total), "page": page, "page_size": page_size}
 
 
-# ---------------------------------------------------------------------------
 # 执行记录（跨任务）
-# ---------------------------------------------------------------------------
 
 
 def list_executions_page(
@@ -343,6 +342,7 @@ def list_executions_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """节点执行记录分页列表（跨任务）。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
@@ -425,6 +425,7 @@ def list_executions_page(
 
 
 def execution_detail(db: Session, execution_id: int) -> dict[str, Any]:
+    """节点执行详情：输入快照来源、结果、错误与关联的后台命令编号。"""
     execution = db.get(NodeExecution, execution_id)
     if not execution:
         raise BusinessError(
@@ -478,9 +479,7 @@ def execution_detail(db: Session, execution_id: int) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
 # 人工复核（跨任务）
-# ---------------------------------------------------------------------------
 
 
 def list_reviews_page(
@@ -494,6 +493,7 @@ def list_reviews_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """人工复核分页列表（跨任务）：含已复核与已失效记录。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
@@ -609,9 +609,7 @@ def list_reviews_page(
     return {"items": items, "total": int(total), "page": page, "page_size": page_size}
 
 
-# ---------------------------------------------------------------------------
 # 规则库导入作业（管理列表）
-# ---------------------------------------------------------------------------
 
 
 def list_import_jobs_page(
@@ -623,8 +621,12 @@ def list_import_jobs_page(
     created_to: datetime | None,
     page: int,
     page_size: int,
+    scenario_code: str | None = None,
 ) -> dict[str, Any]:
+    """导入作业分页列表（管理端）。"""
     conditions = []
+    if scenario_code:
+        conditions.append(ImportJob.scenario_code == scenario_code)
     if filename:
         conditions.append(ImportJob.source_filename.like(f"%{filename.strip()}%"))
     if status:
@@ -644,8 +646,9 @@ def list_import_jobs_page(
         ImportJob.source_filename,
         ImportJob.status,
         ImportJob.profile_version,
+        # 作业所属场景：列表页显示「哪个场景的规则库」要用它，字段很小不影响排序缓冲。
+        ImportJob.scenario_code,
         ImportJob.draft_revision,
-        ImportJob.precheck_json,
         ImportJob.failure_code,
         ImportJob.failure_message,
         ImportJob.created_at,
@@ -660,6 +663,20 @@ def list_import_jobs_page(
     ).all()
 
     job_ids = [row.id for row in rows]
+    # 场景名一次查出，逐行查会让列表页变成 N+1 次查询。
+    scenario_codes = sorted({row.scenario_code for row in rows if row.scenario_code})
+    scenario_names = (
+        {
+            code: name
+            for code, name in db.execute(
+                select(ScenarioTemplate.scenario_code, ScenarioTemplate.scenario_name).where(
+                    ScenarioTemplate.scenario_code.in_(scenario_codes)
+                )
+            ).all()
+        }
+        if scenario_codes
+        else {}
+    )
     issue_counts: dict[int, int] = {}
     if job_ids:
         for job_id, count in db.execute(
@@ -688,21 +705,18 @@ def list_import_jobs_page(
 
     items = []
     for job in rows:
-        precheck = job.precheck_json if isinstance(job.precheck_json, dict) else None
-        target_mode = None
-        target_name = None
-        if precheck:
-            target_mode = precheck.get("template_mode")
-            target_name = precheck.get("target_scenario_name") or precheck.get("scene_name")
         items.append(
             {
                 "job_no": job.job_no,
                 "source_filename": job.source_filename,
                 "status": job.status,
                 "profile_version": job.profile_version,
+                # 作业所属场景：上传时必须指定，因此列表能直接看出这份规则库属于哪个场景。
+                # 历史作业没有这一列，如实返回 None（页面显示「未记录场景」），
+                # 不按表头或文件名替它补一个。
+                "scenario_code": job.scenario_code,
+                "scenario_name": scenario_names.get(job.scenario_code),
                 "draft_revision": job.draft_revision,
-                "target_mode": target_mode,
-                "target_name": target_name,
                 "pending_issue_count": issue_counts.get(job.id, 0),
                 "active_operation_count": active_operation_counts.get(job.job_no, 0),
                 "failure_code": job.failure_code,
@@ -716,19 +730,18 @@ def list_import_jobs_page(
 
 def delete_import_job(db: Session, job_no: str) -> None:
     """删除导入作业（仅限未发布的草稿作业）。
-
     已发布作业（或已经产生场景版本的作业）不删除：删除会破坏版本来源追溯。
     有活跃后台转换时同样拒绝——先等待或按其真实状态处理。
     """
     job = db.scalar(select(ImportJob).where(ImportJob.job_no == job_no).with_for_update())
     if not job:
         raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": job_no})
-    if job.status == "PUBLISHED":
+    if job.status in {"PUBLISHED", "APPLIED"}:
         raise BusinessError(
             "IMPORT_JOB_PUBLISHED",
-            "该作业已发布为场景版本，不能删除；已发布版本及其来源需要保留追溯",
+            "该作业已写入场景草稿或已产生场景版本，不能删除；配置来源需要保留追溯",
             status_code=409,
-            details={"job_no": job_no},
+            details={"job_no": job_no, "status": job.status},
         )
     published = db.scalar(select(ScenarioVersion.id).where(ScenarioVersion.import_job_id == job.id).limit(1))
     if published is not None:
@@ -769,9 +782,7 @@ def delete_import_job(db: Session, job_no: str) -> None:
     db.commit()
 
 
-# ---------------------------------------------------------------------------
 # 审核报告（跨任务）
-# ---------------------------------------------------------------------------
 
 
 def _report_current_map(db: Session, task_ids: set[int]) -> dict[int, int]:
@@ -798,6 +809,7 @@ def list_reports_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """审核报告分页列表（跨任务）。"""
     conditions = []
     if name:
         conditions.append(AuditReport.report_name.like(f"%{name.strip()}%"))
@@ -897,6 +909,7 @@ def list_reports_page(
 
 
 def report_or_404(db: Session, report_no: str) -> AuditReport:
+    """按报告编号取报告快照；取不到即 404。"""
     report = db.scalar(select(AuditReport).where(AuditReport.report_no == report_no))
     if not report:
         raise BusinessError("REPORT_NOT_FOUND", "审核报告不存在", status_code=404, details={"report_no": report_no})
@@ -904,6 +917,7 @@ def report_or_404(db: Session, report_no: str) -> AuditReport:
 
 
 def report_detail(db: Session, report_no: str) -> dict[str, Any]:
+    """报告详情：正文、三信号、范围快照与结构化结论。"""
     report = report_or_404(db, report_no)
     task = db.get(AuditTask, report.audit_task_id)
     scenario = db.get(ScenarioVersion, task.scenario_version_id) if task else None
@@ -939,6 +953,7 @@ def report_detail(db: Session, report_no: str) -> dict[str, Any]:
 
 
 def update_report_remark(db: Session, report_no: str, remark: str | None) -> AuditReport:
+    """只更新报告备注，不动正文与快照。"""
     report = report_or_404(db, report_no)
     report.remark = (str(remark).strip() or None) if remark is not None else None
     task = db.get(AuditTask, report.audit_task_id)
@@ -956,6 +971,7 @@ def update_report_remark(db: Session, report_no: str, remark: str | None) -> Aud
 
 
 def set_report_archived(db: Session, report_no: str, archived: bool) -> AuditReport:
+    """归档 / 取消归档报告快照；不删除任何历史快照。"""
     report = report_or_404(db, report_no)
     if archived and report.archived_at is not None:
         raise BusinessError("REPORT_ALREADY_ARCHIVED", "报告已归档", status_code=409, details={"report_no": report_no})
@@ -977,9 +993,7 @@ def set_report_archived(db: Session, report_no: str, archived: bool) -> AuditRep
     return report
 
 
-# ---------------------------------------------------------------------------
 # 风险结果（跨任务，只取当前有效执行批次）
-# ---------------------------------------------------------------------------
 
 
 def list_risk_results_page(
@@ -993,11 +1007,25 @@ def list_risk_results_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
+    """风险结果分页列表（跨任务，只取当前有效执行批次）。
+
+    归属按**能力类型**判定：`node_execution.node_code` 是用户配置的实例码，
+    拿它与能力类型比较在用户改了实例码之后一条风险都查不到。这里按
+    `scenario_node.node_type == RISK_RATING` 先解析出该版本下的全部风险节点实例，
+    再取这些实例的未失效执行。
+    """
     latest_execution = (
         select(func.max(NodeExecution.id))
+        .join(
+            ScenarioNode,
+            and_(
+                ScenarioNode.scenario_version_id == NodeExecution.scenario_version_id,
+                ScenarioNode.node_code == NodeExecution.node_code,
+                ScenarioNode.node_type == "RISK_RATING",
+            ),
+        )
         .where(
             NodeExecution.audit_task_id == RuleResult.audit_task_id,
-            NodeExecution.node_code == "RISK_RATING",
             NodeExecution.status != "INVALIDATED",
         )
         .correlate(RuleResult)

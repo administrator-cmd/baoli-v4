@@ -31,7 +31,8 @@ import { toQuery } from "./query";
  * 字段结果视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
  * - field_key / material_key：字段纠错接口必须用稳定标识，不能用展示用的中文名；
  * - fact_revision_no / origin / evidence_locator_status：人工纠错与文档抽取要分开呈现，
- *   证据定位未核实要显式标注。
+ *   证据定位未核实要显式标注；
+ * - material_uploaded / material_required：页面显示「材料未上传」状态时需要。
  * 这些都是服务端已持久化的事实，不是前端推断出来的。
  */
 export type AuditFieldView = AuditField & {
@@ -69,21 +70,69 @@ export interface DocumentOcrStatus {
 }
 
 /**
- * 任务视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
- * - latest_operation：页面刷新后要凭它继续查询该任务正在进行/刚结束的后台执行；
- * - 节点的 result_summary / failure_code、字段的 material_uploaded / material_required：
- *   页面显示节点真实产物和「材料未上传」状态时需要，不是前端推断出来的。
+ * 节点视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
+ * result_summary 与 failure_code 是页面显示节点真实产物、失败原因所需的，
+ * 不是前端推断出来的。
  */
 export type AuditNodeView = AuditNode & {
   failure_code?: string | null;
   result_summary?: Record<string, JsonValue> | null;
 };
 
+/** 当前复核批次的身份（服务端给出，页面只读不自己算）。 */
+export interface PendingReviewBatch {
+  /** 本批全部待办编号：**页面只能提交这些**。 */
+  review_nos: string[];
+  count: number;
+  /** 本批哈希。它与服务端提交校验、检查点校验用的是同一个值。 */
+  hash: string | null;
+  /**
+   * true 表示本批哈希与进入等待时落库的哈希不一致：待办集合在等待期间被改动过，
+   * 页面必须刷新后再提交，不能拿旧批次继续（服务端会以 409 拒绝）。
+   */
+  stale: boolean;
+  review_types: string[];
+  /** 排队中的待办总数（含不属于本批的批次）。 */
+  all_pending_count: number;
+}
+
+/** 任务视图：nodes / fields 换成本文件的 View 形状，其余字段沿用契约。 */
 export type AuditTaskView = AuditTask & {
   latest_operation?: OperationView | null;
   nodes: AuditNodeView[];
   fields: AuditFieldView[];
+  /**
+   * 全部待办（含不属于本批的批次）。`pending_reviews` 是**当前批次**，
+   * 只有它允许提交；这个字段只用于展示「还有多少项在排队」。
+   */
+  all_pending_reviews?: TaskReviewRow[];
+  pending_review_batch?: PendingReviewBatch;
+  pending_review_hash?: string | null;
+  pending_review_count?: number;
 };
+
+/** 一条 Agent 工具调用账本记录（只读，后端真实记录）。 */
+export interface AgentToolCallRow {
+  tool_call_id: string;
+  retry_of_tool_call_id: string | null;
+  tool_name: string;
+  tool_version: string | null;
+  status: string;
+  evaluation_id: string;
+  rule_instance_id: string;
+  /** 冻结时的工具目录身份与策略版本：回答「模型当时看到的是哪一版工具定义」。 */
+  tool_catalog_version: string;
+  tool_catalog_hash: string;
+  tool_policy_version: string | null;
+  fact_snapshot_ref: string;
+  input_snapshot_hash: string;
+  caller_identity: string | null;
+  arguments: Record<string, JsonValue> | null;
+  result: Record<string, JsonValue> | null;
+  error: Record<string, JsonValue> | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
 
 /** 替换上传的真实影响范围：由服务端计算，页面只负责显示。 */
 export interface ReplacementImpact {
@@ -115,14 +164,17 @@ export interface TaskQuery {
   page_size: number;
 }
 
+/** 审核任务分页列表（后端筛选 / 排序 / 分页）。 */
 export function listAuditTasksPage(query: TaskQuery): Promise<Paged<AuditTaskRow>> {
   return request<Paged<AuditTaskRow>>(`/audit-tasks${toQuery({ ...query })}`);
 }
 
+/** 按当前筛选的任务列表导出地址；与列表页同一作用域，不做静默截断。 */
 export function taskExportUrl(query: Omit<TaskQuery, "page" | "page_size">): string {
   return apiFileUrl(`/audit-tasks/export${toQuery({ ...query })}`);
 }
 
+/** 任务下拉选项：按名称或编号模糊匹配。 */
 export function listTaskOptions(keyword?: string): Promise<{ request_id: string; items: Array<{ task_no: string; task_name: string; scenario_name: string; status: string }> }> {
   return request(`/audit-tasks/options${toQuery({ keyword })}`);
 }
@@ -136,19 +188,26 @@ export function updateAuditTask(taskNo: string, payload: { task_name?: string; r
   });
 }
 
-/** 复制为新任务：保留原任务方案绑定与执行快照，材料与结果重新开始。 */
-export function copyAuditTask(taskNo: string, taskName: string): Promise<AuditTaskView> {
+/**
+ * 复制为新任务：按源任务所属方案的**当前范围**重新创建。
+ *
+ * 它不是「保留原任务执行快照」——新任务冻结的是方案此刻的范围，材料与结果重新开始。
+ * `idempotencyKey` 与新建任务同一口径：响应丢失后重发返回原任务。
+ */
+export function copyAuditTask(taskNo: string, taskName: string, idempotencyKey: string): Promise<AuditTaskView> {
   return request<AuditTaskView>(`/audit-tasks/${encodeURIComponent(taskNo)}/copy`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_name: taskName }),
+    body: JSON.stringify({ task_name: taskName, idempotency_key: idempotencyKey }),
   });
 }
 
+/** 逻辑删除任务；历史事实、文件、证据与报告保留。 */
 export function deleteAuditTask(taskNo: string): Promise<AuditTaskView> {
   return request<AuditTaskView>(`/audit-tasks/${encodeURIComponent(taskNo)}`, { method: "DELETE" });
 }
 
+/** 恢复已逻辑删除的任务。 */
 export function restoreAuditTask(taskNo: string): Promise<AuditTaskView> {
   return request<AuditTaskView>(`/audit-tasks/${encodeURIComponent(taskNo)}/restore`, { method: "POST" });
 }
@@ -194,19 +253,28 @@ export function listTaskExecutions(taskNo: string, page = 1, pageSize = 50): Pro
   );
 }
 
+/** 任务详情：节点、材料位、字段、规则与待办。 */
 export function getAuditTask(taskNo: string): Promise<AuditTaskView> {
   return request<AuditTaskView>(`/audit-tasks/${encodeURIComponent(taskNo)}`);
 }
 
+/**
+ * 上传或替换材料文件，并回报浏览器真实的上传进度。
+ *
+ * materialType 必填：用户从 8018 支持目录中选择的材料类型，随本次上传保存。
+ * 材料位不声明类型，替换文件时可以换一个类型。
+ */
 export function uploadTaskDocument(
   taskNo: string,
   documentNo: string,
   file: File,
+  materialType: string,
   replace = false,
   onProgress?: (percent: number) => void,
 ): Promise<DocumentUploadView> {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("material_type", materialType);
   formData.append("replace", String(replace));
   return uploadWithProgress<DocumentUploadView>(
     `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/upload`,
@@ -233,6 +301,7 @@ export function executeAuditNode(
   });
 }
 
+/** 提交人工复核结论；幂等标识绑定任务与待办集合，重发复用同一后台操作。 */
 export function submitManualReviews(
   taskNo: string,
   reviews: Array<{
@@ -288,14 +357,17 @@ export function reconcileDocumentOcr(
   );
 }
 
+/** 该任务的风险结果（命中只统计 ABNORMAL）。 */
 export function getTaskRisks(taskNo: string): Promise<RiskList> {
   return request<RiskList>(`/audit-tasks/${encodeURIComponent(taskNo)}/risks`);
 }
 
+/** 该任务的审核报告正文与三信号。 */
 export function getTaskReport(taskNo: string): Promise<Report> {
   return request<Report>(`/audit-tasks/${encodeURIComponent(taskNo)}/reports`);
 }
 
+/** 单条证据详情：引用原文与定位核对结论。 */
 export function getTaskEvidence(taskNo: string, evidenceNo: string): Promise<Evidence> {
   return request<Evidence>(`/audit-tasks/${encodeURIComponent(taskNo)}/evidence/${encodeURIComponent(evidenceNo)}`);
 }
@@ -345,6 +417,21 @@ export function submitRetrievalDecision(
 /** 本任务各上传版本的证据索引状态；只读，不触发建索引。 */
 export function getTaskEvidenceIndex(taskNo: string): Promise<TaskEvidenceIndex> {
   return request<TaskEvidenceIndex>(`/audit-tasks/${encodeURIComponent(taskNo)}/evidence-index`);
+}
+
+/**
+ * Agent 工具调用账本（只读）：模型请求了哪些工具、依据哪一版事实与工具定义、返回了什么。
+ *
+ * 规则详情要展示的「确定性比较结果」以它为准，**不由页面重新计算比较过程**。
+ * `evaluationId` 给出时只取该评估批次。
+ */
+export function listAgentToolCalls(
+  taskNo: string,
+  evaluationId?: string,
+): Promise<{ request_id: string; task_no: string; evaluations: string[]; items: AgentToolCallRow[] }> {
+  return request(
+    `/audit-tasks/${encodeURIComponent(taskNo)}/agent-tool-calls${toQuery({ evaluation_id: evaluationId })}`,
+  );
 }
 
 /** 本任务的检索记录：查询内容、限定范围、模型与索引版本、候选与采用结果。 */

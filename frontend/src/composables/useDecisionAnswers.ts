@@ -17,7 +17,13 @@ export interface DecisionAnswersState {
   /** 立即落一次暂存（提交裁决、离开步骤前必须执行）。 */
   flush: () => Promise<void>;
   /** 提交全部业务结论；未答完时不提交并给出原因。 */
-  submit: (onAccepted: (updated: ImportJob) => void) => Promise<boolean>;
+  /**
+   * 提交全部业务结论。`onAccepted` 收到服务端返回的最新作业视图。
+   *
+   * 回调**允许是异步的**且会被等待：回调里要做的事（例如重新读回作业与场景节点）
+   * 必须在本函数返回之前完成，否则调用方会在数据还没就绪时就推进页面。
+   */
+  submit: (onAccepted: (updated: ImportJob) => void | Promise<void>) => Promise<boolean>;
   reset: () => void;
 }
 
@@ -43,7 +49,6 @@ export function useDecisionAnswers(options: {
   const selectedOptions = ref<Record<string, JsonValue>>({});
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  /** 服务端草稿答案存成 `{ selected: ... }`；页面按 `selected` 取值展示。 */
   function readDecisionValue(decision: JsonValue): JsonValue {
     if (decision && typeof decision === "object" && !Array.isArray(decision) && "selected" in (decision as Record<string, JsonValue>)) {
       return (decision as Record<string, JsonValue>).selected ?? "";
@@ -70,7 +75,6 @@ export function useDecisionAnswers(options: {
   /**
    * 用作业当前的问题与草稿答案初始化表单。
    *
-   * 服务端的草稿答案存成 `{ selected: ... }`，页面按 `selected` 取值展示；
    * 本地已填但服务端没有的值由调用方（`preserveAnswers`）另行保留。
    */
   function initialise(job: ImportJobView, preserveAnswers = false): void {
@@ -113,7 +117,7 @@ export function useDecisionAnswers(options: {
     }, 800);
   }
 
-  async function submit(onAccepted: (updated: ImportJob) => void): Promise<boolean> {
+  async function submit(onAccepted: (updated: ImportJob) => void | Promise<void>): Promise<boolean> {
     if (!options.job.value) return false;
     if (unresolved.value.length) {
       options.formMessage.value = "请先为每一项业务问题给出结论；缺少阈值时必须填写真实数值，不能留空。";
@@ -133,7 +137,8 @@ export function useDecisionAnswers(options: {
         value: { selected: selectedOptions.value[issue.issue_no] as JsonValue },
       }));
       const updated = await saveImportDecisions(jobNo, decisions, revision);
-      onAccepted(updated);
+      // 等回调做完再往下：回调可能要重新读回作业与场景节点，页面据它才切下一步。
+      await onAccepted(updated);
       accepted = true;
       ElMessage.success("业务结论已保存");
     });

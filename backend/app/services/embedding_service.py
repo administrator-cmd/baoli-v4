@@ -44,6 +44,7 @@ class EmbeddingRuntime:
     model_revision: str
     dimension: int
     max_seq_length: int
+    special_token_count: int
     model_dir: Path
     encode: Any
     tokenize: Any
@@ -167,6 +168,13 @@ def _load_runtime() -> EmbeddingRuntime:
             "本地嵌入模型未能给出有效的最大序列长度，无法确定切分口径",
             status_code=503,
         )
+    special_token_count = int(model.tokenizer.num_special_tokens_to_add(pair=False))
+    if max_seq_length <= special_token_count:
+        raise BusinessError(
+            "EMBEDDING_SEQ_LENGTH_INVALID",
+            "本地嵌入模型的最大序列长度不足以容纳正文 token",
+            status_code=503,
+        )
     _assert_revision_matches(model_dir, settings.embedding_model_revision)
 
     def tokenize(text: str) -> dict[str, Any]:
@@ -214,6 +222,7 @@ def _load_runtime() -> EmbeddingRuntime:
         model_revision=settings.embedding_model_revision,
         dimension=dimension,
         max_seq_length=max_seq_length,
+        special_token_count=special_token_count,
         model_dir=model_dir,
         encode=encode,
         tokenize=tokenize,
@@ -282,6 +291,7 @@ def vector_to_json(vector: list[Decimal]) -> list[str]:
 
 
 def vector_from_json(values: list[str]) -> list[Decimal]:
+    """把持久化的向量分量还原成 Decimal 列表（全程不用 float）。"""
     return [Decimal(item) for item in values]
 
 

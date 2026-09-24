@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { AuditTaskRow, PlanSelection } from "@/api/contracts";
@@ -10,7 +10,6 @@ import {
   deleteAuditTask,
   listAuditTasksPage,
   restoreAuditTask,
-  taskExportUrl,
   updateAuditTask,
 } from "@/api/audits";
 import {
@@ -30,6 +29,7 @@ import { nodeLabel, nodeOptions, statusLabel } from "@/constants/labels";
  * 审核任务列表：任务只能从已发布且启用的方案版本创建；
  * 旧任务没有方案关联时显示“历史任务配置”，不伪造关联、不改写历史结果。
  */
+const route = useRoute();
 const router = useRouter();
 
 const list = usePagedList<AuditTaskRow, {
@@ -89,20 +89,6 @@ const deleteDisabled = computed(() => selectedRows.value.length === 0);
 /** 方案筛选下拉：与建任务一致，只列启用且已有发布版本的方案。 */
 const planFilterOptions = ref<PlanOption[]>([]);
 
-function exportUrl(): string {
-  return taskExportUrl({
-    name: filters.name || undefined,
-    scenario_code: filters.scenario_code || undefined,
-    plan_code: filters.plan_code || undefined,
-    legacy: filters.legacy === "" ? undefined : filters.legacy === "true",
-    status: filters.status || undefined,
-    current_node: filters.current_node || undefined,
-    created_from: filters.created_from || undefined,
-    created_to: filters.created_to || undefined,
-    deleted: filters.deleted,
-  });
-}
-
 /** 进入任务详情并打开指定页签；没有页签时由任务详情页按「材料」页处理。 */
 function openTask(row: AuditTaskRow, tab?: DetailTab): void {
   void router.push({
@@ -141,40 +127,84 @@ function primaryEntry(row: AuditTaskRow): PrimaryEntry {
   return { label: "继续审核", tab: "materials" };
 }
 
-/* ---- 新增任务 ---- */
+/* 新增任务 */
 const scenes = ref<ScenarioOption[]>([]);
 const planOptions = ref<PlanOption[]>([]);
 const createVisible = ref(false);
 const createSaving = ref(false);
+const createPrefillLoading = ref(false);
 const createError = ref<string | null>(null);
 const createForm = reactive({ scenario_code: "", plan_code: "", task_name: "", remark: "" });
 let createAttemptKey: string | null = null;
+let createAttemptPayload: string | null = null;
+let planOptionsRequest = 0;
+let snapshotRequest = 0;
+let createOpenRequest = 0;
 
-async function openCreate(): Promise<void> {
+async function openCreate(planCode?: string): Promise<void> {
+  const request = ++createOpenRequest;
   createVisible.value = true;
   // 每次打开弹窗生成新的幂等标识：失败重开时不会与上一次请求的内容冲突。
   createAttemptKey = null;
+  createAttemptPayload = null;
+  ++planOptionsRequest;
+  ++snapshotRequest;
+  createSnapshot.value = null;
+  snapshotLoading.value = false;
+  snapshotError.value = null;
+  planOptions.value = [];
   createError.value = null;
   createForm.scenario_code = "";
   createForm.plan_code = "";
   createForm.task_name = "";
   createForm.remark = "";
+  createPrefillLoading.value = true;
   try {
     const payload = await listSceneOptions();
+    if (request !== createOpenRequest || !createVisible.value) return;
     scenes.value = payload.items.filter((item) => item.enabled);
+    if (!planCode) return;
+    const selected = await getPlan(planCode);
+    if (request !== createOpenRequest || !createVisible.value) return;
+    if (selected.deleted || !selected.enabled || !selected.effective) {
+      createError.value = "该方案当前不可用于创建任务，请在方案管理中核对启用状态和配置范围。";
+      return;
+    }
+    if (!scenes.value.some((item) => item.scenario_code === selected.scenario_code)) {
+      createError.value = "该方案所属场景当前不可用于创建任务。";
+      return;
+    }
+    createForm.scenario_code = selected.scenario_code;
+    await onScenarioChange();
+    if (request !== createOpenRequest || !createVisible.value || createError.value) return;
+    if (!planOptions.value.some((item) => item.plan_code === planCode)) {
+      createError.value = "该方案不在当前可用方案列表中，请刷新后核对方案状态。";
+      return;
+    }
+    createForm.plan_code = planCode;
   } catch (failure) {
-    createError.value = failure instanceof Error ? failure.message : "场景列表读取失败";
+    if (request === createOpenRequest && createVisible.value) {
+      createError.value = failure instanceof Error ? failure.message : "创建任务所需信息读取失败";
+    }
+  } finally {
+    if (request === createOpenRequest) createPrefillLoading.value = false;
   }
 }
 
 async function onScenarioChange(): Promise<void> {
+  const scenarioCode = createForm.scenario_code;
+  const request = ++planOptionsRequest;
   createForm.plan_code = "";
-  if (!createForm.scenario_code) {
-    planOptions.value = [];
+  planOptions.value = [];
+  createError.value = null;
+  if (!scenarioCode) {
     return;
   }
   try {
-    const payload = await listPlanOptions(createForm.scenario_code);
+    const payload = await listPlanOptions(scenarioCode);
+    if (request !== planOptionsRequest || createForm.scenario_code !== scenarioCode) {
+      return;
+    }
     planOptions.value = payload.items;
     if (!payload.items.length) {
       createError.value = "该场景还没有范围已生效的启用方案：请先在方案管理中建立方案并保存成功。";
@@ -182,48 +212,62 @@ async function onScenarioChange(): Promise<void> {
       createError.value = null;
     }
   } catch (failure) {
-    createError.value = failure instanceof Error ? failure.message : "方案列表读取失败";
+    if (request === planOptionsRequest && createForm.scenario_code === scenarioCode) {
+      createError.value = failure instanceof Error ? failure.message : "方案列表读取失败";
+    }
   }
 }
 
-watch(
-  () => createForm.scenario_code,
-  () => void onScenarioChange(),
-);
+/** 创建时校验方案配置，并提交范围哈希以防止并发修改。 */
+const createSnapshot = ref<PlanSelection | null>(null);
+const snapshotLoading = ref(false);
+const snapshotError = ref<string | null>(null);
+const canCreateTask = computed(() => Boolean(
+  createSnapshot.value?.effective
+  && createSnapshot.value.scope_hash
+  && createSnapshot.value.plan_code === createForm.plan_code,
+));
+
+async function loadCreateSnapshot(): Promise<void> {
+  const planCode = createForm.plan_code;
+  const request = ++snapshotRequest;
+  createSnapshot.value = null;
+  snapshotError.value = null;
+  if (!planCode) {
+    snapshotLoading.value = false;
+    return;
+  }
+  snapshotLoading.value = true;
+  try {
+    const snapshot = await getPlan(planCode);
+    if (request === snapshotRequest && createForm.plan_code === planCode) {
+      createSnapshot.value = snapshot;
+    }
+  } catch (failure) {
+    if (request === snapshotRequest && createForm.plan_code === planCode) {
+      snapshotError.value = failure instanceof Error ? failure.message : "方案范围读取失败";
+    }
+  } finally {
+    if (request === snapshotRequest) {
+      snapshotLoading.value = false;
+    }
+  }
+}
 
 watch(
   () => createForm.plan_code,
   () => void loadCreateSnapshot(),
 );
 
-/**
- * 建任务前展示将被抓取的规则范围。
- *
- * 范围来自方案当前保存的配置；任务创建会把它抓成自己的快照，此后改方案不影响本任务。
- * 页面不在此处改选，避免让用户以为可以在建任务时临时调整范围。
- */
-const createSnapshot = ref<PlanSelection | null>(null);
-const snapshotLoading = ref(false);
-const snapshotError = ref<string | null>(null);
-
-async function loadCreateSnapshot(): Promise<void> {
-  createSnapshot.value = null;
-  snapshotError.value = null;
-  if (!createForm.plan_code) {
-    return;
-  }
-  snapshotLoading.value = true;
-  try {
-    createSnapshot.value = await getPlan(createForm.plan_code);
-  } catch (failure) {
-    snapshotError.value = failure instanceof Error ? failure.message : "方案范围读取失败";
-  } finally {
-    snapshotLoading.value = false;
-  }
-}
-
-const snapshotRows = computed(() => createSnapshot.value?.selected_rules ?? []);
-const snapshotExplicitCount = computed(() => snapshotRows.value.length);
+watch(
+  () => route.query.createPlan,
+  (value) => {
+    if (typeof value !== "string" || !value) return;
+    void openCreate(value);
+    void router.replace({ query: { ...route.query, createPlan: undefined } });
+  },
+  { immediate: true },
+);
 
 async function submitCreate(): Promise<void> {
   if (!createForm.plan_code) {
@@ -234,17 +278,30 @@ async function submitCreate(): Promise<void> {
     ElMessage.warning("请填写任务名称");
     return;
   }
+  const snapshot = createSnapshot.value;
+  if (!snapshot?.effective || !snapshot.scope_hash || snapshot.plan_code !== createForm.plan_code) {
+    ElMessage.warning("方案范围尚未读取或已变化，请重新核对后创建任务");
+    return;
+  }
+  const taskName = createForm.task_name.trim();
+  const remark = createForm.remark.trim() || null;
+  const attemptPayload = JSON.stringify([createForm.plan_code, taskName, remark, snapshot.scope_hash]);
+  const attemptKey = createAttemptPayload === attemptPayload && createAttemptKey
+    ? createAttemptKey
+    : operationIdempotencyKey("TASK_CREATE", createForm.plan_code, taskName);
+  createAttemptKey = attemptKey;
+  createAttemptPayload = attemptPayload;
   createSaving.value = true;
   createError.value = null;
   try {
-    createAttemptKey =
-      createAttemptKey ?? operationIdempotencyKey("TASK_CREATE", createForm.plan_code, createForm.task_name.trim());
     const created = await createTaskFromPlan(createForm.plan_code, {
-      task_name: createForm.task_name.trim(),
-      remark: createForm.remark.trim() || null,
-      idempotency_key: createAttemptKey,
+      task_name: taskName,
+      remark,
+      expected_scope_hash: snapshot.scope_hash,
+      idempotency_key: attemptKey,
     });
     createAttemptKey = null;
+    createAttemptPayload = null;
     createVisible.value = false;
     if (created.reused) {
       ElMessage.success("该请求此前已创建任务，已打开原任务");
@@ -259,7 +316,7 @@ async function submitCreate(): Promise<void> {
   }
 }
 
-/* ---- 编辑 ---- */
+/* 编辑 */
 const editVisible = ref(false);
 const editRow = ref<AuditTaskRow | null>(null);
 const editForm = reactive({ task_name: "", remark: "" });
@@ -283,7 +340,7 @@ async function submitEdit(): Promise<void> {
       task_name: editForm.task_name.trim(),
       remark: editForm.remark.trim() || null,
     });
-    ElMessage.success("任务资料已保存（执行快照不受影响）");
+  ElMessage.success("任务资料已保存（冻结的创建时范围不受影响）");
     editVisible.value = false;
     await list.load();
   } catch (failure) {
@@ -293,11 +350,12 @@ async function submitEdit(): Promise<void> {
   }
 }
 
-/* ---- 复制 ---- */
+/* 复制 */
 const copyVisible = ref(false);
 const copyRowTarget = ref<AuditTaskRow | null>(null);
 const copyName = ref("");
 const copySaving = ref(false);
+let copyAttemptKey: string | null = null;
 
 function openCopy(row: AuditTaskRow): void {
   copyRowTarget.value = row;
@@ -312,8 +370,12 @@ async function submitCopy(): Promise<void> {
   }
   copySaving.value = true;
   try {
-    const created = await copyAuditTask(copyRowTarget.value.task_no, copyName.value.trim());
-    ElMessage.success("已复制为新任务（保留方案绑定与执行快照，材料与结果重新开始）");
+    // 与新建任务同一口径：幂等标识在本次尝试内复用，响应丢失后重发返回原任务。
+    copyAttemptKey =
+      copyAttemptKey ?? operationIdempotencyKey("TASK_COPY", copyRowTarget.value.task_no, copyName.value.trim());
+    const created = await copyAuditTask(copyRowTarget.value.task_no, copyName.value.trim(), copyAttemptKey);
+    copyAttemptKey = null;
+    ElMessage.success("已按方案当前范围创建新任务（材料与结果重新开始，原任务报告保留）");
     copyVisible.value = false;
     await router.push({ name: "audit-task-detail", params: { taskNo: created.task_no } });
   } catch (failure) {
@@ -323,7 +385,7 @@ async function submitCopy(): Promise<void> {
   }
 }
 
-/* ---- 删除 / 恢复 ---- */
+/* 删除 / 恢复 */
 async function removeRow(row: AuditTaskRow): Promise<void> {
   try {
     await ElMessageBox.confirm(
@@ -462,16 +524,13 @@ async function loadFilterOptions(): Promise<void> {
       </el-form-item>
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
-        <el-button @click="list.reset()">重置</el-button>
-        <el-button v-if="!filters.deleted" tag="a" :href="exportUrl()">导出</el-button>
-        <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
 
     <div class="app-toolbar">
       <div class="app-toolbar__left">
         <template v-if="!filters.deleted">
-          <el-button type="primary" @click="openCreate">新增</el-button>
+          <el-button type="primary" @click="openCreate()">新增</el-button>
           <el-button type="success" plain :disabled="editDisabled" @click="selectedRows[0] && openEdit(selectedRows[0])">编辑</el-button>
           <el-button type="danger" plain :disabled="deleteDisabled" @click="deleteSelected">删除</el-button>
         </template>
@@ -506,10 +565,10 @@ async function loadFilterOptions(): Promise<void> {
           <span class="text-hint"> · 第 {{ row.scenario_version_no }} 版</span>
         </template>
       </el-table-column>
-      <el-table-column label="方案 / 版本" min-width="190">
+      <el-table-column label="方案" min-width="190">
         <template #default="{ row }">
           <span v-if="row.is_legacy_config" class="text-hint">历史任务配置</span>
-          <span v-else>{{ row.plan_name }}</span>
+          <span v-else>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
       </el-table-column>
       <el-table-column label="当前阶段" width="130">
@@ -571,59 +630,31 @@ async function loadFilterOptions(): Promise<void> {
     </div>
 
     <el-dialog v-model="createVisible" title="新增审核任务" width="640px" :close-on-click-modal="false">
-      <el-alert type="info" show-icon :closable="false" title="任务只能从已发布且启用的方案版本创建">
-        创建后任务保存自己的执行快照（场景版本、显式规则与自动依赖）；后续场景或方案升级不会改变已创建任务。
-      </el-alert>
       <el-alert v-if="createError" class="block-gap-sm" type="warning" show-icon :closable="false" :title="createError" />
+      <el-alert v-if="snapshotError" class="block-gap-sm" type="error" show-icon :closable="false" :title="`方案读取失败：${snapshotError}`">
+        <el-button size="small" @click="loadCreateSnapshot">重试</el-button>
+      </el-alert>
+      <el-alert
+        v-if="createSnapshot && !createSnapshot.effective"
+        class="block-gap-sm"
+        type="warning"
+        show-icon
+        :closable="false"
+        :title="`方案配置尚未生效：${createSnapshot.sync_error?.message ?? '配置不完整'}`"
+      />
       <el-form label-width="100px" class="block-gap-sm">
         <el-form-item label="场景" required>
-          <el-select v-model="createForm.scenario_code" filterable placeholder="选择场景" style="width: 100%">
+          <el-select v-model="createForm.scenario_code" filterable :disabled="createPrefillLoading" placeholder="选择场景" style="width: 100%" @change="onScenarioChange">
             <el-option v-for="item in scenes" :key="item.scenario_code" :value="item.scenario_code" :label="item.scenario_name" />
           </el-select>
         </el-form-item>
         <el-form-item label="方案" required>
-          <el-select v-model="createForm.plan_code" filterable :disabled="!createForm.scenario_code" placeholder="选择已启用的方案" style="width: 100%">
+          <el-select v-model="createForm.plan_code" filterable :disabled="createPrefillLoading || !createForm.scenario_code" placeholder="选择已启用的方案" style="width: 100%">
             <el-option v-for="item in planOptions" :key="item.plan_code" :value="item.plan_code" :label="item.plan_name" />
           </el-select>
         </el-form-item>
         <el-form-item label="任务名称" required>
           <el-input v-model="createForm.task_name" maxlength="255" placeholder="例如：供应商甲 9 月合同审核" />
-        </el-form-item>
-        <el-form-item label="执行范围">
-          <div class="snapshot-block">
-            <div v-if="snapshotLoading" class="text-muted">正在读取方案的规则范围…</div>
-            <el-alert
-              v-else-if="snapshotError"
-              type="error"
-              show-icon
-              :closable="false"
-              :title="`方案范围读取失败：${snapshotError}`"
-            >
-              <el-button size="small" @click="loadCreateSnapshot">重试</el-button>
-            </el-alert>
-            <template v-else-if="createSnapshot">
-              <el-alert
-                v-if="!createSnapshot.effective"
-                type="warning"
-                show-icon
-                :closable="false"
-                title="该方案的范围尚未生效，不能创建任务"
-              >
-                {{ createSnapshot.sync_error?.message ?? "配置不完整" }}；请先在方案管理中保存成功。
-              </el-alert>
-              <div class="text-muted">
-                显式选择 {{ snapshotExplicitCount }} 条 · 字段 {{ createSnapshot.field_count }} 个 ·
-                材料位 {{ createSnapshot.materials.length }} 个
-              </div>
-              <el-table :data="snapshotRows" size="small" border max-height="220" empty-text="该方案没有规则">
-                <el-table-column prop="name" label="规则" min-width="220" show-overflow-tooltip />
-              </el-table>
-              <div class="text-hint">
-                以上范围在创建时写入任务快照；之后修改方案或场景都不会改变本任务。
-              </div>
-            </template>
-            <div v-else class="text-hint">请先选择方案，以查看将被抓取的规则范围。</div>
-          </div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="createForm.remark" type="textarea" :rows="2" maxlength="4000" placeholder="可选" />
@@ -631,7 +662,7 @@ async function loadFilterOptions(): Promise<void> {
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createSaving" :disabled="!createSnapshot?.effective" @click="submitCreate">创建任务</el-button>
+        <el-button type="primary" :loading="createSaving" :disabled="createPrefillLoading || snapshotLoading || !canCreateTask" @click="submitCreate">创建任务</el-button>
       </template>
     </el-dialog>
 
@@ -644,7 +675,7 @@ async function loadFilterOptions(): Promise<void> {
           <el-input v-model="editForm.remark" type="textarea" :rows="3" maxlength="4000" />
         </el-form-item>
       </el-form>
-      <p class="text-hint">执行快照不会随重命名或备注修改变化；已完成任务需要更换输入时，请复制为新任务。</p>
+      <p class="text-hint">冻结的创建时范围不会随重命名或备注修改变化；已完成任务需要更换输入时，请按方案当前范围重新创建任务。</p>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="editSaving" @click="submitEdit">保存</el-button>
@@ -657,7 +688,7 @@ async function loadFilterOptions(): Promise<void> {
           <el-input v-model="copyName" maxlength="255" />
         </el-form-item>
       </el-form>
-      <p class="text-hint">复制保留原任务的方案绑定与执行快照；材料与结果重新开始，原任务报告保留。</p>
+      <p class="text-hint">按所属方案的**当前范围**重新创建一个新任务；材料与结果重新开始，原任务报告保留。</p>
       <template #footer>
         <el-button @click="copyVisible = false">取消</el-button>
         <el-button type="primary" :loading="copySaving" @click="submitCopy">复制</el-button>
@@ -665,13 +696,3 @@ async function loadFilterOptions(): Promise<void> {
     </el-dialog>
   </div>
 </template>
-
-<style scoped>
-.snapshot-block {
-  width: 100%;
-}
-
-.snapshot-block > * + * {
-  margin-top: 8px;
-}
-</style>

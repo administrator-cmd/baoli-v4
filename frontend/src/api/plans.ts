@@ -1,8 +1,10 @@
 import type {
   JsonValue,
   Paged,
+  PlanAdjustments,
+  PlanConfig,
+  PlanConfigPayload,
   PlanListItem,
-  PlanScopePreview,
   PlanSelection,
   TaskCreatedResult,
 } from "./contracts";
@@ -19,10 +21,12 @@ export interface PlanQuery {
   page_size: number;
 }
 
+/** 审核方案分页列表。 */
 export function listPlans(query: PlanQuery): Promise<Paged<PlanListItem>> {
   return request<Paged<PlanListItem>>(`/plans${toQuery({ ...query })}`);
 }
 
+/** 方案列表导出地址；与当前筛选同一作用域。 */
 export function planExportUrl(query: Omit<PlanQuery, "page" | "page_size">): string {
   return apiFileUrl(`/plans/export${toQuery({ ...query })}`);
 }
@@ -34,13 +38,22 @@ export interface PlanOption {
   scenario_version_no: number;
 }
 
+/** 方案下拉选项，可按场景编码过滤。 */
 export function listPlanOptions(scenarioCode?: string): Promise<{ request_id: string; items: PlanOption[] }> {
   return request<{ request_id: string; items: PlanOption[] }>(`/plans/options${toQuery({ scenario_code: scenarioCode })}`);
 }
 
+/**
+ * 创建方案：把那一版场景的配置**整份复制**成方案自己的配置，并立即编译一次。
+ *
+ * `scenario_version_no` 必须是页面看到的那一版：服务端在事务内核对它仍是允许创建方案的
+ * 已发布版本，不一致时返回 `PLAN_VERSION_CHANGED`（刷新后重试），不会静默改取最新版。
+ * **不再提交规则选择** —— 创建时整份复制，规则在方案里逐条勾。
+ */
 export function createPlan(payload: {
   plan_name: string;
   scenario_code: string;
+  scenario_version_no: number;
   description?: string | null;
   enabled: boolean;
 }): Promise<PlanSelection> {
@@ -51,10 +64,12 @@ export function createPlan(payload: {
   });
 }
 
+/** 方案详情：场景版本来源与方案自己的规则启停。 */
 export function getPlan(planCode: string): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`);
 }
 
+/** 编辑方案基本资料；不修改规则范围。 */
 export function updatePlan(
   planCode: string,
   payload: { plan_name?: string; description?: string | null; enabled?: boolean },
@@ -66,6 +81,7 @@ export function updatePlan(
   });
 }
 
+/** 启用 / 停用方案；已停用的方案不能用于创建任务。 */
 export function setPlanEnabled(planCode: string, enabled: boolean): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/enabled`, {
     method: "PUT",
@@ -74,14 +90,17 @@ export function setPlanEnabled(planCode: string, enabled: boolean): Promise<Plan
   });
 }
 
+/** 逻辑删除方案。 */
 export function deletePlan(planCode: string): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`, { method: "DELETE" });
 }
 
+/** 恢复已逻辑删除的方案。 */
 export function restorePlan(planCode: string): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/restore`, { method: "POST" });
 }
 
+/** 复制方案为新方案（沿用原方案的绑定与规则选择）。 */
 export function copyPlan(planCode: string, planName: string | null): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/copy`, {
     method: "POST",
@@ -90,25 +109,20 @@ export function copyPlan(planCode: string, planName: string | null): Promise<Pla
   });
 }
 
-/** 保存方案（绑定场景版本 + 显式规则选择）并立即重算范围；返回被移除的旧选择。 */
-export function savePlan(
-  planCode: string,
-  payload: { rule_keys: string[] },
-): Promise<PlanSelection> {
-  return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/save`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+/** 方案的可编辑配置：材料 / 字段 / 全部规则 / 报告章节（节点与 Sheet 只读返回）。 */
+export function getPlanConfig(planCode: string): Promise<PlanConfig> {
+  return request<PlanConfig>(`/plans/${encodeURIComponent(planCode)}/config`);
 }
 
-/** 范围预览：显式选择 + 自动补入依赖 + 未启用规则（保存前就能看到）。 */
-export function previewPlanScope(payload: {
-  scenario_code: string;
-  rule_keys: string[] | null;
-}): Promise<PlanScopePreview> {
-  return request<PlanScopePreview>("/plans/scope-preview", {
-    method: "POST",
+/** 旧方案相对其来源场景版本的调整，供重新生成时参考。 */
+export function getPlanAdjustments(planCode: string): Promise<PlanAdjustments> {
+  return request<PlanAdjustments>(`/plans/${encodeURIComponent(planCode)}/adjustments`);
+}
+
+/** 整体替换方案的配置并立即重新编译。提交的是五份完整集合。 */
+export function updatePlanConfig(planCode: string, payload: PlanConfigPayload): Promise<PlanConfig> {
+  return request<PlanConfig>(`/plans/${encodeURIComponent(planCode)}/config`, {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
@@ -117,18 +131,15 @@ export function previewPlanScope(payload: {
 /** 使用方案创建审核任务（幂等：同一标识重发返回原任务）。 */
 export function createTaskFromPlan(
   planCode: string,
-  payload: { task_name: string; remark?: string | null; idempotency_key: string },
+  payload: {
+    task_name: string;
+    remark?: string | null;
+    /** 页面预览到的方案范围指纹；服务端锁定方案后比对，不一致时拒绝创建。 */
+    expected_scope_hash: string;
+    idempotency_key: string;
+  },
 ): Promise<TaskCreatedResult> {
   return request<TaskCreatedResult>(`/plans/${encodeURIComponent(planCode)}/tasks`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-/** 把旧任务的执行范围显式另存为方案。 */
-export function saveTaskRangeAsPlan(payload: { task_no: string; plan_name: string }): Promise<PlanSelection> {
-  return request<PlanSelection>("/plans/from-task", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

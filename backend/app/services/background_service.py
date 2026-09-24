@@ -81,6 +81,7 @@ def assert_no_active_operation(db: Session, object_type: str, object_no: str) ->
 
 
 def find_operation(db: Session, object_type: str, object_no: str, operation_no: str) -> BackgroundOperation:
+    """按对象与操作编号取后台命令；取不到即 404。"""
     operation = db.scalar(
         select(BackgroundOperation).where(
             BackgroundOperation.object_type == object_type,
@@ -94,6 +95,7 @@ def find_operation(db: Session, object_type: str, object_no: str, operation_no: 
 
 
 def operation_by_no(db: Session, operation_no: str) -> BackgroundOperation:
+    """按操作编号取后台命令；取不到即 404。"""
     operation = db.scalar(select(BackgroundOperation).where(BackgroundOperation.operation_no == operation_no))
     if not operation:
         raise BusinessError(
@@ -106,6 +108,7 @@ def operation_by_no(db: Session, operation_no: str) -> BackgroundOperation:
 
 
 def latest_operation(db: Session, object_type: str, object_no: str) -> BackgroundOperation | None:
+    """该对象最近一次后台命令，页面刷新后凭它继续查询真实状态。"""
     return db.scalar(
         select(BackgroundOperation)
         .where(BackgroundOperation.object_type == object_type, BackgroundOperation.object_no == object_no)
@@ -114,6 +117,7 @@ def latest_operation(db: Session, object_type: str, object_no: str) -> Backgroun
 
 
 def operation_view(operation: BackgroundOperation, *, reused: bool = False) -> dict[str, Any]:
+    """后台命令的对外视图：状态、阶段、结果，以及是否复用了原命令。"""
     return {
         "operation_no": operation.operation_no,
         "object_no": operation.object_no,

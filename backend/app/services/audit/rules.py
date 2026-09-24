@@ -12,7 +12,7 @@
 
 from ...domain import capabilities
 from ...domain.identity import public_no
-from ...domain.manifest import EVIDENCE_SEAL_SUBJECT
+from ...domain.manifest import EVIDENCE_RETRIEVAL, EVIDENCE_SEAL_SUBJECT, rule_node_type_of
 from ...errors import BusinessError
 from ...models import AuditTask, Evidence, ManualReview, NodeExecution, RuleResult, StoredArtifact
 from ...operators import execute_operator
@@ -49,18 +49,7 @@ def _retrieval_summary(retrieval: dict[str, Any] | None) -> dict[str, Any] | Non
         "uncovered_materials": retrieval.get("uncovered_materials") or [],
         "excluded_indexes": retrieval.get("excluded_indexes") or [],
         "candidates": [_candidate_summary(item) for item in candidates],
-        "adopted": [
-            {
-                **_candidate_summary(item),
-                "page_no": item.get("page_no"),
-                "page_no_source": item.get("page_no_source"),
-                "heading_path": item.get("heading_path"),
-                "char_start": item.get("char_start"),
-                "char_end": item.get("char_end"),
-                "text": item.get("text"),
-            }
-            for item in adopted
-        ],
+        "adopted": [_candidate_summary(item) for item in adopted],
     }
 
 def _candidate_summary(item: Any) -> dict[str, Any]:
@@ -73,11 +62,34 @@ def _candidate_summary(item: Any) -> dict[str, Any]:
         "chunk_id": item.get("chunk_id"),
         "source_entry_no": item.get("source_entry_no"),
         "subject_name": item.get("subject_name"),
+        "artifact_type": item.get("artifact_type"),
+        "text": item.get("text"),
+        "page_no": item.get("page_no"),
+        "page_no_source": item.get("page_no_source"),
+        "heading_path": item.get("heading_path"),
+        "char_start": item.get("char_start"),
+        "char_end": item.get("char_end"),
         "material_key": item.get("material_key"),
         "material_name": item.get("material_name"),
         "filename": item.get("filename"),
         "similarity": item.get("similarity"),
     }
+
+def _retrieval_material_keys(
+    rule: dict[str, Any], *, subject_retrieval: bool, artifact_source_by_field: dict[str, str | None]
+) -> list[str]:
+    inputs = list(rule.get("inputs") or [])
+    if subject_retrieval:
+        seal_inputs = [
+            item for item in inputs
+            if artifact_source_by_field.get(item["field_key"]) == SUBJECT_ARTIFACT_SOURCE
+        ]
+        # 历史主体规则没有字段产物来源声明时，沿用其已冻结的输入材料范围。
+        inputs = seal_inputs or inputs
+    return list(dict.fromkeys([
+        *(rule.get("materials") or []),
+        *(item["material_key"] for item in inputs),
+    ]))
 
 def _build_index_if_needed(db: Session, task: AuditTask, manifest: dict[str, Any]) -> dict[str, Any]:
     """只有本任务启用了**需要检索取证**的规则时才建立证据索引。
@@ -87,35 +99,53 @@ def _build_index_if_needed(db: Session, task: AuditTask, manifest: dict[str, Any
     确实需要检索的规则在运行时若缺模型或索引，会得到明确错误，而不是空结果。
     """
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
-    # 需要主体索引的规则：主体/签章一致性检查（SEAL_SUBJECT_RETRIEVAL，由签章主体字段的
-    # 「产物来源=印章识别」声明触发）。这条规则**自身**声明依赖，不依赖另外启用条款规则，
-    # 也不需要额外启用某条文件质量检查才取得印章产物。
-    subject_rule_keys = [
-        rule["rule_key"]
-        for rule in manifest["rules"]
+    subject_rules = [
+        rule for rule in manifest["rules"]
         if rule["rule_key"] in enabled_keys and _is_subject_rule(rule)
     ]
-    material_keys: list[str] = []
-    for rule in manifest["rules"]:
-        if rule["rule_key"] not in subject_rule_keys:
-            continue
-        for material_key in rule.get("materials") or []:
-            if material_key not in material_keys:
-                material_keys.append(material_key)
-    if not subject_rule_keys:
+    text_rules = [
+        rule for rule in manifest["rules"]
+        if rule["rule_key"] in enabled_keys
+        and isinstance(rule.get("route"), dict)
+        and rule["route"].get("evidence") == EVIDENCE_RETRIEVAL
+    ]
+    selected_rules = [*subject_rules, *text_rules]
+    if not selected_rules:
         return {
             "enabled": False,
-            "reason": "本任务没有需要印章主体检索的规则，本次未建立主体索引",
+            "reason": "本任务没有需要检索取证的规则，本次未建立证据索引",
         }
-    # 印章产物真实完成后建立索引：成功构建完整批次后才把该版本标为可检索；
-    # 部分失败不会标成就绪。索引只服务本任务的主体检索，不参与场景导入或表头识别。
+    indexes = []
+    artifact_source_by_field = {
+        item["field_key"]: item.get("artifact_source") for item in manifest["fields"]
+    }
+    for artifact_type, rules in (("SEAL", subject_rules), ("OCR", text_rules)):
+        if not rules:
+            continue
+        material_keys = list(dict.fromkeys(
+            material_key
+            for rule in rules
+            for material_key in _retrieval_material_keys(
+                rule,
+                subject_retrieval=artifact_type == "SEAL",
+                artifact_source_by_field=artifact_source_by_field,
+            )
+        ))
+        indexes.append(build_task_index(db, task, material_keys=material_keys, artifact_types=(artifact_type,)))
     return {
         "enabled": True,
-        "triggered_by_rules": subject_rule_keys,
-        **build_task_index(db, task, material_keys=material_keys or None),
+        "triggered_by_rules": [rule["rule_key"] for rule in selected_rules],
+        "index_version": indexes[0]["index_version"],
+        "model_id": indexes[0]["model_id"],
+        "model_revision": indexes[0]["model_revision"],
+        "built": [item for index in indexes for item in index["built"]],
+        "reused": [item for index in indexes for item in index["reused"]],
+        "skipped": [item for index in indexes for item in index["skipped"]],
     }
 
-def _seal_records(db: Session, task: AuditTask, rule: dict[str, Any]) -> list[dict[str, Any]]:
+def _seal_records(
+    db: Session, task: AuditTask, rule: dict[str, Any], artifact_source_by_field: dict[str, str | None]
+) -> list[dict[str, Any]]:
     """规则材料范围内**全部**印章识别记录：不隐藏不相似或冲突的条目。
 
     N 条识别主体与 M 条合同主体在库里各自独立保留，本函数只做展示，
@@ -124,9 +154,9 @@ def _seal_records(db: Session, task: AuditTask, rule: dict[str, Any]) -> list[di
     每条记录带完整身份（产物号 + 条目序号）：人工判断要能指回具体是哪一枚印章，
     只给主体名称无法核对其原始出处。
     """
-    material_keys = set(rule.get("materials") or []) | {
-        item["material_key"] for item in rule.get("inputs") or []
-    }
+    material_keys = set(_retrieval_material_keys(
+        rule, subject_retrieval=True, artifact_source_by_field=artifact_source_by_field
+    ))
     records: list[dict[str, Any]] = []
     for document, upload in _current_uploads(db, task):
         if upload is None or document.material_key not in material_keys:
@@ -215,21 +245,27 @@ def _rule_retrieval(
     不能另取一份或用空输入兜底——那会让检索查的对象与这条规则无关。
     """
     route = rule.get("route") if isinstance(rule.get("route"), dict) else {}
-    if route.get("evidence") != EVIDENCE_SEAL_SUBJECT and not _is_subject_rule(rule):
+    subject_retrieval = route.get("evidence") == EVIDENCE_SEAL_SUBJECT or _is_subject_rule(rule)
+    text_retrieval = route.get("evidence") == EVIDENCE_RETRIEVAL
+    if not subject_retrieval and not text_retrieval:
         return None
-    material_keys = [key for key in rule.get("materials") or []]
-    if not material_keys:
-        # 材料范围来自规则的适用材料；为空时不能退化成跨材料检索。
-        material_keys = sorted({item["material_key"] for item in rule.get("inputs") or []})
+    material_keys = _retrieval_material_keys(
+        rule,
+        subject_retrieval=subject_retrieval,
+        artifact_source_by_field=artifact_source_by_field or {},
+    )
     if not material_keys:
         raise BusinessError(
             "RETRIEVAL_SCOPE_EMPTY",
-            f"规则“{rule['name']}”需要印章主体检索，但没有可用的材料范围，本次检索未执行",
+            f"规则“{rule['name']}”需要检索取证，但没有可用的材料范围，本次检索未执行",
             details={"rule": rule["name"]},
         )
-    # 查询文本 = 待核对主体的**当前有效值**（例如主合同甲方名称），
-    # 不用规则名称或整行备注代替实际主体：那会让检索与要核对的对象无关。
-    query_text = _subject_query(rule, inputs, artifact_source_by_field=artifact_source_by_field)
+    if subject_retrieval:
+        query_text = _subject_query(rule, inputs, artifact_source_by_field=artifact_source_by_field)
+    else:
+        query_text = str((rule.get("parameters") or {}).get("instruction") or "").strip()
+        if not query_text:
+            raise BusinessError("RETRIEVAL_QUERY_EMPTY", "语义规则缺少可用于正文检索的审核要求", details={"rule": rule["name"]})
     return retrieve_evidence(
         db,
         task,
@@ -237,6 +273,7 @@ def _rule_retrieval(
         material_keys=material_keys,
         rule_key=rule["rule_key"],
         node_code=rule.get("node"),
+        artifact_type="SEAL" if subject_retrieval else "OCR",
     )
 
 def _capability_result_payload(rule: dict[str, Any]) -> dict[str, Any]:
@@ -291,9 +328,50 @@ def _unimplemented_capability_result(
         "unimplemented_capability": _capability_result_payload(rule),
     }
 
-def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execution: NodeExecution, node_code: str) -> dict[str, Any]:
-    enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
-    rules = [rule for rule in manifest["rules"] if rule["node"] == node_code and rule["rule_key"] in enabled_keys]
+def _risk_source_result_keys(rule: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+    keys = list(dict.fromkeys(rule.get("source_rule_keys") or []))
+    if rule.get("source_rule_key") and rule["source_rule_key"] not in keys:
+        keys.insert(0, rule["source_rule_key"])
+    for code in rule.get("source_rule_codes") or []:
+        calculations = [
+            item for item in manifest.get("calculations") or []
+            if item.get("result_code") == code and item.get("status") != "DISABLED"
+        ]
+        fields = [item for item in manifest["fields"] if item.get("source_ref") == code]
+        if len(calculations) + len(fields) != 1:
+            raise BusinessError(
+                "AUDIT_RISK_SOURCE_INVALID",
+                "风险来源编号无法唯一定位计算结果或字段",
+                details={"rule": rule["name"], "source_code": code},
+            )
+        if calculations:
+            source_key = calculations[0]["rule_code"]
+        else:
+            raise BusinessError("AUDIT_RISK_FIELD_SOURCE_UNJUDGED", "字段抽取结果没有合格/不合格判定，不能作为风险来源", details={"rule": rule["name"], "source_code": code})
+        if source_key not in keys:
+            keys.append(source_key)
+    if not keys:
+        raise BusinessError("AUDIT_RISK_SOURCE_INVALID", "风险规则没有可执行的来源", details={"rule": rule["name"]})
+    return keys
+
+
+def _execute_rules(
+    db: Session,
+    task: AuditTask,
+    manifest: dict[str, Any],
+    execution: NodeExecution,
+    node_code: str,
+    rules: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """执行一组规则并写规则结果。
+
+    `rules` 为空表示「按节点取本任务启用的全部规则」——这是确定性路径的用法。
+    显式传入规则清单时按传入的清单执行：Agent 路径用它执行**本节点里没有授权工具、
+    因而仍由确定性实现负责**的那部分规则，两类规则因此不会重复写同一份结果。
+    """
+    if rules is None:
+        enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
+        rules = [rule for rule in manifest["rules"] if rule["node"] == node_code and rule["rule_key"] in enabled_keys]
     if not rules:
         # 模板允许不配置某类检查（例如单合同场景没有交叉校验、或未配置风险评级）。
         # 这里显式跳过并说明原因，绝不等价于该检查通过。
@@ -350,6 +428,7 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             continue
         inputs = _field_inputs(db, task, rule)
         parameters = dict(rule.get("parameters", {}))
+        risk_source_keys = _risk_source_result_keys(rule, manifest) if rule["operator"] == "RISK_TRIGGER" else []
         retrieval: dict[str, Any] | None = None
         # 材料类型待复核不是「依据不可用」：真实原文照常参与判定，但类型这件事尚未由人定案，
         # 结果里要带着这条事实说明，不能让人把结论读成“材料类型已经没问题”。
@@ -429,18 +508,23 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
                     "missing_inputs": [f"{item['field_key']}@{item['material_key']}" for item in inputs],
                 }
             else:
-                # 条款语义审核需要在长文中定位相关条款：先在本任务、本规则材料范围内检索证据，
-                # 再把真实检索结果与字段事实一起交给大模型判断。已有完整条款时检索只是补充，
-                # 检索不到不等于条款不存在——这一点由证据覆盖状态显式表达。
+                # 正文检索只在规则声明的材料范围内使用当前 OCR 产物；候选会连同
+                # 字段事实交给模型。空候选不等于原文不存在。
                 retrieval = _rule_retrieval(db, task, rule, inputs)
-                result = validate_fields_with_llm(rule, inputs, retrieval=retrieval)
+                if retrieval is None:
+                    raise BusinessError("RETRIEVAL_ROUTE_MISSING", "语义判断规则缺少正文检索路由", details={"rule": rule["name"]})
+                if retrieval.get("status") != "OK" or not retrieval.get("adopted"):
+                    result = {
+                        "status": "EVIDENCE_INSUFFICIENT",
+                        "message": retrieval.get("message") or "本次材料范围内没有可引用的 OCR 原文，无法执行语义判断",
+                        "blocked_reason": "OCR_EVIDENCE_MISSING",
+                    }
+                else:
+                    result = validate_fields_with_llm(rule, inputs, retrieval=retrieval)
         elif capability.execution == capabilities.EXEC_RISK:
             # 风险可能关联多条来源检查（任一 / 全部）：把**全部**来源的当前有效结果交给算子，
             # 只传第一条会让「全部关联检查不合格」被静默放宽成任一。
-            source_keys = list(rule.get("source_rule_keys") or [])
-            if not source_keys and rule.get("source_rule_key"):
-                source_keys = [rule["source_rule_key"]]
-            parameters["source_statuses"] = [prior_results[key].status if key in prior_results else None for key in source_keys]
+            parameters["source_statuses"] = [prior_results[key].status if key in prior_results else None for key in risk_source_keys]
             parameters["risk_condition"] = rule.get("risk_condition")
             result = execute_operator(rule["operator"], parameters, inputs)
         elif capability.execution == capabilities.EXEC_OPERATOR:
@@ -466,16 +550,13 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         risk_context: dict[str, Any] = {}
         if rule["operator"] == "RISK_TRIGGER":
             # 写入**全部**来源规则的实际结果：风险列表与报告要能说明每条来源当时判成了什么。
-            source_keys = list(rule.get("source_rule_keys") or [])
-            if not source_keys and rule.get("source_rule_key"):
-                source_keys = [rule["source_rule_key"]]
             risk_context["source_rules"] = [
                 {
                     "rule_key": prior_results[key].rule_key,
                     "rule_name": prior_results[key].rule_name,
                     "status": prior_results[key].status,
                 }
-                for key in source_keys
+                for key in risk_source_keys
                 if key in prior_results
             ]
             # 风险实际涉及的材料：沿当前有效来源检查实例取得，不直接套用规则声明的所有材料。
@@ -487,11 +568,11 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
                     "status": prior_results[key].status,
                     "material_key": material_key,
                 }
-                for key in source_keys
+                for key in risk_source_keys
                 if key in prior_results
                 for material_key in sorted(_result_material_keys(prior_results[key]))
             ]
-            source_context = prior_results.get(rule.get("source_rule_key")) if source_keys else None
+            source_context = prior_results.get(risk_source_keys[0]) if risk_source_keys else None
             if source_context is not None:
                 # 兼容旧读取路径：第一条来源规则同时以单值形式给出。
                 risk_context["source_rule_key"] = source_context.rule_key
@@ -532,11 +613,8 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         if rule["operator"] == "RISK_TRIGGER":
             # 把**全部**来源规则结果的证据都带到风险上：报告要保留完整证据链，
             # 只复制第一条来源的引文会让其余来源的判断无法追溯。
-            source_keys = list(rule.get("source_rule_keys") or [])
-            if not source_keys and rule.get("source_rule_key"):
-                source_keys = [rule["source_rule_key"]]
             source_result_ids = [
-                prior_results[key].id for key in source_keys if key in prior_results
+                prior_results[key].id for key in risk_source_keys if key in prior_results
             ]
             evidence_ids = [
                 item.id
@@ -579,7 +657,9 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             }
         ):
             requires_review = True
-        if requires_review and node_code == "RISK_RATING":
+        # 归属按**能力类型**判断：`node_code` 是用户配置的实例码，拿它与 RISK_RATING
+        # 比较在用户改了实例码之后恒为假，风险节点上会静默冒出本该被拦住的待复核项。
+        if requires_review and rule_node_type_of(rule) == "RISK_RATING":
             raise BusinessError(
                 "RISK_REVIEW_NODE_ORDER_INVALID",
                 "风险评定位于人工复核节点之后，不能创建新的待复核项",
@@ -605,7 +685,7 @@ def _execute_rules(db: Session, task: AuditTask, manifest: dict[str, Any], execu
                         **({"retrieval": _retrieval_summary(retrieval)} if retrieval else {}),
                         # 主体/签章一致性检查：把双方原文与完整印章记录一并快照，
                         # 人工不需要再去别处找，也不必重新检索。
-                        **({"seal_records": _seal_records(db, task, rule)} if _is_subject_rule(rule) else {}),
+                        **({"seal_records": _seal_records(db, task, rule, artifact_source_by_field)} if _is_subject_rule(rule) else {}),
                         **({"subject_query": _subject_query_of(inputs, manifest)} if _is_subject_rule(rule) else {}),
                     },
                     business_note=result["message"],

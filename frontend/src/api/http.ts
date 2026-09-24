@@ -37,6 +37,7 @@ async function parseJson(response: Response): Promise<unknown> {
   }
 }
 
+/** 统一请求入口：60 秒超时、失败统一转成 ApiError（带 request_id），204 返回 undefined。 */
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -97,6 +98,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   }
 }
 
+/** 拼出后端文件地址，供下载 / 预览使用。 */
 export function apiFileUrl(path: string): string {
   return `${apiBaseUrl}${path}`;
 }
@@ -199,10 +201,12 @@ export type OperationView = OperationAccepted & {
 
 const TERMINAL_OPERATION_STATUSES: OperationStatus[] = ["SUCCEEDED", "FAILED", "INTERRUPTED"];
 
+/** 操作是否已进入终态（SUCCEEDED / FAILED / INTERRUPTED）。 */
 export function isOperationFinished(status: OperationStatus | null | undefined): boolean {
   return status !== null && status !== undefined && TERMINAL_OPERATION_STATUSES.includes(status);
 }
 
+/** 操作是否仍在处理中（PENDING / RUNNING）。 */
 export function isOperationActive(status: OperationStatus | null | undefined): boolean {
   return status === "PENDING" || status === "RUNNING";
 }
@@ -218,6 +222,7 @@ export function operationToneClass(status: OperationStatus | null | undefined): 
   return "running";
 }
 
+/** 按操作编号查询后台操作的真实状态。 */
 export function getOperation(operationNo: string): Promise<OperationView> {
   return request<OperationView>(`/operations/${encodeURIComponent(operationNo)}`);
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
+import type { MenuInstance } from "element-plus";
 import {
   ChartNoAxesCombined,
   ClipboardList,
@@ -9,29 +10,21 @@ import {
   ListChecks,
   PanelLeftClose,
   PanelLeftOpen,
-  RefreshCw,
   Scale,
   Settings,
 } from "lucide-vue-next";
 
-import type { SystemStatus } from "@/api/contracts";
-import type { ApiError } from "@/api/http";
-import { getSystemStatus } from "@/api/system";
-import SystemStatusPopover from "@/components/SystemStatusPopover.vue";
-
 const route = useRoute();
 
-/** 六组菜单与十七个子页面；顺序与设计规范一致。 */
+/** 六组业务菜单。 */
 const menuGroups = [
   {
     name: "场景管理",
     icon: Layers,
     items: [
       { path: "/scenes", title: "场景列表" },
-      { path: "/scene-materials", title: "材料配置" },
-      { path: "/scene-fields", title: "字段配置" },
-      { path: "/scene-rules", title: "规则配置" },
       { path: "/scene-imports", title: "规则库导入" },
+      { path: "/scene-config", title: "场景配置" },
     ],
   },
   {
@@ -39,6 +32,7 @@ const menuGroups = [
     icon: ClipboardList,
     items: [
       { path: "/plans", title: "方案列表" },
+      { path: "/plans/edit", title: "方案编辑" },
     ],
   },
   {
@@ -79,20 +73,29 @@ const menuGroups = [
 /** 当前高亮的菜单路径：详情页高亮所属列表菜单。 */
 const activeMenu = computed(() => (typeof route.meta.menu === "string" ? route.meta.menu : route.path));
 
-/** 当前路由所在的菜单分组：默认展开该组。 */const openedGroups = ref<string[]>([]);
+/** 菜单分组独立展开；路由切换时只展开目标分组，不收起其他分组。 */
+const menuRef = ref<MenuInstance | null>(null);
+const openedGroups = ref<string[]>([]);
+
+function onGroupOpen(index: string): void {
+  if (!openedGroups.value.includes(index)) openedGroups.value = [...openedGroups.value, index];
+}
+
+function onGroupClose(index: string): void {
+  openedGroups.value = openedGroups.value.filter((name) => name !== index);
+}
 
 watch(
   () => route.fullPath,
   () => {
     const group = menuGroups.find((item) => item.items.some((entry) => entry.path === activeMenu.value));
-    openedGroups.value = group ? [group.name] : [];
+    if (group) {
+      onGroupOpen(group.name);
+      menuRef.value?.open(group.name);
+    }
   },
   { immediate: true },
 );
-
-const systemStatus = ref<SystemStatus | null>(null);
-const statusError = ref<string | null>(null);
-const statusLoading = ref(false);
 
 const collapsed = ref(false);
 const isNarrow = ref(false);
@@ -111,33 +114,11 @@ onMounted(() => {
   mediaQuery = window.matchMedia("(max-width: 992px)");
   applyViewport(mediaQuery.matches);
   mediaQuery.addEventListener("change", onViewportChange);
-  void refreshStatus();
 });
 
 onUnmounted(() => {
   mediaQuery?.removeEventListener("change", onViewportChange);
 });
-
-function setFailure(error: unknown): void {
-  if (error instanceof Error && "code" in error && "requestId" in error) {
-    statusError.value = (error as ApiError).message;
-    return;
-  }
-  statusError.value = "无法连接到服务，系统状态暂时不可用。";
-}
-
-/** 系统状态只在顶部状态入口展示；页面级错误由页面自己显示，不重复出现。 */
-async function refreshStatus(): Promise<void> {
-  statusLoading.value = true;
-  statusError.value = null;
-  try {
-    systemStatus.value = await getSystemStatus();
-  } catch (error) {
-    setFailure(error);
-  } finally {
-    statusLoading.value = false;
-  }
-}
 </script>
 
 <template>
@@ -151,13 +132,15 @@ async function refreshStatus(): Promise<void> {
       </div>
 
       <el-menu
+        ref="menuRef"
         class="app-menu"
         :default-active="activeMenu"
         :collapse="collapsed"
         :collapse-transition="false"
         :default-openeds="openedGroups"
         router
-        unique-opened
+        @open="onGroupOpen"
+        @close="onGroupClose"
         background-color="var(--app-menu-bg)"
         text-color="var(--app-menu-text)"
         active-text-color="var(--app-menu-text-active)"
@@ -186,20 +169,6 @@ async function refreshStatus(): Promise<void> {
           >
             <el-icon><PanelLeftClose v-if="!collapsed" /><PanelLeftOpen v-else /></el-icon>
           </el-button>
-        </div>
-
-        <div class="app-header__right">
-          <el-tooltip content="刷新系统状态" placement="bottom">
-            <el-button :loading="statusLoading" aria-label="刷新系统状态" @click="refreshStatus">
-              <el-icon><RefreshCw /></el-icon>
-            </el-button>
-          </el-tooltip>
-          <SystemStatusPopover
-            :status="systemStatus"
-            :error-message="statusError"
-            :loading="statusLoading"
-            @refresh="refreshStatus"
-          />
         </div>
       </el-header>
 

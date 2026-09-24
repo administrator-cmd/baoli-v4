@@ -5,11 +5,10 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { ScenarioListItem } from "@/api/contracts";
 import {
-  copyScene,
+  createScene,
   deleteScene,
   listScenes,
   restoreScene,
-  sceneExportUrl,
   setSceneEnabled,
   updateScene,
 } from "@/api/scenes";
@@ -18,9 +17,10 @@ import PageHeader from "@/components/PageHeader.vue";
 
 /**
  * 场景列表：管理场景身份（名称/业务类型/启停/逻辑删除）与配置入口。
- * 列表数字来自真实草稿配置；发布版本列来自已发布版本；导出使用当前筛选作用域。
- * 场景身份由规则库导入创建（见规则库导入页），本页不提供新增：逐项手工配置不是实际路径。
+ * 列表数字来自真实草稿配置；发布版本列来自已发布版本。
+ * 管理员在这里创建场景，再到规则库导入和场景配置完成设置。
  */
+const creating = ref(false);
 const router = useRouter();
 
 const list = usePagedList<ScenarioListItem, {
@@ -56,29 +56,24 @@ function search(): void {
   list.search();
 }
 
-function reset(): void {
-  dateRange.value = null;
-  list.reset();
-}
-
-function exportUrl(): string {
-  return sceneExportUrl({
-    name: filters.name || undefined,
-    category: filters.category || undefined,
-    enabled: filters.enabled === "" ? undefined : filters.enabled === "true",
-    published_from: filters.published_from || undefined,
-    published_to: filters.published_to || undefined,
-    deleted: filters.deleted,
-  });
-}
-
-/* ---- 编辑 ---- */
+/* 编辑 */
 const dialogVisible = ref(false);
 const editing = ref<ScenarioListItem | null>(null);
 const saving = ref(false);
 const form = reactive({ scenario_name: "", category: "", description: "", enabled: true });
 
+function openCreate(): void {
+  creating.value = true;
+  editing.value = null;
+  form.scenario_name = "";
+  form.category = "";
+  form.description = "";
+  form.enabled = true;
+  dialogVisible.value = true;
+}
+
 function openEdit(row: ScenarioListItem): void {
+  creating.value = false;
   editing.value = row;
   form.scenario_name = row.scenario_name;
   form.category = row.category ?? "";
@@ -92,11 +87,23 @@ async function submitForm(): Promise<void> {
     ElMessage.warning("请填写场景名称");
     return;
   }
-  if (!editing.value) {
-    return;
-  }
   saving.value = true;
   try {
+    if (creating.value) {
+      const created = await createScene({
+        scenario_name: form.scenario_name.trim(),
+        category: form.category.trim() || null,
+        description: form.description.trim() || null,
+        enabled: form.enabled,
+      });
+      ElMessage.success("场景已创建");
+      dialogVisible.value = false;
+      await router.push({ name: "scene-imports", query: { scenario: created.scenario_code, create: "1" } });
+      return;
+    }
+    if (!editing.value) {
+      return;
+    }
     await updateScene(editing.value.scenario_code, {
       scenario_name: form.scenario_name.trim(),
       category: form.category.trim() || null,
@@ -120,28 +127,6 @@ async function toggleEnabled(row: ScenarioListItem): Promise<void> {
     await list.load();
   } catch (failure) {
     ElMessage.error(failure instanceof Error ? failure.message : "操作失败");
-  }
-}
-
-async function copyRow(row: ScenarioListItem): Promise<void> {
-  let name = `${row.scenario_name} 副本`;
-  try {
-    const result = await ElMessageBox.prompt("复制场景会连同当前草稿配置一起复制（已发布版本不复制）。", "复制场景", {
-      inputValue: name,
-      confirmButtonText: "复制",
-      cancelButtonText: "取消",
-      inputValidator: (value) => (value && value.trim() ? true : "请输入新场景名称"),
-    });
-    name = result.value.trim();
-  } catch {
-    return;
-  }
-  try {
-    await copyScene(row.scenario_code, name);
-    ElMessage.success("场景已复制");
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "复制失败");
   }
 }
 
@@ -178,11 +163,25 @@ function goDetail(row: ScenarioListItem): void {
   void router.push({ name: "scene-detail", params: { scenarioCode: row.scenario_code } });
 }
 
-function goConfig(row: ScenarioListItem, scope = "draft"): void {
-  void router.push({ name: "scene-materials", query: { scenario: row.scenario_code, scope } });
+/**
+ * 「配置」直接进场景详情的材料 tab。
+ *
+ * 材料/字段/规则/节点都是场景详情的 tab，不是独立页面；场景身份只在路径里。
+ * tab 是否存在由场景详情校验（无法识别的值退回基本信息），这里只负责给出入口。
+ */
+function goConfig(row: ScenarioListItem): void {
+  void router.push({
+    name: "scene-detail",
+    params: { scenarioCode: row.scenario_code },
+    query: { tab: "materials" },
+  });
 }
 
 function goCreatePlan(row: ScenarioListItem): void {
+  if (!row.enabled || row.published_version_no == null) {
+    ElMessage.warning("只有已发布且启用的场景才能创建方案");
+    return;
+  }
   void router.push({ name: "plan-new", query: { scenario: row.scenario_code } });
 }
 
@@ -200,7 +199,7 @@ onMounted(() => {
     <PageHeader
       eyebrow="场景管理"
       title="场景列表"
-      subtitle="管理审核场景身份与配置入口；配置规模来自真实草稿，发布版本来自已发布记录。场景由规则库导入创建。"
+      subtitle="管理场景基本资料与启用状态。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="search">
@@ -228,15 +227,12 @@ onMounted(() => {
       </el-form-item>
       <el-form-item>
         <el-button type="primary" @click="search">查询</el-button>
-        <el-button @click="reset">重置</el-button>
-        <el-button v-if="!filters.deleted" tag="a" :href="exportUrl()">导出</el-button>
-        <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
 
     <div class="app-toolbar">
       <div class="app-toolbar__left">
-        <span class="text-hint">场景由「规则库导入」按要求的目标模板新建，不在本页手工创建。</span>
+        <el-button type="primary" @click="openCreate">新建场景</el-button>
       </div>
       <div class="app-toolbar__right">
         <el-checkbox v-model="filters.deleted" @change="search">已删除</el-checkbox>
@@ -271,16 +267,18 @@ onMounted(() => {
       </el-table-column>
       <el-table-column label="配置状态" width="150">
         <template #default="{ row }">
-          <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>
-            尚未生效
-          </el-tag>
-          <el-tag v-else type="success" size="small" effect="light" disable-transitions>已生效</el-tag>
+          <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>修改未生效</el-tag>
+          <el-tag v-else-if="row.published_version_no" type="success" size="small" effect="light" disable-transitions>已生效</el-tag>
+          <el-tag v-else type="info" size="small" effect="light" disable-transitions>待配置</el-tag>
           <div v-if="row.sync_error" class="text-hint">{{ row.sync_error.message }}</div>
         </template>
       </el-table-column>
       <el-table-column prop="material_count" label="材料数" width="90" />
       <el-table-column prop="field_count" label="字段数" width="90" />
       <el-table-column prop="rule_count" label="业务规则数" width="110" />
+      <el-table-column label="已发布版本" width="120">
+        <template #default="{ row }">{{ row.published_version_no ?? "未发布" }}</template>
+      </el-table-column>
       <el-table-column label="场景状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
@@ -302,8 +300,7 @@ onMounted(() => {
               <el-button link type="primary" size="small">更多</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item @click="copyRow(row)">复制场景</el-dropdown-item>
-                  <el-dropdown-item @click="goCreatePlan(row)">创建方案</el-dropdown-item>
+                  <el-dropdown-item :disabled="!row.enabled || row.published_version_no == null" @click="goCreatePlan(row)">创建方案</el-dropdown-item>
                   <el-dropdown-item @click="goImport(row)">导入规则</el-dropdown-item>
                   <el-dropdown-item divided @click="deleteRow(row)">删除</el-dropdown-item>
                 </el-dropdown-menu>
@@ -331,7 +328,7 @@ onMounted(() => {
       />
     </div>
 
-    <el-dialog v-model="dialogVisible" title="编辑场景" width="600px" :close-on-click-modal="false">
+    <el-dialog v-model="dialogVisible" :title="creating ? '新建场景' : '编辑场景'" width="600px" :close-on-click-modal="false">
       <el-form label-width="100px">
         <el-form-item label="场景名称" required>
           <el-input v-model="form.scenario_name" maxlength="255" placeholder="例如：采购合同与发票核验" />
@@ -345,7 +342,7 @@ onMounted(() => {
         <el-form-item label="启用状态">
           <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" />
         </el-form-item>
-        <el-form-item label="场景编码">
+        <el-form-item v-if="!creating" label="场景编码">
           <span class="text-hint mono">{{ editing?.scenario_code }}</span>
         </el-form-item>
       </el-form>

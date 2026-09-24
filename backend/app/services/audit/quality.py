@@ -2,7 +2,7 @@
 
 文件处理按材料位逐份执行：8018 材料识别（**只记录不判定**）、8010 处理、OCR、印章识别
 （按需启用）。印章是否启用由两条依据决定，缺一不可：文件名质量规则声明
-`artifact_type = SEAL`，或字段在 03_字段抽取 中声明了「产物来源=印章识别」。
+`artifact_type = SEAL`，或字段在 03_字段 中声明了「产物来源=印章识别」。
 
 文件质量检查逐份材料判定并保留每份的结果：不合格优先、其次不可判定、全部适用结果合格
 才通过。不可判定的检查项目（图像清晰度、页码连续、有效签章、骑缝章）缺少已确认的判定
@@ -10,11 +10,11 @@
 
 材料类型待复核**不阻断**这些检查：判定依据是真实上传记录，类型本身作为待确认事项另行说明。"""
 
-from ...domain import file_quality
+from ...domain import file_quality, quality_judgement
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, declared_artifact_source, is_type_unavailable, read_material_type_status
-from ...domain.file_quality import CHECK_FILE_DUPLICATE, CHECK_FILE_FORMAT, CHECK_FILE_SIZE, check_file_duplicate, check_file_format, check_file_size
+from ...domain.file_quality import CHECK_FILE_DUPLICATE, CHECK_FILE_FORMAT, CHECK_FILE_SIZE
 from ...domain.identity import public_no
-from ...domain.manifest import OPERATOR_LABELS
+from ...domain.manifest import OPERATOR_LABELS, rule_node_type_of
 from ...errors import BusinessError
 from .document_ports import document_service
 from ...models import AuditTask, DocumentUpload, ManualReview, NodeExecution, RuleResult, StoredArtifact
@@ -51,7 +51,7 @@ def _seal_requirements(manifest: dict[str, Any], enabled_keys: set[str]) -> dict
     印章按需启用，来源有两条，缺一不可：
 
       1. 文件名质量规则声明 `artifact_type = SEAL`（检查项目是甲方签章 / 乙方签章 / 骑缝章）；
-      2. **主体核对规则自身**：规则引用的字段在 03_字段抽取 中声明了「产物来源=印章识别」。
+      2. **主体核对规则自身**：规则引用的字段在 03_字段 中声明了「产物来源=印章识别」。
          这类规则不需要额外启用某条文件质量检查才取得印章产物，也不需要再启用一条条款规则。
 
     未启用时报告与页面显示为“未配置”，不能因为服务不可用就静默删掉步骤。
@@ -59,7 +59,7 @@ def _seal_requirements(manifest: dict[str, Any], enabled_keys: set[str]) -> dict
     quality_rules = [
         rule
         for rule in manifest["rules"]
-        if rule["node"] == "DOCUMENT_PREPARE"
+        if rule_node_type_of(rule) == "DOCUMENT_PREPARE"
         and rule["operator"] == "FILE_QUALITY_CHECK"
         and rule["rule_key"] in enabled_keys
         and rule.get("parameters", {}).get("artifact_type") == "SEAL"
@@ -194,7 +194,6 @@ def _sync_type_review_pending(db: Session, task: AuditTask) -> dict[str, Any]:
     return {"created": created, "created_count": len(created)}
 
 def _document_prepare(db: Session, task: AuditTask, manifest: dict[str, Any], execution: NodeExecution) -> dict[str, Any]:
-    materials = {item["material_key"]: item for item in manifest["materials"]}
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
     seal_requirements = _seal_required_material_keys(manifest, task, enabled_keys)
     seal_rule_names = seal_requirements["rule_names"]
@@ -207,10 +206,11 @@ def _document_prepare(db: Session, task: AuditTask, manifest: dict[str, Any], ex
     for document, upload in _current_uploads(db, task):
         if not upload:
             continue
-        material = materials[document.material_key]
         source_path = resolve_storage_path(upload.relative_path)
 
         # 8018/8010/印章与 OCR 一样先占位再调用：占位提交后才联系供应商，中断不会被自动重放。
+        # doc_type 取**本次上传时用户声明的类型**（上传入口已按 8018 目录核对过），
+        # 不来自场景配置：材料位不声明类型，同一材料位换文件时可以换类型。
         _ensure_external_artifact(
             db,
             task,
@@ -220,7 +220,7 @@ def _document_prepare(db: Session, task: AuditTask, manifest: dict[str, Any], ex
                 file_path=source_path,
                 filename=upload.original_filename,
                 content_type=upload.content_type,
-                material_type=material["material_type"],
+                material_type=upload.declared_material_type,
             ),
         )
         # 8018 的识别结论只记录不判定：不改材料状态、不挂人工复核，后续节点照常执行。
@@ -485,7 +485,7 @@ def _execute_file_quality_rules(
     rules = [
         rule
         for rule in manifest["rules"]
-        if rule["node"] == "DOCUMENT_PREPARE" and rule["operator"] == "FILE_QUALITY_CHECK" and rule["rule_key"] in enabled_keys
+        if rule_node_type_of(rule) == "DOCUMENT_PREPARE" and rule["operator"] == "FILE_QUALITY_CHECK" and rule["rule_key"] in enabled_keys
     ]
     for rule in rules:
         # 每条规则先取自己的参数：下面有多个「不适用 / 缺输入 / 材料类型待复核」的提前分支，
@@ -562,38 +562,17 @@ def _execute_file_quality_rules(
                     )
                     continue
                 verdict = self_check = None
-                if check_item == CHECK_FILE_FORMAT:
-                    verdict = check_file_format(upload, standard_value=standard_value)
-                elif check_item == CHECK_FILE_SIZE:
-                    verdict = check_file_size(upload, standard_value=standard_value, unit=unit)
-                elif check_item == CHECK_FILE_DUPLICATE:
-                    verdict = check_file_duplicate(
-                        upload_id=upload.id,
-                        sha256=upload.sha256,
-                        other_uploads=peers,
-                    )
-                elif check_item in file_quality.KNOWN_QUALITY_ITEMS:
-                    # 图像清晰度、页码连续、有效签章、骑缝章完整：缺少已确认的判定依据，
-                    # 明确记为不可判定并给出能力缺口，绝不把处理成功当质量通过。
-                    gap = gap_by_rule_key.get(rule["rule_key"]) or {}
-                    self_check = {
-                        "status": "EVIDENCE_INSUFFICIENT",
-                        "message": (
-                            f"检查项目“{file_quality.label_of(check_item)}”缺少已确认的判定依据，"
-                            "本项不可判定，不默认通过"
-                        ),
-                        "capability_gap": gap.get("gap", file_quality.GAP_CRITERION_UNCONFIRMED),
-                        "capability_message": gap.get("message"),
-                    }
-                else:
-                    # 未知的检查项目不是「证据不足」：系统根本不认识这个算子，
-                    # 把它混进不可判定会让配置错误伪装成已知但未确认的能力。
-                    raise BusinessError(
-                        "OPERATOR_QUALITY_ITEM_UNKNOWN",
-                        "文件检查规则的「检查项目」不是系统已知的检查项目，无法执行也无法形成能力缺口",
-                        details={"rule": rule["name"], "check_item": check_item},
-                    )
-                recorded = verdict or self_check
+                # 判定走共享领域服务：Agent 工具调的是同一个函数，
+                # 节点与工具不可能对同一份文件得出不同结论。
+                verdict = quality_judgement.judge_quality_item(
+                    check_item,
+                    upload=upload,
+                    standard_value=standard_value,
+                    unit=unit,
+                    peers=peers,
+                    gap=gap_by_rule_key.get(rule["rule_key"]) or {},
+                )
+                recorded = verdict
                 per_material.append(
                     {
                         "material_key": material_key,
@@ -613,29 +592,9 @@ def _execute_file_quality_rules(
                 if artifact:
                     quality_artifacts.append(artifact)
             # 汇总口径与填写规范一致：不合格优先，其次不可判定，全部适用结果合格才通过。
+            # 走共享领域服务，节点与工具共用同一份汇总口径。
             statuses = [item["status"] for item in per_material]
-            applicable = [item for item in per_material if item["status"] != "NOT_APPLICABLE"]
-            if not applicable:
-                result = {"status": "NOT_APPLICABLE", "message": "适用材料均未上传，本检查不适用"}
-            elif any(item["status"] == "ABNORMAL" for item in applicable):
-                failures = [item for item in applicable if item["status"] == "ABNORMAL"]
-                first = failures[0]
-                result = {
-                    "status": "ABNORMAL",
-                    "message": first["message"],
-                    "capability_gap": first.get("capability_gap"),
-                    "capability_message": first.get("capability_message"),
-                }
-            elif any(item["status"] == "EVIDENCE_INSUFFICIENT" for item in applicable):
-                first = next(item for item in applicable if item["status"] == "EVIDENCE_INSUFFICIENT")
-                result = {
-                    "status": "EVIDENCE_INSUFFICIENT",
-                    "message": first["message"],
-                    "capability_gap": first.get("capability_gap"),
-                    "capability_message": first.get("capability_message"),
-                }
-            else:
-                result = {"status": "PASSED", "message": "文件检查通过"}
+            result = quality_judgement.summarize_per_material(per_material)
             result["per_material"] = per_material
             result["status_counts"] = {value: statuses.count(value) for value in sorted(set(statuses))}
         per_material_rows = result.get("per_material", [])

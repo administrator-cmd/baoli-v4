@@ -9,9 +9,31 @@ from typing import Any
 from pydantic import ValidationError
 
 from .proposals import ProposalBundle
-from . import capabilities, file_quality
+from . import calculation as calc
+from . import capabilities, file_quality, node_registry, workflow_dag
+from .audit_vocab import SCOPE_NOT_APPLICABLE
+from .node_registry import LEGACY_NODE_SEQUENCE  # noqa: F401 - 旧 manifest 的节点序列仍按它读取
 from ..errors import BusinessError
 from .identity import stable_key
+from . import tool_catalog
+# 参数契约常量定义在**叶子模块** `parameter_contract`：工具目录要据此生成参数
+# JSON Schema，而工具目录不能反向导入本模块（会形成
+# manifest → capabilities → tool_catalog → manifest 的环）。
+# 这里导入后转发，既有 `from .manifest import DATE_COMPARE_OPERATORS` 一类引用不受影响。
+from .parameter_contract import (
+    CONFIG_STATUS_DISABLED,
+    CONFIG_STATUS_PENDING,
+    DATE_COMPARE_OPERATORS,
+    DATE_THRESHOLD_UNIT,
+    DECIMAL_COMPARE_OPERATORS,
+    DECIMAL_SUM_COMPARE_OPERATORS,
+    DOCUMENT_ARTIFACT_TYPES,
+    LEGACY_RISK_LEVELS,
+    LEGACY_RISK_LEVEL_ORDER,
+    NODE_RISK_LEVELS,
+    NODE_RISK_LEVEL_ORDER,
+    RISK_LEVELS,
+)
 
 
 NODE_DEFINITIONS = [
@@ -25,32 +47,22 @@ NODE_DEFINITIONS = [
     ("REPORT_OUTPUT", "报告输出"),
 ]
 
+# 节点类型常量：从节点注册表派生，不在本模块另写一份名单。
+NODE_TYPE_CALCULATION = node_registry.NODE_TYPE_CALCULATION
+NODE_TYPE_MATERIAL_CHECK = node_registry.NODE_TYPE_MATERIAL_CHECK
+NODE_TYPE_FIELD_EXTRACTION = node_registry.NODE_TYPE_FIELD_EXTRACTION
+NODE_TYPE_INTERNAL_VALIDATE = node_registry.NODE_TYPE_INTERNAL_VALIDATE
+NODE_TYPE_CROSS_VALIDATE = node_registry.NODE_TYPE_CROSS_VALIDATE
+NODE_TYPE_MANUAL_REVIEW = node_registry.NODE_TYPE_MANUAL_REVIEW
+NODE_TYPE_RISK_RATING = node_registry.NODE_TYPE_RISK_RATING
+NODE_TYPE_REPORT_OUTPUT = node_registry.NODE_TYPE_REPORT_OUTPUT
+
 # 算子能挂在哪个节点：从能力目录（domain.capabilities）派生，不在这里另维护一份名单。
 # 两份名单漂移过一次（后端 12 个算子、页面下拉 7 个），因此这里只做引用。
 # 返回类型是 frozenset：调用方只做成员判断，不原地修改。
 OPERATOR_NODE_CONSTRAINTS: dict[str, frozenset[str]] = capabilities.NODE_CONSTRAINTS
 
-DOCUMENT_ARTIFACT_TYPES = {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL"}
-DATE_COMPARE_OPERATORS = {"EQ", "GTE", "LTE", "GT", "LT"}
-# 日期差值只以天为单位：填写规范规定「日期差值以天为单位」，不接受月、年这类不等长单位。
-DATE_THRESHOLD_UNIT = "天"
-# 业务配置状态：停用行不参与执行。它是业务口径，不是系统能力声明或运行结果。
-CONFIG_STATUS_DISABLED = "DISABLED"
-# 待确认：非停用但业务口径尚未确认。它能保存为草稿，但不能进入已发布配置。
-CONFIG_STATUS_PENDING = "PENDING"
-DECIMAL_COMPARE_OPERATORS = {"EQ", "GTE", "LTE", "ABS_DIFF_LTE"}
-# 加总比较只支持数值的等于/不大于/不小于：加法不能用于日期、文本或条款。
-DECIMAL_SUM_COMPARE_OPERATORS = {"EQ", "GTE", "LTE"}
-# 风险等级。旧格式（v1/v2）沿用 PM 原「高/中/低/待确认」，节点版（v3）用
-# 「最高/一级/二级/三级」。两套标签都是已确认的业务取值，必须同时保留：
-# 只接受旧集合会直接拒绝节点版风险行，「一级」这类真实等级根本发布不了。
-LEGACY_RISK_LEVELS = ("高", "中", "低", "待确认")
-NODE_RISK_LEVELS = ("最高", "一级", "二级", "三级")
-RISK_LEVELS = set(LEGACY_RISK_LEVELS) | set(NODE_RISK_LEVELS)
-# 等级排序口径（由高到低）。仅用于同等级内排序展示，不做等级之间的业务映射：
-# PM 原「高/低」与四级标签的对应关系仍未确认，系统不代填。
-LEGACY_RISK_LEVEL_ORDER = {"高": 0, "中": 1, "低": 2, "待确认": 3}
-NODE_RISK_LEVEL_ORDER = {"最高": 0, "一级": 1, "二级": 2, "三级": 3}
+# 参数契约常量见文件顶部从 `parameter_contract` 的导入（叶子模块，避免成环）。
 
 
 def risk_level_rank(value: Any) -> int | None:
@@ -103,10 +115,6 @@ DATE_COMPARISON_LABELS = {"EQ": "同一天", "GTE": "不早于", "LTE": "不晚�
 DECIMAL_COMPARISON_LABELS = {"EQ": "等于", "GTE": "不小于", "LTE": "不大于", "ABS_DIFF_LTE": "绝对差不超过"}
 DECIMAL_SUM_COMPARISON_LABELS = {"EQ": "等于", "GTE": "不小于", "LTE": "不大于"}
 APPLICABILITY_LABELS = {"ALWAYS": "始终适用", "MATERIALS_UPLOADED": "所引用材料均已上传"}
-# 参数字典里不再使用的键：它们是旧格式的执行细节，节点版由检查类型与列事实确定。
-# 编译时必须显式拒绝，不能静默丢弃（静默丢弃等于把业务没确认的差异藏起来）。
-FORMULA_PARAMETER_KEYS = ("formula_type", "formula", "expression", "script")
-
 # 当前不具备执行能力的规则语义。模型对同一条业务要求的改写方式不固定，
 # 因此这些识别必须对所有算子生效，不能只在比较算子或某一种措辞上生效：
 # 把「所有发票合计」写成 LLM_VALIDATE 同样是不支持的汇总取数，不能在运行时才发现。
@@ -175,6 +183,7 @@ def detect_unsupported_capability(*texts: Any) -> tuple[str, str, str] | None:
 
 
 def comparison_label(operator: str, comparison: Any) -> str | None:
+    """把比较方式译成业务中文，供页面与报告说明「实际是怎么比的」；非比较取值原样返回。"""
     if not isinstance(comparison, str):
         return None
     if operator == "DATE_COMPARE":
@@ -349,24 +358,6 @@ def _compiled_applicability(
             details={"rule": rule["name"]},
         )
     return {"kind": applicability["kind"], "material_keys": material_keys}
-
-
-def _assert_no_legacy_formula_parameters(rule_name: str, operator: str, parameters: dict[str, Any]) -> None:
-    """显式拒绝旧格式的公式参数，不静默丢弃。
-
-    静默丢弃等于把「业务写了一段公式、系统实际没执行它」这件事藏起来；
-    这里必须报错，让用户看到具体是哪条规则的哪个参数不被支持。
-    """
-    if not isinstance(parameters, dict):
-        return
-    present = [key for key in FORMULA_PARAMETER_KEYS if key in parameters]
-    if present:
-        _parameter_error(
-            rule_name,
-            operator,
-            "包含当前不支持的公式类参数，系统不执行任何 Excel 公式或脚本",
-            details={"parameter": present[0]},
-        )
 
 
 def _risk_condition_of(rule: dict[str, Any]) -> str:
@@ -587,6 +578,10 @@ def rule_comparison_view(
     direction = comparison_label(rule.get("operator", ""), parameters.get("operator"))
     threshold = parameters.get("threshold")
     unit_mismatch = _comparison_unit_mismatch(rule.get("operator"), inputs)
+    source_rule_refs = list(dict.fromkeys([
+        *(rule.get("source_rule_refs") or []),
+        *([rule["source_rule_ref"]] if rule.get("source_rule_ref") else []),
+    ]))
     unsupported = detect_unsupported_capability(requirement, parameters.get("instruction"))
     if unsupported:
         support_status = "UNSUPPORTED"
@@ -614,11 +609,14 @@ def rule_comparison_view(
         "applicability": {"kind": applicability["kind"], "material_keys": applicability["material_keys"]},
         "applicability_label": applicability["label"],
         "source_rule_name": rule_names.get(rule.get("source_rule_ref")) if rule.get("source_rule_ref") else None,
+        "source_rule_refs": source_rule_refs,
+        "source_rule_names": [rule_names.get(ref) or ref for ref in source_rule_refs],
         # 风险疑点的来源节点：页面据此说明这条风险监视的是哪一类审核规则。
         # 非风险规则没有来源节点，两个键显式为 None。
         "source_node": rule.get("source_node"),
         "source_node_label": SOURCE_NODE_LABELS.get(rule.get("source_node")),
         "scope_material_names": [material_names.get(ref) for ref in rule.get("material_refs", [])],
+        "scope_material_refs": list(rule.get("material_refs", [])),
         "output_field_names": [field_labels.get(ref) for ref in rule.get("output_field_refs", [])],
         # 方向、阈值、单位与支持状态必须显式可见，不能只靠 operator/parameters 原始编码。
         "direction_label": direction,
@@ -659,10 +657,37 @@ def _comparison_unit_mismatch(operator: str, inputs: list[dict[str, Any]]) -> st
     return None
 
 
-def unconfigured_check_nodes(rules: list[dict[str, Any]]) -> list[str]:
-    """返回本模板未配置任何启用规则的业务校验节点。"""
-    covered = {item["node"] for item in rules if item.get("enabled", True)}
-    return [code for code in OPTIONAL_CHECK_NODES if code not in covered]
+def unconfigured_check_node_types(rules: list[dict[str, Any]]) -> list[str]:
+    """本模板未配置任何启用规则的业务校验**能力类型**。
+
+    返回的是能力类型（`INTERNAL_VALIDATE` 一类），不是节点实例码：它是「这类检查
+    在本次配置里有没有」的汇总口径。实例级口径见 `unconfigured_check_node_codes`，
+    两者不能交叉使用——拿实例码去比能力类型列表，在用户改了实例码之后永远为假。
+    """
+    covered = {
+        rule_node_type_of(item)
+        for item in rules
+        if item.get("enabled", True) and (item.get("node_type") or item.get("node"))
+    }
+    return [node_type for node_type in OPTIONAL_CHECK_NODES if node_type not in covered]
+
+
+def unconfigured_check_node_codes(
+    rules: list[dict[str, Any]],
+    node_instances: list[dict[str, Any]],
+) -> list[str]:
+    """本模板未配置这类检查的**真实节点实例码**。
+
+    页面要把「当前节点是未配置的检查类别」显示出来，比较的必须是实例码：
+    节点实例码由用户配置，同一能力类型可以有多个实例。
+    """
+    unconfigured = set(unconfigured_check_node_types(rules))
+    return [
+        str(item["node_code"])
+        for item in node_instances
+        if str(item.get("node_type") or item["node_code"]) in unconfigured
+        and bool(item.get("enabled", True))
+    ]
 
 
 def capability_gaps(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1138,11 +1163,10 @@ def resolve_label(column: dict[str, Any], text: str) -> str | None:
 
 
 def _ensure_unique_materials(materials: list[dict[str, Any]]) -> None:
-    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    seen: dict[str, dict[str, Any]] = {}
     for material in materials:
-        # 识别类型可能尚未声明（None）。它不参与「是不是同一个材料位」的判断：
-        # 重复与否由材料名称决定，未确认类型的两个同名材料位仍是重复。
-        signature = (_normalize_text(material["name"]), _normalize_text(material.get("material_type") or ""))
+        # 「是不是同一个材料位」只由材料名称决定：材料位没有其它可供判定的业务身份。
+        signature = _normalize_text(material["name"])
         existing = seen.get(signature)
         if existing is not None:
             raise BusinessError(
@@ -1150,11 +1174,34 @@ def _ensure_unique_materials(materials: list[dict[str, Any]]) -> None:
                 "场景中存在重复材料位",
                 details={
                     "name": material["name"],
-                    "material_type": material.get("material_type"),
                     "candidate_refs": [existing["candidate_ref"], material["candidate_ref"]],
                 },
             )
         seen[signature] = material
+
+
+def _node_position_of(
+    node_positions: dict[str, int],
+    node_code: Any,
+    *,
+    rule_name: str,
+    role: str = "规则",
+) -> int:
+    """节点在用户配置的节点计划里的顺序位次；节点不在计划里时明确报业务错误。
+
+    节点计划只含用户真实配置的节点实例，而规则可能仍指向已被删除或改名的实例。
+    直接下标取值会抛裸 KeyError，接口返回 500 而真实原因（规则挂在不存在的节点上）
+    完全不可见；这里把它变成可读的业务错误。
+    """
+    code = str(node_code or "")
+    if code not in node_positions:
+        raise BusinessError(
+            "MANIFEST_RULE_NODE_MISSING",
+            f"{role}“{rule_name}”指向的节点“{code}”不在本场景配置的节点清单里："
+            "请先在场景配置里建立该节点，或把规则改挂到已配置的节点上",
+            details={"rule": rule_name, "node_code": code, "configured_nodes": sorted(node_positions)},
+        )
+    return node_positions[code]
 
 
 def _rule_semantic_signature(rule: dict[str, Any]) -> str:
@@ -1189,12 +1236,129 @@ def _rule_semantic_signature(rule: dict[str, Any]) -> str:
         "inputs": inputs,
         "output_field_refs": sorted(rule.get("outputs", rule.get("output_field_refs", []))),
         "source_rule_ref": rule.get("source_rule_key", rule.get("source_rule_ref")),
+        # 财报场景的风险来源是业务编号列表。不把它算进签名，两条来源不同的风险
+        # 会被判成同一条重复规则——而它们监视的是完全不同的上游结果。
+        "source_rule_codes": sorted(rule.get("source_rule_codes") or []),
         "material_refs": sorted(rule.get("materials", rule.get("material_refs", []))),
         "parameters": rule.get("parameters", {}),
         # 适用条件不同的两条规则不是重复规则（例如一条始终适用、一条仅材料齐备时适用）。
         "applicability": rule.get("applicability"),
     }
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+# 系统派生规则的算子：字段抽取与报告生成由编译期无条件补齐，业务不能手工创建。
+SYSTEM_OPERATORS: frozenset[str] = frozenset({"LLM_EXTRACT", "REPORT_RENDER"})
+# 系统派生规则的编号前缀。字段抽取、报告生成与材料检查的派生规则都带它，
+# 但业务来源编号可能同形，分类时还须先看 `source_ref`；派生的材料检查规则算子
+# 是 `MATERIAL_EXISTS`，业务也可能手工建一条同算子的规则。
+SYSTEM_RULE_CODE_PREFIX = "SYS-"
+
+
+def is_system_rule(rule: dict[str, Any]) -> bool:
+    """这条规则是不是**系统派生**的（字段抽取 / 报告生成 / 材料检查）。
+
+    显式来源编号 `source_ref` 是业务规则身份，即使它与系统编号前缀同形也不能丢弃。
+    没有业务来源编号时，系统派生规则才由编号前缀识别。
+    没有编号的历史字段抽取规则与报告生成规则仍按算子识别；
+    前缀也覆盖派生材料检查（算子可与业务规则重合）。派生规则不进入场景草稿与业务规则计数；
+    方案可以保存它们的启停选择，编译时仍按同一确定性规则重新派生——
+    把它们当业务规则带进草稿会在发布时再次派生，造成重复规则。
+    """
+    source_ref = str(rule.get("source_ref") or "").strip()
+    if source_ref:
+        return False
+    rule_code = str(rule.get("rule_code") or "")
+    if rule_code.startswith(SYSTEM_RULE_CODE_PREFIX):
+        return True
+    if rule_code and rule.get("operator") == "LLM_EXTRACT":
+        return False
+    return str(rule.get("operator") or "") in SYSTEM_OPERATORS
+
+
+def _material_check_rules(
+    compiled_materials: list[dict[str, Any]],
+    compiled_rules: list[dict[str, Any]],
+    node_instances: list[dict[str, Any]],
+    namespace: str,
+    system_rule_enabled: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """从「是否必传」派生材料检查规则：**每个必传材料一条**。
+
+    与「每个字段一条抽取规则」「报告生成无条件补齐」同一口径：`01_材料位` 的
+    「是否必传」是业务声明，材料检查节点据此逐份判定该材料是否已上传。
+
+    不派生的话，材料检查节点会因为没有任何规则而返回
+    `skipped=True` / 「本模板未配置材料检查规则」——而它其实已经按必传清单检查过了，
+    页面上却显示成「这类检查没配」，与「已跳过 ≠ 通过」的口径直接冲突。
+
+    场景没有配置材料检查节点时不派生（没有可挂的实例），不报错；同类节点有多个时
+    显式报错，不静默挑一个。
+    """
+    # 业务已经显式声明过某个材料的检查时**不再派生**：两者语义完全相同，
+    # 同时存在会被 `_ensure_unique_rules` 判成重复规则（MANIFEST_DUPLICATE_RULE），
+    # 而报错只说「场景中存在重复规则」，看不出是派生规则与手工规则撞了。
+    covered_by_business = {
+        str(material_key)
+        for rule in compiled_rules
+        if rule.get("operator") == "MATERIAL_EXISTS"
+        and not is_system_rule(rule)
+        and rule.get("enabled", True)
+        for material_key in (rule.get("materials") or [])
+    }
+    required_materials = [
+        item
+        for item in compiled_materials
+        if item.get("required") and item["material_key"] not in covered_by_business
+    ]
+    if not required_materials:
+        return []
+    codes = sorted(
+        str(item["node_code"])
+        for item in node_instances
+        if str(item.get("node_type") or item["node_code"]) == NODE_TYPE_MATERIAL_CHECK
+    )
+    if not codes:
+        return []
+    if len(codes) > 1:
+        raise BusinessError(
+            "MANIFEST_NODE_AMBIGUOUS",
+            "本场景配置了多个「材料检查」节点，系统无法确定材料检查规则应挂在哪一个上："
+            + "、".join(f"“{code}”" for code in codes),
+            details={"node_type": NODE_TYPE_MATERIAL_CHECK, "node_codes": codes},
+        )
+    node_code = codes[0]
+    requirement = "该材料必须上传"
+    rules: list[dict[str, Any]] = []
+    for material in required_materials:
+        rule_key = stable_key("rule", namespace, f"material:{material['material_key']}")
+        rules.append(
+            {
+                "rule_key": rule_key,
+                "legacy_rule_key": rule_key,
+                # 系统派生规则显式带 SYS- 前缀：它不是业务维护的规则编号。
+                "rule_code": f"SYS-MATERIAL-{material['material_key']}",
+                "name": f"材料齐全-{material['name']}",
+                "node": node_code,
+                "node_type": NODE_TYPE_MATERIAL_CHECK,
+                "operator": "MATERIAL_EXISTS",
+                "enabled": (system_rule_enabled or {}).get(f"SYS-MATERIAL-{material['material_key']}", True),
+                "inputs": [],
+                "outputs": [],
+                "materials": [material["material_key"]],
+                "source_rule_key": None,
+                "source_rule_keys": [],
+                "source_node": None,
+                "source_nodes": [],
+                "parameters": {},
+                "applicability": {"kind": "ALWAYS", "material_keys": []},
+                "requirement": requirement,
+                "description": "",
+                "source_ref": None,
+                "source": dict(FORM_SOURCE),
+            }
+        )
+    return rules
 
 
 def _ensure_unique_rules(rules: list[dict[str, Any]]) -> None:
@@ -1216,6 +1380,115 @@ def _ensure_unique_rules(rules: list[dict[str, Any]]) -> None:
         seen[signature] = rule
 
 
+def internal_rule_branch_material(rule: dict[str, Any]) -> str | None:
+    """内部校验的一条执行分支必须只读一份材料。"""
+    materials = rule.get("materials") or []
+    inputs = rule.get("inputs") or []
+    if len(materials) != 1 or not inputs:
+        return None
+    material_key = materials[0]
+    if not isinstance(material_key, str) or not material_key:
+        return None
+    if any(not isinstance(item, dict) or item.get("material_key") != material_key for item in inputs):
+        return None
+    return material_key
+
+
+def business_rule_key(
+    namespace: str, node_type: str, rule_code: str, *, material_code: str | None = None
+) -> str:
+    """导入与场景复制共用业务规则的稳定身份。"""
+    identity = [node_type, rule_code]
+    if node_type == NODE_TYPE_INTERNAL_VALIDATE:
+        if not material_code:
+            raise BusinessError(
+                "IMPORT_RULE_BRANCH_INVALID",
+                "内部校验规则分支缺少唯一材料编号，无法派生稳定键",
+                details={"rule_code": rule_code},
+            )
+        identity.append(material_code)
+    return stable_key("rule", namespace, json.dumps(identity, ensure_ascii=False, separators=(",", ":")))
+
+
+def ensure_unique_rule_codes(rules: list[dict[str, Any]]) -> None:
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for rule in rules:
+        code = rule.get("rule_code")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        code = code.strip()
+        owner = str(rule.get("rule_key") or rule.get("candidate_ref") or "")
+        siblings = seen.setdefault(code, [])
+        branch_material = internal_rule_branch_material(rule)
+        same_business_rule = (
+            siblings
+            and rule_node_type_of(rule) == NODE_TYPE_INTERNAL_VALIDATE
+            and branch_material is not None
+            and all(
+                rule_node_type_of(other) == NODE_TYPE_INTERNAL_VALIDATE
+                and other.get("node") == rule.get("node")
+                and internal_rule_branch_material(other) not in {None, branch_material}
+                for other in siblings
+            )
+        )
+        if siblings and not same_business_rule:
+            raise BusinessError(
+                "MANIFEST_DUPLICATE_RULE_CODE",
+                "业务规则编号重复；只有同一内部校验规则的不同材料分支可共用编号",
+                details={"rule_code": code, "rule_refs": [
+                    *(str(item.get("rule_key") or item.get("candidate_ref") or "") for item in siblings), owner
+                ]},
+            )
+        siblings.append(rule)
+
+
+def rule_node_type_of(item: dict[str, Any]) -> str:
+    """一条规则归属节点的**能力类型**。
+
+    规则的 `node` 是节点**实例码**（用户配置的 `scenario_draft_node.node_code`），
+    能力类型在 `node_type` 里。旧格式（节点码即能力类型）没有 `node_type`：
+    那时实例码与能力类型是同一个值，因此直接用它——这不是兜底，是旧格式的确定性语义。
+
+    凡是判断「这条规则属于哪一类节点」（能不能挂这个算子、是不是内部校验、
+    来源节点是哪一个）都必须用本函数，不能用 `node`：同一场景可以有两个同类节点，
+    按实例码判断会让其中一条规则的这类校验永远不成立。
+    """
+    node_type = item.get("node_type")
+    return str(node_type) if node_type else str(item["node"])
+
+
+def instance_code_of_type(
+    node_instances: list[dict[str, Any]],
+    node_type: str,
+    *,
+    purpose: str,
+) -> str:
+    """系统派生规则要挂到**用户配置的节点实例**上，这里按能力类型取实例码。
+
+    字段抽取规则、报告生成规则由后端确定性补齐，它们必须落在用户真实建立的实例上：
+    用能力类型当实例码会让规则挂到一个并不存在的节点上，发布期以
+    「规则指向不存在的节点」报出，看不出真实原因。
+
+    同类节点有多个时**显式报错**：系统派生规则没有依据在其中挑一个，
+    静默取第一个会让一条规则的归属随机取决于用户配置顺序。
+    """
+    matched = sorted(str(item["node_code"]) for item in node_instances if item["node_type"] == node_type)
+    if not matched:
+        raise BusinessError(
+            "MANIFEST_NODE_REQUIRED",
+            f"本场景没有配置「{node_type}」节点，无法放置{purpose}规则：请先在场景配置里建立该节点",
+            details={"node_type": node_type, "purpose": purpose},
+        )
+    if len(matched) > 1:
+        raise BusinessError(
+            "MANIFEST_NODE_AMBIGUOUS",
+            f"本场景配置了多个「{node_type}」节点，系统无法确定{purpose}规则应挂在哪一个上："
+            + "、".join(f"“{code}”" for code in matched),
+            details={"node_type": node_type, "purpose": purpose, "node_codes": matched},
+        )
+    return matched[0]
+
+
 def _risk_source_node(rule_name: str, value: Any) -> str:
     """风险疑点的来源节点必须是契约枚举之一。
 
@@ -1233,38 +1506,38 @@ def _risk_source_node(rule_name: str, value: Any) -> str:
 def _ensure_manifest_node_coverage(
     rules: list[dict[str, Any]],
     report_template: list[dict[str, Any]],
+    node_instances: list[dict[str, Any]],
+    *,
+    require_report_rule: bool = True,
 ) -> None:
     """发布前的节点覆盖校验。
 
-    固定事实报告是系统能力，必须能生成，因此 REPORT_OUTPUT 必须有 REPORT_RENDER；
-    该规则由后端确定性补齐，不要求业务在 Excel 里填写。
-    附加报告章节是可选配置：没有 07_报告模板 的最小模板同样可以发布，
+    节点清单由**用户配置**，因此这里校验的是「已配置的节点里该有的规则有没有」，
+    而不是「固定八个节点齐不齐」：
+
+    - 场景配置了报告输出节点时，它必须有启用的报告生成规则；方案可显式关闭；
+    - 配置了校验/风险节点时，它们的规则可以为空——「本场景不配这类检查」是配置事实。
+
+    附加报告章节是可选配置：没有报告模板表的最小配置同样可以发布，
     只要固定事实报告仍能生成，就不把「没有附加章节」当成阻断项。
     """
+    if not require_report_rule:
+        return
     covered_nodes = {item["node"] for item in rules if item.get("enabled", True)}
-    missing_nodes = [code for code, _ in NODE_DEFINITIONS if code in REQUIRED_RULE_NODES and code not in covered_nodes]
+    report_nodes = {
+        str(item["node_code"]) for item in node_instances if item["node_type"] == "REPORT_OUTPUT"
+    }
+    missing_nodes = sorted(report_nodes - covered_nodes)
     if missing_nodes:
         raise BusinessError(
             "MANIFEST_NODE_RULE_MISSING",
-            "审核模板缺少必需节点的规则，不能发布",
+            "已配置的报告输出节点缺少报告生成规则，不能发布",
             details={"node_codes": missing_nodes},
         )
-    if not any(item["node"] == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" for item in rules):
-        # 编译期已确定性补齐报告规则；走到这里说明规则被外部裁剪或被禁用。
+    if report_nodes and not any(
+        item["node"] in report_nodes and item["operator"] == "REPORT_RENDER" for item in rules
+    ):        # 编译期已确定性补齐报告规则；走到这里说明规则被外部裁剪或被禁用。
         raise BusinessError("MANIFEST_REPORT_RULE_MISSING", "报告输出节点缺少报告生成规则")
-
-
-def _ensure_task_node_coverage(selected_rules: list[dict[str, Any]]) -> None:
-    selected_nodes = {item["node"] for item in selected_rules}
-    missing_nodes = [code for code, _ in NODE_DEFINITIONS if code in REQUIRED_RULE_NODES and code not in selected_nodes]
-    if missing_nodes:
-        raise BusinessError(
-            "TASK_NODE_RULE_MISSING",
-            "所选规则缺少必需节点的规则，任务无法执行",
-            details={"node_codes": missing_nodes},
-        )
-    if not any(item["node"] == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" for item in selected_rules):
-        raise BusinessError("TASK_REPORT_RULE_MISSING", "所选规则缺少报告生成规则")
 
 
 def _proposal_reference_index(
@@ -1315,7 +1588,7 @@ def _accepted(decisions: list[dict[str, Any]], target_type: str, target_ref: str
 
 
 RESOLVABLE_PROPERTIES = {
-    "MATERIAL": {"name", "material_type", "required", "description", "config_status"},
+    "MATERIAL": {"name", "required", "description", "config_status"},
     # unit / currency 是节点版的金额口径：缺少它们时业务可以通过既有裁决入口补齐，
     # 系统不代填默认单位或默认币种。
     "FIELD": {
@@ -1330,7 +1603,7 @@ RESOLVABLE_PROPERTIES = {
         "artifact_source",
         "config_status",
     },
-    # source_node 与 source_rule_ref 一样是「06_风险评定」工作表里的业务列，
+    # source_node 与 source_rule_ref 一样是「09_风险规则」工作表里的业务列，
     # 人工裁决可以显式指定来源节点；它仍会在编译期与来源规则的实际节点比对。
     # check_level 是节点版的检查等级原文：PM 原「高/低」没有已确认映射，
     # 只能由业务在裁决里明确成四级之一。
@@ -1340,22 +1613,32 @@ RESOLVABLE_PROPERTIES = {
         "operator",
         "parameters",
         "source_rule_ref",
+        "source_rule_refs",
         "source_node",
         "material_refs",
         "check_level",
-        # risk_condition 是「06_风险评定」的成立条件列：Excel 里为空时业务必须显式
+        # risk_condition 是「09_风险规则」的成立条件列：Excel 里为空时业务必须显式
         # 指定「任一关联检查不合格」还是「全部关联检查不合格」，系统不代选默认值。
         "risk_condition",
         "config_status",
     },
-    # 07_报告输出 的章节：非停用章节标记为待确认时该报告仍是未完成配置，
+    # 10_报告模板 的章节：非停用章节标记为待确认时该报告仍是未完成配置，
     # 业务可以在这里确认该章节可以执行，或明确停用（停用章节不进入报告）。
     "REPORT_SECTION": {"config_status"},
     "SHEET": {"suggested_role"},
+    # 计算规则候选：业务只能改配置状态、参数声明、判定区间与算式。
+    # 结果编号（result_code）**不在**可裁决属性里：它是下游引用的身份，
+    # 改它会让已引用它的风险规则与计算规则指向一个不存在的编号。
+    "CALC_RULE": {"status", "parameters", "bands", "formula", "period_policy", "unit", "currency"},
 }
 
 
-def _apply_resolutions(proposals: dict[str, Any], decisions: list[dict[str, Any]]) -> dict[str, Any]:
+def _apply_resolutions(
+    proposals: dict[str, Any],
+    decisions: list[dict[str, Any]],
+    *,
+    validate_references: bool = True,
+) -> dict[str, Any]:
     updated = deepcopy(proposals)
     indexes: dict[str, dict[str, dict[str, Any]]] = {
         "MATERIAL": {},
@@ -1363,6 +1646,9 @@ def _apply_resolutions(proposals: dict[str, Any], decisions: list[dict[str, Any]
         "RULE": {},
         "REPORT_SECTION": {},
         "SHEET": {},
+        # 计算规则候选挂在 bundle 顶层（它跨 Sheet：定义/参数/判定三张表按 rule_code
+        # 关联），因此单独一个索引，不能按 Sheet 遍历取到。
+        "CALC_RULE": {},
     }
     for sheet in updated["sheets"]:
         indexes["SHEET"][sheet["sheet_key"]] = sheet
@@ -1374,6 +1660,14 @@ def _apply_resolutions(proposals: dict[str, Any], decisions: list[dict[str, Any]
         ):
             for item in sheet.get(property_name, []):
                 indexes[target_type][item["candidate_ref"]] = item
+    for item in updated.get("calculations", []):
+        # 计算规则候选同时按候选引用与**业务编号**索引：待确认事项声明的裁决身份是
+        # 业务编号（`rule_code`，跨导入稳定），而候选引用是 `calc:<rule_code>`。
+        # 只索引一个会让另一个形态的裁决报「裁决引用的对象不存在」。
+        indexes["CALC_RULE"][item["candidate_ref"]] = item
+        rule_code = item.get("rule_code")
+        if rule_code:
+            indexes["CALC_RULE"][str(rule_code)] = item
     for decision in decisions:
         if decision["action"] != "RESOLVE":
             continue
@@ -1389,11 +1683,35 @@ def _apply_resolutions(proposals: dict[str, Any], decisions: list[dict[str, Any]
         validated = ProposalBundle.model_validate(updated).model_dump(mode="json")
     except ValidationError as exc:
         raise BusinessError("MANIFEST_DECISION_VALUE_INVALID", "裁决值不符合候选对象的业务类型") from exc
-    _validate_proposal_identity(validated)
-    material_refs, material_source_refs = _proposal_reference_index(validated, "materials")
-    field_refs, field_source_refs = _proposal_reference_index(validated, "fields")
-    rule_refs, rule_source_refs = _proposal_reference_index(validated, "rules")
+    if not validate_references:
+        return validated
+    # 排除项仍留在返回值中供工作台追溯；引用和编号只按最终保留的候选复核。
+    active_sheets: list[dict[str, Any]] = []
     for sheet in validated["sheets"]:
+        if not _accepted(decisions, "SHEET", sheet["sheet_key"]):
+            continue
+        active_sheet = dict(sheet)
+        for property_name, target_type in (
+            ("materials", "MATERIAL"),
+            ("fields", "FIELD"),
+            ("rules", "RULE"),
+            ("report_sections", "REPORT_SECTION"),
+        ):
+            active_sheet[property_name] = [
+                item for item in sheet.get(property_name, [])
+                if _accepted(decisions, target_type, item["candidate_ref"])
+            ]
+        active_sheets.append(active_sheet)
+    active = {"sheets": active_sheets}
+    _validate_proposal_identity(active)
+    material_refs, material_source_refs = _proposal_reference_index(active, "materials")
+    field_refs, field_source_refs = _proposal_reference_index(active, "fields")
+    active_rules = [rule for sheet in active_sheets for rule in sheet.get("rules", [])]
+    rules_by_ref = {rule["candidate_ref"]: rule for rule in active_rules}
+    rule_aliases, rule_sources = _alias_map(
+        active_rules, {candidate_ref: candidate_ref for candidate_ref in rules_by_ref}
+    )
+    for sheet in active["sheets"]:
         sheet_key = sheet["sheet_key"]
         for field in sheet.get("fields", []):
             if not _proposal_reference_exists(
@@ -1422,10 +1740,28 @@ def _apply_resolutions(proposals: dict[str, Any], decisions: list[dict[str, Any]
                 for reference in rule.get("material_refs", [])
             ):
                 raise BusinessError("MANIFEST_RULE_MATERIAL_MISSING", "裁决后的规则材料范围引用不存在", details={"rule": rule["name"]})
-            if rule.get("source_rule_ref") and not _proposal_reference_exists(
-                rule["source_rule_ref"], sheet_key, rule_refs, rule_source_refs
-            ):
-                raise BusinessError("MANIFEST_RISK_SOURCE_MISSING", "裁决后的风险规则来源不存在", details={"rule": rule["name"]})
+            source_references = list(dict.fromkeys([
+                *(rule.get("source_rule_refs") or []),
+                *([rule["source_rule_ref"]] if rule.get("source_rule_ref") else []),
+            ]))
+            for source_ref in source_references:
+                resolved_refs = _resolve_aliases(
+                    source_ref,
+                    sheet_key,
+                    rule_aliases,
+                    rule_sources,
+                    target_type="RULE",
+                    error_code="MANIFEST_RISK_SOURCE_MISSING",
+                    error_message="裁决后的风险规则来源不存在",
+                    details={"rule": rule["name"], "source_rule_ref": source_ref},
+                )
+                if rule["operator"] == "RISK_TRIGGER":
+                    if any(rules_by_ref[ref]["operator"] == "RISK_TRIGGER" for ref in resolved_refs):
+                        raise BusinessError(
+                            "MANIFEST_RISK_SOURCE_INVALID",
+                            "风险规则不能引用自身或另一条风险规则",
+                            details={"rule": rule["name"], "source_rule_ref": source_ref},
+                        )
         for section in sheet.get("report_sections", []):
             if any(
                 not _proposal_reference_exists(reference, sheet_key, field_refs, field_source_refs)
@@ -1440,10 +1776,10 @@ def _apply_resolutions(proposals: dict[str, Any], decisions: list[dict[str, Any]
 
 
 def resolve_saved_decisions(proposals: dict[str, Any], decisions: list[dict[str, Any]]) -> dict[str, Any]:
-    """只读地叠加已保存裁决，供业务视图展示有效值；绝不改写原始候选与来源记录。"""
+    """只读叠加已保存裁决；未完成的跨表修正可展示，写草稿时再复核引用。"""
     if not decisions:
         return deepcopy(proposals)
-    return _apply_resolutions(proposals, decisions)
+    return _apply_resolutions(proposals, decisions, validate_references=False)
 
 
 def excluded_targets(decisions: list[dict[str, Any]]) -> tuple[set[str], set[tuple[str, str]]]:
@@ -1457,7 +1793,7 @@ def excluded_targets(decisions: list[dict[str, Any]]) -> tuple[set[str], set[tup
         (item["target_type"], item["target_ref"])
         for item in decisions
         if item.get("action") == "EXCLUDE"
-        and item.get("target_type") in {"MATERIAL", "FIELD", "RULE", "REPORT_SECTION"}
+        and item.get("target_type") in {"MATERIAL", "FIELD", "RULE", "REPORT_SECTION", "CALC_RULE"}
     }
     return excluded_sheets, excluded_refs
 
@@ -1468,16 +1804,16 @@ def resolved_targets(decisions: list[dict[str, Any]]) -> set[tuple[str, str]]:
         (item["target_type"], item["target_ref"])
         for item in decisions
         if item.get("action") == "RESOLVE"
-        and item.get("target_type") in {"MATERIAL", "FIELD", "RULE", "REPORT_SECTION"}
+        and item.get("target_type") in {"MATERIAL", "FIELD", "RULE", "REPORT_SECTION", "CALC_RULE"}
     }
 
 
 def _alias_map(
     items: list[dict[str, Any]],
     key_map: dict[str, str],
-) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
+) -> tuple[dict[str, str], dict[tuple[str, str], list[str]]]:
     candidate_aliases: dict[str, str] = {}
-    source_aliases: dict[tuple[str, str], str] = {}
+    source_aliases: dict[tuple[str, str], list[str]] = {}
     # 同一行业务记录按材料展开出的多条候选共用同一个编号：只有来自**不同**业务行的
     # 候选共用编号才是冲突。这里按行号区分，与 _validate_proposal_identity 同一口径。
     rows_by_source: dict[tuple[str, str], set[int]] = {}
@@ -1505,34 +1841,30 @@ def _alias_map(
                     "row_nos": sorted(rows_by_source[scope]),
                 },
             )
-        source_aliases.setdefault(scope, key)
+        source_aliases.setdefault(scope, []).append(key)
     return candidate_aliases, source_aliases
 
 
-def _resolve_alias(
+def _resolve_aliases(
     reference: str,
     owner_sheet_key: str,
     candidate_aliases: dict[str, str],
-    source_aliases: dict[tuple[str, str], str],
+    source_aliases: dict[tuple[str, str], list[str]],
     *,
     target_type: str,
     error_code: str,
     error_message: str,
     details: dict[str, Any],
-) -> str:
+) -> list[str]:
     candidate = candidate_aliases.get(reference)
     if candidate is not None:
-        return candidate
+        return [candidate]
     source = source_aliases.get((owner_sheet_key, reference))
     if source is not None:
         return source
-    cross_sheet_matches = {
-        key
-        for (_, source_ref), key in source_aliases.items()
-        if source_ref == reference
-    }
+    cross_sheet_matches = [keys for (_, source_ref), keys in source_aliases.items() if source_ref == reference]
     if len(cross_sheet_matches) == 1:
-        return next(iter(cross_sheet_matches))
+        return cross_sheet_matches[0]
     if cross_sheet_matches:
         raise BusinessError(
             "MANIFEST_SOURCE_SCOPE_INVALID",
@@ -1542,706 +1874,1148 @@ def _resolve_alias(
     raise BusinessError(error_code, error_message, details=details)
 
 
-def compile_scene_manifest(
+def _resolve_alias(
+    reference: str,
+    owner_sheet_key: str,
+    candidate_aliases: dict[str, str],
+    source_aliases: dict[tuple[str, str], list[str]],
     *,
-    workbook_ir: dict[str, Any],
+    target_type: str,
+    error_code: str,
+    error_message: str,
+    details: dict[str, Any],
+) -> str:
+    matches = _resolve_aliases(
+        reference, owner_sheet_key, candidate_aliases, source_aliases,
+        target_type=target_type, error_code=error_code, error_message=error_message, details=details,
+    )
+    if len(matches) != 1:
+        raise BusinessError(
+            "MANIFEST_SOURCE_SCOPE_INVALID",
+            "来源编号对应同一业务行展开的多个候选，请使用明确的候选引用",
+            details={"target_type": target_type, "reference": reference, "matches": matches, **details},
+        )
+    return matches[0]
+
+
+def import_origin_of(
+    item: dict[str, Any], *, sheet_names: dict[str, str], import_job_no: str
+) -> dict[str, Any]:
+    source = item["source"]
+    sheet_key = source["sheet_key"]
+    if sheet_key not in sheet_names:
+        raise BusinessError(
+            "IMPORT_SOURCE_SHEET_MISSING",
+            "导入候选的来源工作表不在本次导入范围内",
+            details={"sheet_key": sheet_key, "import_job_no": import_job_no},
+        )
+    return {
+        "import_job_no": import_job_no,
+        "sheet_key": sheet_key,
+        "sheet_name": sheet_names[sheet_key],
+        "row_no": source["row_no"],
+        "cells": list(source["cells"]),
+        "texts": dict(source.get("texts") or {}),
+    }
+
+
+def draft_config_of_import(
+    *,
     proposals: dict[str, Any],
     decisions: list[dict[str, Any]],
-    scene_code: str,
-    scene_name: str,
     namespace: str,
-    compiled_at: datetime,
+    selected_sheets: list[dict[str, Any]],
+    import_job_no: str,
 ) -> dict[str, Any]:
-    proposals = _apply_resolutions(proposals, decisions)
+    """把已裁决候选投影为可编辑配置；发布校验仍由草稿编译承担。"""
+    resolved = _apply_resolutions(proposals, decisions)
     excluded_sheets = {
         item["target_ref"]
         for item in decisions
         if item["target_type"] == "SHEET" and item["action"] == "EXCLUDE"
     }
-    included = [item for item in proposals["sheets"] if item["sheet_key"] not in excluded_sheets]
-    materials = [item for sheet in included for item in sheet.get("materials", []) if _accepted(decisions, "MATERIAL", item["candidate_ref"])]
-    fields = [item for sheet in included for item in sheet.get("fields", []) if _accepted(decisions, "FIELD", item["candidate_ref"])]
-    rules = [item for sheet in included for item in sheet.get("rules", []) if _accepted(decisions, "RULE", item["candidate_ref"])]
+    included = [sheet for sheet in resolved["sheets"] if sheet["sheet_key"] not in excluded_sheets]
+    if not included:
+        raise BusinessError(
+            "SCENARIO_SHEET_REQUIRED",
+            "裁决后没有参与本次导入的工作表，不能覆盖场景草稿",
+            status_code=409,
+            details={"excluded_sheet_keys": sorted(excluded_sheets)},
+        )
+    bound_roles = {item["sheet_key"]: item["sheet_role"] for item in selected_sheets}
+    for sheet in included:
+        if bound_roles.get(sheet["sheet_key"]) != sheet["suggested_role"]:
+            raise BusinessError(
+                "IMPORT_SHEET_ROLE_CHANGED",
+                "工作表用途与转换时确认的绑定不一致，请重新绑定并转换规则库",
+                status_code=409,
+                details={
+                    "sheet_key": sheet["sheet_key"],
+                    "bound_role": bound_roles.get(sheet["sheet_key"]),
+                    "resolved_role": sheet["suggested_role"],
+                },
+            )
+    included_keys = {sheet["sheet_key"] for sheet in included}
+    sheet_names = {sheet["sheet_key"]: sheet["sheet_name"] for sheet in selected_sheets}
+
+    def original_source(item: dict[str, Any]) -> dict[str, Any]:
+        return import_origin_of(item, sheet_names=sheet_names, import_job_no=import_job_no)
+
+    def with_nested_origins(
+        rows: list[dict[str, Any]], original_rows: list[dict[str, Any]], key: str
+    ) -> list[dict[str, Any]]:
+        originals = {row[key]: row for row in original_rows}
+        return [
+            {
+                **row,
+                **({"origin": original_source(originals[row[key]])}
+                   if row[key] in originals and originals[row[key]].get("source") else {}),
+            }
+            for row in rows
+        ]
+
+    materials = [
+        item for sheet in included for item in sheet.get("materials", [])
+        if _accepted(decisions, "MATERIAL", item["candidate_ref"])
+    ]
+    fields = [
+        item for sheet in included for item in sheet.get("fields", [])
+        if _accepted(decisions, "FIELD", item["candidate_ref"])
+    ]
+    rules = [
+        item for sheet in included for item in sheet.get("rules", [])
+        if _accepted(decisions, "RULE", item["candidate_ref"])
+    ]
     sections = [
-        item
-        for sheet in included
-        for item in sheet.get("report_sections", [])
+        item for sheet in included for item in sheet.get("report_sections", [])
         if _accepted(decisions, "REPORT_SECTION", item["candidate_ref"])
     ]
-    # 非停用章节里仍标着「待确认」的，是尚未确认的业务口径，不能进已发布配置：
-    # 章节携带展示字段、内容类型与内容要求，把它当成已确认会直接改变报告内容。
-    # 它本来必须由业务确认或明确停用；发布检查会因仍有未处理问题先阻断，走到这里
-    # 说明有人在未处理该问题的情况下继续，必须显式报错，不能静默带上或静默丢弃。
-    pending_sections = [
-        item
-        for item in sections
-        if item.get("config_status") == CONFIG_STATUS_PENDING
+    calculations = [
+        item for item in resolved.get("calculations", [])
+        if _accepted(decisions, "CALC_RULE", item["candidate_ref"])
+        and _accepted(decisions, "CALC_RULE", item["rule_code"])
+        and item["source"]["sheet_key"] in included_keys
     ]
-    if pending_sections:
+    excluded_calc_inputs = sorted({
+        sheet["suggested_role"]
+        for sheet in resolved["sheets"]
+        if sheet["sheet_key"] in excluded_sheets
+        and sheet.get("suggested_role") in {"CALC_PARAMETER", "CALC_JUDGEMENT"}
+    })
+    if calculations and excluded_calc_inputs:
         raise BusinessError(
-            "MANIFEST_REPORT_SECTION_PENDING",
-            "报告章节仍是「待确认」状态，不能发布：请确认该章节可以执行，或明确停用该章节",
-            details={
-                "sections": [
-                    {"report_code": item.get("report_code"), "section_name": item.get("section_name")}
-                    for item in pending_sections
-                ]
-            },
+            "MANIFEST_CALC_SHEET_EXCLUDED",
+            "计算候选已合并被排除工作表的数据，不能按排除后的范围写入草稿",
+            details={"excluded_sheet_roles": excluded_calc_inputs},
         )
-    # 节点版的报告章节自带报告编号、材料范围、输出格式与结果排序；这些属性必须整组一致。
-    # 旧格式没有这些列，保持原有的“附加展示章节”语义。
-    explicit_report_groups = any(section.get("report_code") for section in sections)
-    if not materials:
-        raise BusinessError("MANIFEST_NO_MATERIAL", "场景至少需要一个材料位")
-    if not rules:
-        raise BusinessError("MANIFEST_NO_RULE", "场景至少需要一条启用规则")
+    original_calculations = {item["candidate_ref"]: item for item in proposals.get("calculations", [])}
+    calculations = [
+        {
+            **item,
+            "origin": original_source(original_calculations[item["candidate_ref"]]),
+            "parameters": with_nested_origins(
+                item.get("parameters") or [],
+                original_calculations[item["candidate_ref"]].get("parameters") or [],
+                "parameter_code",
+            ),
+            "bands": with_nested_origins(
+                item.get("bands") or [],
+                original_calculations[item["candidate_ref"]].get("bands") or [],
+                "condition_code",
+            ),
+        }
+        for item in calculations
+    ]
     _ensure_unique_materials(materials)
 
-    material_keys = {item["candidate_ref"]: stable_key("mat", namespace, item["candidate_ref"]) for item in materials}
-    field_keys = {item["candidate_ref"]: stable_key("fld", namespace, item["candidate_ref"]) for item in fields}
-    rule_keys = {item["candidate_ref"]: stable_key("rule", namespace, item["candidate_ref"]) for item in rules}
-    material_candidate_aliases, material_source_aliases = _alias_map(materials, material_keys)
-    field_candidate_aliases, field_source_aliases = _alias_map(fields, field_keys)
-    rule_candidate_aliases, rule_source_aliases = _alias_map(rules, rule_keys)
-    field_types = {field_keys[item["candidate_ref"]]: item["value_type"] for item in fields}
-    field_units = {field_keys[item["candidate_ref"]]: item.get("unit") for item in fields}
-    field_currencies = {field_keys[item["candidate_ref"]]: item.get("currency") for item in fields}
-    rule_nodes = {rule_keys[item["candidate_ref"]]: item["node"] for item in rules}
-
-    compiled_materials = []
-    for item in materials:
-        # 材料识别类型必须由业务确认后才能发布：8018 的 doc_type 是严格枚举，
-        # 未声明的类型会让材料校验在运行时被拒。这里显式阻断，不代填、不用材料名称冒充。
-        recognize_type = str(item.get("material_type") or "").strip()
-        if not recognize_type:
+    def business_code(item: dict[str, Any], target_type: str) -> str:
+        value = item.get("source_id")
+        if target_type == "RULE" and item.get("rule_code"):
+            value = item["rule_code"]
+        if not isinstance(value, str) or not value.strip():
             raise BusinessError(
-                "MANIFEST_MATERIAL_RECOGNIZE_TYPE_MISSING",
-                f"材料“{item['name']}”没有确认识别类型：请从 8018 支持的类型目录中选择后再发布",
-                details={"material": item["name"]},
+                "IMPORT_BUSINESS_CODE_REQUIRED",
+                "统一规则库候选缺少业务编号，无法保持跨导入的对象身份",
+                details={"target_type": target_type, "candidate_ref": item["candidate_ref"]},
             )
-        compiled_materials.append(
+        return value.strip()
+
+    material_codes = {item["candidate_ref"]: business_code(item, "MATERIAL") for item in materials}
+    material_keys = {ref: stable_key("mat", namespace, code) for ref, code in material_codes.items()}
+    field_keys = {
+        item["candidate_ref"]: stable_key("fld", namespace, business_code(item, "FIELD")) for item in fields
+    }
+    rule_keys: dict[str, str] = {}
+    for item in rules:
+        node_type = rule_node_type_of(item)
+        material_code: str | None = None
+        if node_type == NODE_TYPE_INTERNAL_VALIDATE:
+            branch_refs = {entry["material_ref"] for entry in item.get("inputs", [])}
+            if len(branch_refs) != 1:
+                raise BusinessError(
+                    "IMPORT_RULE_BRANCH_INVALID",
+                    "内部校验规则分支必须且只能对应一个材料",
+                    details={"candidate_ref": item["candidate_ref"], "material_refs": sorted(branch_refs)},
+                )
+            material_ref = next(iter(branch_refs))
+            material_code = material_codes.get(material_ref)
+            if material_code is None:
+                raise BusinessError(
+                    "MANIFEST_MATERIAL_REF_MISSING",
+                    "内部校验规则分支引用的材料不存在或已被排除",
+                    details={"candidate_ref": item["candidate_ref"], "material_ref": material_ref},
+                )
+        rule_keys[item["candidate_ref"]] = business_rule_key(
+            namespace, node_type, business_code(item, "RULE"), material_code=material_code
+        )
+    for target_type, keys in (("MATERIAL", material_keys), ("FIELD", field_keys), ("RULE", rule_keys)):
+        if len(set(keys.values())) != len(keys):
+            raise BusinessError(
+                "IMPORT_BUSINESS_CODE_DUPLICATED",
+                "业务编号在当前场景内无法唯一确定配置对象",
+                details={"target_type": target_type},
+            )
+    material_aliases, material_sources = _alias_map(materials, material_keys)
+    field_aliases, field_sources = _alias_map(fields, field_keys)
+    rule_aliases, rule_sources = _alias_map(rules, rule_keys)
+
+    def resolve(
+        reference: str, owner: dict[str, Any], target: str, *, multiple: bool = False
+    ) -> str | list[str]:
+        aliases, sources = {
+            "MATERIAL": (material_aliases, material_sources),
+            "FIELD": (field_aliases, field_sources),
+            "RULE": (rule_aliases, rule_sources),
+        }[target]
+        options = {
+            "MATERIAL": ("MANIFEST_MATERIAL_REF_MISSING", "引用的材料不存在或已被排除"),
+            "FIELD": ("MANIFEST_RULE_INPUT_MISSING", "引用的字段不存在或已被排除"),
+            "RULE": ("MANIFEST_RISK_SOURCE_MISSING", "引用的来源规则不存在或已被排除"),
+        }
+        code, message = options[target]
+        args = (
+            reference, owner["source"]["sheet_key"], aliases, sources,
+        )
+        kwargs = {
+            "target_type": target,
+            "error_code": code,
+            "error_message": message,
+            "details": {"candidate_ref": owner["candidate_ref"], "reference": reference},
+        }
+        if multiple:
+            return _resolve_aliases(*args, **kwargs)
+        return _resolve_alias(*args, **kwargs)
+
+    manifest_like: dict[str, Any] = {
+        "selected_sheets": [
+            {"sheet_role": item["sheet_role"], "node_code": item["node_code"]}
+            for item in selected_sheets if item["sheet_key"] in included_keys
+        ],
+        "materials": [
             {
                 "material_key": material_keys[item["candidate_ref"]],
                 "name": item["name"],
-                # 材料位名称与 8018 识别类型分开固化：名称是业务叫法，
-                # material_type 是提交给 8018 的 doc_type。
-                "material_type": recognize_type,
                 "required": item["required"],
-                # 「业务说明」是业务含义的一部分，随材料一起进入已发布配置，不能被丢掉。
                 "description": item.get("description", ""),
                 "source_ref": item.get("source_id"),
-                "source": item["source"],
+                "origin": original_source(item),
             }
-        )
-
-    compiled_fields = []
+            for item in materials
+        ],
+        "fields": [],
+        "rules": [],
+        "report_template": [],
+        "calculation_inputs": calculations,
+    }
+    field_materials: dict[str, str] = {}
     for item in fields:
-        material_key = _resolve_alias(
-            item["material_ref"],
-            item["source"]["sheet_key"],
-            material_candidate_aliases,
-            material_source_aliases,
-            target_type="MATERIAL",
-            error_code="MANIFEST_MATERIAL_REF_MISSING",
-            error_message="字段引用的材料不存在或已被排除",
-            details={"field": item["name"]},
-        )
-        compiled_fields.append(
-            {
-                "field_key": field_keys[item["candidate_ref"]],
-                "name": item["name"],
-                "value_type": item["value_type"],
-                "unit": item.get("unit"),
-                # 币种是金额比较与加总的口径之一；留空表示未声明，不表示人民币。
-                "currency": item.get("currency"),
-                "material_key": material_key,
-                "required": item["required"],
-                "instruction": item["instruction"],
-                # 产物来源（当前仅印章识别）：主体核对据此确定待核对主体取自哪种产物，
-                # 不靠字段名里是否含“签章主体”来猜。留空表示常规字段抽取。
-                "artifact_source": item.get("artifact_source"),
-                "source_ref": item.get("source_id"),
-                "source": item["source"],
-            }
-        )
-    field_materials = {
-        item["field_key"]: item["material_key"]
-        for item in compiled_fields
-    }
-    field_names = {item["field_key"]: item["name"] for item in compiled_fields}
-    # 字段的产物来源声明：主体核对的判定依据，不能靠字段中文名猜测。
-    artifact_source_by_field = {
-        item["field_key"]: item.get("artifact_source") for item in compiled_fields
-    }
-
-    node_positions = {code: index for index, (code, _) in enumerate(NODE_DEFINITIONS)}
-    compiled_rules = []
+        material_key = resolve(item["material_ref"], item, "MATERIAL")
+        field_key = field_keys[item["candidate_ref"]]
+        field_materials[field_key] = material_key
+        manifest_like["fields"].append({
+            "field_key": field_key,
+            "material_key": material_key,
+            "name": item["name"],
+            "value_type": item["value_type"],
+            "unit": item.get("unit"),
+            "currency": item.get("currency"),
+            "artifact_source": item.get("artifact_source"),
+            "period_scope": item.get("period_scope"),
+            "statement_scope": item.get("statement_scope"),
+            "required": item["required"],
+            "instruction": item["instruction"],
+            "source_ref": item.get("source_id"),
+            "origin": original_source(item),
+        })
     for item in rules:
-        if item["operator"] not in OPERATOR_NODE_CONSTRAINTS or item["node"] not in OPERATOR_NODE_CONSTRAINTS[item["operator"]]:
-            raise BusinessError(
-                "MANIFEST_OPERATOR_NODE_INVALID",
-                "规则算子不能在当前节点执行",
-                details={"rule": item["name"], "operator": item["operator"], "node": item["node"]},
-            )
-        parameters = item.get("parameters", {})
-        if item["operator"] == "DATE_COMPARE" and isinstance(parameters, dict) and parameters.get("formula_type") == "DECIMAL":
-            raise BusinessError("MANIFEST_DATE_FORMULA_INVALID", "日期比较不能使用 DECIMAL 公式", details={"rule": item["name"]})
-        # 公式类参数在节点版里没有位置：显式拒绝，不静默丢弃。
-        _assert_no_legacy_formula_parameters(item["name"], item["operator"], parameters)
-        _validate_rule_parameters(item["name"], item["operator"], parameters)
-        # 引用的能力必须真实存在于能力目录：不在目录里的算子没有 handler，
-        # 拖到运行时才发现会变成「导入成功、执行时静默跳过」。
-        if capabilities.capability_of(item["operator"]) is None:
-            raise BusinessError(
-                "MANIFEST_OPERATOR_UNKNOWN",
-                f"规则“{item['name']}”引用的算子不在能力目录中，系统无法确定它是否可执行",
-                details={"rule": item["name"], "operator": item["operator"]},
-            )
-        # 能力判定分成两步，顺序不能颠倒：
-        #
-        # 1) **结构事实优先**：规则实际引用了几份材料、几个字段，是可核对的事实。
-        #    节点版把「备注」作为 requirement 带入，而备注是说明性文字，里面经常出现
-        #    「不能加总」「关联汇总风险」这类措辞——它们既可能是技术限制说明，也可能
-        #    只是别的对象的名称。按文字判定会把整份规则库误拦，因此结构能定的先用结构定。
-        #    （多材料内部校验的判定在下面 inputs 构造之后进行。）
-        # 2) 文字判定只用于**真正的执行说明**：字段抽取指令（instruction）是写给系统的
-        #    操作要求，出现在那里才代表业务要求系统做汇总取数。
-        unsupported = detect_unsupported_capability_for_operator(
-            item["operator"],
-            parameters.get("instruction") if isinstance(parameters, dict) else None,
-        )
-        if unsupported:
-            raise BusinessError(
-                "RULE_CAPABILITY_UNSUPPORTED",
-                f"规则“{item['name']}”包含当前不支持的能力：{unsupported[2]}",
-                details={
-                    "rule": item["name"],
-                    "node": item["node"],
-                    "operator": item["operator"],
-                    "capability": unsupported[0],
-                    "matched": unsupported[1],
-                },
-            )
-        if item["operator"] in {"MATERIAL_EXISTS", "FILE_QUALITY_CHECK"} and not item.get("material_refs"):
-            raise BusinessError("MANIFEST_RULE_MATERIAL_REQUIRED", "材料规则必须声明适用材料", details={"rule": item["name"]})
-        if item["operator"] == "FILE_QUALITY_CHECK":
-            # 检查项目与合格要求必须在发布期就能确定判定方式；口径未明确的检查
-            # 只保留为能力缺口（见 capability_gaps），绝不在发布时承诺支持、运行时才发现做不了。
-            check_item = parameters.get("check_item") if isinstance(parameters, dict) else None
-            requirement = parameters.get("requirement") if isinstance(parameters, dict) else None
-            if not check_item or not requirement:
-                raise BusinessError(
-                    "MANIFEST_QUALITY_PARAMETER_MISSING",
-                    "文件处理检查必须声明检查项目与合格要求",
-                    details={"rule": item["name"]},
-                )
-        if item["operator"] == "LLM_EXTRACT" and not item.get("output_field_refs"):
-            raise BusinessError("MANIFEST_EXTRACTION_OUTPUT_REQUIRED", "字段抽取规则必须声明输出字段", details={"rule": item["name"]})
-        # 风险疑点必须声明来源规则与成立条件；来源节点决定来源规则允许落在哪个节点。
-        source_node: str | None = None
-        risk_condition: str | None = None
-        declared_source_refs: list[str] = []
-        # 本规则全部来源规则实际所在的审核节点。节点版不维护来源节点列，
-        # 风险结果里据此说明它监视的是哪一类检查；跨节点多来源时全部保留。
-        actual_source_nodes: set[str] = set()
-        if item["operator"] == "RISK_TRIGGER":
-            declared_source_refs = list(item.get("source_rule_refs") or [])
-            if item.get("source_rule_ref") and item["source_rule_ref"] not in declared_source_refs:
-                declared_source_refs.insert(0, item["source_rule_ref"])
-            if not declared_source_refs:
-                raise BusinessError("MANIFEST_RISK_SOURCE_REQUIRED", "风险规则必须声明来源规则", details={"rule": item["name"]})
-            risk_condition = _risk_condition_of(item)
-        if item["node"] == "RISK_RATING" and item.get("parameters", {}).get("requires_manual_review") is True:
-            raise BusinessError(
-                "MANIFEST_RISK_REVIEW_NODE_ORDER_INVALID",
-                "风险评定位于人工复核节点之后，不能要求新增人工复核",
-                details={"rule": item["name"]},
-            )
-        inputs = []
-        for rule_input in item["inputs"]:
-            field_key = _resolve_alias(
-                rule_input["field_ref"],
-                item["source"]["sheet_key"],
-                field_candidate_aliases,
-                field_source_aliases,
-                target_type="FIELD",
-                error_code="MANIFEST_RULE_INPUT_MISSING",
-                error_message="规则输入字段不存在或已被排除",
-                details={"rule": item["name"], "field_ref": rule_input["field_ref"]},
-            )
-            material_key = _resolve_alias(
-                rule_input["material_ref"],
-                item["source"]["sheet_key"],
-                material_candidate_aliases,
-                material_source_aliases,
-                target_type="MATERIAL",
-                error_code="MANIFEST_RULE_INPUT_MISSING",
-                error_message="规则输入材料不存在或已被排除",
-                details={"rule": item["name"], "material_ref": rule_input["material_ref"]},
-            )
-            if field_materials[field_key] != material_key:
+        inputs = [
+            {
+                "field_key": resolve(entry["field_ref"], item, "FIELD"),
+                "material_key": resolve(entry["material_ref"], item, "MATERIAL"),
+            }
+            for entry in item.get("inputs", [])
+        ]
+        for entry in inputs:
+            if field_materials[entry["field_key"]] != entry["material_key"]:
                 raise BusinessError(
                     "MANIFEST_RULE_INPUT_MATERIAL_MISMATCH",
                     "规则输入材料与字段所属材料不一致",
-                    details={
-                        "rule": item["name"],
-                        "field_ref": rule_input["field_ref"],
-                        "material_ref": rule_input["material_ref"],
-                    },
+                    details={"rule": item["name"], "candidate_ref": item["candidate_ref"]},
                 )
-            inputs.append(
-                {
-                    "field_key": field_key,
-                    "material_key": material_key,
-                }
-            )
-        output_keys = []
-        for ref in item.get("output_field_refs", []):
-            output_keys.append(
-                _resolve_alias(
-                    ref,
-                    item["source"]["sheet_key"],
-                    field_candidate_aliases,
-                    field_source_aliases,
-                    target_type="FIELD",
-                    error_code="MANIFEST_RULE_OUTPUT_MISSING",
-                    error_message="规则输出字段不存在或已被排除",
-                    details={"rule": item["name"], "field_ref": ref},
-                )
-            )
-        material_scope = []
-        for ref in item.get("material_refs", []):
-            material_scope.append(
-                _resolve_alias(
-                    ref,
-                    item["source"]["sheet_key"],
-                    material_candidate_aliases,
-                    material_source_aliases,
-                    target_type="MATERIAL",
-                    error_code="MANIFEST_RULE_MATERIAL_MISSING",
-                    error_message="规则材料范围不存在或已被排除",
-                    details={"rule": item["name"], "material_ref": ref},
-                )
-            )
-        source_rule_key = None
-        source_rule_keys: list[str] = []
-        if declared_source_refs:
-            for declared in declared_source_refs:
-                resolved = _resolve_alias(
-                    declared,
-                    item["source"]["sheet_key"],
-                    rule_candidate_aliases,
-                    rule_source_aliases,
-                    target_type="RULE",
-                    error_code="MANIFEST_RISK_SOURCE_MISSING",
-                    error_message="风险规则的来源规则不存在或已被排除",
-                    details={"rule": item["name"], "source_rule_ref": declared},
-                )
-                actual_node = rule_nodes[resolved]
-                if node_positions[item["node"]] <= node_positions[actual_node]:
-                    raise BusinessError("MANIFEST_NODE_ORDER_INVALID", "风险规则必须位于来源规则之后", details={"rule": item["name"]})
-                # 来源节点必须与来源规则的实际节点一致：声明与实际不符时显式报错，
-                # 不按实际节点改写来源节点，避免风险挂到业务没有声明的节点上。
-                #
-                # 声明来源节点是「06_风险评定」的**可选**业务列（只有旧格式有这一列）。
-                # 节点版（contract_review_v3）不要求业务重复维护来源节点：来源由检查行的
-                # 「关联风险」反向确定，一条风险可以跨节点关联多条来源检查。这种情况下
-                # 按来源规则的实际节点校验关系，而不是对 None 做下标取值。
-                declared_node = item.get("source_node")
-                if declared_node is not None and actual_node not in SOURCE_NODE_RULE_NODES.get(declared_node, frozenset()):
-                    raise BusinessError(
-                        "MANIFEST_RISK_SOURCE_NODE_MISMATCH",
-                        "风险疑点的来源审核规则不在指定的来源节点中",
-                        details={
-                            "rule": item["name"],
-                            "source_node": declared_node,
-                            "source_rule_ref": declared,
-                            "actual_node": actual_node,
-                            "expected_nodes": sorted(SOURCE_NODE_RULE_NODES.get(declared_node, frozenset())),
-                        },
-                    )
-                actual_source_nodes.add(actual_node)
-                if resolved not in source_rule_keys:
-                    source_rule_keys.append(resolved)
-            source_rule_key = source_rule_keys[0]
-        comparison_operators = {
-            "FIELD_EQUAL",
-            "FIELD_NOT_EQUAL",
-            "DATE_COMPARE",
-            "DECIMAL_COMPARE",
-            "DECIMAL_SUM_COMPARE",
-        }
-        if item["operator"] in comparison_operators:
-            # 加总比较的右侧是多个加数：至少一个左字段与一个加数；单字段比较仍然必须恰好两个输入。
-            minimum = 2
-            maximum = None if operator_uses_addends(item["operator"]) else 2
-            if len(inputs) < minimum or (maximum is not None and len(inputs) > maximum):
-                raise BusinessError(
-                    "MANIFEST_RULE_INPUT_COUNT_INVALID",
-                    "金额加总比较必须包含左侧字段和至少一个加数"
-                    if operator_uses_addends(item["operator"])
-                    else "比较规则必须恰好包含两个输入字段",
-                    details={"rule": item["name"], "input_count": len(inputs)},
-                )
-            # 「文件内部校验」的字段必须属于同一份材料：加总式的全部加数继承同一份适用材料，
-            # 跨材料的比较属于交叉校验，不能靠改一行材料引用把跨文件比较混进内部校验。
-            if item["node"] == "INTERNAL_VALIDATE" and len({item["material_key"] for item in inputs}) != 1:
-                raise BusinessError(
-                    "MANIFEST_INTERNAL_MATERIAL_MISMATCH",
-                    "文件内部校验的字段必须属于同一份材料",
-                    details={
-                        "rule": item["name"],
-                        "left_material_key": inputs[0]["material_key"],
-                        "left_field_key": inputs[0]["field_key"],
-                        "material_keys": sorted({item["material_key"] for item in inputs}),
-                    },
-                )
-            input_types = [field_types[input_item["field_key"]] for input_item in inputs]
-            if item["operator"] == "DATE_COMPARE" and any(value_type != "DATE" for value_type in input_types):
-                raise BusinessError("MANIFEST_RULE_TYPE_INVALID", "日期比较规则只能引用 DATE 字段", details={"rule": item["name"]})
-            if item["operator"] in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} and any(
-                value_type != "DECIMAL" for value_type in input_types
-            ):
-                raise BusinessError(
-                    "MANIFEST_RULE_TYPE_INVALID",
-                    "金额比较规则只能引用金额字段（不接收大写金额字段）",
-                    details={"rule": item["name"]},
-                )
-            if item["operator"] in {"FIELD_EQUAL", "FIELD_NOT_EQUAL"} and len(set(input_types)) != 1:
-                raise BusinessError("MANIFEST_RULE_TYPE_INVALID", "字段比较规则的两个字段类型必须一致", details={"rule": item["name"]})
-            unit_mismatch = _comparison_unit_mismatch(
-                item["operator"],
-                [{"unit": field_units.get(input_item["field_key"])} for input_item in inputs],
-            )
-            if unit_mismatch:
-                # 单位/币种不一致时系统不做换算：这类规则不能发布后再以“数值相等”通过。
-                raise BusinessError(
-                    "MANIFEST_RULE_UNIT_MISMATCH",
-                    f"规则“{item['name']}”不能发布：{unit_mismatch}",
-                    details={
-                        "rule": item["name"],
-                        "units": sorted(
-                            {
-                                (field_units.get(input_item["field_key"]) or "")
-                                for input_item in inputs
-                            }
-                        ),
-                    },
-                )
-            # 加总比较的加数单位必须与字段归一化单位一致，否则“求和”本身没有意义。
-            if operator_uses_addends(item["operator"]):
-                for input_item in inputs:
-                    if not (field_units.get(input_item["field_key"]) or "").strip():
-                        raise BusinessError(
-                            "MANIFEST_RULE_UNIT_MISSING",
-                            f"规则“{item['name']}”需要加总，但引用的字段没有声明归一化单位："
-                            "系统不默认单位，也不做单位换算",
-                            details={"rule": item["name"], "field_key": input_item["field_key"]},
-                        )
-            # 金额比较与加总（含大小写金额一致性）：币种必须都声明且一致；
-            # 币种未声明时不能做数值比较或求和，系统也不默认人民币。
-            if item["operator"] in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} or "DECIMAL" in input_types or "DECIMAL_CN" in input_types:
-                currencies = {field_currencies.get(input_item["field_key"]) for input_item in inputs}
-                missing_currency = any(not (value or "").strip() for value in currencies)
-                declared = {value for value in currencies if (value or "").strip()}
-                if missing_currency:
-                    raise BusinessError(
-                        "MANIFEST_RULE_CURRENCY_MISSING",
-                        f"规则“{item['name']}”引用的字段没有在 03_字段抽取 中声明币种："
-                        "系统不默认人民币，币种未知时不做数值比较或求和",
-                        details={"rule": item["name"]},
-                    )
-                if len(declared) > 1:
-                    raise BusinessError(
-                        "MANIFEST_RULE_CURRENCY_MISMATCH",
-                        f"规则“{item['name']}”比较双方币种不一致（{' / '.join(sorted(declared))}）："
-                        "系统不做汇率换算，也不能直接相加",
-                        details={"rule": item["name"], "currencies": sorted(declared)},
-                    )
-        if item["operator"] == "FIELD_NOT_EMPTY":
-            if len(inputs) != 1:
-                raise BusinessError(
-                    "MANIFEST_RULE_INPUT_COUNT_INVALID",
-                    "非空校验必须且只能引用一个字段",
-                    details={"rule": item["name"], "input_count": len(inputs)},
-                )
-        if item["operator"] == "CLAUSE_ABSENT":
-            if len(inputs) != 1:
-                raise BusinessError(
-                    "MANIFEST_RULE_INPUT_COUNT_INVALID",
-                    "条款存在性检查必须且只能引用一个条款字段",
-                    details={"rule": item["name"], "input_count": len(inputs)},
-                )
-            if field_types[inputs[0]["field_key"]] != "CLAUSE":
-                raise BusinessError(
-                    "MANIFEST_RULE_TYPE_INVALID",
-                    "条款存在性检查只能引用条款字段",
-                    details={"rule": item["name"]},
-                )
-        if item["operator"] == "LLM_VALIDATE" and not inputs:
-            raise BusinessError("MANIFEST_RULE_INPUT_COUNT_INVALID", "智能校验规则必须声明输入字段", details={"rule": item["name"]})
-        # 1 对 1 的输入数量限制在 manifest 层兜底，不依赖导入层已经纠正过输入：
-        # 内部校验的智能判断只针对一份材料的字段（最多一个输入），交叉校验必须左右各一个字段。
-        if item["node"] == "INTERNAL_VALIDATE" and item["operator"] == "LLM_VALIDATE" and len(inputs) > 1:
-            raise BusinessError(
-                "MANIFEST_RULE_INPUT_COUNT_INVALID",
-                "文件内部校验的智能判断最多只能引用一个字段",
-                details={
-                    "rule": item["name"],
-                    "node": item["node"],
-                    "input_count": len(inputs),
-                    "max_input_count": 1,
-                },
-            )
-        # 交叉校验要求左右两侧都有字段，但不强求恰好两个输入：加总比较的右侧是多个加数，
-        # 「结算总金额 = 已付款金额 + 未付款金额」展开后就是三个输入。与表单路径
-        # （compile_form_manifest 里的 comparison_operators 分支）同一口径。
-        if item["node"] == "CROSS_VALIDATE" and (
-            len(inputs) < 2 or (not operator_uses_addends(item["operator"]) and len(inputs) > 2)
-        ):
-            raise BusinessError(
-                "MANIFEST_RULE_INPUT_COUNT_INVALID",
-                "文件交叉校验必须引用左右两侧的字段（加总比较的右侧可以有多个加数）"
-                if operator_uses_addends(item["operator"])
-                else "文件交叉校验必须左右各引用一个字段，共两个输入",
-                details={
-                    "rule": item["name"],
-                    "node": item["node"],
-                    "input_count": len(inputs),
-                    "required_input_count": 2,
-                },
-            )
-        if item["operator"] == "LLM_EXTRACT":
-            if any(field_materials[output_key] not in material_scope for output_key in output_keys):
-                raise BusinessError("MANIFEST_EXTRACTION_MATERIAL_INVALID", "字段抽取规则的输出字段不属于规则材料范围", details={"rule": item["name"]})
-        compiled_rules.append(
-            {
-                "rule_key": rule_keys[item["candidate_ref"]],
-                "name": item["name"],
-                "node": item["node"],
-                "operator": item["operator"],
-                # 配置状态=停用 的行不参与本次规则库：它们不进入执行，也不进入风险汇总。
-                # 其余状态（已明确 / 待确认）进入已发布配置；待确认项由发布检查按未处理问题阻断，
-                # 不在这里静默当成“已确认”。
-                "enabled": item.get("config_status") != CONFIG_STATUS_DISABLED,
-                "inputs": inputs,
-                "outputs": output_keys,
-                "materials": material_scope,
-                # 风险来源可能有多条（任一 / 全部）。单一 source_rule_key 保留为第一条，
-                # 供旧读取路径与页面“来源规则”列继续可用；完整来源集合进入 source_rule_keys。
-                "source_rule_key": source_rule_key or (source_rule_keys[0] if source_rule_keys else None),
-                "source_rule_keys": source_rule_keys,
-                # 来源节点与 rule_key 同级进入已发布配置，保证风险来源可追溯；
-                # 它不属于 RISK_TRIGGER 的参数契约，因此不写进 parameters。
-                # 节点版没有来源节点列时如实留空，不按来源规则反推一个业务没有声明的节点；
-                # 实际节点集合单独记录，供执行结果与报告说明真实来源。
-                "source_node": source_node,
-                "source_nodes": sorted(actual_source_nodes),
-                "parameters": parameters,
-                # 适用条件与审核要求原文是执行与证据链的一部分，随规则一起进入已发布配置。
-                "applicability": _compiled_applicability(item, inputs, material_scope),
-                "requirement": item.get("requirement", ""),
-                # 业务配置事实随已发布配置一起固化：停用行不会进入执行，检查等级/风险等级
-                # 原文与风险成立条件必须保留，否则报告与风险结果无法说明依据。
-                "config_status": item.get("config_status"),
-                "check_operator": item.get("check_operator"),
-                "check_level": item.get("check_level"),
-                "risk_level_value": item.get("risk_level_value"),
-                "risk_condition": item.get("risk_condition"),
-                "quality_supported": item.get("quality_supported"),
-                "source_ref": item.get("source_id"),
-                "source": item["source"],
-            }
-        )
-        # 主体/签章一致性检查：规则引用了**显式声明产物来源=印章识别**的字段。
-        # 判定依据是配置声明（03_字段抽取 的「产物来源」列），不是字段名里是否含某几个汉字：
-        # 中文名可以随便改，靠名字猜产物归属会把主体核对接到错误的证据源上。
-        # 这类规则的识别冲突或归属不明必须展示完整印章记录并进入人工复核。
-        #
-        # 必须先判定主体标记再算 route：execution_route 内部读的正是这个标记，
-        # 顺序颠倒会让主体规则拿不到 SEAL_SUBJECT_RETRIEVAL 取证方式，
-        # 索引准备、检索分支与执行分支就会互相不一致。
-        if compiled_rules[-1]["operator"] in {"FIELD_EQUAL", "FIELD_NOT_EQUAL"}:
-            compiled_rules[-1]["subject_check"] = any(
-                (artifact_source_by_field.get(item["field_key"]) or "") == "SEAL" for item in inputs
-            )
-        # 取证方式与判定方式在编译期固化：运行时按冻结计划分派，不让大模型临时决定路由。
-        compiled_rules[-1]["route"] = execution_route(compiled_rules[-1])
-
-    extraction_output_keys = {
-        output_key
-        for rule in compiled_rules
-        if rule["operator"] == "LLM_EXTRACT"
-        for output_key in rule["outputs"]
-    }
-    extraction_output_counts: dict[str, int] = {}
-    for rule in compiled_rules:
-        if rule["operator"] != "LLM_EXTRACT":
-            continue
-        for output_key in rule["outputs"]:
-            extraction_output_counts[output_key] = extraction_output_counts.get(output_key, 0) + 1
-    duplicate_extraction_outputs = sorted(
-        output_key for output_key, count in extraction_output_counts.items() if count > 1
-    )
-    if duplicate_extraction_outputs:
-        raise BusinessError(
-            "MANIFEST_EXTRACTION_OUTPUT_DUPLICATE",
-            "同一字段不能由多个字段抽取规则同时产出",
-            details={"field_keys": duplicate_extraction_outputs},
-        )
-    for field in compiled_fields:
-        if field["field_key"] in extraction_output_keys:
-            continue
-        extraction_parameters = {"instruction": field["instruction"]}
-        _validate_rule_parameters(f"抽取{field['name']}", "LLM_EXTRACT", extraction_parameters)
-        compiled_rules.append(
-            {
-                "rule_key": stable_key("rule", namespace, f"extract:{field['field_key']}"),
-                "name": f"抽取{field['name']}",
-                "node": "FIELD_EXTRACTION",
-                "operator": "LLM_EXTRACT",
-                "enabled": True,
-                "inputs": [],
-                "outputs": [field["field_key"]],
-                "materials": [field["material_key"]],
-                "source_rule_key": None,
-                "source_rule_keys": [],
-                "source_node": None,
-                "source_nodes": [],
-                "parameters": extraction_parameters,
-                # 抽取规则的适用条件不是用户配置项：保持“始终适用”，材料未上传时由执行期
-                # 呈现“缺输入”，不能借适用条件把缺材料说成规则不适用。
-                "applicability": {"kind": "ALWAYS", "material_keys": []},
-                "requirement": field["instruction"],
-                # 系统派生的抽取规则没有业务配置状态与等级：显式为 None，不伪造业务口径。
-                "config_status": None,
-                "check_operator": None,
-                "check_level": None,
-                "risk_level_value": None,
-                "risk_condition": None,
-                "quality_supported": None,
-                "source_ref": field.get("source_ref"),
-                "source": field["source"],
-            }
-        )
-
-    report_template = []
-    for section in sections:
-        # 停用章节不进入报告：Excel 里的停用章节在读取阶段就不产生候选，
-        # 经裁决改成停用的章节必须在编译期同样丢弃，否则两条路径结果不一致。
-        if section.get("config_status") == CONFIG_STATUS_DISABLED:
-            continue
-        field_refs = []
-        for ref in section.get("field_refs", []):
-            field_refs.append(
-                _resolve_alias(
-                    ref,
-                    section["source"]["sheet_key"],
-                    field_candidate_aliases,
-                    field_source_aliases,
-                    target_type="FIELD",
-                    error_code="MANIFEST_REPORT_FIELD_MISSING",
-                    error_message="报告章节引用的字段不存在或已被排除",
-                    details={"section": section["section_name"], "field_ref": ref},
-                )
-            )
-        material_scope = []
-        for ref in section.get("material_refs", []):
-            material_scope.append(
-                _resolve_alias(
-                    ref,
-                    section["source"]["sheet_key"],
-                    material_candidate_aliases,
-                    material_source_aliases,
-                    target_type="MATERIAL",
-                    error_code="MANIFEST_REPORT_MATERIAL_MISSING",
-                    error_message="报告章节引用的材料范围不存在或已被排除",
-                    details={"section": section["section_name"], "material_ref": ref},
-                )
-            )
-        # 展示字段必须属于报告材料范围：范围外材料不能自动进入普通字段明细。
-        for field_key in field_refs:
+        source_keys: list[str] = []
+        for reference in dict.fromkeys([
+            *(item.get("source_rule_refs") or []),
+            *([item["source_rule_ref"]] if item.get("source_rule_ref") else []),
+        ]):
+            for key in resolve(reference, item, "RULE", multiple=True):
+                if key not in source_keys:
+                    source_keys.append(key)
+        material_scope = [resolve(ref, item, "MATERIAL") for ref in item.get("material_refs", [])]
+        output_keys = [resolve(ref, item, "FIELD") for ref in item.get("output_field_refs", [])]
+        manifest_like["rules"].append({
+            "rule_key": rule_keys[item["candidate_ref"]],
+            "rule_code": item.get("rule_code") or item.get("source_id"),
+            "name": item["name"],
+            "node": item["node"],
+            "operator": item["operator"],
+            "enabled": item.get("config_status") != CONFIG_STATUS_DISABLED,
+            "inputs": inputs,
+            "outputs": output_keys,
+            "materials": material_scope,
+            "parameters": item.get("parameters") or {},
+            "requirement": item.get("requirement") or "",
+            "description": (item.get("requirement") or "") if item.get("operator") == "RISK_TRIGGER" else "",
+            "applicability": _compiled_applicability(item, inputs, material_scope),
+            "source_node": item.get("source_node"),
+            "source_rule_key": source_keys[0] if source_keys else None,
+            "source_rule_keys": source_keys,
+            "source_rule_codes": list(item.get("source_rule_codes") or []),
+            "check_level": item.get("check_level"),
+            "check_operator": item.get("check_operator"),
+            "risk_level_value": item.get("risk_level_value"),
+            "risk_condition": item.get("risk_condition"),
+            "config_status": item.get("config_status"),
+            "quality_supported": item.get("quality_supported"),
+            "source_ref": item.get("rule_code") or item.get("source_id"),
+            "origin": original_source(item),
+        })
+    for item in sections:
+        field_scope = [resolve(ref, item, "FIELD") for ref in item.get("field_refs", [])]
+        material_scope = [resolve(ref, item, "MATERIAL") for ref in item.get("material_refs", [])]
+        for field_key in field_scope:
             if material_scope and field_materials[field_key] not in material_scope:
                 raise BusinessError(
                     "MANIFEST_REPORT_FIELD_OUT_OF_SCOPE",
-                    f"报告章节“{section['section_name']}”的展示字段不属于该报告的材料范围",
-                    details={"section": section["section_name"], "field_key": field_key},
+                    "报告章节的展示字段不属于该报告的材料范围",
+                    details={"section": item["section_name"], "field_key": field_key},
                 )
-        report_template.append({**section, "field_keys": field_refs, "material_keys": material_scope})
-        report_template[-1].pop("field_refs", None)
-        report_template[-1].pop("material_refs", None)
+        report_code = item.get("report_code")
+        section_order = item.get("section_order")
+        if not isinstance(report_code, str) or not report_code.strip() or type(section_order) is not int or section_order < 1:
+            raise BusinessError(
+                "IMPORT_REPORT_SECTION_IDENTITY_INVALID",
+                "报告章节缺少有效的报告编号或章节顺序，无法保持跨导入身份",
+                details={"candidate_ref": item["candidate_ref"]},
+            )
+        section_identity = json.dumps([report_code.strip(), section_order], ensure_ascii=False, separators=(",", ":"))
+        manifest_like["report_template"].append({
+            "section_key": stable_key("sec", namespace, section_identity),
+            "section_name": item["section_name"],
+            "content_instruction": item["content_instruction"],
+            "field_keys": field_scope,
+            "material_keys": material_scope,
+            "report_code": item.get("report_code"),
+            "report_name": item.get("report_name"),
+            "formats": list(item.get("formats") or []),
+            "section_order": item.get("section_order"),
+            "content_type": item.get("content_type"),
+            "result_sort": item.get("result_sort"),
+            "config_status": item.get("config_status"),
+            "origin": original_source(item),
+        })
+    manifest_like["disabled_source_rows"] = [
+        {
+            "row_key": stable_key(
+                "disabled", namespace,
+                json.dumps(
+                    [sheet["suggested_role"], row["source"]["sheet_key"], row["source"]["row_no"]],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+            "sheet_role": sheet["suggested_role"],
+            "import_job_no": import_job_no,
+            **row,
+        }
+        for sheet in included
+        for row in sheet.get("disabled_rows", [])
+    ]
+    return editable_config_of(manifest_like, namespace=namespace)
 
-    report_groups = _build_report_groups(report_template, explicit_report_groups)
-    report_template.sort(key=lambda item: (item.get("report_code") or "", item.get("section_order") or 0))
 
-    if not any(
-        item["node"] == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" for item in compiled_rules
-    ):
-        # 生成报告不需要业务决策，也不需要附加章节：固定事实报告是系统能力，
-        # 因此报告规则无条件由后端确定性补齐，最小模板（无 07_报告模板）同样可发布。
-        compiled_rules.append(
+# 字段「取数期间 / 报表口径」两个列的业务中文名。发布编译、运行期写事实、
+# 草稿表单校验三处都要用它组报错文案，只维护一份。
+FIELD_SCOPE_LABELS = {"period_scope": "取数期间", "statement_scope": "报表口径"}
+
+
+def required_field_scope(
+    field: dict[str, Any],
+    key: str,
+    *,
+    code: str = "MANIFEST_FIELD_SCOPE_MISSING",
+    status_code: int = 400,
+) -> str:
+    """字段的取数期间 / 报表口径。**缺失即明确报错，不代填默认值。**
+
+    计算参数按这两项定位字段事实；默认成「本期 / 合并」会让一个声明了上期的参数
+    静默取到本期的数，而结果看起来完全正常。发布编译与运行期写事实必须用同一份判据，
+    因此这里是唯一的实现，调用方只传自己的错误码与状态码。
+    """
+    value = field.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise BusinessError(
+            code,
+            f"字段“{field.get('name')}”没有声明{FIELD_SCOPE_LABELS.get(key, key)}："
+            "计算参数按它定位字段事实，系统不提供默认值",
+            status_code=status_code,
+            details={"field_key": field.get("field_key"), "column": key},
+        )
+    return value.strip()
+
+
+def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str, Any]:
+    """已发布 manifest → 可编辑配置行的**唯一映射口径**。
+
+    两个调用方都从这里取：场景「基于此版创建修订」把已发布版本灌回草稿、
+    创建方案时把场景版本复制成方案自己的配置。**只允许有一处口径** —— 各写一份必然漂移，
+    表现是「同一个版本经两条路径回来的配置不一样」，而且不报错。
+
+    新版本保留 manifest 中的 `section_key`；历史版本没有该字段时，仍按原有的
+    名称、序号与 `namespace` 派生，避免旧版本无法创建修订或方案。
+
+    返回的每项都是**不含归属 id** 的字典，调用方据此构造自己的行；
+    `rules` **不跳过系统派生规则** —— 是否保留由调用方决定（方案要保留，草稿不要）。
+    """
+    applicability_of = lambda rule: rule.get("applicability") if isinstance(rule.get("applicability"), dict) else {}
+    optional = lambda key, value: {key: value} if value is not None else {}
+
+    nodes = [
+        {
+            "node_code": str(node["node_code"]),
+            "node_type": str(node.get("node_type") or node["node_code"]),
+            "name": str(node.get("name") or node["node_code"]),
+            "sequence_no": int(node.get("sequence_no") or 1),
+            "depends_on": [str(code) for code in (node.get("depends_on") or [])],
+            "config_json": node.get("config_json"),
+            "enabled": bool(node.get("enabled", True)),
+        }
+        for node in manifest.get("nodes", [])
+    ]
+    sheets = [
+        {"sheet_role": str(sheet["sheet_role"]), "node_code": sheet.get("node_code")}
+        for sheet in manifest.get("selected_sheets", [])
+    ]
+    materials = [
+        {
+            "material_key": material["material_key"],
+            "name": material["name"],
+            "required": bool(material.get("required")),
+            "description": str(material.get("description") or ""),
+            # 来源业务编号：导出时要按它写回 Excel 的「材料编号」，丢掉会让导出缺必填编号。
+            "source_ref": material.get("source_ref"),
+            "origin_json": material.get("origin"),
+        }
+        for material in manifest.get("materials", [])
+    ]
+    fields = [
+        {
+            "field_key": field["field_key"],
+            "material_key": field["material_key"],
+            "name": field["name"],
+            "value_type": field["value_type"],
+            "unit": field.get("unit"),
+            # 币种是金额比较与加总的口径之一，不能只保留单位。
+            "currency": field.get("currency"),
+            # 产物来源：主体核对据此确定字段取自哪种产物，必须保留。
+            "artifact_source": field.get("artifact_source"),
+            # 取数期间与报表口径：计算参数按它们定位字段事实。
+            "period_scope": required_field_scope(field, "period_scope", code="MANIFEST_FIELD_SCOPE_MISSING"),
+            "statement_scope": required_field_scope(field, "statement_scope", code="MANIFEST_FIELD_SCOPE_MISSING"),
+            "required": bool(field.get("required")),
+            "instruction": str(field.get("instruction") or ""),
+            "source_ref": field.get("source_ref"),
+            "origin_json": field.get("origin"),
+        }
+        for field in manifest.get("fields", [])
+    ]
+    rules = []
+    for rule in manifest.get("rules", []):
+        applicability = applicability_of(rule)
+        rules.append(
             {
-                "rule_key": stable_key("rule", namespace, "report:render"),
-                "name": "生成审核报告",
-                "node": "REPORT_OUTPUT",
-                "operator": "REPORT_RENDER",
-                "enabled": True,
-                "inputs": [],
-                "outputs": [],
-                "materials": [],
-                "source_rule_key": None,
-                "source_rule_keys": [],
-                "source_node": None,
-                "source_nodes": [],
-                "parameters": {},
-                "applicability": {"kind": "ALWAYS", "material_keys": []},
-                "requirement": "",
-                "config_status": None,
-                "check_operator": None,
-                "check_level": None,
-                "risk_level_value": None,
-                "risk_condition": None,
-                "quality_supported": None,
-                "source_ref": None,
-                "source": sections[0]["source"] if sections else {"sheet_key": None, "row_no": None, "cells": []},
+                "rule_key": rule["rule_key"],
+                "name": rule["name"],
+                "node_code": rule["node"],
+                "operator_code": rule["operator"],
+                "enabled": bool(rule.get("enabled", True)),
+                # 是不是系统派生规则。判据只有一处（`is_system_rule`），调用方据此决定去留：
+                # 场景草稿丢掉它们（发布时重新派生），方案保留它们（用户可逐条取消）。
+                "is_system": is_system_rule(rule),
+                "rule_json": {
+                    "rule_code": rule.get("rule_code"),
+                    "name": rule["name"],
+                    "node": rule["node"],
+                    "operator": rule["operator"],
+                    "enabled": bool(rule.get("enabled", True)),
+                    "inputs": [
+                        {"field_key": item["field_key"], "material_key": item["material_key"]}
+                        for item in rule.get("inputs", [])
+                    ],
+                    "outputs": list(rule.get("outputs") or []),
+                    "materials": list(rule.get("materials", [])),
+                    "parameters": dict(rule.get("parameters") or {}),
+                    "requirement": str(rule.get("requirement") or ""),
+                    "description": str(rule.get("description") or ""),
+                    "applicability": {
+                        "kind": applicability.get("kind", "ALWAYS"),
+                        **(
+                            {"material_keys": list(applicability.get("material_keys") or [])}
+                            if applicability.get("material_keys")
+                            else {}
+                        ),
+                    },
+                    "source_node": rule.get("source_node"),
+                    "source_rule_key": rule.get("source_rule_key"),
+                    # 以下业务配置事实是人工维护的审核口径，页面表单不一定每一项都能编辑，
+                    # 整块覆盖 rule_json 时不能丢：检查等级与「合格要求」原文、风险等级原文与
+                    # 成立条件、风险的多来源、业务配置状态与能力缺口标记。
+                    **optional("check_level", rule.get("check_level")),
+                    **optional("check_operator", rule.get("check_operator")),
+                    **optional("risk_level_value", rule.get("risk_level_value")),
+                    **optional("risk_condition", rule.get("risk_condition")),
+                    **(
+                        {"source_rule_keys": list(rule["source_rule_keys"])}
+                        if rule.get("source_rule_keys")
+                        else {}
+                    ),
+                    **(
+                        {"source_rule_codes": list(rule["source_rule_codes"])}
+                        if rule.get("source_rule_codes")
+                        else {}
+                    ),
+                    **optional("config_status", rule.get("config_status")),
+                    **optional("quality_supported", rule.get("quality_supported")),
+                },
+                "source_ref": rule.get("source_ref"),
+                "origin_json": rule.get("origin"),
             }
         )
-
-    _ensure_unique_rules(compiled_rules)
-    _ensure_manifest_node_coverage(compiled_rules, report_template)
-
-    manifest = {
-        "manifest_version": "1.0",
-        "profile_version": workbook_ir["profile_version"],
-        "scene_code": scene_code,
-        "scene_name": scene_name,
-        "materials": sorted(compiled_materials, key=lambda item: item["material_key"]),
-        "fields": sorted(compiled_fields, key=lambda item: item["field_key"]),
-        "rules": sorted(compiled_rules, key=lambda item: item["rule_key"]),
-        "nodes": [
-            {"node_code": code, "name": name, "sequence_no": index, "enabled": True}
-            for index, (code, name) in enumerate(NODE_DEFINITIONS, start=1)
-        ],
-        "report_template": report_template,
-        # 报告分组：报告编号、报告名称、材料范围、输出格式、结果排序与章节顺序。
-        # 「报告只能是附加章节」的旧范围在这里更新为按报告编号分组的多报告配置。
-        "report_groups": report_groups,
-        # 显式记录本模板未配置的业务校验节点，供任务节点展示与报告说明使用。
-        "unconfigured_check_nodes": unconfigured_check_nodes(compiled_rules),
-        # 已配置但当前无法无条件执行的检查。它们在预览里必须可见，
-        # 不能被当成已支持的能力，也不能在执行时静默跳过。
-        "capability_gaps": capability_gaps(compiled_rules),
-        # 能力覆盖结果随版本一起冻结（参与 manifest_hash）：每条启用规则引用了哪项能力、
-        # 哪一版、输入形态、可表达的状态与输出键、以及**发布当时**是否已实现。
-        # 后续能力实现状态变化不会重新解释这个已发布版本的含义。
-        "capability_coverage": capabilities.coverage_of(compiled_rules),
-        "capability_version": capabilities.CAPABILITY_VERSION,
-        "compiled_at": compiled_at.isoformat(),
-        "source_workbook_id": workbook_ir["workbook_id"],
+    sections = []
+    for index, section in enumerate(manifest.get("report_template", []), start=1):
+        section_key = section.get("section_key")
+        if "section_key" in section:
+            if not isinstance(section_key, str) or not section_key.strip():
+                raise BusinessError(
+                    "MANIFEST_SECTION_KEY_INVALID",
+                    "已发布报告章节的稳定键无效",
+                    details={"section_name": section.get("section_name"), "section_key": section_key},
+                )
+        else:
+            section_key = stable_key(
+                "sec", namespace, section.get("section_name", f"section-{index}") + f"-{index}"
+            )
+        sections.append({
+            "section_key": section_key,
+            "title": section.get("section_name", f"章节{index}"),
+            "content_instruction": str(section.get("content_instruction") or ""),
+            "field_keys": list(section.get("field_keys", [])),
+            # 节点版的报告分组属性：少了它们，页面保存一次就会把按编号分组的报告
+            # 退回成旧的「附加展示章节」。
+            "report_code": section.get("report_code"),
+            "report_name": section.get("report_name"),
+            "material_keys": list(section.get("material_keys") or []) or None,
+            "formats": list(section.get("formats") or []) or None,
+            "section_order": section.get("section_order"),
+            "content_type": section.get("content_type"),
+            "result_sort": section.get("result_sort"),
+            "config_status": section.get("config_status"),
+            "origin_json": section.get("origin"),
+        })
+    inputs = manifest.get("calculation_inputs")
+    compiled_calculations = manifest.get("calculations")
+    if isinstance(inputs, list) and inputs:
+        calculation_json: Any = inputs
+    elif isinstance(compiled_calculations, list) and compiled_calculations:
+        # 历史版本只有编译产物：保留下来，发布时核对字段编号与节点仍在，不丢计算配置。
+        calculation_json = {"frozen": compiled_calculations}
+    else:
+        calculation_json = []
+    return {
+        "nodes": nodes,
+        "sheets": sheets,
+        "materials": materials,
+        "fields": fields,
+        "rules": rules,
+        "sections": sections,
+        "disabled_source_rows": list(manifest.get("disabled_source_rows") or []),
+        "calculation_json": calculation_json,
     }
-    canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    manifest["manifest_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return manifest
+
+
+def _config_value(item: Any, key: str, default: Any = None) -> Any:
+    """从配置行取一个列值。行可以是 ORM 行，也可以是字典。
+
+    方案的节点与选用 Sheet 以只读 JSON 冻结（不是表行），场景的则是 `scenario_draft_*` 行；
+    两者的列名完全一致，因此同一份映射能服务两边。
+    """
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def compile_inputs_of_config(
+    *,
+    materials: list[Any],
+    fields: list[Any],
+    rules: list[Any],
+    sections: list[Any],
+    nodes: list[Any],
+    sheets: list[Any],
+    profile_version: str | None,
+) -> dict[str, Any]:
+    """可编辑配置行 → `compile_form_manifest` 的入参。**唯一映射口径**。
+
+    场景草稿发布与方案保存都从这里取 —— 各写一份必然漂移，表现是「同一个版本经两条
+    路径编译出的产物不一样」，而且不会报错。行的类型允许混用（ORM 行 / 字典），
+    见 `_config_value`。
+    """
+    # 规则的节点实例码 → 能力类型：编译期比的是能力类型，实例码是用户自己起的名字。
+    node_type_by_code = {
+        str(_config_value(node, "node_code")): _config_value(node, "node_type") for node in nodes
+    }
+    return {
+        "materials": [
+            {
+                "material_key": _config_value(item, "material_key"),
+                "name": _config_value(item, "name"),
+                "required": bool(_config_value(item, "required")),
+                "description": str(_config_value(item, "description") or ""),
+                # 来源业务编号进入编译结果，导出时按它写回 Excel 对应列。
+                "source_ref": _config_value(item, "source_ref"),
+                "origin": _config_value(item, "origin_json"),
+            }
+            for item in materials
+        ],
+        "fields": [
+            {
+                "field_key": _config_value(item, "field_key"),
+                "material_key": _config_value(item, "material_key"),
+                "name": _config_value(item, "name"),
+                "value_type": _config_value(item, "value_type"),
+                "unit": _config_value(item, "unit"),
+                # 币种是金额比较与加总的口径之一；产物来源决定主体核对从哪种产物取值。
+                "currency": _config_value(item, "currency"),
+                "artifact_source": _config_value(item, "artifact_source"),
+                "period_scope": _config_value(item, "period_scope"),
+                "statement_scope": _config_value(item, "statement_scope"),
+                "required": bool(_config_value(item, "required")),
+                "instruction": str(_config_value(item, "instruction") or ""),
+                "source_ref": _config_value(item, "source_ref"),
+                "origin": _config_value(item, "origin_json"),
+            }
+            for item in fields
+        ],
+        "rules": [
+            {
+                **(_config_value(item, "rule_json") or {}),
+                "rule_key": _config_value(item, "rule_key"),
+                "name": _config_value(item, "name"),
+                # `node` 是**节点实例码**（规则归属），`node_type` 才是能力类型：
+                # 算子约束、节点专属校验与来源节点判定都比能力类型。两者必须分开传。
+                "node": _config_value(item, "node_code"),
+                "node_type": node_type_by_code.get(_config_value(item, "node_code")),
+                "operator": _config_value(item, "operator_code"),
+                "enabled": bool(_config_value(item, "enabled")),
+                "source_ref": _config_value(item, "source_ref"),
+                "origin": _config_value(item, "origin_json"),
+            }
+            for item in rules
+        ],
+        "sections": [
+            {
+                "section_key": _config_value(item, "section_key"),
+                "section_name": _config_value(item, "title"),
+                "content_instruction": _config_value(item, "content_instruction"),
+                "field_keys": list(_config_value(item, "field_keys") or []),
+                "report_code": _config_value(item, "report_code"),
+                "report_name": _config_value(item, "report_name"),
+                "material_keys": list(_config_value(item, "material_keys") or []),
+                "formats": list(_config_value(item, "formats") or []),
+                "section_order": _config_value(item, "section_order"),
+                "content_type": _config_value(item, "content_type"),
+                "result_sort": _config_value(item, "result_sort"),
+                "config_status": _config_value(item, "config_status"),
+                "origin": _config_value(item, "origin_json"),
+            }
+            for item in sections
+        ],
+        # 节点实例是**用户配置**的流程：原样固化，不由系统按规则内容生成。
+        "node_instances": [
+            {
+                "node_code": _config_value(node, "node_code"),
+                "node_type": _config_value(node, "node_type"),
+                "name": _config_value(node, "name"),
+                "sequence_no": _config_value(node, "sequence_no"),
+                "depends_on": list(_config_value(node, "depends_on") or []),
+                "config_json": _config_value(node, "config_json"),
+                "enabled": bool(_config_value(node, "enabled")),
+            }
+            for node in nodes
+        ],
+        # 选用哪些 Sheet：模板导出与「本场景/本方案用哪些表」都读它。
+        "selected_sheets": [
+            {"sheet_role": _config_value(item, "sheet_role"), "node_code": _config_value(item, "node_code")}
+            for item in sheets
+        ],
+        # 统一模板协议的版本标识。系统只有一份协议，版本只记录「按哪一版解释」；
+        # 由调用方解析（没记来源时用当前版本），不在这里默认——那会让本函数反向依赖协议模块。
+        "profile_version": profile_version,
+    }
+
+
+def calc_field_scope(field: dict[str, Any], key: str) -> str:
+    """**被计算参数引用**的字段的定位口径。在这里「不适用」不可用。
+
+    `required_field_scope` 只保证「声明了且非空」——对运行期写事实足够了：
+    声明为「不适用」的字段照样能写出一条口径明确的事实。
+    但计算参数是按 (字段, 期间, 报表口径, 主体) 去**定位**事实的，
+    拿「不适用」去定位永远取不到数，只会在运行期变成「输入缺失」。
+    因此在发布期就明确阻断，并指出该字段被计算引用这一事实。
+    """
+    value = required_field_scope(field, key)
+    if value == SCOPE_NOT_APPLICABLE:
+        raise BusinessError(
+            "MANIFEST_CALC_FIELD_SCOPE_NOT_APPLICABLE",
+            f"字段“{field.get('name')}”的{FIELD_SCOPE_LABELS.get(key, key)}声明为「不适用」，"
+            "但计算参数按它定位事实，无法执行：请在 03_字段 里为该字段声明真实口径，"
+            "或把它从计算公式中移除",
+            status_code=409,
+            details={"field_key": field.get("field_key"), "column": key},
+        )
+    return value
+
+
+def compile_calculations(
+    calculations: list[dict[str, Any]],
+    *,
+    field_code_index: dict[str, dict[str, Any]],
+    node_instances: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把计算规则候选编译成已发布配置里的计算段。
+
+    这是**发布期**的唯一入口：公式在这里解析成受限 AST，参数在这里解析成确定的
+    取值来源，单位币种在这里核对，依赖在这里成环检查，判定区间在这里查重叠。
+    编译产物随 manifest 冻结，运行期只读它。
+
+    `field_code_index` 把业务字段编号映射到字段定义（field_key / 单位 / 币种 / 材料）。
+    计算参数按业务编号引用字段，而已发布配置里的字段身份是 field_key，
+    两者必须在这里对上；运行期不再做这个转换。
+
+    计算规则必须落在**用户配置的计算节点实例**上：候选自带 `node_code`（来自计算三表
+    绑定的那个节点实例）。缺失时按能力类型取唯一实例——同类多个时无法确定归属，
+    明确报错而不是静默挑一个。
+    """
+    if not calculations:
+        return []
+    # 转换期识别出的「公式引用了未声明参数」必须在**发布期**阻断。
+    # 转换期不抛错是为了让用户能看到整份规则库；这里才是真正的门禁：
+    # 参数不全的计算规则如果进了已发布配置，运行期只会表现为「输入事实取不到」，
+    # 用户看到的是「这条指标没结论」，而不是「配置里少了一个参数声明」。
+    unresolved = [
+        item
+        for item in calculations
+        if item.get("unresolved_identifiers")
+    ]
+    if unresolved:
+        raise BusinessError(
+            "MANIFEST_CALC_IDENTIFIER_UNRESOLVED",
+            "以下计算规则引用了未声明的参数，不能发布："
+            + "；".join(
+                f"“{item['rule_code']}”引用 " + "、".join(f"“{name}”" for name in item["unresolved_identifiers"])
+                for item in unresolved
+            )
+            + "。请在 07_计算参数补齐参数编号及取值来源，或修正 06_计算定义中的公式后重新转换",
+            details={
+                "rules": [
+                    {"rule_code": item["rule_code"], "unresolved": list(item["unresolved_identifiers"])}
+                    for item in unresolved
+                ]
+            },
+        )
+    definitions: list[calc.CalculationDefinition] = []
+    parameters_by_rule: dict[str, list[calc.CalculationParameter]] = {}
+    bands_by_rule: dict[str, list[calc.JudgementBand]] = {}
+    for item in calculations:
+        rule_code = str(item["rule_code"])
+        parameters_by_rule.setdefault(rule_code, [])
+        bands_by_rule.setdefault(rule_code, [])
+    field_catalog: dict[str, calc.FieldReference] = {}
+    for item in calculations:
+        definitions.append(_calculation_definition(item))
+        rule_code = str(item["rule_code"])
+        for parameter in item.get("parameters") or []:
+            parameters_by_rule[rule_code].append(_calculation_parameter(parameter))
+            if parameter.get("source_type") != "FIELD":
+                continue
+            field_code = str(parameter.get("source_code") or "")
+            field = field_code_index.get(field_code)
+            if field is None:
+                # 计算参数引用的字段编号在字段集合里不存在：这是配置错误，
+                # 必须在发布期报出，不能留到运行期变成「字段事实取不到」。
+                raise BusinessError(
+                    "MANIFEST_CALC_FIELD_MISSING",
+                    f"计算规则“{rule_code}”的参数“{parameter.get('parameter_code')}”"
+                    f"引用的字段编号“{field_code}”不在本场景的字段集合里",
+                    details={"rule_code": rule_code, "field_code": field_code},
+                )
+            field_catalog[field_code] = calc.FieldReference(
+                field_code=field_code,
+                field_key=str(field["field_key"]),
+                name=str(field["name"]),
+                value_type=str(field.get("value_type") or "DECIMAL"),
+                # 单位与币种来自字段配置：计算编译会核对它们是否声明与一致，
+                # 未声明时明确报错，不代填「元」或「人民币」。
+                unit=field.get("unit"),
+                currency=field.get("currency"),
+                material_key=str(field.get("material_key") or ""),
+                material_name="",
+                # 取数期间与报表口径：来自字段配置（03_字段 的声明）。
+                # 缺了明确报错——默认成「本期 / 合并」会让声明了上期的参数静默取到本期的数；
+                # 声明成「不适用」同样不行：计算参数按它定位事实，定位不到就等于取不到数。
+                period_scope=calc_field_scope(field, "period_scope"),
+                statement_scope=calc_field_scope(field, "statement_scope"),
+            )
+        for band in item.get("bands") or []:
+            bands_by_rule[rule_code].append(_judgement_band(band))
+    # 每条计算规则的节点实例：候选自带 `node_code`（计算三表绑定的那个实例）；
+    # 缺失时按能力类型取唯一实例。一次编译里的全部计算规则必须落在**同一个**实例上——
+    # 编译器只接受一个实例码，多个实例意味着这份候选集合需要按实例拆开编译。
+    node_codes = sorted(
+        {
+            str(item["node_code"]) if item.get("node_code") else instance_code_of_type(
+                node_instances, NODE_TYPE_CALCULATION, purpose="计算"
+            )
+            for item in calculations
+        }
+    )
+    if len(node_codes) > 1:
+        raise BusinessError(
+            "MANIFEST_CALC_NODE_AMBIGUOUS",
+            "本次计算规则分别落在不同的计算节点实例上，无法一次编译："
+            + "、".join(f"“{code}”" for code in node_codes),
+            details={"node_codes": node_codes},
+        )
+    outcome = calc.compile_calculation_rules(
+        definitions=definitions,
+        parameters_by_rule=parameters_by_rule,
+        bands_by_rule=bands_by_rule,
+        field_catalog=field_catalog,
+        node_instance_code=node_codes[0],
+    )
+    # 缺判定区间的计算规则不能进已发布配置：它算出来的数没有任何业务结论，
+    # 而报告与风险规则引用它时会拿到一个「算完了但没有结论」的结果——
+    # 那在页面上与「正常」没有区别。这里显式阻断，由业务补齐区间后重新发布。
+    missing_bands = [
+        rule.definition.rule_code for rule in outcome.rules if not rule.bands
+    ]
+    if missing_bands:
+        raise BusinessError(
+            "MANIFEST_CALC_BAND_MISSING",
+            "以下计算规则没有可用的判定区间，不能发布："
+            + "、".join(missing_bands)
+            + "。计算结果没有区间可判定时不会形成业务结论，系统不代填默认区间",
+            details={"rule_codes": sorted(missing_bands)},
+        )
+    payload: list[dict[str, Any]] = []
+    sources_by_rule = {str(item["rule_code"]): item for item in calculations}
+    for rule in outcome.rules:
+        source = sources_by_rule[rule.definition.rule_code]
+        payload.append(
+            {
+                "rule_code": rule.definition.rule_code,
+                "rule_name": rule.definition.rule_name,
+                "calculation_type": rule.definition.calculation_type,
+                "formula": rule.definition.formula,
+                "result_code": rule.definition.result_code,
+                "result_type": rule.definition.result_type,
+                "unit": rule.definition.unit,
+                "currency": rule.definition.currency,
+                "period_policy": rule.definition.period_policy,
+                # 报表口径必须随编译产物一起投影：派生事实按它落库，导出也按它写回
+                # 「报表口径」列。漏了它，导出的该列为空，重新导入直接报缺列。
+                "statement_scope": rule.definition.statement_scope,
+                "status": rule.definition.status,
+                "remark": rule.definition.remark,
+                "parameters": [item.model_dump(mode="json") for item in rule.parameters],
+                # 每个参数解析后的定位口径（期间 + 报表口径）：执行期按它建立字段事实的
+                # 定位键。漏了它，运行期取不到任何事实，报「输入缺失」而看不出原因。
+                "parameter_scopes": dict(rule.parameter_scopes),
+                "bands": [item.model_dump(mode="json") for item in rule.bands],
+                "ast": rule.ast,
+                "expression_hash": rule.expression_hash,
+                "depends_on_result_codes": rule.depends_on_result_codes,
+                "depends_on_field_codes": rule.depends_on_field_codes,
+                "node_instance_code": rule.node_instance_code,
+                # 业务说明类配置事实随计算规则一起冻结：导出时必须原样写回「指标类别」
+                # 「指标说明」「风险等级」「结果区间定义」等列。这些列是**配置事实**，
+                # 不参与执行判定，但丢掉它们会让导出的文件重新导入时报
+                # 「指标类别」为空，进而以 CALC_CATEGORY_UNSUPPORTED 失败。
+                "category": str(rule.definition.category),
+                "description": str(rule.definition.description),
+                "risk_level_text": str(rule.definition.risk_level_text),
+                "bands_text": str(rule.definition.bands_text),
+                "verification_logic": str(rule.definition.verification_logic),
+                "review_advice": str(rule.definition.review_advice),
+                **({"origin": source["origin"]} if source.get("origin") else {}),
+                "parameter_origins": {
+                    item["parameter_code"]: item["origin"]
+                    for item in source.get("parameters") or [] if item.get("origin")
+                },
+                "band_origins": {
+                    item["condition_code"]: item["origin"]
+                    for item in source.get("bands") or [] if item.get("origin")
+                },
+            }
+        )
+    return payload
+
+
+def _calculation_definition(item: dict[str, Any]) -> Any:
+    try:
+        return calc.CalculationDefinition.model_validate(
+            {
+                "rule_code": item["rule_code"],
+                "rule_name": item["rule_name"],
+                "calculation_type": item["calculation_type"],
+                "formula": item["formula"],
+                "result_code": item["result_code"],
+                "result_type": item["result_type"],
+                "unit": item.get("unit"),
+                "currency": item.get("currency"),
+                "period_policy": item["period_policy"],
+                # 计算结果的报表口径：派生事实按它落库，下游引用与报告都读它。
+                # 缺了明确报错（契约里是必填），不代填「合并报表」。
+                "statement_scope": item["statement_scope"],
+                "status": item.get("status") or "CLEAR",
+                "remark": item.get("remark") or "",
+                # 业务说明类配置事实：随定义一起进入已发布配置，导出时原样写回。
+                "category": item.get("category") or "",
+                "description": item.get("description") or "",
+                "risk_level_text": item.get("risk_level_text") or "",
+                "bands_text": item.get("bands_text") or "",
+                "verification_logic": item.get("verification_logic") or "",
+                "review_advice": item.get("review_advice") or "",
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - 契约错误转成带定位的业务错误
+        raise BusinessError(
+            "MANIFEST_CALC_DEFINITION_INVALID",
+            f"计算规则“{item.get('rule_code')}”的定义不符合计算契约：{exc}",
+            details={"rule_code": item.get("rule_code")},
+        ) from exc
+
+
+def _calculation_parameter(item: dict[str, Any]) -> Any:
+    try:
+        return calc.CalculationParameter.model_validate(
+            {key: value for key, value in item.items() if key not in {"source", "origin"}}
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise BusinessError(
+            "MANIFEST_CALC_PARAMETER_INVALID",
+            f"计算参数“{item.get('parameter_code')}”不符合计算契约：{exc}",
+            details={"parameter_code": item.get("parameter_code")},
+        ) from exc
+
+
+def _judgement_band(item: dict[str, Any]) -> Any:
+    try:
+        return calc.JudgementBand.model_validate(
+            {key: value for key, value in item.items() if key not in {"source", "origin"}}
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise BusinessError(
+            "MANIFEST_CALC_BAND_INVALID",
+            f"计算判定“{item.get('condition_code')}”不符合判定契约：{exc}",
+            details={"condition_code": item.get("condition_code")},
+        ) from exc
+
+
+def build_node_plan(
+    rules: list[dict[str, Any]],
+    calculations: list[dict[str, Any]] | None = None,
+    node_instances: list[dict[str, Any]] | None = None,
+    fields: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """把**用户配置的节点实例**编译成 manifest 的节点计划。
+
+    节点不再由系统生成：以前按规则内容或 `LEGACY_NODE_SEQUENCE` 自动推导节点，
+    结果是「用户在页面上配的流程」与「实际执行的流程」可能不一致，而两边看起来都正常。
+    现在节点的存在、顺序与依赖**完全来自用户保存的节点实例**：
+
+    - `node_code` 是实例码（同一场景可以有两个同类节点），`node_type` 才是能力类型；
+    - `sequence_no` 是用户配置的顺序，只用于展示；`depends_on` 是执行依据；
+    - 缺失依赖、自依赖、循环依赖与顺序冲突在**发布期**校验，运行期不再遇到。
+
+    规则必须落在已配置的节点上：一条规则指向不存在的节点实例时显式报错——
+    静默丢掉它会让一条已声明的检查在执行时消失。
+    """
+    instances = list(node_instances or [])
+    if not instances:
+        raise BusinessError(
+            "MANIFEST_NODE_REQUIRED",
+            "场景没有配置任何业务节点，无法发布：节点与节点顺序必须由用户配置",
+            details={"rule_count": len(rules)},
+        )
+    known_codes = {str(item["node_code"]) for item in instances}
+    # 规则与计算规则都必须落在已配置的节点实例上：计算规则也携带 `node_code`，
+    # 只校验普通规则会让一条计算规则挂到不存在的实例上，直到运行期才暴露。
+    unknown_rules = sorted(
+        {
+            str(rule.get("node"))
+            for rule in rules
+            if rule.get("enabled", True) and str(rule.get("node")) not in known_codes
+        }
+        | {
+            # 编译后的计算规则归属键是 `node_instance_code`（实例码）；
+            # 编译**候选**用的是 `node_code`。本函数拿到的是编译产物，
+            # 读错键会抛 KeyError 而不是报出「规则指向不存在的节点」。
+            str(item.get("node_instance_code") or item.get("node_code"))
+            for item in (calculations or [])
+            if str(item.get("node_instance_code") or item.get("node_code")) not in known_codes
+        }
+    )
+    if unknown_rules:
+        raise BusinessError(
+            "MANIFEST_RULE_NODE_MISSING",
+            "以下规则指向的节点不在本场景配置的节点清单里："
+            + "、".join(f"“{item}”" for item in unknown_rules)
+            + "。请先在场景配置里建立对应节点，或把这些规则改挂到已配置的节点上",
+            details={"node_codes": unknown_rules, "configured_nodes": sorted(known_codes)},
+        )
+    calculation_codes_by_node: dict[str, list[str]] = {}
+    for calculation in calculations or []:
+        if calculation.get("status") == CONFIG_STATUS_DISABLED:
+            continue
+        node_code = str(calculation.get("node_instance_code") or calculation.get("node_code"))
+        calculation_codes_by_node.setdefault(node_code, []).append(str(calculation["rule_code"]))
+    plans: list[dict[str, Any]] = []
+    for item in sorted(instances, key=lambda row: (int(row.get("sequence_no") or 0), str(row["node_code"]))):
+        config = dict(item.get("config_json") or {})
+        if item["node_type"] == NODE_TYPE_CALCULATION:
+            config["calculation_rule_codes"] = sorted(calculation_codes_by_node.get(str(item["node_code"]), []))
+        plans.append(
+            {
+                "node_code": str(item["node_code"]),
+                "node_type": str(item["node_type"]),
+                "name": str(item.get("name") or item["node_code"]),
+                "sequence_no": int(item.get("sequence_no") or 0),
+                "depends_on": [str(code) for code in (item.get("depends_on") or [])],
+                "config_json": config or None,
+                "enabled": bool(item.get("enabled", True)),
+            }
+        )
+    # 依赖必须指向真实存在的实例，且不得自依赖/成环/依赖停用节点。
+    workflow_dag.validate_dag(workflow_dag.plans_of({"nodes": plans}))
+    _assert_sequence_consistent(plans)
+    _assert_risk_source_dependencies(rules, calculations or [], fields or [], plans)
+    return plans
+
+
+def _assert_risk_source_dependencies(
+    rules: list[dict[str, Any]],
+    calculations: list[dict[str, Any]],
+    fields: list[dict[str, Any]],
+    nodes: list[dict[str, Any]],
+) -> None:
+    node_dependencies = {item["node_code"]: item["depends_on"] for item in nodes}
+    node_types = {item["node_code"]: item["node_type"] for item in nodes}
+    rules_by_key = {item["rule_key"]: item for item in rules}
+
+    def ancestors_of(node_code: str) -> set[str]:
+        ancestors: set[str] = set()
+        pending = list(node_dependencies[node_code])
+        while pending:
+            dependency = pending.pop()
+            if dependency in ancestors:
+                continue
+            ancestors.add(dependency)
+            pending.extend(node_dependencies[dependency])
+        return ancestors
+
+    for rule in rules:
+        if rule["operator"] != "RISK_TRIGGER" or not rule.get("enabled", True):
+            continue
+        source_nodes: set[str] = set()
+        source_keys = list(dict.fromkeys(rule.get("source_rule_keys") or []))
+        if rule.get("source_rule_key") and rule["source_rule_key"] not in source_keys:
+            source_keys.insert(0, rule["source_rule_key"])
+        for key in source_keys:
+            source = rules_by_key.get(key)
+            if source is None or not source.get("enabled", True):
+                raise BusinessError("MANIFEST_RISK_SOURCE_MISSING", "风险来源规则不存在或已停用", details={"rule": rule["name"], "source_rule_key": key})
+            if source["operator"] == "RISK_TRIGGER":
+                raise BusinessError("MANIFEST_RISK_SOURCE_INVALID", "风险规则不能引用自身或另一条风险规则", details={"rule": rule["name"], "source_rule_key": key})
+            source_nodes.add(source["node"])
+        for code in rule.get("source_rule_codes") or []:
+            result_matches = [
+                item for item in calculations
+                if item.get("result_code") == code and item.get("status") != CONFIG_STATUS_DISABLED
+            ]
+            field_matches = [item for item in fields if item.get("source_ref") == code]
+            if len(result_matches) + len(field_matches) != 1:
+                raise BusinessError("MANIFEST_RISK_SOURCE_MISSING", "风险来源编号不能唯一定位已启用的计算结果或字段", details={"rule": rule["name"], "source_code": code})
+            if result_matches:
+                source_nodes.add(str(result_matches[0]["node_instance_code"]))
+                continue
+            raise BusinessError("MANIFEST_RISK_FIELD_SOURCE_UNJUDGED", "风险来源是字段编号，但字段抽取成功不等于检查合格：请关联有判定标准的检查规则", details={"rule": rule["name"], "source_code": code})
+        allowed_types = SOURCE_NODE_RULE_NODES.get(rule.get("source_node") or "")
+        if allowed_types is not None:
+            mismatched = sorted(code for code in source_nodes if node_types[code] not in allowed_types)
+            if mismatched:
+                raise BusinessError("MANIFEST_RISK_SOURCE_NODE_MISMATCH", "风险来源与声明的来源节点不一致", details={"rule": rule["name"], "source_nodes": mismatched, "declared_source_node": rule["source_node"]})
+        available = ancestors_of(rule["node"])
+        missing = sorted(source_nodes - available)
+        if missing:
+            raise BusinessError(
+                "MANIFEST_RISK_DEPENDENCY_MISSING",
+                "风险节点没有依赖全部来源节点，执行时可能先于来源产生结果",
+                details={"rule": rule["name"], "risk_node": rule["node"], "missing_source_nodes": missing},
+            )
+        rule["source_nodes"] = sorted(set(rule.get("source_nodes") or []) | {node_types[code] for code in source_nodes})
+
+
+def _assert_sequence_consistent(plans: list[dict[str, Any]]) -> None:
+    """顺序冲突校验：依赖必须排在被依赖节点之后。
+
+    `sequence_no` 只用于展示，`depends_on` 才是执行依据；两者不一致时页面显示的顺序
+    与真实执行顺序相反，而依赖图仍然正确——这种不一致最难发现，因此必须在发布期拦下。
+    """
+    position = {str(item["node_code"]): index for index, item in enumerate(plans)}
+    conflicts: list[dict[str, Any]] = []
+    for item in plans:
+        for dependency in item["depends_on"]:
+            if position.get(str(dependency), -1) >= position[str(item["node_code"])]:
+                conflicts.append(
+                    {"node_code": item["node_code"], "depends_on": dependency}
+                )
+    if conflicts:
+        raise BusinessError(
+            "MANIFEST_NODE_SEQUENCE_CONFLICT",
+            "节点顺序与依赖关系冲突：被依赖的节点排在了依赖它的节点之后——"
+            + "、".join(f"“{item['node_code']}”依赖“{item['depends_on']}”" for item in conflicts),
+            details={"conflicts": conflicts},
+        )
 
 
 def build_task_schema(
@@ -2250,19 +3024,25 @@ def build_task_schema(
     *,
     allow_empty: bool = False,
 ) -> dict[str, Any]:
+    """从已发布 manifest 算出某个任务的执行范围：**就是用户勾选的那些规则**。
+
+    enabled_rule_keys=None 表示未选择过（视为全部启用）；[] 表示显式一条业务规则都没选；
+    两者不能混：把 [] 当成 None 会让用户取消掉的规则重新生效。
+
+    **系统不替用户补入任何规则。** 方案与任务是用户自己的范围选择：勾了什么就跑什么，
+    没勾的就不跑。原先的三类补入——报告生成/材料检查的无条件补入、风险来源依赖闭包、
+    字段依赖闭包——都已移除；缺规则造成的后果由各节点如实表达（拿不到输入就报
+    「无法判断」，没有规则就记 SKIPPED 并写明原因），绝不写成通过。
+    """
     known_rules = {item["rule_key"]: item for item in manifest["rules"]}
     available_keys = {key for key, rule in known_rules.items() if rule.get("enabled", True)}
-    # 报告生成是系统技术规则：用户误取消它不能让任务无法创建，由后端保证补回。
-    system_rule_keys = {
-        key for key, rule in known_rules.items() if rule["node"] == "REPORT_OUTPUT" and rule["operator"] == "REPORT_RENDER"
-    }
     if enabled_rule_keys is None:
         selected_keys = set(available_keys)
     elif not enabled_rule_keys and not allow_empty:
         raise BusinessError("TASK_RULE_EMPTY", "创建任务时至少需要启用一条规则")
     elif not enabled_rule_keys:
-        # allow_empty 仅供方案范围预览使用：空显式集合时仍要展示“系统会补入哪些规则、
-        # 哪些业务规则未启用”，不能伪装成全部启用，也不能按建任务门禁直接报错。
+        # allow_empty 仅供方案范围预览使用：空集合要如实展示「哪些规则未启用」，
+        # 不能伪装成全部启用，也不能按建任务门禁直接报错。
         selected_keys = set()
     else:
         selected_keys = set(enabled_rule_keys)
@@ -2273,91 +3053,59 @@ def build_task_schema(
     if disabled:
         raise BusinessError("TASK_RULE_DISABLED", "创建任务时选择了未启用规则", details={"rule_keys": sorted(disabled)})
 
-    requested_keys = set(selected_keys)
-    selected_keys |= system_rule_keys
-
-    # 自动补入的每一条规则都要能说出真实原因：报告生成能力、风险来源依赖、
-    # 或字段抽取依赖。页面据此说明“为什么用户没选它却仍会执行”。
     fields_by_key = {item["field_key"]: item for item in manifest["fields"]}
-    auto_reasons: dict[str, str] = {
-        key: "报告生成依赖：报告输出由系统保证执行" for key in system_rule_keys
-    }
-
-    # 任务执行需要先完成来源规则和字段抽取；闭包写入任务快照，后续节点不再猜测依赖。
-    required_fields = {
-        field_key for section in manifest.get("report_template", []) for field_key in section.get("field_keys", [])
-    }
-    while True:
-        before = set(selected_keys)
-        for rule_key in sorted(selected_keys):
-            rule = known_rules[rule_key]
-            # 风险可能关联多条来源检查（任一 / 全部）：全部来源都要进入任务范围，
-            # 只补第一条会让风险在运行时拿不到其余来源的实际结果。
-            for source_key in (rule.get("source_rule_keys") or ([rule["source_rule_key"]] if rule.get("source_rule_key") else [])):
-                source_rule = known_rules.get(source_key)
-                if not source_rule or not source_rule.get("enabled", True):
-                    raise BusinessError(
-                        "TASK_RULE_DEPENDENCY_MISSING",
-                        "任务风险规则依赖的来源规则不可用",
-                        details={"rule_key": rule_key, "source_rule_key": source_key},
-                    )
-                if source_key not in requested_keys:
-                    auto_reasons.setdefault(
-                        source_key,
-                        f"风险来源依赖：由风险规则「{rule.get('name', rule_key)}」引用",
-                    )
-                selected_keys.add(source_key)
-            required_fields.update(item["field_key"] for item in rule.get("inputs", []))
-
-        extraction_producers: dict[str, list[str]] = {}
-        for rule_key, rule in known_rules.items():
-            if rule.get("enabled", True) and rule["operator"] == "LLM_EXTRACT":
-                for field_key in rule.get("outputs", []):
-                    extraction_producers.setdefault(field_key, []).append(rule_key)
-        for field_key in sorted(required_fields):
-            producers = extraction_producers.get(field_key, [])
-            if len(producers) != 1:
-                raise BusinessError(
-                    "TASK_FIELD_EXTRACTION_DEPENDENCY_INVALID",
-                    "任务字段缺少唯一的字段抽取规则",
-                    details={"field_key": field_key, "producer_rule_keys": sorted(producers)},
-                )
-            if producers[0] not in requested_keys:
-                auto_reasons.setdefault(
-                    producers[0],
-                    f"字段抽取依赖：产出字段「{fields_by_key.get(field_key, {}).get('name', field_key)}」",
-                )
-            selected_keys.add(producers[0])
-        if selected_keys == before:
-            break
-
     selected_rules = [known_rules[key] for key in sorted(selected_keys)]
-    # 建任务必须覆盖必需节点；范围预览（allow_empty）不启用任何业务规则时允许为空，
-    # 节点覆盖由方案发布与建任务的门禁保证。
-    if not allow_empty:
-        _ensure_task_node_coverage(selected_rules)
-    field_keys = required_fields | {
+    # 字段抽取按任务字段清单取数；普通规则、报告章节与计算参数引用的字段
+    # 都必须进入清单。抽取规则的启停只控制那条规则的结果，不控制取数动作。
+    field_keys = {
+        field_key for section in manifest.get("report_template", []) for field_key in section.get("field_keys", [])
+    } | {
+        field_key for rule in selected_rules for field_key in (item["field_key"] for item in rule.get("inputs", []))
+    } | {
         field_key
         for rule in selected_rules
         if rule["operator"] == "LLM_EXTRACT"
         for field_key in rule.get("outputs", [])
     }
+    calculation_field_codes = {
+        str(code)
+        for calculation in manifest.get("calculations", [])
+        if calculation.get("status") != CONFIG_STATUS_DISABLED
+        for code in calculation.get("depends_on_field_codes", [])
+    }
+    fields_by_code: dict[str, dict[str, Any]] = {}
+    for field in manifest["fields"]:
+        code = field.get("source_ref")
+        if code not in calculation_field_codes:
+            continue
+        if code in fields_by_code:
+            raise BusinessError(
+                "TASK_CALC_FIELD_AMBIGUOUS",
+                "计算规则引用的字段编号对应多条字段定义，无法确定任务取数范围",
+                details={"field_code": code},
+            )
+        fields_by_code[code] = field
+    missing_calculation_fields = calculation_field_codes - fields_by_code.keys()
+    if missing_calculation_fields:
+        raise BusinessError(
+            "TASK_CALC_FIELD_MISSING",
+            "计算规则引用的字段编号不在任务字段集合中",
+            details={"field_codes": sorted(missing_calculation_fields)},
+        )
+    field_keys.update(field["field_key"] for field in fields_by_code.values())
     missing = field_keys - fields_by_key.keys()
     if missing:
         raise BusinessError("TASK_SCHEMA_FIELD_MISSING", "任务规则引用的字段不在场景字段集合中", details={"field_keys": sorted(missing)})
-    auto_included = sorted(selected_keys - requested_keys)
     return {
         "schema_version": "1.0",
         "enabled_rule_keys": sorted(rule["rule_key"] for rule in selected_rules),
-        # 后端为满足依赖与系统能力自动补入的规则：必须在建任务前对用户可见，
-        # 否则用户会以为自己取消掉的规则真的不会执行。
-        "auto_included_rule_keys": auto_included,
-        # 每条自动补入规则的真实原因（报告生成 / 风险来源 / 字段抽取），供页面直显。
-        "auto_included_reasons": {key: auto_reasons[key] for key in auto_included if key in auto_reasons},
         # 模板里存在、但本任务明确未启用的规则：页面与报告据此区分"未启用"与"未配置"。
-        "unenabled_rule_keys": sorted(available_keys - selected_keys),
+        "unenabled_rule_keys": sorted(known_rules.keys() - selected_keys),
         # 本模板未配置的业务校验节点（模板级事实，不是任务级选择）。
-        "unconfigured_check_nodes": list(manifest.get("unconfigured_check_nodes", [])),
+        # 类型级与实例级分开返回：页面按类型判断「这类检查有没有配」，
+        # 按实例码判断「当前这个节点是不是未配置的类别」。
+        "unconfigured_check_node_types": list(manifest.get("unconfigured_check_node_types", [])),
+        "unconfigured_check_node_codes": list(manifest.get("unconfigured_check_node_codes", [])),
         "fields": [fields_by_key[key] for key in sorted(field_keys)],
     }
 
@@ -2366,7 +3114,7 @@ def build_task_schema(
 # 因此 source 中不包含工作表与行号——不伪造导入作业、工作表行号或供应商结果。
 FORM_SOURCE = {"sheet_key": None, "row_no": None, "cells": []}
 
-# 页面表单允许维护的字段类型。它必须与 03_字段抽取 的「数据类型」下拉一致，
+# 页面表单允许维护的字段类型。它必须与 03_字段 的「数据类型」下拉一致，
 # 包含大写金额（DECIMAL_CN）：只接受五种会让页面上确实存在的选项在保存时被拒绝，
 # 也会让草稿无法保留导入进来的大写金额字段。
 FORM_VALUE_TYPES = {"STRING", "DECIMAL", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"}
@@ -2392,6 +3140,38 @@ def manifest_scope_hash(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def assert_frozen_calculations(
+    compiled: list[dict[str, Any]],
+    *,
+    field_codes: set[str],
+    node_codes: set[str],
+) -> None:
+    """历史版本只留下已编译计算规则时，发布前核对它引用的字段编号和节点实例还在。
+
+    对不上就明确失败。不把过期编译产物原样带进新版本，也不按字段名重新猜一份。
+    """
+    missing_fields: list[dict[str, str]] = []
+    missing_nodes: list[dict[str, str]] = []
+    for item in compiled:
+        rule_code = str(item.get("rule_code") or "")
+        node_code = item.get("node_instance_code")
+        if not isinstance(node_code, str) or node_code not in node_codes:
+            missing_nodes.append({"rule_code": rule_code, "node_code": str(node_code or "")})
+        for field_code in item.get("depends_on_field_codes") or []:
+            if str(field_code) not in field_codes:
+                missing_fields.append({"rule_code": rule_code, "field_code": str(field_code)})
+    if missing_fields or missing_nodes:
+        raise BusinessError(
+            "MANIFEST_CALC_FROZEN_STALE",
+            "已冻结的计算配置与当前草稿的字段编号或计算节点不一致，不能发布",
+            details={"missing_fields": missing_fields, "missing_nodes": missing_nodes},
+        )
+
+
+def _has_enabled_calculation(calculations: list[dict[str, Any]]) -> bool:
+    return any(item.get("status") != CONFIG_STATUS_DISABLED for item in calculations)
+
+
 def compile_form_manifest(
     *,
     scene_code: str,
@@ -2401,53 +3181,56 @@ def compile_form_manifest(
     fields: list[dict[str, Any]],
     rules: list[dict[str, Any]],
     sections: list[dict[str, Any]],
+    node_instances: list[dict[str, Any]],
+    selected_sheets: list[dict[str, Any]],
     profile_version: str,
     compiled_at: datetime,
+    calculation_candidates: list[dict[str, Any]] | None = None,
+    frozen_calculations: list[dict[str, Any]] | None = None,
+    disabled_source_rows: list[dict[str, Any]] | None = None,
+    acknowledged_capability_gaps: list[str] | None = None,
+    system_rule_enabled: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """把页面表单维护的业务配置编译成与导入流程同构的 manifest。
 
-    输入的 materials/fields/rules/sections 是草稿的原始业务定义：
-      materials: {material_key, name, material_type, required, description}
-      fields:    {field_key, material_key, name, value_type, unit, required, instruction}
-      rules:     {rule_key, name, node, operator, enabled, inputs:[{field_key, material_key}],
-                  materials:[material_key], source_rule_key, source_node, parameters,
-                  applicability:{kind, material_keys}, requirement}
-      sections:  {section_name, content_instruction, field_keys}
+    输入是草稿的原始业务定义：materials / fields / rules / sections，
+    以及**用户配置的节点实例**（node_instances）。节点不由系统按规则内容生成，
+    因此它是必填输入——缺节点时编译明确报错，不补一份固定节点表。
 
-    校验口径与 compile_scene_manifest 完全一致（同一个参数契约、能力判定、节点约束、
-    比较类型与单位校验），差别只在于引用已经是稳定键、且没有工作表来源。
-    字段抽取规则与报告生成规则按同一确定性规则派生：字段抽取每条字段一条，
-    报告生成无条件补齐——最小配置同样可以发布并生成固定事实报告。
+    `rules` 里**停用的业务规则不参与编译**：它既不进已发布配置，也不算「有规则」。
+    字段抽取规则与报告生成规则按同一确定性规则派生。方案传入的
+    `system_rule_enabled` 只改变派生规则的启停，不改变它们的业务定义。
     """
     if not materials:
         raise BusinessError("MANIFEST_NO_MATERIAL", "场景至少需要一个材料位")
-    business_rules = [item for item in rules if item.get("operator") not in {"LLM_EXTRACT", "REPORT_RENDER"}]
-    if not business_rules:
+    # 「至少一条启用规则」必须真的按 `enabled=true` 过滤：把全部停用的规则也算进来，
+    # 一份所有业务规则都停用的配置会被判成「有规则」而通过，发布出去却没有任何检查执行。
+    business_rules = [
+        item
+        for item in rules
+        if not is_system_rule(item) and item.get("enabled", True)
+    ]
+    if not business_rules and not _has_enabled_calculation(
+        list(calculation_candidates or frozen_calculations or [])
+    ):
         raise BusinessError("MANIFEST_NO_RULE", "场景至少需要一条启用规则")
 
     material_by_key: dict[str, dict[str, Any]] = {}
-    material_names_seen: dict[tuple[str, str], dict[str, Any]] = {}
+    material_names_seen: dict[str, dict[str, Any]] = {}
     for item in materials:
         key = str(item.get("material_key") or "")
         name = str(item.get("name") or "").strip()
-        material_type = str(item.get("material_type") or "").strip()
         if not key or key in material_by_key:
             raise BusinessError("MANIFEST_DUPLICATE_MATERIAL_KEY", "材料配置缺少唯一标识", details={"material_key": key})
         if not name:
             raise BusinessError("MANIFEST_MATERIAL_NAME_REQUIRED", "材料名称不能为空", details={"material_key": key})
-        # 与导入路径同口径：识别类型必须由业务确认，不能用材料名称冒充。
-        if not material_type:
-            raise BusinessError(
-                "MANIFEST_MATERIAL_RECOGNIZE_TYPE_MISSING",
-                f"材料“{name}”没有确认识别类型：请从 8018 支持的类型目录中选择后再发布",
-                details={"material_key": key, "material": name},
-            )
-        signature = (_normalize_text(name), _normalize_text(material_type))
+        # 与导入路径同口径：「是不是同一个材料位」只由材料名称决定。
+        signature = _normalize_text(name)
         if signature in material_names_seen:
             raise BusinessError(
                 "MANIFEST_DUPLICATE_MATERIAL",
                 "场景中存在重复材料位",
-                details={"name": name, "material_type": material_type},
+                details={"name": name},
             )
         material_names_seen[signature] = item
         material_by_key[key] = item
@@ -2456,21 +3239,37 @@ def compile_form_manifest(
         {
             "material_key": item["material_key"],
             "name": item["name"].strip(),
-            "material_type": str(item.get("material_type") or "").strip(),
             "required": bool(item.get("required")),
             "description": str(item.get("description") or ""),
             # 来源业务编号：由导入 / 修订带入草稿，导出时按它写回 Excel 的编号列。
             # 页面新建的行没有编号，保持 None（导出为空），不伪造一个。
-            "source_ref": item.get("source_ref"),
+            "source_ref": str(item.get("source_ref") or "").strip() or None,
             "source": dict(FORM_SOURCE),
+            **({"origin": item["origin"]} if item.get("origin") else {}),
         }
         for item in materials
     ]
+    material_codes: dict[str, str] = {}
+    for material in compiled_materials:
+        code = material["source_ref"]
+        if code is None:
+            continue
+        previous_key = material_codes.get(code)
+        if previous_key is not None:
+            raise BusinessError(
+                "MANIFEST_DUPLICATE_MATERIAL_CODE",
+                "材料业务编号重复，跨表引用无法唯一定位材料",
+                details={"material_code": code, "material_keys": [previous_key, material["material_key"]]},
+            )
+        material_codes[code] = material["material_key"]
 
     field_by_key: dict[str, dict[str, Any]] = {}
     compiled_fields: list[dict[str, Any]] = []
     field_types: dict[str, str] = {}
     field_units: dict[str, str | None] = {}
+    # 币种与单位一样是金额比较与加总的口径，发布编译必须按它校验；
+    # 只收单位会让页面建的规则在币种未声明或不一致时照常发布。
+    field_currencies: dict[str, str | None] = {}
     field_materials: dict[str, str] = {}
     for item in fields:
         key = str(item.get("field_key") or "")
@@ -2496,6 +3295,7 @@ def compile_form_manifest(
         field_by_key[key] = item
         field_types[key] = value_type
         field_units[key] = item.get("unit")
+        field_currencies[key] = item.get("currency")
         field_materials[key] = material_key
         compiled_fields.append(
             {
@@ -2509,28 +3309,51 @@ def compile_form_manifest(
                 "required": bool(item.get("required")),
                 "instruction": str(item.get("instruction") or ""),
                 "artifact_source": item.get("artifact_source"),
-                "source_ref": item.get("source_ref"),
+                # 取数期间与报表口径：计算参数按这两项定位字段事实。
+                # 表单配置的字段同样必须显式声明，缺了在 compile_calculations 明确报错。
+                "period_scope": item.get("period_scope"),
+                "statement_scope": item.get("statement_scope"),
+                "source_ref": str(item.get("source_ref") or "").strip() or None,
                 "source": dict(FORM_SOURCE),
+                **({"origin": item["origin"]} if item.get("origin") else {}),
             }
         )
+
+    field_code_index: dict[str, dict[str, Any]] = {}
+    for field in compiled_fields:
+        code = field["source_ref"]
+        if code is None:
+            continue
+        previous = field_code_index.get(code)
+        if previous is not None:
+            raise BusinessError(
+                "MANIFEST_DUPLICATE_FIELD_CODE",
+                "字段业务编号重复，跨表计算参数无法唯一定位字段",
+                details={"field_code": code, "field_keys": [previous["field_key"], field["field_key"]]},
+            )
+        field_code_index[code] = field
 
     compiled_rules: list[dict[str, Any]] = []
     rule_keys: set[str] = set()
     rule_nodes: dict[str, str] = {}
+    # 规则 key → 能力类型。页面表单维护的规则同样把归属写成**节点实例码**，
+    # 能力类型在 `node_type` 里（缺省时按旧口径取 node）。
+    rule_node_types: dict[str, str] = {}
     for item in business_rules:
         key = str(item.get("rule_key") or "")
         name = str(item.get("name") or "").strip()
         operator = str(item.get("operator") or "")
         node = str(item.get("node") or "")
+        node_type = rule_node_type_of(item)
         if not key or key in rule_keys:
             raise BusinessError("MANIFEST_DUPLICATE_RULE_KEY", "规则配置缺少唯一标识", details={"rule_key": key})
         if not name:
             raise BusinessError("MANIFEST_RULE_NAME_REQUIRED", "规则名称不能为空", details={"rule_key": key})
-        if operator not in OPERATOR_NODE_CONSTRAINTS or node not in OPERATOR_NODE_CONSTRAINTS[operator]:
+        if operator not in OPERATOR_NODE_CONSTRAINTS or node_type not in OPERATOR_NODE_CONSTRAINTS[operator]:
             raise BusinessError(
                 "MANIFEST_OPERATOR_NODE_INVALID",
                 "规则算子不能在当前节点执行",
-                details={"rule": name, "operator": operator, "node": node},
+                details={"rule": name, "operator": operator, "node": node, "node_type": node_type},
             )
         parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else {}
         if operator == "DATE_COMPARE" and parameters.get("formula_type") == "DECIMAL":
@@ -2574,12 +3397,29 @@ def compile_form_manifest(
                 )
             if material_key not in material_scope:
                 material_scope.append(material_key)
+        output_keys: list[str] = []
+        for field_key in item.get("outputs") or []:
+            if field_key not in field_by_key:
+                raise BusinessError(
+                    "MANIFEST_RULE_OUTPUT_MISSING",
+                    "规则输出字段不存在或已被删除",
+                    details={"rule": name, "field_key": field_key},
+                )
+            if field_key not in output_keys:
+                output_keys.append(field_key)
+        if operator == "LLM_EXTRACT":
+            if not output_keys:
+                raise BusinessError("MANIFEST_EXTRACTION_OUTPUT_REQUIRED", "字段抽取规则必须声明输出字段", details={"rule": name})
+            if any(field_materials[field_key] not in material_scope for field_key in output_keys):
+                raise BusinessError("MANIFEST_EXTRACTION_MATERIAL_INVALID", "字段抽取规则的输出字段不属于规则材料范围", details={"rule": name})
         if operator in {"MATERIAL_EXISTS", "FILE_QUALITY_CHECK"} and not material_scope:
             raise BusinessError("MANIFEST_RULE_MATERIAL_REQUIRED", "材料规则必须声明适用材料", details={"rule": name})
         source_node: str | None = None
         source_rule_key: str | None = None
         source_rule_keys: list[str] = []
+        source_rule_codes: list[str] = []
         if operator == "RISK_TRIGGER":
+            _risk_condition_of(item)
             # 风险可以关联多条来源检查（任一 / 全部）。表单一次只提交一个 source_rule_key，
             # 但经导入 / 修订进入草稿的节点版风险带的是 source_rule_keys 列表；
             # 只读第一个会把「全部关联检查不合格」静默放宽成只监视一条来源。
@@ -2595,12 +3435,29 @@ def compile_form_manifest(
                 text = str(source_ref)
                 if text not in declared_keys:
                     declared_keys.insert(0, text)
-            if not declared_keys:
+            source_rule_codes = list(dict.fromkeys(
+                str(code) for code in (item.get("source_rule_codes") or []) if str(code)
+            ))
+            if not declared_keys and not source_rule_codes:
                 raise BusinessError("MANIFEST_RISK_SOURCE_REQUIRED", "风险规则必须声明来源规则", details={"rule": name})
-            source_node = _risk_source_node(name, item.get("source_node"))
-            source_rule_key = declared_keys[0]
+            # 来源节点是**可选**声明：base Excel 的 `09_风险规则` 没有这一列，风险来源由
+            # 检查行的「关联风险」反向确定，来源节点由下面解析出的来源规则自身派生
+            # （`rule["source_nodes"]`）。声明了才校验它，没声明不等于缺配置。
+            source_node = (
+                _risk_source_node(name, item.get("source_node")) if item.get("source_node") else None
+            )
+            source_rule_key = declared_keys[0] if declared_keys else None
             source_rule_keys = declared_keys
-        comparison_operators = {"FIELD_EQUAL", "FIELD_NOT_EQUAL", "DATE_COMPARE", "DECIMAL_COMPARE"}
+        # 漏掉 DECIMAL_SUM_COMPARE 会让页面新建的
+        # 加总比较规则跳过全部比较校验（输入数量、同材料、类型、单位币种），
+        # 直到运行期才由算子实现报错——「能导入、运行时才失败」。
+        comparison_operators = {
+            "FIELD_EQUAL",
+            "FIELD_NOT_EQUAL",
+            "DATE_COMPARE",
+            "DECIMAL_COMPARE",
+            "DECIMAL_SUM_COMPARE",
+        }
         if operator in comparison_operators:
             # 加总比较（DECIMAL_SUM_COMPARE）的右侧是多个加数，输入可以多于两个；
             # 其余比较算子仍是严格的一对一。按算子区分，不要用统一上限拒绝跨文件多字段加总。
@@ -2611,7 +3468,10 @@ def compile_form_manifest(
                     "金额加总比较必须包含左侧字段和至少一个加数" if operator_uses_addends(operator) else "比较规则必须恰好包含两个输入字段",
                     details={"rule": name, "input_count": len(inputs)},
                 )
-            if node == "INTERNAL_VALIDATE" and len({entry["material_key"] for entry in inputs}) != 1:
+            # 节点专属约束按**能力类型**判断：`node` 是用户配置的实例码，
+            # 拿它与 INTERNAL_VALIDATE 比较在用户改了实例码之后恒为假，
+            # 这条「左右字段必须同一份材料」的约束会被静默跳过。
+            if node_type == "INTERNAL_VALIDATE" and len({entry["material_key"] for entry in inputs}) != 1:
                 raise BusinessError(
                     "MANIFEST_INTERNAL_MATERIAL_MISMATCH",
                     "文件内部校验的左右字段必须属于同一份材料",
@@ -2620,10 +3480,40 @@ def compile_form_manifest(
             input_types = [field_types[input_item["field_key"]] for input_item in inputs]
             if operator == "DATE_COMPARE" and any(value_type != "DATE" for value_type in input_types):
                 raise BusinessError("MANIFEST_RULE_TYPE_INVALID", "日期比较规则只能引用 DATE 字段", details={"rule": name})
-            if operator == "DECIMAL_COMPARE" and any(value_type != "DECIMAL" for value_type in input_types):
+            if operator in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} and any(value_type != "DECIMAL" for value_type in input_types):
                 raise BusinessError("MANIFEST_RULE_TYPE_INVALID", "金额比较规则只能引用 DECIMAL 字段", details={"rule": name})
             if operator in {"FIELD_EQUAL", "FIELD_NOT_EQUAL"} and input_types[0] != input_types[1]:
                 raise BusinessError("MANIFEST_RULE_TYPE_INVALID", "字段比较规则的两个字段类型必须一致", details={"rule": name})
+            if operator_uses_addends(operator):
+                # 加总的每个加数都必须声明单位：系统不默认单位，也不做单位换算。
+                for input_item in inputs:
+                    if not (field_units.get(input_item["field_key"]) or "").strip():
+                        raise BusinessError(
+                            "MANIFEST_RULE_UNIT_MISSING",
+                            f"规则“{name}”需要加总，但引用的字段没有声明归一化单位："
+                            "系统不默认单位，也不做单位换算",
+                            details={"rule": name, "field_key": input_item["field_key"]},
+                        )
+            # 金额比较与加总（含大小写金额一致性）：币种必须都声明且一致；
+            # 币种未声明时不能做数值比较或求和，系统也不默认人民币。
+            if operator in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} or "DECIMAL" in input_types or "DECIMAL_CN" in input_types:
+                currencies = {field_currencies.get(input_item["field_key"]) for input_item in inputs}
+                missing_currency = any(not (value or "").strip() for value in currencies)
+                declared_currencies = {value for value in currencies if (value or "").strip()}
+                if missing_currency:
+                    raise BusinessError(
+                        "MANIFEST_RULE_CURRENCY_MISSING",
+                        f"规则“{name}”引用的字段没有在 03_字段 中声明币种："
+                        "系统不默认人民币，币种未知时不做数值比较或求和",
+                        details={"rule": name},
+                    )
+                if len(declared_currencies) > 1:
+                    raise BusinessError(
+                        "MANIFEST_RULE_CURRENCY_MISMATCH",
+                        f"规则“{name}”比较双方币种不一致（{' / '.join(sorted(declared_currencies))}）："
+                        "系统不做汇率换算，也不能直接相加",
+                        details={"rule": name, "currencies": sorted(declared_currencies)},
+                    )
             unit_mismatch = _comparison_unit_mismatch(
                 operator,
                 [{"unit": field_units.get(input_item["field_key"])} for input_item in inputs],
@@ -2636,13 +3526,14 @@ def compile_form_manifest(
                 )
         if operator == "LLM_VALIDATE" and not inputs:
             raise BusinessError("MANIFEST_RULE_INPUT_COUNT_INVALID", "智能校验规则必须声明输入字段", details={"rule": name})
-        if node == "INTERNAL_VALIDATE" and operator == "LLM_VALIDATE" and len(inputs) > 1:
+        # 同上：节点专属约束一律按能力类型判断，不拿实例码与能力类型比较。
+        if node_type == "INTERNAL_VALIDATE" and operator == "LLM_VALIDATE" and len(inputs) > 1:
             raise BusinessError(
                 "MANIFEST_RULE_INPUT_COUNT_INVALID",
                 "文件内部校验的智能判断最多只能引用一个字段",
                 details={"rule": name, "input_count": len(inputs)},
             )
-        if node == "CROSS_VALIDATE" and len(inputs) < 2:
+        if node_type == "CROSS_VALIDATE" and len(inputs) < 2:
             raise BusinessError(
                 "MANIFEST_RULE_INPUT_COUNT_INVALID",
                 "文件交叉校验必须引用左右两侧的字段",
@@ -2657,18 +3548,27 @@ def compile_form_manifest(
             )
         rule_keys.add(key)
         rule_nodes[key] = node
+        rule_node_types[key] = node_type
         compiled_rules.append(
             {
                 "rule_key": key,
+                # 业务规则编号：页面表单维护的「规则编号」列（`source_ref`）。
+                # 它是新版本的规则身份（需求 6/19），导出时要写回 Excel 的「规则编号」列——
+                # 不填这一列，导出的文件在该列上是空的，而它是**行必填列**，
+                # 重新导入会直接报 RULE_CELL_EMPTY。页面新建且未填编号的规则保持 None，
+                # 不用派生值冒充业务编号。
+                "rule_code": item.get("source_ref") or None,
                 "name": name,
                 "node": node,
+                "node_type": node_type,
                 "operator": operator,
                 "enabled": bool(item.get("enabled", True)),
                 "inputs": inputs,
-                "outputs": [],
+                "outputs": output_keys,
                 "materials": material_scope,
                 "source_rule_key": source_rule_key,
                 "source_rule_keys": list(source_rule_keys),
+                "source_rule_codes": list(source_rule_codes),
                 "source_node": source_node,
                 # 页面表单路径的来源节点由用户显式选择，单独一条来源规则：
                 # 实际节点集合与声明一致，由下面的统一校验核对。
@@ -2678,6 +3578,9 @@ def compile_form_manifest(
                 # 但不能在这里丢掉用户选择的 kind（否则会静默变成“始终适用”）。
                 "applicability": {"kind": applicability["kind"]},
                 "requirement": str(item.get("requirement") or ""),
+                # 业务说明：风险规则的「风险说明」列。它是业务配置事实，导出时必须写回，
+                # 否则页面保存一次就把这一列丢成空。
+                "description": str(item.get("description") or ""),
                 # 业务配置事实随规则进入已发布配置，与导入编译保持一致：
                 # 检查等级、合格要求原文、风险等级原文、风险成立条件与业务配置状态。
                 # 缺了它们，页面保存过的规则在导出、报告与风险结果里就只剩执行参数，
@@ -2686,17 +3589,24 @@ def compile_form_manifest(
                 "check_operator": item.get("check_operator"),
                 "check_level": item.get("check_level"),
                 "risk_level_value": item.get("risk_level_value"),
+                # 风险的成立条件（任一 / 全部关联检查不合格）：它是**业务配置事实**，
+                # 导出时要写回「成立条件」列。丢了它导出的该列为空，而它是必填枚举列，
+                # 重新导入直接报 RULE_ENUM_VALUE_INVALID。
                 "risk_condition": item.get("risk_condition"),
                 "quality_supported": item.get("quality_supported"),
                 "source_ref": item.get("source_ref"),
                 "source": dict(FORM_SOURCE),
+                **({"origin": item["origin"]} if item.get("origin") else {}),
             }
         )
 
     # 风险规则的来源规则必须真实存在、已启用，并位于来源节点允许的审核节点上。
     # 来源可能有多条（任一 / 全部）：全部来源都要校验，只查第一条会让其余来源
     # 指向已删除或已停用的规则却仍然发布出去。
-    node_positions = {code: index for index, (code, _) in enumerate(NODE_DEFINITIONS)}
+    # 节点先后位置取自用户配置的节点实例顺序。
+    node_positions = {
+        str(item["node_code"]): int(item.get("sequence_no") or 0) for item in node_instances
+    }
     rules_by_key = {item["rule_key"]: item for item in compiled_rules}
     for rule in compiled_rules:
         if rule["operator"] != "RISK_TRIGGER":
@@ -2720,10 +3630,25 @@ def compile_form_manifest(
                     "风险规则的来源规则已被停用，不能作为风险来源",
                     details={"rule": rule["name"], "source_rule_key": source_rule_key},
                 )
+            if source_rule["operator"] == "RISK_TRIGGER":
+                raise BusinessError(
+                    "MANIFEST_RISK_SOURCE_INVALID",
+                    "风险规则不能引用自身或另一条风险规则",
+                    details={"rule": rule["name"], "source_rule_key": source_rule_key},
+                )
             actual_node = rule_nodes[source_rule_key]
-            if node_positions[rule["node"]] <= node_positions[actual_node]:
+            _rule_position = _node_position_of(node_positions, rule["node"], rule_name=rule["name"])
+            _source_position = _node_position_of(
+                node_positions, actual_node, rule_name=rule["name"], role="来源规则"
+            )
+            if _rule_position <= _source_position:
                 raise BusinessError("MANIFEST_NODE_ORDER_INVALID", "风险规则必须位于来源规则之后", details={"rule": rule["name"]})
-            if actual_node not in SOURCE_NODE_RULE_NODES.get(rule["source_node"] or "", frozenset()):
+            # 来源节点声明的是**能力类型**（内部校验 / 交叉校验 / 材料质量），
+            # 而 `node` 是实例码：比对必须用 `node_type`。
+            # 未声明来源节点时**不校验**这一项：来源节点由来源规则自身派生
+            # （`actual_nodes`），没有声明就没有可违反的限制。
+            allowed_source_types = SOURCE_NODE_RULE_NODES.get(rule["source_node"] or "")
+            if allowed_source_types is not None and rule_node_types[source_rule_key] not in allowed_source_types:
                 raise BusinessError(
                     "MANIFEST_RISK_SOURCE_NODE_MISMATCH",
                     "风险疑点的来源审核规则不在指定的来源节点中",
@@ -2735,10 +3660,10 @@ def compile_form_manifest(
                         "expected_nodes": sorted(SOURCE_NODE_RULE_NODES.get(rule["source_node"] or "", frozenset())),
                     },
                 )
-            actual_nodes.add(actual_node)
+            actual_nodes.add(rule_node_types[source_rule_key])
             if source_rule_key not in resolved_keys:
                 resolved_keys.append(source_rule_key)
-        rule["source_rule_key"] = resolved_keys[0]
+        rule["source_rule_key"] = resolved_keys[0] if resolved_keys else None
         rule["source_rule_keys"] = resolved_keys
         rule["source_nodes"] = sorted(actual_nodes)
 
@@ -2775,23 +3700,52 @@ def compile_form_manifest(
         rule["applicability"] = {"kind": applicability["kind"], "material_keys": material_keys}
 
     # 字段抽取规则：每个字段一条，与导入编译使用同一确定性派生规则。
+    # 它们挂到**用户配置的字段抽取节点实例**上（同类多个时明确报错）。
+    extraction_node_code = (
+        instance_code_of_type(node_instances, NODE_TYPE_FIELD_EXTRACTION, purpose="字段抽取")
+        if compiled_fields
+        else None
+    )
+    extraction_output_counts: dict[str, int] = {}
+    for rule in compiled_rules:
+        if rule["operator"] != "LLM_EXTRACT":
+            continue
+        for field_key in rule["outputs"]:
+            extraction_output_counts[field_key] = extraction_output_counts.get(field_key, 0) + 1
+    duplicate_outputs = sorted(key for key, count in extraction_output_counts.items() if count > 1)
+    if duplicate_outputs:
+        raise BusinessError(
+            "MANIFEST_EXTRACTION_OUTPUT_DUPLICATE",
+            "同一字段不能由多个字段抽取规则同时产出",
+            details={"field_keys": duplicate_outputs},
+        )
     for field in compiled_fields:
+        if field["field_key"] in extraction_output_counts:
+            continue
         instruction = str(field["instruction"] or "").strip()
-        if not instruction:
+        extraction_enabled = (system_rule_enabled or {}).get(f"SYS-EXTRACT-{field['field_key']}", True)
+        if extraction_enabled and not instruction:
             raise BusinessError(
                 "MANIFEST_FIELD_INSTRUCTION_REQUIRED",
                 f"字段“{field['name']}”缺少抽取要求，不能发布",
                 details={"field_name": field["name"]},
             )
         extraction_parameters = {"instruction": instruction}
-        _validate_rule_parameters(f"抽取{field['name']}", "LLM_EXTRACT", extraction_parameters)
+        if extraction_enabled:
+            _validate_rule_parameters(f"抽取{field['name']}", "LLM_EXTRACT", extraction_parameters)
         compiled_rules.append(
             {
                 "rule_key": stable_key("rule", namespace, f"extract:{field['field_key']}"),
+                # 系统派生规则的编号显式带 SYS- 前缀：它**不是**业务规则编号，
+                # 不能让页面或导出把它读成一条业务维护的规则。派生依据（字段身份）
+                # 拼在后面，同一字段重编译得到同一个编号。
+                "rule_code": f"SYS-EXTRACT-{field['field_key']}",
+                "legacy_rule_key": stable_key("rule", namespace, f"extract:{field['field_key']}"),
                 "name": f"抽取{field['name']}",
-                "node": "FIELD_EXTRACTION",
+                "node": extraction_node_code,
+                "node_type": NODE_TYPE_FIELD_EXTRACTION,
                 "operator": "LLM_EXTRACT",
-                "enabled": True,
+                "enabled": extraction_enabled,
                 "inputs": [],
                 "outputs": [field["field_key"]],
                 "materials": [field["material_key"]],
@@ -2807,8 +3761,23 @@ def compile_form_manifest(
         )
 
     report_template: list[dict[str, Any]] = []
-    explicit_report_groups = any(section.get("report_code") for section in sections)
-    for section in sections:
+    active_sections = [section for section in sections if section.get("config_status") != CONFIG_STATUS_DISABLED]
+    pending_sections = [section for section in active_sections if section.get("config_status") == CONFIG_STATUS_PENDING]
+    if pending_sections:
+        raise BusinessError(
+            "MANIFEST_REPORT_SECTION_PENDING",
+            "报告章节仍是「待确认」状态，不能生效：请确认该章节可以执行，或明确停用",
+            details={"sections": [section.get("section_name") for section in pending_sections]},
+        )
+    explicit_report_groups = any(section.get("report_code") for section in active_sections)
+    for section in active_sections:
+        section_key = section.get("section_key")
+        if not isinstance(section_key, str) or not section_key.strip():
+            raise BusinessError(
+                "MANIFEST_SECTION_KEY_REQUIRED",
+                "报告章节缺少稳定键",
+                details={"section_name": section.get("section_name")},
+            )
         title = str(section.get("section_name") or "").strip()
         if not title:
             raise BusinessError("MANIFEST_SECTION_NAME_REQUIRED", "报告章节名称不能为空")
@@ -2822,10 +3791,12 @@ def compile_form_manifest(
                 )
             field_keys.append(field_key)
         entry: dict[str, Any] = {
+            "section_key": section_key,
             "section_name": title,
             "content_instruction": str(section.get("content_instruction") or ""),
             "field_keys": field_keys,
             "source": dict(FORM_SOURCE),
+            **({"origin": section["origin"]} if section.get("origin") else {}),
         }
         # 节点版的报告分组属性：报告编号、报告名称、材料范围、输出格式、
         # 章节顺序、内容类型、结果排序与配置状态。有报告编号时按分组渲染，
@@ -2848,14 +3819,19 @@ def compile_form_manifest(
             entry["content_type"] = section.get("content_type")
         report_template.append(entry)
 
-    if not any(item["node"] == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" for item in compiled_rules):
+    report_node_code = instance_code_of_type(node_instances, NODE_TYPE_REPORT_OUTPUT, purpose="报告生成")
+    if not any(item["node"] == report_node_code and item["operator"] == "REPORT_RENDER" for item in compiled_rules):
         compiled_rules.append(
             {
                 "rule_key": stable_key("rule", namespace, "report:render"),
+                # 报告生成是系统动作，编号显式带 SYS- 前缀。
+                "rule_code": "SYS-REPORT-RENDER",
+                "legacy_rule_key": stable_key("rule", namespace, "report:render"),
                 "name": "生成审核报告",
-                "node": "REPORT_OUTPUT",
+                "node": report_node_code,
+                "node_type": NODE_TYPE_REPORT_OUTPUT,
                 "operator": "REPORT_RENDER",
-                "enabled": True,
+                "enabled": (system_rule_enabled or {}).get("SYS-REPORT-RENDER", True),
                 "inputs": [],
                 "outputs": [],
                 "materials": [],
@@ -2870,13 +3846,41 @@ def compile_form_manifest(
             }
         )
 
+    compiled_rules.extend(
+        _material_check_rules(compiled_materials, compiled_rules, node_instances, namespace, system_rule_enabled)
+    )
     _ensure_unique_rules(compiled_rules)
-    _ensure_manifest_node_coverage(compiled_rules, report_template)
+    ensure_unique_rule_codes(compiled_rules)
+    _ensure_manifest_node_coverage(
+        compiled_rules,
+        report_template,
+        node_instances,
+        require_report_rule=(system_rule_enabled or {}).get("SYS-REPORT-RENDER", True),
+    )
+
+    candidates = list(calculation_candidates or [])
+    if candidates:
+        compiled_calculations = compile_calculations(
+            candidates,
+            field_code_index=field_code_index,
+            node_instances=node_instances,
+        )
+        stored_inputs: list[dict[str, Any]] | None = candidates
+    elif frozen_calculations:
+        assert_frozen_calculations(
+            frozen_calculations,
+            field_codes=set(field_code_index),
+            node_codes={str(item.get("node_code") or "") for item in node_instances},
+        )
+        compiled_calculations = list(frozen_calculations)
+        stored_inputs = None
+    else:
+        compiled_calculations = []
+        stored_inputs = []
 
     manifest = {
         "manifest_version": "1.0",
-        # 页面表单配置没有 Excel 工作簿；导出时会按该格式版本写出业务列，
-        # 因此这里记录可导出的目标格式版本，并显式标注配置来源。
+        # 统一模板协议的版本标识：系统只有一份协议，这里记录按哪一版解释这份配置。
         "profile_version": profile_version,
         "source_kind": "FORM",
         "scene_code": scene_code,
@@ -2884,20 +3888,41 @@ def compile_form_manifest(
         "materials": sorted(compiled_materials, key=lambda item: item["material_key"]),
         "fields": sorted(compiled_fields, key=lambda item: item["field_key"]),
         "rules": sorted(compiled_rules, key=lambda item: item["rule_key"]),
-        "nodes": [
-            {"node_code": code, "name": name, "sequence_no": index, "enabled": True}
-            for index, (code, name) in enumerate(NODE_DEFINITIONS, start=1)
+        # 节点来自**用户配置**：实例码、能力类型、名称、顺序、依赖与配置全部原样固化，
+        # 不由系统按规则内容生成固定节点表。
+        "nodes": build_node_plan(compiled_rules, compiled_calculations or None, node_instances, compiled_fields),
+        "calculations": sorted(compiled_calculations, key=lambda item: item["rule_code"]),
+        # 有候选时随版本留下，修订时重新编译。只有冻结产物时不写空候选，
+        # 否则加载草稿会把已编译的计算规则当成「没有计算配置」丢掉。
+        **({"calculation_inputs": stored_inputs} if stored_inputs is not None else {}),
+        # 本场景**选用**的 Sheet 及各自归属的节点实例。它是「这个场景用哪些表」的
+        # 权威来源：模板导出据此决定写哪几张表，不再从材料/字段/规则反推
+        # （反推区分不了合同版与财报版的同名 Sheet）。
+        "selected_sheets": [
+            {"sheet_role": str(item["sheet_role"]), "node_code": item.get("node_code")}
+            for item in selected_sheets
         ],
+        "disabled_source_rows": list(disabled_source_rows or []),
         "report_template": report_template,
-        # 报告分组：节点版的报告编号、报告名称、材料范围、输出格式、结果排序与章节顺序
-        # 随章节一起保留；页面表单配置若来自节点版导入/修订，同样按编号分组，
+        # 报告分组：报告编号、报告名称、材料范围、输出格式、结果排序与章节顺序
+        # 随章节一起保留；页面表单配置若来自导入/修订，同样按编号分组，
         # 不会因为经过一次页面保存就退回成旧的附加展示章节。
         "report_groups": _build_report_groups(report_template, explicit_report_groups),
-        "unconfigured_check_nodes": unconfigured_check_nodes(compiled_rules),
+        # 未配置的检查类别：类型级汇总与实例级清单分开记录。页面按类型判断
+        # 「这类检查有没有配」，按实例码判断「当前这个节点是不是未配置的类别」。
+        "unconfigured_check_node_types": unconfigured_check_node_types(compiled_rules),
+        "unconfigured_check_node_codes": unconfigured_check_node_codes(compiled_rules, node_instances),
         "capability_gaps": capability_gaps(compiled_rules),
-        # 与导入编译同一口径：能力覆盖结果随版本一起冻结。
+        # 本次发布逐条确认过的能力缺口：属于版本审计事实，随版本冻结并参与指纹。
+        "acknowledged_capability_gaps": sorted(set(acknowledged_capability_gaps or [])),
+        # 能力覆盖结果随版本一起冻结。
         "capability_coverage": capabilities.coverage_of(compiled_rules),
         "capability_version": capabilities.CAPABILITY_VERSION,
+        # 工具目录与工具策略随版本冻结，供运行期核对发布时的执行契约。
+        "tool_catalog_version": tool_catalog.TOOL_CATALOG_VERSION,
+        "tool_catalog_hash": tool_catalog.catalog_fingerprint(),
+        "tool_policy_version": tool_catalog.TOOL_POLICY_VERSION,
+        "allowed_tools": tool_catalog.allowed_tools_of(compiled_rules),
         "compiled_at": compiled_at.isoformat(),
         "source_workbook_id": None,
     }

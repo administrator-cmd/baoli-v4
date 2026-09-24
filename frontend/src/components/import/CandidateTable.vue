@@ -58,7 +58,7 @@ defineEmits<{
     <el-table-column type="expand">
       <template #default="{ row }">
         <el-descriptions :column="1" size="small" border class="candidate-detail">
-          <el-descriptions-item v-for="detail in row.details" :key="detail.label" :label="detail.label">
+          <el-descriptions-item v-for="(detail, index) in row.details" :key="index" :label="detail.label">
             {{ detail.value }}
           </el-descriptions-item>
         </el-descriptions>
@@ -90,7 +90,8 @@ defineEmits<{
 
     <el-table-column v-if="canEdit" label="人工纠错" width="150" align="center">
       <template #default="{ row }">
-        <template v-if="row.state === 'EXCLUDED'">
+        <span v-if="row.state === 'PENDING'" class="table-note">先处理该候选的问题</span>
+        <template v-else-if="row.state === 'EXCLUDED'">
           <el-button link type="primary" @click="$emit('restore', row)">恢复</el-button>
         </template>
         <template v-else>
@@ -113,5 +114,9 @@ defineEmits<{
 
 .candidate-detail {
   padding: 8px 12px;
+}
+.candidate-detail :deep(.el-descriptions__content) {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 </style>

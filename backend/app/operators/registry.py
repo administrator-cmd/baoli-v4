@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
+from ..domain import quality_judgement
 from ..errors import BusinessError
 
 
@@ -223,6 +224,7 @@ def _threshold_of(
 
 
 def field_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
+    """字段一致比较：两侧规范化取值必须相同。"""
     selected, problem = _require_inputs(inputs, 2)
     if problem:
         return problem
@@ -303,6 +305,7 @@ def field_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dic
 
 
 def field_not_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
+    """字段应当不同：两侧规范化取值必须不同。"""
     result = field_equal(parameters, inputs)
     if result["status"] != "PASSED" and result["status"] != "ABNORMAL":
         return result
@@ -315,6 +318,7 @@ def field_not_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
 
 
 def decimal_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
+    """金额数值比较：单位与币种必须一致，允许差值按业务配置。"""
     selected, problem = _require_inputs(inputs, 2)
     if problem:
         return problem
@@ -508,36 +512,14 @@ def field_not_empty(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
 def decimal_cn_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """大小写金额一致性比较。
 
-    当前**不具备**可执行能力：把大写金额换算成可核验数值需要业务先确认金额单位、
-    币种与大写金额的换算口径（见本轮待确认清单），代码不会自行补值、不会按字符串
-    比较、也不让大模型做算术。因此这项检查明确返回「证据不足」并说明缺少哪条口径，
-    既不默认通过，也不伪装成已经执行。
-
-    双方抽取到的原文如实带出：口径缺失是标准不明确，不是这一条内容有问题。
+    判定实现在 `domain/quality_judgement.decimal_cn_equal`：它是本项的唯一实现，
+    工具 adapter 调的是同一个函数，避免「算子判不可判定、工具判通过」这类漂移。
     """
-    return {
-        "status": "EVIDENCE_INSUFFICIENT",
-        "message": (
-            "大小写金额一致性检查需要先把大写金额换算成有证据的数值，"
-            "而金额单位、币种与大写金额换算口径尚未由业务确认；"
-            "本项不可判定，不能按字符串比较，也不能默认通过"
-        ),
-        "capability_gap": "DECIMAL_CN_CONVERSION_UNDEFINED",
-        # 无法判断的具体原因：标准不明确（换算口径未确认），不是缺少原文。
-        "blocked_reason": "STANDARD_UNDEFINED",
-        "extracted_values": [
-            {
-                "field_key": item.get("field_key"),
-                "material_key": item.get("material_key"),
-                "raw_value": item.get("raw_value"),
-                "normalized_value": item.get("normalized_value"),
-            }
-            for item in inputs
-        ],
-    }
+    return quality_judgement.decimal_cn_equal(inputs)
 
 
 def date_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
+    """日期比较：允许差值以天为单位；不带差值时按严格比较。"""
     selected, problem = _require_inputs(inputs, 2)
     if problem:
         return problem
@@ -823,6 +805,7 @@ REGISTRY: dict[str, OperatorHandler] = {
 
 
 def execute_operator(operator: str, parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
+    """按算子码分发到对应 handler；算子不在注册表时明确报错。"""
     handler = REGISTRY.get(operator)
     if not handler:
         raise BusinessError("OPERATOR_NOT_EXECUTABLE", "当前节点没有可执行的已注册算子", details={"operator": operator})

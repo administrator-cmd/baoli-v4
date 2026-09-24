@@ -32,11 +32,17 @@ const saving = ref(false);
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
-const query = reactive({ name: "", node: "", kind: "BUSINESS" as "BUSINESS" | "SYSTEM" | "ALL", enabled: "" });
+/**
+ * 列表筛选：规则名称 / 检查阶段 / 启用状态。
+ *
+ * **没有「规则类别」这一项，表格里也没有这一类标签**。系统派生的规则与业务规则是同一个
+ * 列表里的不同行，「是不是系统派生的」只决定**这一行能不能编辑**——页面用操作列有没有
+ * 按钮、详情里的一句说明来表达就够了。给它一个筛选下拉或一个恒为「业务规则」的标签列，
+ * 只会让人以为这两类需要分开办理。
+ */
+const query = reactive({ name: "", node: "", enabled: "" });
 const filteredRules = computed(() =>
   rules.value.filter((item) => {
-    if (query.kind === "BUSINESS" && item.system) return false;
-    if (query.kind === "SYSTEM" && !item.system) return false;
     if (query.node && item.node !== query.node) return false;
     if (query.enabled === "true" && !item.enabled) return false;
     if (query.enabled === "false" && item.enabled) return false;
@@ -184,13 +190,6 @@ function scopeText(rule: DraftRuleItem): string {
             <el-option v-for="item in nodeOptions" :key="item.value" :value="item.value" :label="item.label" />
           </el-select>
         </el-form-item>
-        <el-form-item label="规则类别">
-          <el-select v-model="query.kind" style="width: 140px">
-            <el-option value="BUSINESS" label="业务规则" />
-            <el-option value="SYSTEM" label="系统规则" />
-            <el-option value="ALL" label="全部" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="启用状态">
           <el-select v-model="query.enabled" clearable placeholder="全部" style="width: 120px">
             <el-option value="true" label="启用" />
@@ -214,19 +213,12 @@ function scopeText(rule: DraftRuleItem): string {
 
       <el-table v-else :data="filteredRules" border stripe v-loading="loading" empty-text="暂无规则配置">
         <el-table-column type="index" label="序号" width="60" />
-        <el-table-column label="规则 key" width="190">
-          <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
+        <el-table-column label="业务编号" width="155" show-overflow-tooltip>
+          <template #default="{ row }"><span class="mono">{{ row.source_ref || (row.system ? "系统派生" : "未填写") }}</span></template>
         </el-table-column>
         <el-table-column prop="name" label="规则名称" min-width="190" show-overflow-tooltip>
           <template #default="{ row }">
             <el-button link type="primary" class="table-link" @click="detailRule = row">{{ row.name }}</el-button>
-          </template>
-        </el-table-column>
-        <el-table-column label="规则类型" width="120">
-          <template #default="{ row }">
-            <el-tag :type="row.system ? 'info' : 'primary'" size="small" effect="plain" disable-transitions>
-              {{ row.system ? "系统派生" : "业务规则" }}
-            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="执行节点" width="120">
@@ -261,7 +253,7 @@ function scopeText(rule: DraftRuleItem): string {
             <el-button link type="primary" size="small" @click="detailRule = row">详情</el-button>
             <template v-if="canEdit && !row.system">
               <el-button link type="primary" size="small" @click="openEditor(row.rule_key)">编辑</el-button>
-              <el-button link type="primary" size="small" @click="openEditor('new', { from: row.rule_key })">复制</el-button>
+              <el-button v-if="row.operator !== 'LLM_EXTRACT'" link type="primary" size="small" @click="openEditor('new', { from: row.rule_key })">复制</el-button>
               <el-button link type="primary" size="small" :disabled="saving" @click="toggleEnabled(row)">
                 {{ row.enabled ? "停用" : "启用" }}
               </el-button>
@@ -270,18 +262,23 @@ function scopeText(rule: DraftRuleItem): string {
           </template>
         </el-table-column>
       </el-table>
-      <p class="text-hint">
-        「是否自动纳入」是方案与任务的概念（方案按依赖自动补入规则），场景本身定义全部规则，因此这里不显示。
-        「来源工作表 / 原始行号」只对规则库导入生成的配置有意义，后端在场景配置接口未返回该来源信息，页面不显示。
-      </p>
 
       <el-drawer :model-value="Boolean(detailRule)" title="规则详情" size="520px" @close="detailRule = null">
         <template v-if="detailRule">
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="规则名称">{{ detailRule.name }}</el-descriptions-item>
+            <el-descriptions-item label="业务编号">{{ detailRule.source_ref || (detailRule.system ? "系统派生" : "未填写") }}</el-descriptions-item>
+            <el-descriptions-item v-if="detailRule.origin" label="原规则库来源">
+              <el-button
+                v-if="detailRule.origin.import_job_no"
+                link
+                type="primary"
+                @click="router.push({ name: 'scene-import-detail', params: { jobNo: detailRule.origin.import_job_no } })"
+              >{{ detailRule.origin.sheet_name }} 第 {{ detailRule.origin.row_no }} 行</el-button>
+              <span v-else>{{ detailRule.origin.sheet_name }} 第 {{ detailRule.origin.row_no }} 行</span>
+            </el-descriptions-item>
             <el-descriptions-item label="检查阶段">{{ nodeLabel(detailRule.node) }}</el-descriptions-item>
             <el-descriptions-item label="检查方式">{{ operatorLabel(detailRule.operator) }}</el-descriptions-item>
-            <el-descriptions-item label="规则类别">{{ detailRule.system ? "系统派生（只读）" : "业务规则" }}</el-descriptions-item>
             <el-descriptions-item label="输入对象">{{ inputText(detailRule) }}</el-descriptions-item>
             <el-descriptions-item label="材料范围 / 输出">{{ scopeText(detailRule) }}</el-descriptions-item>
             <el-descriptions-item label="审核要求">{{ detailRule.requirement || "—" }}</el-descriptions-item>
@@ -301,8 +298,13 @@ function scopeText(rule: DraftRuleItem): string {
             <el-descriptions-item v-if="detailRule.risk_action" label="处理建议">{{ detailRule.risk_action }}</el-descriptions-item>
             <el-descriptions-item label="启用状态">{{ detailRule.enabled ? "启用" : "停用" }}</el-descriptions-item>
           </el-descriptions>
-          <p class="text-hint block-gap-sm">
-            自动抽取与报告生成规则由字段与固定报告派生，不作为业务规则计数；停用或删除它们会破坏执行依赖，因此只读。
+          <!--
+            只对系统派生的规则说明「为什么不能编辑」。业务规则弹窗里没有任何按钮缺失，
+            给所有规则统一贴一句「因此只读」会对业务规则说假话。
+          -->
+          <p v-if="detailRule.system" class="text-hint block-gap-sm">
+            这条规则由字段与固定报告自动派生，随配置变化重新生成，因此不能编辑；
+            停用或删除它会破坏执行依赖。
           </p>
         </template>
       </el-drawer>

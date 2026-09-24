@@ -3,27 +3,45 @@ import { computed } from "vue";
 import { FileSpreadsheet } from "lucide-vue-next";
 
 import type { ImportSheet, JsonValue } from "@/api/contracts";
+import type { ProfileSheet } from "@/api/imports";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { formatBusinessValue, sheetRoleDescription, sheetRoleLabel, sheetRoleOptions } from "@/constants/labels";
-
-export interface SheetBindingDraft {
-  role: string | null;
-  headerRow: number | null;
-  excluded: boolean;
-}
+import { formatBusinessValue } from "@/constants/labels";
+import {
+  DEFAULT_HEADER_ROW,
+  defaultNodeCodeForRole,
+  nodeOptionsForRole,
+  type NodeOption,
+  type SheetBindingDraft,
+} from "@/constants/sheetBinding";
 
 /**
  * Sheet 绑定表。
  *
  * 只列出需要业务确认的工作表（服务端未 fixed_excluded 的表）；模板说明页等元数据与
  * 没有业务数据的工作表由页面单独列出，不在这里出现，也不会被当成业务 Sheet。
- * 主信息是工作表中文名称和系统识别出的用途；技术标识放在展开行里。
- * 未选择用途的工作表明确标记为「不参与本次发布」，不会被静默忽略。
+ * 主信息是工作表中文名称和它的用途；技术标识放在展开行里。
+ *
+ * 「本表用途」与「绑定节点」的初值由 `constants/sheetBinding.initialBindingOf` 给出
+ * （与作业侧的「是否有未提交改动」共用同一份口径）。绑定仍以用户提交的值为准。
  */
 const props = defineProps<{
   sheets: ImportSheet[];
   drafts: Record<string, SheetBindingDraft>;
-  /** 行内错误：用途冲突、缺少表头行、未选择用途。 */
+  /**
+   * 统一模板协议声明的 Sheet：用途下拉的**唯一**来源。
+   *
+   * 不能在组件里写死固定的几个用途：协议里的 Sheet 数量与名称由协议声明，
+   * 写死的那一套会让用户根本选不到某些用途。
+   */
+  profileSheets: ProfileSheet[];
+  /**
+   * 当前场景里用户配置的**节点实例**：节点绑定的唯一来源。
+   *
+   * 一张 Sheet 只能绑定一个节点；一个节点可以绑定多张 Sheet。
+   * 该用途下只有一个可选实例时，绑定初值会直接选中它（见 `constants/sheetBinding`）。
+   */
+  nodeOptions: NodeOption[];
+  /** 行内错误：用途冲突、缺少表头行、未选择用途或未绑定节点。 */
   problemsOf: (sheet: ImportSheet) => string[];
 }>();
 
@@ -31,22 +49,58 @@ const emit = defineEmits<{
   "update:draft": [payload: { sheetKey: string; draft: SheetBindingDraft }];
 }>();
 
+/** 用途下拉选项：名称与可绑定节点类型都来自统一模板协议。 */
+const roleOptions = computed(() =>
+  props.profileSheets.map((item) => ({
+    value: item.sheet_role,
+    label: item.display_name,
+    description: `可绑定的节点类型：${item.node_types.join("、") || "未声明"}`,
+  })),
+);
+
+/** 该用途可以绑定的节点实例：与预选默认值共用同一条规则（见 constants/sheetBinding）。 */
+function nodeOptionsFor(role: string | null | undefined): Array<{ value: string; label: string }> {
+  return nodeOptionsForRole(props.profileSheets, props.nodeOptions, role).map((item) => ({
+    value: item.nodeCode,
+    label: item.label,
+  }));
+}
+
+/** 换用途时把节点带上该用途的默认值：只有一个可选实例就选中，否则清空由用户选。 */
+function defaultNodeCodeOf(role: string | null | undefined): string | null {
+  return defaultNodeCodeForRole(props.profileSheets, props.nodeOptions, role);
+}
+
+/** 下拉下方的说明文案：取当前选中的用途。 */
+function roleDescription(role: string | null | undefined): string {
+  if (!role) {
+    return "尚未指定用途。请选择用途，或把本表设为不参与本次导入。";
+  }
+  const option = roleOptions.value.find((item) => item.value === role);
+  return option ? option.description : "该用途不在统一模板协议的声明范围内。";
+}
+
 function draftOf(sheet: ImportSheet): SheetBindingDraft {
-  return props.drafts[sheet.sheet_key] ?? { role: sheet.role, headerRow: sheet.header_row, excluded: false };
+  return (
+    props.drafts[sheet.sheet_key] ?? {
+      role: sheet.role ?? sheet.suggested_role ?? null,
+      nodeCode: sheet.node_code ?? defaultNodeCodeOf(sheet.role ?? sheet.suggested_role),
+      headerRow: sheet.header_row ?? DEFAULT_HEADER_ROW,
+      excluded: sheet.status === "EXCLUDED",
+    }
+  );
 }
 
 function update(sheet: ImportSheet, patch: Partial<SheetBindingDraft>): void {
   emit("update:draft", { sheetKey: sheet.sheet_key, draft: { ...draftOf(sheet), ...patch } });
 }
 
-/** 不参与本次发布的工作表不需要再选用途与表头行。 */
+/** 不参与本次导入的工作表不需要再选用途与表头行。 */
 function roleDisabled(sheet: ImportSheet): boolean {
   return draftOf(sheet).excluded;
 }
 
-/**
- * 预览列：取自全部行已填充单元格地址的并集，最多 24 列，避免不同行错位。
- */
+/** 预览列：取自全部行已填充单元格地址的并集，最多 24 列，避免不同行错位。 */
 function previewColumns(sheet: ImportSheet): string[] {
   const addresses = new Set<string>();
   for (const row of sheet.rows) {
@@ -90,7 +144,9 @@ function previewRows(sheet: ImportSheet): PreviewRow[] {
 }
 
 const sheetNameHint = computed(
-  () => "系统已按表头识别用途；没有识别出用途的工作表必须手动选择用途，或明确设为不参与本次发布。",
+  () =>
+    "「本表用途」的初值是系统按工作表名称识别出的结果，已直接选中；未识别出的工作表必须手动选择用途，或明确设为不参与本次导入。" +
+    "识别结果与所有下拉一样，以你提交的值为准。",
 );
 </script>
 
@@ -134,7 +190,7 @@ const sheetNameHint = computed(
               <span class="mono">{{ row.status }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="识别到的用途编码">
-              <span class="mono">{{ row.role ?? "未识别" }}</span>
+              <span class="mono">{{ row.role ?? row.suggested_role ?? "未识别" }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="最大行 / 最大列">
               {{ row.summary.max_row }} / {{ row.summary.max_column }}
@@ -163,26 +219,47 @@ const sheetNameHint = computed(
       </template>
     </el-table-column>
 
-    <el-table-column label="系统建议用途" width="140">
-      <template #default="{ row }">
-        <span v-if="row.role">{{ sheetRoleLabel(row.role) }}</span>
-        <span v-else class="text-hint">未识别出用途</span>
-      </template>
-    </el-table-column>
-
-    <el-table-column label="本表用途" width="200">
+    <el-table-column label="本表用途" width="220">
       <template #default="{ row }">
         <el-select
           :model-value="draftOf(row).role ?? ''"
           :disabled="roleDisabled(row)"
-          placeholder="不参与本次发布"
+          placeholder="请选择用途"
           class="sheet-select"
-          @update:model-value="update(row, { role: $event || null })"
+          @update:model-value="update(row, { role: $event || null, nodeCode: defaultNodeCodeOf($event || null) })"
         >
-          <el-option label="不参与本次发布" value="" />
-          <el-option v-for="role in sheetRoleOptions" :key="role.value" :label="role.label" :value="role.value" />
+          <el-option label="尚未选择" value="" />
+          <el-option v-for="role in roleOptions" :key="role.value" :label="role.label" :value="role.value" />
         </el-select>
-        <span class="table-note">{{ sheetRoleDescription(roleDisabled(row) ? null : draftOf(row).role) }}</span>
+        <span class="table-note">{{ roleDescription(roleDisabled(row) ? null : draftOf(row).role) }}</span>
+      </template>
+    </el-table-column>
+
+    <el-table-column label="绑定节点" width="200">
+      <template #default="{ row }">
+        <el-select
+          :model-value="draftOf(row).nodeCode ?? ''"
+          :disabled="roleDisabled(row) || !draftOf(row).role"
+          placeholder="请选择业务节点"
+          class="sheet-select"
+          @update:model-value="update(row, { nodeCode: $event || null })"
+        >
+          <el-option
+            v-for="option in nodeOptionsFor(draftOf(row).role)"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <span class="table-note">
+          {{
+            !draftOf(row).role
+              ? "先选择用途"
+              : nodeOptionsFor(draftOf(row).role).length
+                ? "一张 Sheet 只能绑定一个节点"
+                : "当前场景没有该用途可绑定的节点，请到场景详情的「流程」页签新建"
+          }}
+        </span>
       </template>
     </el-table-column>
 
@@ -197,17 +274,16 @@ const sheetNameHint = computed(
           class="sheet-number"
           @update:model-value="update(row, { headerRow: typeof $event === 'number' ? $event : null })"
         />
-        <span class="table-note">{{ row.header_row ? `系统识别在 ${row.header_row} 行` : "请按实际文件填写" }}</span>
       </template>
     </el-table-column>
 
-    <el-table-column label="参与发布" width="110" align="center">
+    <el-table-column label="参与导入" width="120" align="center">
       <template #default="{ row }">
         <el-switch
           :model-value="!draftOf(row).excluded"
           @update:model-value="update(row, { excluded: !$event })"
         />
-        <span class="table-note">{{ draftOf(row).excluded ? "不参与" : "参与" }}</span>
+        <span class="table-note">{{ draftOf(row).excluded ? "不参与本次导入" : "参与本次导入" }}</span>
       </template>
     </el-table-column>
 

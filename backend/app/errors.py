@@ -37,12 +37,10 @@ class BusinessError(Exception):
         self.details = details or {}
 
 
-# 未预期异常的定位信息必须能被事后读到。此前这类失败只写一句通用文案
-# （「发生未处理异常」），异常类型与出错位置只进 stdout 日志；日志没有落盘时，
-# 一次失败就彻底无法诊断，只能靠重启复现碰运气。
-# 这里把异常类型、消息与**最后一层业务代码栈帧**一起落库到 failure_message。
-# 只取最后一层自己的代码（排除 site-packages 与标准库）：那是业务代码真正抛错的位置，
-# 也正是需要修的那一行；完整堆栈仍然由 logger.exception 记录在日志里。
+# 未预期异常的定位信息必须能被事后读到：只写一句通用文案会让一次失败彻底无法诊断，
+# 日志没有落盘时只能靠重启复现碰运气。这里把异常类型、消息与**最后一层业务代码栈帧**
+# 一起落库到 failure_message——只取最后一层自己的代码（排除 site-packages 与标准库），
+# 那是业务代码真正抛错的位置，也正是需要修的那一行；完整堆栈仍由 logger.exception 记录。
 MAX_ERROR_SUMMARY = 2000
 
 
@@ -90,6 +88,12 @@ SAFE_DETAIL_KEYS = frozenset(
         "material_name",
         "material_keys",
         "node_code",
+        "node_type",
+        "node_codes",
+        "sheet_role",
+        "sheet_roles",
+        "contract_roles",
+        "financial_roles",
         "node",
         "operator",
         "kind",
@@ -115,6 +119,10 @@ SAFE_DETAIL_KEYS = frozenset(
         # 计划/方案、报告与操作日志的定位键：让用户能指明是哪一个对象出错。
         "plan_code",
         "plan_name",
+        "plan_id",
+        "scenario_version_id",
+        "scenario_version_no",
+        "pinned_version_no",
         "report_no",
         "log_no",
         "source_scenario_code",

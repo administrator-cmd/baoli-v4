@@ -10,14 +10,17 @@
 
 from ...domain.audit_vocab import SEAL_ARTIFACT_SOURCE, declared_artifact_source
 from ...domain.identity import public_no
-from ...domain.manifest import OPERATOR_LABELS, comparison_label
+from ...domain.manifest import OPERATOR_LABELS, comparison_label, required_field_scope, rule_node_type_of
+from ...domain import quality_judgement
 from ...errors import BusinessError
-from ...models import AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
+from ...models import AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFact, TaskFieldValue
 from ..llm_extraction import extract_document_fields
 from .artifacts import _artifact_payload
 from .evidence import _evidence_snapshot, _verify_evidence_location
 from .shared import _applicability_json, _applicability_state, _current_uploads, _extraction_fact_value, _material_names, _not_applicable_message, _task_field_definitions
 from .state import _material_states
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from typing import Any
@@ -33,73 +36,46 @@ def _material_check(db: Session, task: AuditTask, manifest: dict[str, Any], exec
     rules = [
         rule
         for rule in manifest["rules"]
-        if rule["node"] == "MATERIAL_CHECK" and rule["operator"] == "MATERIAL_EXISTS" and rule["rule_key"] in enabled_keys
+        if rule_node_type_of(rule) == "MATERIAL_CHECK" and rule["operator"] == "MATERIAL_EXISTS" and rule["rule_key"] in enabled_keys
     ]
     counts: dict[str, int] = {}
     for rule in rules:
         scoped = set(rule["materials"])
-        missing = scoped - available
         state = _applicability_state(rule, available)
-        missing_names = "、".join(material_names.get(key, key) for key in sorted(missing))
-        uploaded_scoped = sorted(scoped - missing)
-        uploaded_names = "、".join(material_names.get(key, key) for key in uploaded_scoped)
         if not state["applicable"]:
             # 已配置规则但适用条件明确不成立：记录不适用并保留原因，绝不写成通过。
             status = "NOT_APPLICABLE"
             message = _not_applicable_message(state, material_names)
-        elif not missing:
-            status = "PASSED"
-            message = "所需材料已上传"
-        elif all(not documents[key].required for key in missing):
-            # 始终适用的材料检查缺少可选材料时属于缺输入，不能判定通过。
-            status = "EVIDENCE_INSUFFICIENT"
-            message = f"可选材料尚未上传，材料检查缺少输入，不能判定通过：{missing_names}"
         else:
-            status = "ABNORMAL"
-            message = f"所需材料未上传：{missing_names}"
-        # 审核标准 = 这条材料检查声明覆盖哪些材料位，取自任务绑定的已确认配置，
-        # 不由系统补默认范围。实传情况与实际比较放在下面，与标准分开表达。
-        scope_names = "、".join(material_names.get(key, key) for key in rule["materials"])
-        criterion = str(rule.get("requirement") or "").strip()
+            status = None
+            message = None
+        # 判定与结果结构走共享领域服务 `material_exists_result`：
+        # Agent 工具调的是同一个函数，节点与工具不可能得出不同结论，
+        # 也不会出现「目录声明的输出键在某一侧永远为空」。
+        payload = quality_judgement.material_exists_result(
+            required_keys=sorted(scoped),
+            available_keys=available,
+            required_by_key={key: bool(document.required) for key, document in documents.items()},
+            material_names=material_names,
+            applicability=_applicability_json(state),
+            requirement=str(rule.get("requirement") or "").strip(),
+            operator_label=OPERATOR_LABELS.get(rule.get("operator"), rule.get("operator")),
+            check_level=rule.get("check_level"),
+            status=status,
+            message=message,
+        )
         db.add(
             RuleResult(
                 audit_task_id=task.id,
                 node_execution_id=execution.id,
                 rule_key=rule["rule_key"],
                 rule_name=rule["name"],
-                status=status,
-                message=message,
-                result_json={
-                    "applicability": _applicability_json(state),
-                    "missing_material_keys": sorted(missing),
-                    "missing_material_names": [material_names.get(key, key) for key in sorted(missing)],
-                    "standard": {
-                        "operator_label": OPERATOR_LABELS.get(rule.get("operator"), rule.get("operator")),
-                        # 检查口径原文来自配置列；没有填写时如实标缺失，不代填默认条件。
-                        "requirement": criterion or None,
-                        # 这条检查声明的材料范围就是它的判定标准：这些材料位齐了才算通过。
-                        "comparison_label": f"所声明的材料位是否都已上传：{scope_names}" if scope_names else None,
-                        "check_level": rule.get("check_level"),
-                        "clear": bool(scope_names),
-                        **({} if scope_names else {"missing": "该检查没有声明适用材料，判定标准缺少业务依据"}),
-                    },
-                    # 实际比较：声明范围与实传情况逐项对照，读得出缺的是哪一份。
-                    "comparison": {
-                        "kind": "MATERIAL_EXISTS",
-                        "left_label": "本次已上传的材料位",
-                        "left_value": uploaded_names or "无",
-                        "right_label": "本条检查声明的材料位",
-                        "right_value": scope_names or "未声明",
-                        "expression": (
-                            f"已上传 {len(uploaded_scoped)} 项，声明 {len(scoped)} 项"
-                            + (f"，缺少：{missing_names}" if missing else "，无缺少")
-                        ),
-                        "mode_label": "所声明的材料位均已上传",
-                    },
-                },
+                status=payload["status"],
+                message=payload["message"],
+                result_json=payload,
             )
         )
-        counts[status] = counts.get(status, 0) + 1
+        counts[payload["status"]] = counts.get(payload["status"], 0) + 1
     return {
         "uploaded": len(available),
         "required_missing": len(required_missing),
@@ -304,6 +280,22 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
                 db.add(evidence)
                 db.flush()
                 fact.evidence_id = evidence.id
+            # 统一事实：把这次抽取同时写进 task_fact，供计算节点按
+            # (字段编号, 期间, 报表口径, 主体范围) 取用。
+            #
+            # 为什么必须同时写两处：task_field_value 的唯一范围表达不了期间与报表口径，
+            # 而财报场景的同一个科目在本期与上期是两个不同的数。两份记录指向同一次
+            # 抽取（source_execution_id 相同），因此不会出现口径不一致。
+            _write_extracted_fact(
+                db,
+                task,
+                execution,
+                field=field,
+                material_key=document.material_key,
+                status=status,
+                normalized_value=normalized_value,
+                previous_facts=previous_facts,
+            )
             if status in {"EVIDENCE_UNCLEAR", "NORMALIZATION_FAILED"}:
                 db.add(
                     ManualReview(
@@ -333,6 +325,114 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
         "skipped": rule_summary["extraction_rule_count"] == 0,
         "skip_reason": "本模板未配置字段抽取规则" if rule_summary["extraction_rule_count"] == 0 else None,
     }
+
+def _write_extracted_fact(
+    db: Session,
+    task: AuditTask,
+    execution: NodeExecution,
+    *,
+    field: dict[str, Any],
+    material_key: str,
+    status: str,
+    normalized_value: Any,
+    previous_facts: list[TaskFieldValue],
+) -> None:
+    """把一次抽取写进统一事实表。
+
+    期间与报表口径取自字段配置（03_字段 的声明）。字段把这两列留空时，配置里存的是
+    **显式的「不适用」**——那是这份配置真实表达的意思，不是系统替业务补的默认值，
+    本函数不代填任何具体口径。
+
+    数值事实只在规范化成功且得到数值时写入 decimal_value；文本、日期各自写入
+    对应的列。**不把解析失败的值写成 0**：解析失败时 decimal_value 保持 NULL，
+    计算节点据此返回「输入缺失」，而不是算出一个错误的 0。
+    """
+    # 取数期间与报表口径**来自字段自己的声明**：计算参数按这两项定位事实，
+    # 缺了就无法建立定位键。这里不代填默认值——默认成「本期 / 合并」会让一个
+    # 声明了上期的计算参数静默取到本期的数，而结果看起来完全正常。
+    period_scope = required_field_scope(
+        field, "period_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
+    )
+    statement_scope = required_field_scope(
+        field, "statement_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
+    )
+    entity_scope = str(field.get("entity_scope") or "SELF")
+    value_type = str(field.get("value_type") or "DECIMAL")
+    decimal_value = None
+    text_value = None
+    date_value = None
+    # 规范化值是按字段类型重算后的**裸值**（数值 / 文本 / 日期字符串），不是字典。
+    # 按类型分派到对应的列；类型与值不匹配时不强行转换，保持 NULL——
+    # 下游看到 NULL 会明确报「输入缺失」，比塞进一个错误的 0 安全。
+    if isinstance(normalized_value, bool) or normalized_value is None:
+        pass
+    elif isinstance(normalized_value, (int, float, Decimal)):
+        try:
+            decimal_value = Decimal(str(normalized_value))
+        except (InvalidOperation, ValueError):
+            decimal_value = None
+    elif isinstance(normalized_value, str) and normalized_value.strip():
+        if value_type == "DATE":
+            try:
+                date_value = date.fromisoformat(normalized_value.strip()[:10])
+            except ValueError:
+                text_value = normalized_value
+        elif value_type == "DECIMAL":
+            try:
+                decimal_value = Decimal(normalized_value.strip())
+            except (InvalidOperation, ValueError):
+                text_value = normalized_value
+        else:
+            text_value = normalized_value
+
+    # 同一 (字段, 材料位, 期间, 口径) 已有当前事实时，把它置为非当前再插入新版本。
+    # 事实不可变：绝不原地改写（改写会被数据库触发器拒绝）。
+    previous = db.scalars(
+        select(TaskFact).where(
+            TaskFact.audit_task_id == task.id,
+            TaskFact.fact_code == str(field.get("source_ref") or field["field_key"]),
+            TaskFact.material_key == material_key,
+            TaskFact.period_scope == period_scope,
+            TaskFact.statement_scope == statement_scope,
+            TaskFact.entity_scope == entity_scope,
+            TaskFact.is_current.is_(True),
+        )
+    ).all()
+    revision_no = 1
+    if previous:
+        revision_no = max(item.revision_no for item in previous) + 1
+        db.execute(
+            update(TaskFact)
+            .where(TaskFact.id.in_([item.id for item in previous]))
+            .values(is_current=False)
+        )
+        db.flush()
+    db.add(
+        TaskFact(
+            audit_task_id=task.id,
+            scenario_version_id=task.scenario_version_id,
+            # 事实编号用业务字段编号（FEX-xxx）：计算参数按它引用，
+            # 与字段身份（field_key）是两回事，转换在编译期完成。
+            fact_code=str(field.get("source_ref") or field["field_key"]),
+            fact_kind="EXTRACTED",
+            material_key=material_key,
+            entity_scope=entity_scope,
+            period_scope=period_scope,
+            statement_scope=statement_scope,
+            value_type=value_type,
+            decimal_value=decimal_value,
+            text_value=text_value,
+            date_value=date_value,
+            unit=field.get("unit"),
+            currency=field.get("currency"),
+            source_execution_id=execution.id,
+            revision_no=revision_no,
+            is_current=True,
+            status=status,
+        )
+    )
+    db.flush()
+
 
 def _extraction_result_payload(
     rule: dict[str, Any],
@@ -392,7 +492,7 @@ def _save_extraction_rule_results(
     rules = [
         rule
         for rule in manifest["rules"]
-        if rule["node"] == "FIELD_EXTRACTION" and rule["operator"] == "LLM_EXTRACT" and rule["rule_key"] in enabled_keys
+        if rule_node_type_of(rule) == "FIELD_EXTRACTION" and rule["operator"] == "LLM_EXTRACT" and rule["rule_key"] in enabled_keys
     ]
     counts: dict[str, int] = {}
     for rule in rules:
@@ -664,7 +764,7 @@ def _refresh_extraction_rule_results(db: Session, task: AuditTask, manifest: dic
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
     recomputed: list[str] = []
     for rule in manifest["rules"]:
-        if rule["node"] != "FIELD_EXTRACTION" or rule["operator"] != "LLM_EXTRACT" or rule["rule_key"] not in enabled_keys:
+        if rule_node_type_of(rule) != "FIELD_EXTRACTION" or rule["operator"] != "LLM_EXTRACT" or rule["rule_key"] not in enabled_keys:
             continue
         statuses: list[str] = []
         rule_facts: list[TaskFieldValue | None] = []
@@ -687,7 +787,9 @@ def _refresh_extraction_rule_results(db: Session, task: AuditTask, manifest: dic
             .where(
                 RuleResult.audit_task_id == task.id,
                 RuleResult.rule_key == rule["rule_key"],
-                NodeExecution.node_code == "FIELD_EXTRACTION",
+                # 这条抽取规则的归属是**节点实例码**（`rule["node"]`），不是能力类型：
+                # 同一场景可以有两个字段抽取节点，写死能力类型当实例码后一条都查不到。
+                NodeExecution.node_code == rule["node"],
                 NodeExecution.status != "INVALIDATED",
             )
             .order_by(RuleResult.id.desc())

@@ -12,7 +12,7 @@ export interface MaterialActionsState {
   uploadPercent: Ref<number | null>;
   /** 最近一次替换/补传/移除的真实影响范围，供页面说明失效了什么。 */
   replacementImpact: Ref<(ReplacementImpact & { materialName: string }) | null>;
-  upload: (file: File, document: AuditDocument) => Promise<void>;
+  upload: (file: File, document: AuditDocument, materialType: string) => Promise<void>;
   download: (document: AuditDocument) => void;
   preview: (document: AuditDocument) => void;
   remove: (document: AuditDocument) => Promise<void>;
@@ -36,7 +36,7 @@ export function useMaterialActions(options: {
   const uploadPercent = ref<number | null>(null);
   const replacementImpact = ref<(ReplacementImpact & { materialName: string }) | null>(null);
 
-  async function upload(file: File, document: AuditDocument): Promise<void> {
+  async function upload(file: File, document: AuditDocument, materialType: string): Promise<void> {
     const taskNo = options.taskNo.value;
     const replacing = Boolean(document.filename);
     busyDocumentNo.value = document.document_no;
@@ -47,6 +47,7 @@ export function useMaterialActions(options: {
           taskNo,
           document.document_no,
           file,
+          materialType,
           replacing,
           // 百分比来自浏览器真实发送进度，不是估算。
           (percent) => {

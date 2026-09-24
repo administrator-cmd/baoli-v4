@@ -6,8 +6,12 @@
 
 校验范围：
 1. 必需的表、列、唯一键/索引、复合外键、触发器是否存在；
-2. 本轮新增的迁移记录是否齐全（空库初始化与增量脚本都会写入）；
-3. LangGraph checkpoint 表与迁移版本（由 runtime.checkpoint 负责，见 check_checkpoint_tables）。
+2. LangGraph checkpoint 表与迁移版本（由 runtime.checkpoint 负责，见 check_checkpoint_tables）。
+
+触发器检查覆盖的是**业务主流程里那些一经产生就不可改写的事实**：
+场景草稿 → 显式发布 → 方案钉版本 → 任务冻结。已发布场景版本及其全部关系投影
+（版本 / 材料 / 节点 / 规则）的改与删都在检查范围内——缺一条删除触发器，
+一次误删就能让引用它的方案与历史任务无从解释，而应用层看起来一切正常。
 
 发现缺口时抛 RuntimeError，消息里带精确的对象名与需要执行哪一个脚本。
 """
@@ -24,37 +28,7 @@ from ..database import engine as default_engine
 logger = logging.getLogger(__name__)
 
 
-# 结构建立时写入的迁移版本。backend/database/schema.sql 在同一次执行里写入这些记录；
-# 本仓库只保留这一份结构脚本，已不再维护增量脚本。
-REQUIRED_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("2026-09-11-field-fact-revisions", "字段事实不可变版本"),
-    ("2026-09-11-evidence-locator-status", "证据定位核对状态"),
-    ("2026-09-11-manual-review-decisions", "人工复核真实决定与依据类型"),
-    ("2026-09-11-task-input-revision", "任务输入修订号"),
-    ("2026-09-11-import-draft-and-precheck", "导入草稿修订与发布意图绑定"),
-    ("2026-09-11-operation-command-record", "后台命令记录"),
-    ("2026-09-11-schema-migration-registry", "迁移记录表与字段事实不可变触发器"),
-    ("2026-09-11-scenario-admin-and-drafts", "场景基本资料与配置草稿"),
-    ("2026-09-11-audit-plans", "审核方案与方案版本、任务方案绑定"),
-    ("2026-09-11-audit-reports-and-operation-log", "报告快照与操作日志"),
-    ("2026-09-11-review-drafts", "复核草稿持久化暂存"),
-    ("2026-09-14-node-rulebook-and-task-rag", "节点版规则库格式与审核任务 RAG 索引/检索记录"),
-    (
-        "2026-09-15-draft-config-fidelity",
-        "草稿保真：报告分组属性、字段产物来源与草稿来源格式版本",
-    ),
-    (
-        "2026-09-15-import-job-created-at-index",
-        "规则库导入列表：import_job 增加 (created_at, id) 索引，消除分页排序的 1038 内存不足",
-    ),
-    (
-        "2026-09-16-scenario-config-single-source",
-        "场景配置单一来源：scenario_draft 增加 sync_error，记录配置未生效的真实原因",
-    ),
-)
-
 REQUIRED_TABLES: tuple[str, ...] = (
-    "schema_migration",
     "scenario_template",
     "background_operation",
     "import_job",
@@ -66,12 +40,20 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "scenario_node",
     "scenario_rule",
     "scenario_draft",
+    # 用户配置的节点实例：节点存在、顺序与依赖由用户配置，不由系统自动生成。
+    "scenario_draft_node",
+    # 场景选用的 Sheet：模板下载与绑定步骤按它取值，不再从草稿内容反推。
+    "scenario_draft_sheet",
     "scenario_draft_material",
     "scenario_draft_field",
     "scenario_draft_rule",
     "scenario_draft_section",
     "audit_plan",
-    "audit_plan_rule",
+    # 方案自己的配置（场景版本的可编辑副本）：形状与 scenario_draft_* 对应。
+    "plan_material",
+    "plan_field",
+    "plan_rule",
+    "plan_section",
     "audit_task",
     "workflow_checkpoint",
     "audit_report",
@@ -82,6 +64,8 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "stored_artifact",
     "node_execution",
     "task_field_value",
+    # 统一事实：字段抽取事实与计算派生事实（期间 / 报表口径 / 主体范围）。
+    "task_fact",
     "rule_result",
     "evidence",
     "manual_review",
@@ -89,6 +73,10 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "evidence_index_version",
     "evidence_chunk",
     "evidence_retrieval",
+    # Agent 工具调用账本：请求与结果，tool_call_id 唯一（不重复执行的数据库级保证）。
+    "agent_tool_call",
+    # Agent 规则评估的冻结事实内容：工具执行只从它解析事实，不再读「当前数据」。
+    "evaluation_snapshot",
 )
 
 # 只列出「缺失会导致业务错误或数据不一致」的列，不追求与 ORM 逐列比对。
@@ -110,6 +98,9 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "import_job": (
         "job_no",
         "profile_version",
+        # 场景身份：缺列会让导入作业无法回答「属于哪个场景」，页面只能按表头猜。
+        "scenario_code",
+        "profile_display_version",
         "status",
         "workbook_ir_json",
         "proposals_json",
@@ -127,6 +118,8 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "status",
         "current_node",
         "thread_id",
+        # 执行快照：方案的编译产物整份冻结，执行期只读它。
+        "manifest_json",
         "task_schema_json",
         "checkpoint_json",
         "pending_review_hash",
@@ -142,8 +135,24 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "deleted_at",
         "latest_version_no",
     ),
-    "scenario_draft": ("scenario_code", "revision_no", "source", "base_version_no", "profile_version", "sync_error"),
-    "scenario_draft_material": ("draft_id", "material_key", "name", "material_type", "required", "source_ref"),
+    "scenario_draft": (
+        "scenario_code",
+        "revision_no",
+        "source",
+        "base_version_no",
+        "profile_version",
+        "sync_error",
+        "calculation_json",
+        "disabled_source_rows",
+    ),
+    # 节点实例：实例码、能力类型、顺序、依赖与配置缺一不可——
+    # 缺 depends_on 会让发布期无法校验依赖，缺 node_type 会让分发退回按实例码猜能力。
+    "scenario_draft_node": ("draft_id", "node_code", "node_type", "name", "sequence_no", "depends_on", "config_json", "enabled"),
+    # 场景选用哪些 Sheet、每张表归哪个节点：缺列会让「本场景用哪些表」没有权威来源。
+    "scenario_draft_sheet": ("draft_id", "sheet_role", "node_code"),
+    # Sheet → 节点实例的绑定列：缺它就只能按表头自动推断用途，而系统不允许自动推断。
+    "import_sheet": ("import_job_id", "sheet_key", "sheet_name", "bound_role", "bound_node_code", "header_row"),
+    "scenario_draft_material": ("draft_id", "material_key", "name", "required", "source_ref", "origin_json"),
     # 币种与产物来源是金额口径与主体核对的配置事实：缺列会让页面保存一次就丢掉它们。
     "scenario_draft_field": (
         "draft_id",
@@ -153,10 +162,14 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "unit",
         "currency",
         "artifact_source",
+        # 取数期间与报表口径：计算参数按这两项定位字段事实，缺列则计算配置无法发布。
+        "period_scope",
+        "statement_scope",
         "instruction",
         "source_ref",
+        "origin_json",
     ),
-    "scenario_draft_rule": ("draft_id", "rule_key", "node_code", "operator_code", "enabled", "rule_json", "source_ref"),
+    "scenario_draft_rule": ("draft_id", "rule_key", "node_code", "operator_code", "enabled", "rule_json", "source_ref", "origin_json"),
     # 节点版报告的分组属性：缺列时草稿保存会把分组报告退回旧的附加展示章节。
     "scenario_draft_section": (
         "draft_id",
@@ -171,6 +184,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "content_type",
         "result_sort",
         "config_status",
+        "origin_json",
     ),
     "audit_plan": (
         "plan_code",
@@ -179,12 +193,35 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "scenario_version_id",
         "enabled",
         "deleted_at",
+        # 只读上下文（节点/Sheet）与方案的编译产物：缺 manifest_json 任务就冻结不到配置。
+        "context_json",
+        "manifest_json",
+        "manifest_hash",
         # 保存即生效：范围快照与未生效原因都落在这里。
         "sync_error",
         "scope_hash",
         "scope_json",
     ),
-    "audit_plan_rule": ("plan_id", "rule_key"),
+    # 方案自己的配置：形状与 scenario_draft_* 一致，归属是 plan_id。
+    # 列清单只列「缺了会导致业务错误或数据不一致」的那些。
+    "plan_material": ("plan_id", "material_key", "name", "required", "source_ref", "origin_json"),
+    "plan_field": (
+        "plan_id",
+        "field_key",
+        "material_key",
+        "name",
+        "value_type",
+        "unit",
+        "currency",
+        "artifact_source",
+        "period_scope",
+        "statement_scope",
+        "required",
+        "instruction",
+        "origin_json",
+    ),
+    "plan_rule": ("plan_id", "rule_key", "name", "node_code", "operator_code", "enabled", "rule_json", "origin_json"),
+    "plan_section": ("plan_id", "section_key", "title", "field_keys", "report_code", "content_type", "origin_json"),
     "audit_report": (
         "report_no",
         "audit_task_id",
@@ -263,8 +300,87 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "audit_task_id",
         "is_current",
         "current_task_document_id",
+        # 上传时声明并经 8018 目录核对过的材料类型：缺列会让材料校验没有 doc_type 可提交。
+        "declared_material_type",
     ),
     "scenario_version": ("scenario_code", "version_no", "source", "base_version_id", "manifest_hash", "manifest_json"),
+    # 节点实例码、能力类型、依赖 DAG 与节点级配置：缺任一列都会让新调度器
+    # 退回线性推进，或把能力类型当成实例码。
+    "scenario_node": ("scenario_version_id", "node_code", "node_type", "name", "sequence_no", "depends_on", "enabled"),
+    # 规则身份两个口径：rule_key 是历史身份，rule_code 是业务编号。
+    "scenario_rule": ("scenario_version_id", "rule_key", "rule_code", "legacy_rule_key", "node_code", "operator_code", "enabled"),
+    "rule_result": ("audit_task_id", "node_execution_id", "rule_key", "rule_code", "legacy_rule_key", "status"),
+    # 统一事实：期间 / 报表 / 主体三个维度与计算追溯列缺一不可——
+    # 缺期间列会让本期与上期互相覆盖，缺 input_snapshot_json 会让计算无法追溯。
+    "task_fact": (
+        "audit_task_id",
+        "scenario_version_id",
+        "fact_code",
+        "fact_kind",
+        "material_key",
+        "entity_scope",
+        "period_scope",
+        "statement_scope",
+        "value_type",
+        "decimal_value",
+        "text_value",
+        "date_value",
+        "unit",
+        "currency",
+        "source_execution_id",
+        "input_snapshot_json",
+        "judgement_json",
+        "calculation_status",
+        "calculation_rule_code",
+        "revision_no",
+        "is_current",
+        "status",
+        "current_fact_scope",
+    ),
+    # 工具调用账本的关键列：缺任何一列都会让「不重复执行」或「绑定快照」失效。
+    # 评估身份、规则实例与快照引用必须非空（只校验存在性，非空由结构脚本保证）。
+    "agent_tool_call": (
+        "audit_task_id",
+        "evaluation_id",
+        "rule_instance_id",
+        "tool_call_id",
+        "retry_of_tool_call_id",
+        "tool_name",
+        "tool_version",
+        "tool_catalog_version",
+        "tool_catalog_hash",
+        "tool_policy_version",
+        "arguments_json",
+        "input_snapshot_hash",
+        "fact_snapshot_ref",
+        "caller_identity",
+        "status",
+        "result_json",
+        "error_json",
+        "external_job_id",
+        "started_at",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    ),
+    # 冻结快照的关键列：缺 facts_json 就只剩指纹（工具会退回读当前数据）；
+    # 缺 input_revision 就无法判断「这份快照还是不是当前输入」。
+    "evaluation_snapshot": (
+        "snapshot_ref",
+        "audit_task_id",
+        "evaluation_id",
+        "rule_instance_id",
+        "node_code",
+        "input_revision",
+        "facts_json",
+        "fact_snapshot_hash",
+        "tool_catalog_version",
+        "tool_catalog_hash",
+        "tool_policy_version",
+        "allowed_tools_json",
+        "created_at",
+        "updated_at",
+    ),
     "stored_artifact": (
         "artifact_no",
         "document_upload_id",
@@ -352,8 +468,19 @@ REQUIRED_INDEXES: dict[str, tuple[str, ...]] = {
     ),
     "document_upload": ("uq_document_upload_one_current",),
     "rule_result": ("uq_rule_result_execution_rule",),
+    # 统一事实的当前版本唯一键：没有它，本期/上期/期初/期末的事实会互相覆盖。
+    "task_fact": ("uq_task_fact_revision", "uq_task_fact_current", "idx_task_fact_current"),
+    # 工具调用账本：唯一键是「同一调用不重复执行」的数据库级保证。
+    "agent_tool_call": ("uq_agent_tool_call_id", "idx_agent_tool_call_evaluation", "idx_agent_tool_call_retry"),
+    # 冻结快照：ref 唯一（恢复入口）；(评估批次, 规则实例, 输入修订) 唯一，
+    # 防止同一次评估拿到两份不同的输入。
+    "evaluation_snapshot": ("uq_evaluation_snapshot_ref", "uq_evaluation_snapshot_scope"),
     # 管理模块的唯一键：幂等命令重放与方案归属都靠它们兜底。
     "scenario_draft": ("uq_scenario_draft_code",),
+    # 节点实例码在同一草稿内唯一：重码会让规则归属与 Sheet 绑定指向不明确的实例。
+    "scenario_draft_node": ("uq_scenario_draft_node_code", "idx_scenario_draft_node_draft"),
+    # 同一草稿内一个 Sheet 角色只能选用一次：重复会让转换读两次同一角色。
+    "scenario_draft_sheet": ("uq_scenario_draft_sheet_role", "idx_scenario_draft_sheet_draft"),
     "audit_plan": ("uq_audit_plan_code",),
     "audit_report": ("uq_audit_report_no",),
     "operation_log": ("uq_operation_log_no", "uq_operation_log_idempotency"),
@@ -368,6 +495,7 @@ REQUIRED_INDEXES: dict[str, tuple[str, ...]] = {
 REQUIRED_FOREIGN_KEYS: dict[str, tuple[str, ...]] = {
     "task_document": ("fk_task_document_current_upload",),
     "task_field_value": (
+        "fk_task_field_value_task_material",
         "fk_task_field_value_upload_task",
         "fk_task_field_value_evidence_task",
         "fk_task_field_value_execution_task",
@@ -386,29 +514,56 @@ REQUIRED_FOREIGN_KEYS: dict[str, tuple[str, ...]] = {
     "audit_plan": ("fk_audit_plan_scenario_version",),
     "audit_report": ("fk_audit_report_task",),
     "scenario_version": ("fk_scenario_version_base",),
-    "audit_plan_rule": ("fk_audit_plan_rule_plan",),
+    "plan_material": ("fk_plan_material_plan",),
+    "plan_field": ("fk_plan_field_plan",),
+    "plan_rule": ("fk_plan_rule_plan",),
+    "plan_section": ("fk_plan_section_plan",),
     "scenario_draft_material": ("fk_scenario_draft_material_draft",),
+    "scenario_draft_node": ("fk_scenario_draft_node_draft",),
+    "scenario_draft_sheet": ("fk_scenario_draft_sheet_draft",),
     "scenario_draft_field": ("fk_scenario_draft_field_draft",),
     "scenario_draft_rule": ("fk_scenario_draft_rule_draft",),
     "scenario_draft_section": ("fk_scenario_draft_section_draft",),
     "review_draft": ("fk_review_draft_task",),
+    # 统一事实必须绑定到真实任务与产生它的执行批次：缺任一条都会允许跨任务串事实。
+    "task_fact": ("fk_task_fact_task", "fk_task_fact_execution_task"),
     # 索引与检索必须绑定到具体的上传版本、产物版本与任务场景版本：
     # 缺任一条外键都会允许跨任务或跨上传版本串用检索结果。
     "evidence_index_version": ("fk_evidence_index_upload_task", "fk_evidence_index_artifact_task"),
     "evidence_chunk": ("fk_evidence_chunk_index_task",),
     "evidence_retrieval": ("fk_evidence_retrieval_task",),
+    # 冻结快照必须绑定到真实任务：缺它就会允许跨任务串用事实。
+    "evaluation_snapshot": ("fk_evaluation_snapshot_task",),
 }
 
 # 不可变性与快照保护触发器：缺少它们就等于允许改写已发布内容与历史事实。
 REQUIRED_TRIGGERS: tuple[str, ...] = (
     "trg_manual_review_system_judgment_immutable_r2",
     "trg_task_field_value_immutable_r2",
+    # 统一事实与字段事实同一口径：事实不可变，重跑新增版本。
+    "trg_task_fact_immutable_r2",
     "trg_audit_task_snapshot_immutable_r3",
     "trg_document_upload_identity_immutable_r2",
+    # 已发布场景版本**与它的全部关系投影**都是追加的历史事实：
+    # 缺少删除/改写触发器时，一次误删就能让引用它的方案与历史任务无从解释，
+    # 而应用层看起来一切正常。因此八条（版本 / 材料 / 节点 / 规则 × 改 / 删）逐一检查。
     "trg_scenario_version_no_update_r2",
+    "trg_scenario_version_no_delete_r2",
+    "trg_scenario_material_no_update_r2",
+    "trg_scenario_material_no_delete_r2",
+    "trg_scenario_node_no_update_r2",
+    "trg_scenario_node_no_delete_r2",
+    "trg_scenario_rule_no_update_r2",
+    "trg_scenario_rule_no_delete_r2",
+    # 任务材料位的快照同样不可改写（它记录任务创建时冻结的材料范围）。
+    "trg_task_document_snapshot_immutable_r2",
     # 报告快照不可改写、操作日志只追加。
     "trg_audit_report_content_immutable_r2",
     "trg_operation_log_immutable_r2",
+    # 工具调用账本的身份与参数一经写入即不可改；终态不允许改成任何其他状态。
+    "trg_agent_tool_call_identity_immutable",
+    # 冻结快照不可改写：改写它等于让已经据此执行的工具结果无从解释。
+    "trg_evaluation_snapshot_immutable",
 )
 
 
@@ -495,41 +650,12 @@ def _missing_triggers(engine: Engine) -> list[str]:
     return [name for name in REQUIRED_TRIGGERS if name not in present]
 
 
-def _missing_migrations(engine: Engine) -> list[str]:
-    # schema_migration 表本身可能不存在（全新或旧版初始化的库）：
-    # 先查存在性，缺表时按“全部迁移都未应用”处理，给出明确的初始化指引，
-    # 而不是让原始 SQL 错误（1146）在启动日志里裸奔。
-    rows = _query_rows(
-        engine,
-        """
-        SELECT table_name FROM information_schema.tables
-        WHERE table_schema = DATABASE() AND table_name = 'schema_migration'
-        """,
-    )
-    if not rows:
-        return [version for version, _ in REQUIRED_MIGRATIONS]
-    present = {row["version"] for row in _query_rows(engine, "SELECT version FROM schema_migration")}
-    return [version for version, _ in REQUIRED_MIGRATIONS if version not in present]
-
-
 def verify_schema(engine: Engine | None = None) -> dict[str, Any]:
     """只读校验业务结构；缺口不为空时抛 RuntimeError。
 
     返回一份可供日志与系统状态接口使用的摘要；不执行任何 DDL，也不自动修表。
     """
     target = engine or default_engine
-    missing_migrations = _missing_migrations(target)
-    if missing_migrations:
-        # 迁移记录缺失时先报这一项：它说明当前库不是由本仓库的 schema.sql 建立的，
-        # 后面的列/键缺口只是同一原因的派生结果。
-        raise RuntimeError(
-            "数据库结构迁移记录不完整，缺少："
-            + "、".join(missing_migrations)
-            + "。请执行 backend/database/schema.sql 重建空库"
-            "（本仓库只保留这一份结构脚本，已不含增量脚本；"
-            "它在同一次执行里写入全部迁移记录）。"
-        )
-
     report = {
         "missing_tables": _missing_tables(target),
         "missing_columns": _missing_columns(target),

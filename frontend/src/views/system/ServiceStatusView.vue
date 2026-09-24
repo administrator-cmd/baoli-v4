@@ -82,7 +82,7 @@ onMounted(() => {
       :closable="false"
       title="“已配置，未验证”只表示必需配置项已填写，不代表供应商服务已经连通"
     >
-      外部服务的真实连通性在执行具体操作时验证；失败会返回明确错误，不会静默降级。页面不显示密钥、令牌或完整地址。
+      外部服务的真实连通性在执行具体操作时验证；失败会返回明确错误，不会静默降级。
     </el-alert>
 
     <el-table :data="payload?.services ?? []" border stripe v-loading="loading" empty-text="暂无数据">

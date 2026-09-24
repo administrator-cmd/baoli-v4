@@ -10,7 +10,7 @@ from ..config import get_settings
 from ..domain.workbook import WorkbookCell, WorkbookIR, WorkbookRow, WorkbookSheet
 from ..errors import BusinessError
 from ..domain.identity import stable_key
-from ..domain.profile import detect_profile_version, load_rulebook_profile, match_sheet_role
+from ..domain import unified_profile
 
 
 def _cell_value(value: Any, max_chars: int | None = None) -> tuple[str | int | float | bool | None, bool]:
@@ -70,6 +70,12 @@ def read_workbook_ir(
     source_size: int,
     source_sha256: str,
 ) -> WorkbookIR:
+    """读取工作簿 IR（工作表、表头候选与截断标记）。
+
+    **不判断场景**：场景由上传入口决定（用户先建场景、再在该场景下上传）。
+    这里只按统一模板协议给每张 Sheet 一个**绑定建议**——建议不写库，
+    绑定结果必须由用户在绑定步骤确认（见 `import_sheet.bound_node_code`）。
+    """
     settings = get_settings()
     try:
         workbook = load_workbook(path, read_only=False, data_only=False, keep_vba=path.suffix.lower() == ".xlsm")
@@ -172,15 +178,19 @@ def read_workbook_ir(
             )
         )
     workbook.close()
-    # 读取顺序不影响识别结果：按全部工作表的表头文本一次性判定格式版本。
-    profile = load_rulebook_profile(detect_profile_version(_header_signature(sheets)))
+    # 按统一模板协议给每张 Sheet 一个**建议**角色。建议只用于页面预选，
+    # 不写库、不生成节点、不决定场景：绑定结果由用户确认后落库。
+    profile = unified_profile.load_unified_profile()
     for sheet in sheets:
-        sheet.suggested_role = match_sheet_role(sheet.name, profile["profile_version"])
+        header_row = sheet.header_candidates[0] if sheet.header_candidates else None
+        header = next((row for row in sheet.rows if row.row_no == header_row), None) if header_row else None
+        cells = {str(value).strip() for value in (header.cells.values() if header else []) if str(value).strip()}
+        sheet.suggested_role = unified_profile.suggest_sheet_role(profile, sheet.name, cells)
     return WorkbookIR(
         workbook_id=workbook_id,
         source_filename=source_filename,
         source_size=source_size,
         source_sha256=source_sha256,
-        profile_version=profile["profile_version"],
+        profile_version=unified_profile.UNIFIED_PROFILE_VERSION,
         sheets=sheets,
     )

@@ -1,0 +1,30 @@
+这个项目的结构层次不清晰，我希望是可以做出类似java的那种风格的系统
+src/main/java/com/company/project/
+├── controller/          @RestController，只做参数接收/校验 + 调 service
+├── service/             业务接口
+│   └── impl/            实现类，@Service + @Transactional（事务边界在这层）
+├── mapper/  （或 dao/）  MyBatis Mapper 接口，@Mapper
+├── entity/  （或 po/）   与数据库表一一对应
+│   └── dto/ vo/ query/  入参、出参、查询条件对象
+├── common/  （或 util/）
+│   ├── Result.java      统一返回体
+│   ├── constant/        常量
+│   └── exception/       自定义异常 + @ControllerAdvice 全局处理
+├── config/              Spring / MyBatis / 拦截器配置
+├── interceptor/        登录态、权限
+└── task/  job/          定时任务
+
+src/main/resources/
+├── mapper/              MyBatis XML（与 Mapper 接口同名同路径）
+├── application.yml
+└── static/ templates/   （服务端渲染时才有）
+
+当然上面只是一个参考，传统的ssm 项目是这个要求，不过咱是fastapi 项目，但还是有很多思路值得借鉴的，我也不要求你完全安装这个思路，但是我决的，你可以借鉴这个思路，
+controller 就是 api
+service 就是 service
+mapper 的话 咱们可用 repository
+entity 的话 咱们没有 好像？ dto vo query 这三个我觉得也可以保留 这个时候 model 和 schema（pydantic 的模型校验）你就需要好好拆分了
+conmon 也可以用
+config interceptor 都可以用
+task job 暂时用不到
+至于下面的 resources 咱们是用不到的
