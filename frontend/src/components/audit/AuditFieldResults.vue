@@ -39,10 +39,21 @@ const props = defineProps<{
   correctionEnabled?: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "open-evidence": [field: AuditFieldView];
   correct: [field: AuditFieldView];
 }>();
+
+function evidenceItems(field: AuditFieldView): Array<{ evidence_no: string; field_path: string | null; locator_status: string }> {
+  if (field.evidences?.length) return field.evidences;
+  return field.evidence_no
+    ? [{ evidence_no: field.evidence_no, field_path: null, locator_status: field.evidence_locator_status ?? "UNVERIFIED" }]
+    : [];
+}
+
+function openEvidence(field: AuditFieldView, evidenceNo: string): void {
+  emit("open-evidence", { ...field, evidence_no: evidenceNo });
+}
 
 /** 原文内容。没有原文时说明属于哪一种缺失，不留空白。 */
 function rawText(field: AuditFieldView): string {
@@ -245,7 +256,7 @@ const emptyDescription = computed(() => {
       <!-- 位置只是辅助信息：单独一列，明确标注为位置，不影响上面的字段值与原文证据 -->
       <el-table-column label="辅助信息" min-width="170">
         <template #default="{ row }">
-          <div v-if="row.evidence_no" class="table-note">已记录原文证据</div>
+          <div v-if="evidenceItems(row).length" class="table-note">已记录 {{ evidenceItems(row).length }} 条原文证据</div>
           <div v-else-if="row.material_uploaded === false" class="table-note">材料未上传，无法抽取</div>
           <div v-else-if="row.status === 'PENDING' || row.status === 'NOT_EXECUTED'" class="table-note">
             本次未执行抽取
@@ -264,10 +275,31 @@ const emptyDescription = computed(() => {
 
       <el-table-column label="操作" width="170" fixed="right" align="center">
         <template #default="{ row }">
-          <el-button v-if="row.evidence_no" link type="primary" size="small" title="查看证据原文" @click="$emit('open-evidence', row)">
+          <el-button v-if="evidenceItems(row).length === 1" link type="primary" size="small" title="查看证据原文" @click="openEvidence(row, evidenceItems(row)[0].evidence_no)">
             <template #icon><FileSearch :size="15" /></template>
             原文证据
           </el-button>
+          <el-dropdown
+            v-else-if="evidenceItems(row).length > 1"
+            trigger="click"
+            @command="(evidenceNo) => openEvidence(row, String(evidenceNo))"
+          >
+            <el-button link type="primary" size="small" title="选择字段属性的原文证据">
+              <template #icon><FileSearch :size="15" /></template>
+              原文证据（{{ evidenceItems(row).length }}）
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="item in evidenceItems(row)"
+                  :key="item.evidence_no"
+                  :command="item.evidence_no"
+                >
+                  {{ item.field_path || "字段原文" }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button
             v-if="correctionEnabled"
             link

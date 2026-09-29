@@ -4,7 +4,6 @@ import { FileSpreadsheet } from "lucide-vue-next";
 
 import type { ImportSheet, JsonValue } from "@/api/contracts";
 import type { ProfileSheet } from "@/api/imports";
-import StatusBadge from "@/components/StatusBadge.vue";
 import { formatBusinessValue } from "@/constants/labels";
 import {
   DEFAULT_HEADER_ROW,
@@ -54,7 +53,6 @@ const roleOptions = computed(() =>
   props.profileSheets.map((item) => ({
     value: item.sheet_role,
     label: item.display_name,
-    description: `可绑定的节点类型：${item.node_types.join("、") || "未声明"}`,
   })),
 );
 
@@ -69,15 +67,6 @@ function nodeOptionsFor(role: string | null | undefined): Array<{ value: string;
 /** 换用途时把节点带上该用途的默认值：只有一个可选实例就选中，否则清空由用户选。 */
 function defaultNodeCodeOf(role: string | null | undefined): string | null {
   return defaultNodeCodeForRole(props.profileSheets, props.nodeOptions, role);
-}
-
-/** 下拉下方的说明文案：取当前选中的用途。 */
-function roleDescription(role: string | null | undefined): string {
-  if (!role) {
-    return "尚未指定用途。请选择用途，或把本表设为不参与本次导入。";
-  }
-  const option = roleOptions.value.find((item) => item.value === role);
-  return option ? option.description : "该用途不在统一模板协议的声明范围内。";
 }
 
 function draftOf(sheet: ImportSheet): SheetBindingDraft {
@@ -143,11 +132,6 @@ function previewRows(sheet: ImportSheet): PreviewRow[] {
   });
 }
 
-const sheetNameHint = computed(
-  () =>
-    "「本表用途」的初值是系统按工作表名称识别出的结果，已直接选中；未识别出的工作表必须手动选择用途，或明确设为不参与本次导入。" +
-    "识别结果与所有下拉一样，以你提交的值为准。",
-);
 </script>
 
 <template>
@@ -231,7 +215,6 @@ const sheetNameHint = computed(
           <el-option label="尚未选择" value="" />
           <el-option v-for="role in roleOptions" :key="role.value" :label="role.label" :value="role.value" />
         </el-select>
-        <span class="table-note">{{ roleDescription(roleDisabled(row) ? null : draftOf(row).role) }}</span>
       </template>
     </el-table-column>
 
@@ -251,15 +234,6 @@ const sheetNameHint = computed(
             :value="option.value"
           />
         </el-select>
-        <span class="table-note">
-          {{
-            !draftOf(row).role
-              ? "先选择用途"
-              : nodeOptionsFor(draftOf(row).role).length
-                ? "一张 Sheet 只能绑定一个节点"
-                : "当前场景没有该用途可绑定的节点，请到场景详情的「流程」页签新建"
-          }}
-        </span>
       </template>
     </el-table-column>
 
@@ -283,18 +257,10 @@ const sheetNameHint = computed(
           :model-value="!draftOf(row).excluded"
           @update:model-value="update(row, { excluded: !$event })"
         />
-        <span class="table-note">{{ draftOf(row).excluded ? "不参与本次导入" : "参与本次导入" }}</span>
-      </template>
-    </el-table-column>
-
-    <el-table-column label="状态" width="120">
-      <template #default="{ row }">
-        <StatusBadge :status="row.status" />
       </template>
     </el-table-column>
   </el-table>
 
-  <p class="text-hint block-gap-sm">{{ sheetNameHint }}</p>
 </template>
 
 <style scoped>

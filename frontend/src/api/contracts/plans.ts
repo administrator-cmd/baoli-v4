@@ -86,6 +86,8 @@ export interface PlanFieldItem {
   material_key: string;
   name: string;
   value_type: string;
+  extraction_strategy: "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED";
+  structure_schema: Record<string, unknown> | null;
   unit?: string | null;
   currency?: string | null;
   artifact_source?: string | null;

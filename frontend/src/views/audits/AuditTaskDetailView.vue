@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
@@ -26,12 +26,13 @@ import {
   type OperationView,
 } from "@/api/http";
 import {
-  copyAuditTask,
   deleteAuditTask,
   createTaskRetrieval,
   documentFileUrl,
   executeAuditNode,
   getAuditTask,
+  getDocumentArtifact,
+  getDocumentOcr,
   getTaskEvidence,
   getTaskEvidenceIndex,
   getTaskReport,
@@ -39,14 +40,17 @@ import {
   getTaskRisks,
   listTaskExecutions,
   listTaskReviews,
+  reconcileDocumentArtifact,
+  reconcileDocumentOcr,
+  recoverFailedAuditNode,
   removeTaskDocumentFile,
   saveTaskReviewDrafts,
   submitFieldCorrections,
   submitRetrievalDecision as submitRetrievalDecisionRequest,
   submitManualReviews,
-  updateAuditTask,
   uploadTaskDocument,
   type AuditTaskView,
+  type DocumentArtifactStatus,
   type ReplacementImpact,
 } from "@/api/audits";
 import type {
@@ -66,14 +70,15 @@ import RetrievalEvidencePanel from "@/components/audit/RetrievalEvidencePanel.vu
 import FieldCorrectionDialog from "@/components/audit/FieldCorrectionDialog.vue";
 import PendingReviewCard, { type ReviewDraft } from "@/components/audit/PendingReviewCard.vue";
 import TaskMaterialRow from "@/components/audit/TaskMaterialRow.vue";
-import DrawerPanel from "@/components/DrawerPanel.vue";
 import EvidenceDrawer from "@/components/EvidenceDrawer.vue";
+import BackButton from "@/components/BackButton.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
 import OperationPanel from "@/components/OperationPanel.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { useEvidenceDrawer } from "@/composables/useEvidenceDrawer";
 import { useMaterialActions } from "@/composables/useMaterialActions";
+import { useMaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
 import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { useRetrievalWorkbench } from "@/composables/useRetrievalWorkbench";
@@ -115,6 +120,7 @@ const taskNo = computed(() => String(route.params.taskNo ?? ""));
 
 // 任务详情整体替换（applyTask），用 shallowRef 避免对含递归 JsonValue 的类型做深解包（TS2589）。
 const task = shallowRef<AuditTaskView | null>(null);
+const materialTypeCatalog = useMaterialTypeCatalog();
 /* 材料位操作与原文证据抽屉：各自独立的状态与操作流程，见对应 composable。 */
 const {
   busyDocumentNo: uploadingDocumentNo,
@@ -199,9 +205,27 @@ let executionAttemptKey: string | null = null;
 /* 弹窗与抽屉的可见性
  * 这些状态在 resetWorkspace() 里会被统一清理，因此必须与其它页面状态一起声明在
  * 调用之前——声明在后面会让「切换任务清理抽屉」在第一次调用时就踩到暂时性死区。 */
-const snapshotOpen = ref(false);
-const editVisible = ref(false);
-const copyVisible = ref(false);
+type ProcessingArtifact = {
+  artifact_type: DocumentArtifactStatus["artifact_type"] | "OCR";
+  artifact_no: string | null;
+  status: string;
+  message: string;
+  job_id?: string | null;
+  deadline_at?: string | null;
+};
+type ProcessingAction = "ADOPT_JOB" | "RETRY_SUBMIT" | "CLEAR";
+const processingDialogVisible = ref(false);
+const processingDocument = ref<AuditDocument | null>(null);
+const processingStatuses = ref<ProcessingArtifact[]>([]);
+const processingLoading = ref(false);
+const processingErrors = ref<Array<{ artifact_type: ProcessingArtifact["artifact_type"]; message: string }>>([]);
+const processingAction = ref<{ artifact: ProcessingArtifact; action: ProcessingAction } | null>(null);
+const processingReason = ref("");
+const processingJobId = ref("");
+const processingSubmitting = ref(false);
+const processingActionError = ref<string | null>(null);
+let processingRequestGeneration = 0;
+let processingAttempt: { signature: string; key: string } | null = null;
 
 
 /** 页面状态代次：切换任务时递增，过期响应不得覆盖当前页面。 */
@@ -210,6 +234,174 @@ const activeTaskNo = ref<string | null>(null);
 
 function isStale(token: number, currentTaskNo: string): boolean {
   return token !== stateGeneration || activeTaskNo.value !== currentTaskNo;
+}
+
+const processingActionAllowed = computed(() => {
+  const current = task.value;
+  return Boolean(current && !current.deleted
+    && !["RUNNING", "COMPLETED", "FAILED"].includes(current.status)
+    && !isOperationActive(current.latest_operation?.status)
+    && !watching.value && !pending.value && !processingLoading.value && !processingSubmitting.value);
+});
+
+function processingStatusLabel(artifact: ProcessingArtifact): string {
+  if (artifact.artifact_type === "OCR" && artifact.status === "PENDING" && processingRecoverable(artifact)) {
+    return "等待超时，需对账";
+  }
+  const labels: Record<string, string> = {
+    NOT_SUBMITTED: "未提交",
+    SUBMITTING: "提交结果未知",
+    PROCESSING: "处理结果未知",
+    PENDING: "等待完成",
+    READY: "已就绪",
+    FAILED: "失败",
+    INVALIDATED: "已失效",
+  };
+  return labels[artifact.status] ?? artifact.status;
+}
+
+function processingArtifactLabel(artifactType: ProcessingArtifact["artifact_type"]): string {
+  return {
+    MATERIAL_CLASSIFY: "8018 材料识别",
+    DOCUMENT_PARSE: "8010 文件处理",
+    OCR: "OCR 识别",
+  }[artifactType];
+}
+
+function processingRecoverable(artifact: ProcessingArtifact): boolean {
+  if (!artifact.artifact_no) return false;
+  if (artifact.artifact_type !== "OCR") return artifact.status === "PROCESSING";
+  if (artifact.status === "SUBMITTING" || artifact.status === "PROCESSING") return true;
+  return artifact.status === "PENDING"
+    && Boolean(artifact.deadline_at)
+    && Date.parse(artifact.deadline_at!) <= Date.now();
+}
+
+async function loadProcessingStatuses(): Promise<void> {
+  const document = processingDocument.value;
+  const currentTaskNo = task.value?.task_no;
+  if (!document || !currentTaskNo) return;
+  const token = stateGeneration;
+  const generation = ++processingRequestGeneration;
+  processingLoading.value = true;
+  processingErrors.value = [];
+  try {
+    const results = await Promise.allSettled([
+      getDocumentArtifact(currentTaskNo, document.document_no, "MATERIAL_CLASSIFY"),
+      getDocumentArtifact(currentTaskNo, document.document_no, "DOCUMENT_PARSE"),
+      getDocumentOcr(currentTaskNo, document.document_no),
+    ]);
+    if (isStale(token, currentTaskNo) || generation !== processingRequestGeneration) return;
+    const types: ProcessingArtifact["artifact_type"][] = ["MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR"];
+    const statuses: ProcessingArtifact[] = [];
+    const errors: typeof processingErrors.value = [];
+    results.forEach((result, index) => {
+      const artifactType = types[index]!;
+      if (result.status === "rejected") {
+        errors.push({
+          artifact_type: artifactType,
+          message: result.reason instanceof Error ? result.reason.message : "状态读取失败",
+        });
+      } else {
+        statuses.push({ ...result.value, artifact_type: artifactType });
+      }
+    });
+    processingStatuses.value = statuses;
+    processingErrors.value = errors;
+    const selected = processingAction.value;
+    if (selected) {
+      const current = statuses.find((item) => item.artifact_no === selected.artifact.artifact_no && item.artifact_type === selected.artifact.artifact_type);
+      processingAction.value = current && processingRecoverable(current) ? { ...selected, artifact: current } : null;
+      if (!processingAction.value) processingActionError.value = null;
+    }
+  } finally {
+    if (!isStale(token, currentTaskNo) && generation === processingRequestGeneration) processingLoading.value = false;
+  }
+}
+
+function openProcessingDialog(document: AuditDocument): void {
+  processingDocument.value = document;
+  processingDialogVisible.value = true;
+  processingStatuses.value = [];
+  processingAction.value = null;
+  processingActionError.value = null;
+  void loadProcessingStatuses();
+}
+
+function chooseProcessingAction(artifact: ProcessingArtifact, action: ProcessingAction): void {
+  processingAction.value = { artifact, action };
+  processingReason.value = "";
+  processingJobId.value = action === "ADOPT_JOB" ? artifact.job_id ?? "" : "";
+  processingActionError.value = null;
+}
+
+async function submitProcessingAction(): Promise<void> {
+  const selected = processingAction.value;
+  const document = processingDocument.value;
+  const currentTaskNo = task.value?.task_no;
+  if (!selected || !document || !currentTaskNo || !selected.artifact.artifact_no || !processingActionAllowed.value) return;
+  const reason = processingReason.value.trim();
+  const jobId = processingJobId.value.trim();
+  if (!reason) {
+    processingActionError.value = "请填写本次人工对账的原因";
+    return;
+  }
+  if (selected.action === "ADOPT_JOB" && !jobId) {
+    processingActionError.value = "请填写已向供应商确认的作业号";
+    return;
+  }
+  const label = processingArtifactLabel(selected.artifact.artifact_type);
+  const warning = selected.action === "ADOPT_JOB"
+    ? `确认已向供应商核实「${label}」的作业号？系统将按此作业号继续查询。`
+    : `确认「${label}」的当前请求结果未知，并已核实外部处理情况？继续操作可能再次调用外部服务。`;
+  try {
+    await ElMessageBox.confirm(warning, "确认人工对账", {
+      type: "warning", confirmButtonText: "确认提交", cancelButtonText: "取消",
+    });
+  } catch {
+    return;
+  }
+  const token = stateGeneration;
+  if (isStale(token, currentTaskNo) || !processingDialogVisible.value) return;
+  const artifactNo = selected.artifact.artifact_no;
+  const signature = JSON.stringify([currentTaskNo, document.document_no, selected.artifact.artifact_type, artifactNo, selected.action, reason, jobId]);
+  if (processingAttempt?.signature !== signature) {
+    processingAttempt = {
+      signature,
+      key: operationIdempotencyKey("ARTIFACT_RECONCILE", currentTaskNo, document.document_no, artifactNo),
+    };
+  }
+  processingSubmitting.value = true;
+  processingActionError.value = null;
+  let successMessage: string;
+  try {
+    const response = selected.artifact.artifact_type === "OCR"
+      ? await reconcileDocumentOcr(currentTaskNo, document.document_no, {
+          action: selected.action as "ADOPT_JOB" | "RETRY_SUBMIT",
+          artifact_no: artifactNo,
+          job_id: selected.action === "ADOPT_JOB" ? jobId : undefined,
+          reason,
+          idempotency_key: processingAttempt.key,
+        })
+      : await reconcileDocumentArtifact(currentTaskNo, document.document_no, selected.artifact.artifact_type, {
+          artifact_no: artifactNo,
+          reason,
+          idempotency_key: processingAttempt.key,
+        });
+    successMessage = response.message;
+  } catch (error) {
+    if (!isStale(token, currentTaskNo)) processingActionError.value = error instanceof Error ? error.message : "人工对账失败";
+    return;
+  } finally {
+    if (!isStale(token, currentTaskNo)) processingSubmitting.value = false;
+  }
+  if (isStale(token, currentTaskNo)) return;
+  processingAttempt = null;
+  processingAction.value = null;
+  processingReason.value = "";
+  processingJobId.value = "";
+  ElMessage.success(successMessage);
+  await Promise.all([loadProcessingStatuses(), refreshTask()]);
 }
 
 /* 复核记录 / 执行记录（页签） */
@@ -386,6 +578,10 @@ const currentNodeUnconfigured = computed(
 );
 const canEnterManualReview = computed(() => task.value?.status === "READY" && isManualReviewNode.value);
 const atWaitingReview = computed(() => task.value?.status === "WAITING_REVIEW");
+const canRecoverFailedNode = computed(() => {
+  const current = task.value;
+  return current?.can_recover_failed_node === true;
+});
 
 const prerequisites = computed(() => {
   if (!task.value) {
@@ -395,6 +591,8 @@ const prerequisites = computed(() => {
   const nodeType = nodeTypeOf(task.value.current_node.node_code);
   const items: Array<{ label: string; satisfied: boolean }> = [
     { label: "任务不在后台执行中", satisfied: task.value.status !== "RUNNING" && !watching.value },
+    { label: "没有仍在执行的后台操作", satisfied: !isOperationActive(task.value.latest_operation?.status) },
+    { label: "任务未被删除", satisfied: !task.value.deleted },
     {
       label: "任务未结束（未全部完成、未失败）",
       satisfied: task.value.status !== "COMPLETED" && task.value.status !== "FAILED",
@@ -450,7 +648,7 @@ interface PrimaryAction {
  *
  * 同一个位置在不同状态下给出唯一明确的下一步：
  *   执行中 → 查看进度；等待复核 → 进入复核；已完成 → 查看结果；
- *   失败/阻断 → 查看原因；可执行 → 执行当前节点。
+ *   失败 → 查看原因；阻断 → 重新执行当前节点；可执行 → 执行当前节点。
  * 任务未到可执行状态时不显示一个点不动的「执行当前节点」。
  */
 const primaryAction = computed<PrimaryAction>(() => {
@@ -473,13 +671,31 @@ const primaryAction = computed<PrimaryAction>(() => {
   if (task.value.status === "COMPLETED") {
     return { label: "查看审核结果", tab: "rules", disabled: false, reason: null, loading: false };
   }
-  if (task.value.status === "FAILED" || task.value.status === "BLOCKED") {
+  if (canRecoverFailedNode.value) {
+    return {
+      label: "恢复当前节点",
+      run: () => void recoverCurrentNode(),
+      disabled: pending.value || watching.value,
+      reason: pending.value || watching.value ? "请等待当前操作查询结束。" : null,
+      loading: pending.value || watching.value,
+    };
+  }
+  if (task.value.status === "FAILED" || (task.value.status === "BLOCKED" && isManualReviewNode.value)) {
     return {
       label: "查看失败原因",
       tab: "executions",
       disabled: false,
       reason: null,
       loading: false,
+    };
+  }
+  if (task.value.status === "BLOCKED") {
+    return {
+      label: "重新执行当前节点",
+      run: () => void executeCurrentNode(),
+      disabled: !canExecuteNode.value,
+      reason: executeDisabledReason.value,
+      loading: watching.value || pending.value,
     };
   }
   return {
@@ -551,7 +767,7 @@ const blockers = computed<BlockerItem[]>(() => {
       description: "执行后会记为跳过并说明原因，不代表该检查通过。",
     });
   }
-  if (unsatisfiedPrerequisites.value.length) {
+  if (unsatisfiedPrerequisites.value.length && !canRecoverFailedNode.value) {
     items.push({
       tone: "warning",
       title: "当前节点还不能执行",
@@ -596,10 +812,10 @@ const blockers = computed<BlockerItem[]>(() => {
  * 输入修订是任务级事实（页面持有），候选与结论是检索工作台的状态；
  * 服务端据此拒绝基于过期输入的结论。
  */
-/** 人工复核卡片上的「查看原文依据」：打开当前待办所引用的证据。 */
-function openActiveReviewEvidence(): void {
+/** 人工复核卡片上的「查看原文依据」：打开用户选中的字段属性证据。 */
+function openActiveReviewEvidence(evidenceNo: string): void {
   const review = activeReview.value;
-  if (review) void openReviewEvidence(review);
+  if (review) void openReviewEvidence(review, evidenceNo);
 }
 
 function onSubmitRetrievalDecision(payload: {
@@ -712,11 +928,12 @@ const reviewSubmitDisabledReason = computed(() => {
   return null;
 });
 
-const retryableOperation = computed(
-  () => operation.value?.status === "FAILED" || operation.value?.status === "INTERRUPTED"
-    ? lastOperationType.value === "MANUAL_REVIEW_RESUME" || lastOperationType.value === "NODE_EXECUTE"
-    : false,
-);
+const retryableOperation = computed(() => {
+  if (!task.value || task.value.status === "FAILED" || task.value.deleted) return false;
+  if (operation.value?.status !== "FAILED" && operation.value?.status !== "INTERRUPTED") return false;
+  if (lastOperationType.value === "MANUAL_REVIEW_RESUME") return atWaitingReview.value;
+  return lastOperationType.value === "NODE_EXECUTE" && canExecuteNode.value;
+});
 
 const activeReview = computed(
   () => task.value?.pending_reviews.find((review) => review.review_no === selectedReviewNo.value) ?? null,
@@ -790,9 +1007,16 @@ function resetWorkspace(): void {
   executionDetail.value = null;
   executionDetailVisible.value = false;
   /* 抽屉与弹窗 */
-  snapshotOpen.value = false;
-  editVisible.value = false;
-  copyVisible.value = false;
+  processingDialogVisible.value = false;
+  processingDocument.value = null;
+  processingStatuses.value = [];
+  processingLoading.value = false;
+  processingErrors.value = [];
+  processingAction.value = null;
+  processingActionError.value = null;
+  processingSubmitting.value = false;
+  processingAttempt = null;
+  processingRequestGeneration += 1;
   formMessage.value = "";
   loadingTask.value = false;
 }
@@ -856,6 +1080,7 @@ async function loadTask(currentTaskNo: string): Promise<void> {
 }
 
 async function refreshTask(): Promise<void> {
+  if (materialTypeCatalog.state.error) void materialTypeCatalog.reload();
   if (!task.value) return;
   const currentTaskNo = task.value.task_no;
   loadingTask.value = true;
@@ -921,6 +1146,10 @@ async function resumeOperation(operationNo: string, currentTaskNo: string | null
     const { getOperation } = await import("@/api/http");
     const current = await getOperation(operationNo);
     if (isStale(token, currentTaskNo ?? "")) return;
+    if (isRecoveredCheckpointFailure(current)) {
+      await dropOperationQuery();
+      return;
+    }
     lastOperationType.value = current.operation_type;
     setExecutionResult(current);
     if (isOperationFinished(current.status)) {
@@ -936,8 +1165,15 @@ async function resumeOperation(operationNo: string, currentTaskNo: string | null
   }
 }
 
+function isRecoveredCheckpointFailure(value: OperationView): boolean {
+  return task.value?.status === "READY"
+    && value.operation_type === "NODE_EXECUTE"
+    && value.failure_code === "AUDIT_CHECKPOINT_MISSING";
+}
+
 function resumeLatestOperation(token = stateGeneration): void {
   const latest = task.value?.latest_operation;
+  if (latest && isRecoveredCheckpointFailure(latest)) return;
   if (latest && isOperationActive(latest.status)) {
     executingNode.value = { code: latest.target_node ?? "", name: nodeLabel(latest.target_node) };
     trackOperation(latest, token);
@@ -1027,6 +1263,23 @@ async function executeCurrentNode(): Promise<void> {
   });
 }
 
+async function recoverCurrentNode(): Promise<void> {
+  if (!task.value || !canRecoverFailedNode.value || pending.value || watching.value) return;
+  const currentTaskNo = task.value.task_no;
+  const nodeCode = task.value.current_node.node_code;
+  const inputRevision = task.value.input_revision;
+  const token = stateGeneration;
+  await run(async () => {
+    const recovered = await recoverFailedAuditNode(currentTaskNo, nodeCode, inputRevision);
+    if (isStale(token, currentTaskNo)) return;
+    applyTask(recovered);
+    resetTracking();
+    await dropOperationQuery();
+    await fetchTaskState(currentTaskNo, token);
+    if (!isStale(token, currentTaskNo)) ElMessage.success("当前节点已恢复，请重新执行。");
+  });
+}
+
 async function retryOperation(operationType: string): Promise<void> {
   if (operationType === "MANUAL_REVIEW_RESUME") {
     await submitReviews();
@@ -1090,7 +1343,7 @@ async function submitReviews(): Promise<void> {
     const draft = reviewDraftOf(review.review_no);
     return {
       review_no: review.review_no,
-      decision: draft.decision as "CONFIRM_ABNORMAL" | "MARK_NORMAL" | "EVIDENCE_INSUFFICIENT" | "CONFIRM_FIELD" | "MODIFY_FIELD",
+      decision: draft.decision as "CONFIRM_ABNORMAL" | "MARK_NORMAL" | "EVIDENCE_INSUFFICIENT" | "CONFIRM_FIELD" | "MODIFY_FIELD" | "MARK_NOT_PRESENT",
       business_note: draft.note.trim(),
       ...(requiresConfirmedFieldValue(draft.decision) ? { field_value: draft.fieldValue.trim() } : {}),
       basis_type: (draft.basisType || "HUMAN_STATEMENT") as "HUMAN_STATEMENT" | "DOCUMENT_EVIDENCE" | "UPLOAD_RECORD",
@@ -1132,67 +1385,7 @@ async function submitReviews(): Promise<void> {
   });
 }
 
-/* 任务资料 / 复制 / 删除。任务不能反向生成方案。 */
-const editForm = reactive({ task_name: "", remark: "" });
-const editSaving = ref(false);
-
-function openEdit(): void {
-  if (!task.value) return;
-  editForm.task_name = task.value.task_name;
-  editForm.remark = task.value.remark ?? "";
-  editVisible.value = true;
-}
-
-async function submitEdit(): Promise<void> {
-  if (!task.value || !editForm.task_name.trim()) {
-    ElMessage.warning("请填写任务名称");
-    return;
-  }
-  editSaving.value = true;
-  try {
-    await updateAuditTask(task.value.task_no, { task_name: editForm.task_name.trim(), remark: editForm.remark.trim() || null });
-    ElMessage.success("任务资料已保存（执行快照不受影响）");
-    editVisible.value = false;
-    await refreshTask();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "保存失败");
-  } finally {
-    editSaving.value = false;
-  }
-}
-
-const copyName = ref("");
-const copySaving = ref(false);
-let copyAttemptKey: string | null = null;
-
-function openCopy(): void {
-  if (!task.value) return;
-  copyName.value = `${task.value.task_name} 副本`;
-  copyVisible.value = true;
-}
-
-async function submitCopy(): Promise<void> {
-  if (!task.value || !copyName.value.trim()) {
-    ElMessage.warning("请填写新任务名称");
-    return;
-  }
-  copySaving.value = true;
-  try {
-    // 与新建任务同一口径：幂等标识在本次尝试内复用，响应丢失后重发返回原任务。
-    copyAttemptKey =
-      copyAttemptKey ?? operationIdempotencyKey("TASK_COPY", task.value.task_no, copyName.value.trim());
-    const created = await copyAuditTask(task.value.task_no, copyName.value.trim(), copyAttemptKey);
-    copyAttemptKey = null;
-    ElMessage.success("已按方案当前范围创建新任务（材料与结果重新开始，原任务报告保留）");
-    copyVisible.value = false;
-    await router.push({ name: "audit-task-detail", params: { taskNo: created.task_no } });
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "复制失败");
-  } finally {
-    copySaving.value = false;
-  }
-}
-
+/* 任务删除是唯一保留的任务级管理操作。 */
 async function removeTask(): Promise<void> {
   if (!task.value) return;
   try {
@@ -1221,26 +1414,9 @@ const planText = computed(() => {
   return `${task.value.plan.plan_name} · 冻结场景第 ${task.value.plan.scenario_version_no} 版`;
 });
 
-/* 任务规则快照：执行范围就是创建任务时勾选的那些规则 */
-const enabledRules = computed(() => task.value?.scope?.enabled_rules ?? []);
-const enabledCalculationRules = computed(() => task.value?.scope?.enabled_calculation_rules ?? []);
-const unenabledRules = computed(() => task.value?.scope?.unenabled_rules ?? []);
-// 未配置的检查类别按**能力类型**汇总展示：拿实例码与能力类型列表比较恒为假。
-const unconfiguredNodes = computed(() => task.value?.scope?.unconfigured_node_types ?? []);
-
-/** 本任务的证据记录与操作记录：跳转到对应页面并按任务编号预筛选。 */
-function openTaskEvidence(): void {
-  if (!task.value) return;
-  void router.push({ name: "evidence", query: { task_no: task.value.task_no } });
-}
-
-function openTaskOperations(): void {
-  if (!task.value) return;
-  void router.push({ name: "system-operations", query: { keyword: task.value.task_no } });
-}
-
 onMounted(() => {
   void syncFromRoute();
+  void materialTypeCatalog.reload();
 });
 
 watch(
@@ -1258,33 +1434,20 @@ watch(
     <!-- 1. 返回 / 任务名称 / 总体状态；2. 场景与方案版本 -->
     <div class="app-panel">
       <div class="app-detail-head">
-        <el-button text aria-label="返回任务列表" @click="router.push({ name: 'audit-tasks' })">← 返回</el-button>
+        <BackButton label="返回任务列表" @click="router.push({ name: 'audit-tasks' })" />
         <span class="app-detail-head__name">{{ task?.task_name ?? "任务详情" }}</span>
         <StatusBadge v-if="task" :status="task.status" size="default" />
         <el-tag v-if="task?.deleted" type="danger" size="small" effect="light" disable-transitions>已删除</el-tag>
         <div class="card-actions">
           <el-button :loading="loadingTask" @click="refreshTask">刷新</el-button>
-          <el-dropdown trigger="click">
-            <el-button>更多</el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item @click="openTaskEvidence">证据记录</el-dropdown-item>
-                <el-dropdown-item @click="openTaskOperations">操作记录</el-dropdown-item>
-                <el-dropdown-item @click="snapshotOpen = true">任务规则快照</el-dropdown-item>
-                <el-dropdown-item v-if="task && !task.deleted" divided @click="openEdit">编辑资料</el-dropdown-item>
-                <el-dropdown-item v-if="task && !task.deleted" @click="openCopy">复制任务</el-dropdown-item>
-
-                <el-dropdown-item v-if="task && !task.deleted" divided @click="removeTask">删除任务</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <el-button v-if="task && !task.deleted" type="danger" plain @click="removeTask">删除任务</el-button>
         </div>
       </div>
 
       <StateBlock v-if="!task && loadingTask" kind="loading" />
       <el-alert v-else-if="!task" type="warning" show-icon :closable="false" title="任务不存在或读取失败">
         <el-button size="small" @click="refreshTask">重试</el-button>
-        <el-button size="small" @click="router.push({ name: 'audit-tasks' })">返回任务列表</el-button>
+        <BackButton label="返回任务列表" @click="router.push({ name: 'audit-tasks' })" />
       </el-alert>
 
       <!-- 场景 / 方案 / 版本：一行业务信息，不再重复出现在描述表格里 -->
@@ -1321,6 +1484,7 @@ watch(
             >
               {{ primaryAction.label }}
             </el-button>
+            <el-button v-if="task.status === 'BLOCKED' && !isManualReviewNode" link type="primary" @click="setTab('executions')">查看失败原因</el-button>
             <span v-if="primaryAction.reason && !blockers.length" class="text-danger primary-reason">{{ primaryAction.reason }}</span>
           </div>
         </div>
@@ -1390,6 +1554,9 @@ watch(
       <div class="app-panel">
         <el-tabs :model-value="tab" @update:model-value="setTab">
           <el-tab-pane label="材料" name="materials">
+            <el-alert v-if="materialTypeCatalog.state.error" class="block-gap-sm" type="error" show-icon :closable="false" :title="materialTypeCatalog.state.error">
+              <el-button size="small" :loading="materialTypeCatalog.state.loading" @click="materialTypeCatalog.reload">重试读取目录</el-button>
+            </el-alert>
             <div v-if="materialUploadPercent !== null && uploadingDocumentNo" class="block-gap-sm">
               <el-progress :percentage="materialUploadPercent" :status="materialUploadPercent >= 100 ? 'success' : undefined" />
               <span class="text-hint">
@@ -1407,6 +1574,7 @@ watch(
                     v-for="document in task.documents"
                     :key="document.document_no"
                     :document="document"
+                    :catalog="materialTypeCatalog"
                     :busy="uploadingDocumentNo === document.document_no"
                     :disabled="pending && uploadingDocumentNo !== document.document_no"
                     :needs-attention="currentNodeCode === 'MATERIAL_CHECK'"
@@ -1417,6 +1585,7 @@ watch(
                     @download="downloadDocument"
                     @preview="previewDocument"
                     @remove="removeDocument"
+                    @inspect-processing="openProcessingDialog"
                   />
                 </tbody>
               </table>
@@ -1794,95 +1963,85 @@ watch(
       </el-alert>
     </el-drawer>
 
-    <DrawerPanel
-      :open="snapshotOpen"
-      title="任务规则快照"
-      description="范围在创建任务时冻结；规则名称与自动纳入原因取自任务绑定的场景版本，不读取场景最新版本。"
-      size="46%"
-      @close="snapshotOpen = false"
+    <el-dialog
+      v-model="processingDialogVisible"
+      :title="`${processingDocument?.material_name ?? '材料'} · 处理状态`"
+      width="760px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="!processingSubmitting"
+      :show-close="!processingSubmitting"
     >
       <el-alert
-        v-if="unconfiguredNodes.length"
+        v-for="error in processingErrors"
+        :key="error.artifact_type"
         class="block-gap-sm"
-        type="warning"
+        type="error"
         show-icon
         :closable="false"
-        :title="`本模板未配置的校验节点：${unconfiguredNodes.map((code) => nodeLabel(code)).join('、')}`"
+        :title="`${processingArtifactLabel(error.artifact_type)}：${error.message}`"
       >
-        执行时会记为跳过并说明原因，不代表该检查通过。
+        <el-button size="small" :loading="processingLoading" @click="loadProcessingStatuses">重新查询</el-button>
       </el-alert>
-
-      <el-alert
-        class="block-gap-sm"
-        type="info"
-        show-icon
-        :closable="false"
-        :title="`本次任务启用 ${enabledRules.length + enabledCalculationRules.length} 条规则`"
+      <el-table
+        :data="processingStatuses"
+        border
+        size="small"
+        v-loading="processingLoading"
+        :empty-text="processingErrors.length ? '未能读取处理状态' : '暂无处理状态'"
       >
-        执行范围来自创建任务时冻结的方案配置；未启用的检查规则不参与本次审核。
-      </el-alert>
-
-      <h4 class="app-section-title">已启用检查规则（{{ enabledRules.length }} 条）</h4>
-      <el-table :data="enabledRules" size="small" border empty-text="没有启用规则">
-        <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
-        <el-table-column label="规则键" width="160" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
+        <el-table-column label="处理服务" width="150">
+          <template #default="{ row }">{{ processingArtifactLabel(row.artifact_type) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="140">
+          <template #default="{ row }">
+            <StatusBadge :status="row.status" :label="processingStatusLabel(row)" :tone="processingRecoverable(row) ? 'warning' : statusTone(row.status)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="详情" min-width="220">
+          <template #default="{ row }">
+            <div>{{ row.message }}</div>
+            <div v-if="row.artifact_no" class="text-hint">产物编号：{{ row.artifact_no }}</div>
+            <div v-if="row.job_id" class="text-hint">作业号：{{ row.job_id }}</div>
+            <div v-if="row.deadline_at" class="text-hint">等待截止：{{ formatDate(row.deadline_at) }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="170">
+          <template #default="{ row }">
+            <template v-if="processingRecoverable(row) && processingActionAllowed">
+              <el-button v-if="row.artifact_type === 'OCR'" link type="primary" size="small" @click="chooseProcessingAction(row, 'ADOPT_JOB')">接管作业</el-button>
+              <el-button link type="warning" size="small" @click="chooseProcessingAction(row, row.artifact_type === 'OCR' ? 'RETRY_SUBMIT' : 'CLEAR')">
+                {{ row.artifact_type === "OCR" ? "重新提交" : "解除占位" }}
+              </el-button>
+            </template>
+            <span v-else>—</span>
+          </template>
         </el-table-column>
       </el-table>
 
-      <h4 class="app-section-title">已启用计算规则（{{ enabledCalculationRules.length }} 条）</h4>
-      <el-table :data="enabledCalculationRules" size="small" border empty-text="没有启用计算规则">
-        <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
-        <el-table-column label="规则编号" width="160" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
-        </el-table-column>
-      </el-table>
-
-      <h4 class="app-section-title">未启用检查规则（{{ unenabledRules.length }} 条）</h4>
-      <el-table :data="unenabledRules" size="small" border empty-text="没有未启用的规则">
-        <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip />
-        <el-table-column label="规则键" width="160" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.rule_key }}</span></template>
-        </el-table-column>
-      </el-table>
-      <p class="text-hint">这些规则保留在任务冻结的方案配置中，本任务不执行。</p>
-
-      <h4 class="app-section-title">任务技术信息</h4>
-      <el-descriptions :column="1" size="small" border>
-        <el-descriptions-item label="任务编号"><span class="mono">{{ task?.task_no }}</span></el-descriptions-item>
-        <el-descriptions-item label="任务输入修订"><span class="mono">{{ task?.input_revision }}</span></el-descriptions-item>
-        <el-descriptions-item label="场景版本">{{ task?.scenario_name }} · 第 {{ task?.version_no }} 版</el-descriptions-item>
-        <el-descriptions-item label="方案">{{ planText }}</el-descriptions-item>
-        <el-descriptions-item label="更新时间">{{ task?.updated_at ? formatDate(task.updated_at) : "—" }}</el-descriptions-item>
-      </el-descriptions>
-    </DrawerPanel>
-
-    <el-dialog v-model="editVisible" title="编辑任务资料" width="600px" :close-on-click-modal="false">
-      <el-form label-width="100px">
-        <el-form-item label="任务名称" required>
-          <el-input v-model="editForm.task_name" maxlength="255" />
-        </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="editForm.remark" type="textarea" :rows="3" maxlength="4000" />
-        </el-form-item>
-      </el-form>
-      <p class="text-hint">冻结的创建时范围不会随重命名或备注修改变化；已完成任务需要更换输入时，请按方案当前范围重新创建任务。</p>
+      <div v-if="processingAction" class="block-gap">
+        <el-alert
+          type="warning"
+          show-icon
+          :closable="false"
+          :title="processingAction.action === 'ADOPT_JOB' ? '接管已确认的 OCR 作业' : processingAction.action === 'RETRY_SUBMIT' ? '重新提交 OCR 作业' : '解除结果未知的处理占位'"
+        >
+          请先核对外部服务的实际处理情况；重新提交或解除占位后再次执行节点，可能产生新的外部请求。
+        </el-alert>
+        <el-form label-position="top" class="block-gap-sm">
+          <el-form-item v-if="processingAction.action === 'ADOPT_JOB'" label="已确认的作业号" required>
+            <el-input v-model="processingJobId" maxlength="200" />
+          </el-form-item>
+          <el-form-item label="对账原因" required>
+            <el-input v-model="processingReason" type="textarea" :rows="3" maxlength="2000" show-word-limit />
+          </el-form-item>
+        </el-form>
+        <el-alert v-if="processingActionError" class="block-gap-sm" type="error" show-icon :closable="false" :title="processingActionError" />
+        <el-button type="primary" :loading="processingSubmitting" :disabled="!processingActionAllowed" @click="submitProcessingAction">确认对账</el-button>
+        <el-button :disabled="processingSubmitting" @click="processingAction = null">取消</el-button>
+      </div>
       <template #footer>
-        <el-button @click="editVisible = false">取消</el-button>
-        <el-button type="primary" :loading="editSaving" @click="submitEdit">保存</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="copyVisible" title="复制为新任务" width="600px" :close-on-click-modal="false">
-      <el-form label-width="100px">
-        <el-form-item label="新任务名称" required>
-          <el-input v-model="copyName" maxlength="255" />
-        </el-form-item>
-      </el-form>
-      <p class="text-hint">按所属方案的**当前范围**重新创建一个新任务；材料与结果重新开始，原任务报告保留。</p>
-      <template #footer>
-        <el-button @click="copyVisible = false">取消</el-button>
-        <el-button type="primary" :loading="copySaving" @click="submitCopy">复制</el-button>
+        <el-button :loading="processingLoading" :disabled="processingSubmitting" @click="loadProcessingStatuses">刷新状态</el-button>
+        <el-button :disabled="processingSubmitting" @click="processingDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 

@@ -186,7 +186,10 @@ onMounted(() => {
         <template #default="{ row }">{{ row.quote_text || "—" }}</template>
       </el-table-column>
       <el-table-column label="关联字段或规则" min-width="180" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.object_name || "—" }}</template>
+        <template #default="{ row }">
+          {{ row.object_name || "—" }}
+          <div v-if="row.field_path" class="text-hint">属性：{{ row.field_path }}</div>
+        </template>
       </el-table-column>
       <el-table-column label="依据类型" width="110">
         <template #default="{ row }">{{ referenceTypeText(row.reference_type) }}</template>

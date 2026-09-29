@@ -102,6 +102,8 @@ export interface RuleComparison {
   scope_material_refs: string[];
   scope_material_names: Array<string | null>;
   output_field_names: Array<string | null>;
+  input_units: Array<string | null>;
+  input_currencies: Array<string | null>;
 }
 
 export interface ProposalMaterial {
@@ -184,6 +186,11 @@ export interface ImportJob extends ApiResponse {
   source_filename: string;
   status: string;
   profile_version: string;
+  /** 上传时冻结的业务场景 Schema；profile.schema_version 是内部统一协议版本。 */
+  scenario_code?: string | null;
+  schema_key?: string | null;
+  schema_version?: string | null;
+  schema_json?: Record<string, JsonValue> | null;
   profile_display_name: string;
   sheets: ImportSheet[];
   issues: ImportIssue[];

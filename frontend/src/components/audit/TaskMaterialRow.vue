@@ -6,10 +6,12 @@ import { Download, Eye, Upload } from "lucide-vue-next";
 import type { AuditDocument } from "@/api/contracts";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
+import type { MaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
 import type { StatusTone } from "@/constants/labels";
 
 const props = defineProps<{
   document: AuditDocument;
+  catalog: MaterialTypeCatalog;
   busy: boolean;
   disabled: boolean;
   needsAttention?: boolean;
@@ -27,11 +29,11 @@ const emit = defineEmits<{
   download: [document: AuditDocument];
   preview: [document: AuditDocument];
   remove: [document: AuditDocument];
+  inspectProcessing: [document: AuditDocument];
 }>();
 
 const uploadRef = ref<{ clearFiles: () => void } | null>(null);
 const selectedType = ref("");
-const typeSelect = ref<{ available: boolean; reload: () => Promise<void> } | null>(null);
 const missingRequired = computed(() => props.document.required && !props.document.filename);
 const materialClassify = computed(() => props.document.material_classify ?? null);
 const matchedKeywords = computed(() => {
@@ -64,8 +66,8 @@ const impactText = computed(() => {
 function onFileChange(file: { raw?: File }): void {
   uploadRef.value?.clearFiles();
   if (!file.raw) return;
-  if (!typeSelect.value?.available) {
-    ElMessage.error("材料类型目录不可用，无法上传：请检查 8018 服务配置后重试");
+  if (!props.catalog.state.available) {
+    ElMessage.error("材料类型目录不可用，无法上传：请重试读取目录");
     return;
   }
   if (!selectedType.value) {
@@ -109,7 +111,7 @@ function onFileChange(file: { raw?: File }): void {
         {{ replacementImpact.description || "本次替换已使旧结果失效" }}；{{ impactText }}
       </div>
     </td>
-    <td><MaterialTypeSelect ref="typeSelect" v-model="selectedType" :disabled="disabled || busy" /></td>
+    <td><MaterialTypeSelect v-model="selectedType" :catalog="catalog" :show-error="false" :disabled="disabled || busy" /></td>
     <td>
       <div class="material-row__actions">
         <el-upload ref="uploadRef" :auto-upload="false" :show-file-list="false" :disabled="disabled || busy" :on-change="onFileChange">
@@ -119,6 +121,7 @@ function onFileChange(file: { raw?: File }): void {
           </el-button>
         </el-upload>
         <template v-if="document.filename">
+          <el-button link type="primary" size="small" :disabled="disabled || busy" @click="emit('inspectProcessing', document)">处理状态</el-button>
           <el-button link type="primary" size="small" :disabled="disabled || busy" @click="emit('preview', document)">
             <template #icon><Eye :size="14" /></template>预览
           </el-button>

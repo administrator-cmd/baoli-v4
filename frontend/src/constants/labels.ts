@@ -265,12 +265,13 @@ export function locatorStatusTone(status: string | null | undefined): StatusTone
 }
 
 /**
- * 证据**内容依据**的核对结论：引文能否在所述材料里找到原文。
+ * 证据**内容依据**的核对结论：引文或字段值能否在所述材料里找到原文。
  *
  * 与位置分开：内容找不到才是真的缺依据，位置对不上只是高亮不了。
  */
 const quoteCheckLabels: Record<string, string> = {
   FOUND: "已在所属材料中找到该原文",
+  VALUE_FOUND: "已在处理产物中找到字段值，但引文原文无法直接定位",
   NOT_FOUND: "在所属材料中找不到该原文，缺少原文依据",
   NOT_CHECKABLE: "该产物没有可核对的原文文本，未能核对内容依据",
   PENDING: "写入时尚未按当前口径核对内容依据",
@@ -287,7 +288,7 @@ export function quoteCheckTone(status: string | null | undefined): StatusTone {
   if (status === "NOT_FOUND") {
     return "danger";
   }
-  if (status === "NOT_CHECKABLE" || status === "PENDING") {
+  if (status === "VALUE_FOUND" || status === "NOT_CHECKABLE" || status === "PENDING") {
     return "warning";
   }
   return "neutral";
@@ -640,7 +641,7 @@ const sheetRoleDescriptions: Record<string, string> = {
   CROSS_VALIDATE: "定义两种材料之间的交叉核对规则及允许差值。",
   CALC_DEFINITION: "定义计算规则：指标名称、类别、计算公式、结果期间与报表口径。",
   CALC_PARAMETER: "定义公式里每个标识符的取值来源（字段 / 上游计算结果 / 常量）、单位与币种。",
-  CALC_JUDGEMENT: "定义计算结果的判定区间：上下界、是否含边界、比较基准与结论。",
+  CALC_JUDGEMENT: "定义计算结果的判定区间、业务结论及对应的通过、异常或待复核状态。",
   RISK: "定义风险及其等级、成立条件（任一/全部关联检查不合格）；来源只在检查行的「关联风险」维护。",
   REPORT_TEMPLATE: "定义报告编号、材料范围、输出格式与章节；同一报告编号的属性必须整组一致。",
   INSTRUCTION: "模板自带的填写说明页，属于模板元数据，不参与本次导入。",
@@ -701,6 +702,7 @@ export function valueTypeLabel(valueType: string | null | undefined): string {
 const reviewOptionLabels: Record<string, string> = {
   CONFIRM_FIELD: "确认系统抽取的字段值",
   MODIFY_FIELD: "修改为人工确认的字段值",
+  MARK_NOT_PRESENT: "确认字段在文档中不存在",
   CONFIRM_ABNORMAL: "确认异常",
   MARK_NORMAL: "判定为正常",
   EVIDENCE_INSUFFICIENT: "证据不足，无法判定",
@@ -709,7 +711,7 @@ const reviewOptionLabels: Record<string, string> = {
 export function reviewOptions(reviewType: string): Array<{ value: string; label: string }> {
   const values =
     reviewType === "FIELD_CONFIRMATION"
-      ? ["CONFIRM_FIELD", "MODIFY_FIELD", "EVIDENCE_INSUFFICIENT"]
+      ? ["CONFIRM_FIELD", "MODIFY_FIELD", "MARK_NOT_PRESENT", "EVIDENCE_INSUFFICIENT"]
       : ["CONFIRM_ABNORMAL", "MARK_NORMAL", "EVIDENCE_INSUFFICIENT"];
   return values.map((value) => ({ value, label: reviewOptionLabels[value] }));
 }
@@ -738,6 +740,7 @@ const reviewDecisionLabels: Record<string, string> = {
   EVIDENCE_INSUFFICIENT: "证据不足",
   CONFIRM_FIELD: "确认字段",
   MODIFY_FIELD: "修改字段",
+  MARK_NOT_PRESENT: "确认字段不存在",
 };
 
 export function reviewDecisionLabel(decision: string | null | undefined): string {
@@ -850,6 +853,30 @@ export const valueTypeOptions = [
   { value: "BOOLEAN", label: "是否" },
   { value: "CLAUSE", label: "条款" },
 ];
+
+export const extractionStrategyOptions = [
+  { value: "RAW_TEXT", label: "保留原文" },
+  { value: "DETERMINISTIC", label: "确定性转换" },
+  { value: "STRUCTURED", label: "结构化抽取" },
+] as const;
+
+const extractionStrategyLabels: Record<string, string> = Object.fromEntries(
+  extractionStrategyOptions.map((item) => [item.value, item.label]),
+);
+
+export function extractionStrategyLabel(value: string | null | undefined): string {
+  return value ? extractionStrategyLabels[value] ?? value : "未配置";
+}
+
+export function defaultExtractionStrategy(valueType: string): "RAW_TEXT" | "DETERMINISTIC" {
+  return ["STRING", "CLAUSE", "DECIMAL_CN"].includes(valueType) ? "RAW_TEXT" : "DETERMINISTIC";
+}
+
+export function extractionStrategySupports(strategy: string, valueType: string): boolean {
+  if (strategy === "STRUCTURED") return ["STRING", "CLAUSE"].includes(valueType);
+  if (strategy === "RAW_TEXT") return ["STRING", "CLAUSE", "DECIMAL_CN"].includes(valueType);
+  return strategy === "DETERMINISTIC" && ["DECIMAL", "DATE", "BOOLEAN"].includes(valueType);
+}
 
 export const artifactTypeOptions = [
   { value: "MATERIAL_CLASSIFY", label: "材料识别产物" },
@@ -1082,6 +1109,14 @@ const failureNextSteps: Record<string, string> = {
   SCENARIO_DISABLED: "该场景已停用，不能发布或用于新建方案与任务；如需继续请先启用场景。",
   FIELD_REFERENCED: "该字段被规则引用，删除会破坏规则定义；请先改掉引用它的规则，再删除字段。",
   FIELD_TYPE_INVALID: "字段类型不在支持范围内，请从页面提供的类型里重新选择。",
+  FIELD_EXTRACTION_STRATEGY_INVALID: "字段抽取策略不受支持，请重新选择。",
+  FIELD_EXTRACTION_STRATEGY_TYPE_MISMATCH: "字段类型与抽取策略不匹配，请按字段类型重新选择抽取方式。",
+  FIELD_STRUCTURE_SCHEMA_REQUIRED: "结构化抽取必须填写结构定义。",
+  FIELD_STRUCTURE_SCHEMA_INVALID: "结构定义不合法，请检查 JSON Schema 后重新保存。",
+  FIELD_STRUCTURE_SCHEMA_UNSUPPORTED: "结构定义使用了系统尚未支持的 JSON Schema 关键字。",
+  FIELD_STRUCTURE_SCHEMA_ROOT_INVALID: "结构定义的根类型必须是 object。",
+  FIELD_STRUCTURE_SCHEMA_PROPERTIES_REQUIRED: "结构定义必须声明至少一个属性。",
+  FIELD_STRUCTURE_SCHEMA_UNEXPECTED: "普通字段不能携带结构定义，请清空后保存。",
   SECTION_FIELD_MISSING: "报告章节引用的字段不存在；请在章节里重新选择字段，或先补上该字段。",
   RULE_SYSTEM_READONLY: "字段抽取与报告生成规则由系统维护，不能在页面上改写；如需调整请改字段定义或报告章节。",
   RULE_INPUT_COUNT_INVALID: "一条规则只比较左右各一个字段；请把多字段关系拆成多条规则。",

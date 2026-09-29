@@ -121,8 +121,7 @@ export function abortImportJob(jobNo: string): Promise<OperationView> {
 /**
  * 统一模板协议摘要：系统支持的全部 Sheet 与可绑定的节点类型。
  *
- * 系统只有**一份**模板协议，因此也只有一个下载入口；不再有「合同模板 / 财报模板」
- * 两个下载地址，也不再有 v1-v4 的格式版本选择——那些都来自已删除的双轨 Profile。
+ * 统一协议是内部执行格式；场景 Schema 决定其 Excel 的 Sheet 展示名与列别名。
  */
 export interface ProfileSheet {
   sheet_role: string;
@@ -137,6 +136,10 @@ export interface ProfileSheet {
 export interface ProfileSummary {
   profile_version: string | null;
   display_name: string | null;
+  /** 业务场景冻结的 Schema 身份；与统一执行协议版本分开。 */
+  scenario_schema_key?: string | null;
+  scenario_schema_version?: string | null;
+  /** 内部统一协议版本；导入作业顶层 schema_version 是业务场景版本。 */
   schema_version: string | null;
   /** 模板说明页名称：模板生成、导出与导入读同一声明。 */
   instruction_sheet?: string;
@@ -153,7 +156,7 @@ export interface ProfileSummary {
  *
  * 不传 selection 时只带场景编码：已有确认绑定的场景由服务端按绑定导出。
  * 还没有确认绑定时，必须由用户勾选本次要下载的工作表；该选择不写场景。
- * 一份模板就是**一份 base Excel**，勾选哪些表就下载哪些表。
+ * 下载按该场景冻结的 Schema 生成，勾选哪些表就下载哪些表。
  */
 export function unifiedTemplateUrl(
   scenarioCode: string,
@@ -170,16 +173,19 @@ export function unifiedTemplateUrl(
 }
 
 /** 统一模板协议声明的 Sheet 与列协议（页面据此渲染 Sheet 绑定步骤）。 */
-export function getProfileSheets(): Promise<{
+export function getProfileSheets(scenarioCode?: string): Promise<{
   request_id: string;
   profile_version: string | null;
   display_name: string | null;
+  scenario_schema_key?: string | null;
+  scenario_schema_version?: string | null;
   schema_version: string | null;
   instruction_sheet: string;
   node_types: ProfileSummary["node_types"];
   sheets: Array<ProfileSheet & { aliases: string[]; header_signature: string[]; columns: Array<Record<string, unknown>> }>;
 }> {
-  return request("/rulebook-templates/sheets");
+  const query = scenarioCode ? `?scenario_code=${encodeURIComponent(scenarioCode)}` : "";
+  return request(`/rulebook-templates/sheets${query}`);
 }
 
 

@@ -45,15 +45,30 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:draft": [value: ReviewDraft];
-  "open-evidence": [];
+  "open-evidence": [evidenceNo: string];
 }>();
 
 const options = computed(() => reviewOptions(props.review.review_type));
 
-/** 选择「确认字段值 / 修改字段值」时才需要填写最终生效的字段值。 */
+/** 确认沿用系统候选值，只有修改字段时允许编辑最终值。 */
 const needsFieldValue = computed(() => props.draft.decision === "CONFIRM_FIELD" || props.draft.decision === "MODIFY_FIELD");
+const fieldValueReadOnly = computed(() => props.draft.decision === "CONFIRM_FIELD");
 
 const judgment = computed(() => props.review.system_judgment ?? null);
+const judgmentEvidences = computed(() => {
+  if (judgment.value?.evidences?.length) return judgment.value.evidences;
+  return judgment.value?.evidence ? [judgment.value.evidence] : [];
+});
+const reviewEvidenceOptions = computed(() =>
+  judgmentEvidences.value.flatMap((item) =>
+    typeof item.evidence_no === "string" && item.evidence_no.length > 0
+      ? [{ ...item, evidence_no: item.evidence_no }]
+      : [],
+  ),
+);
+const singleReviewEvidenceNo = computed(() =>
+  reviewEvidenceOptions.value.length === 1 ? reviewEvidenceOptions.value[0]?.evidence_no ?? null : null,
+);
 
 /**
  * 主体/签章一致性核对的判据：待核对主体原文、检索候选与完整印章条目。
@@ -127,6 +142,19 @@ const recomputeText = computed(() => {
 function update(patch: Partial<ReviewDraft>): void {
   emit("update:draft", { ...props.draft, ...patch });
 }
+
+function openReviewEvidence(command: unknown): void {
+  if (typeof command === "string" && command) {
+    emit("open-evidence", command);
+  }
+}
+
+function openSingleReviewEvidence(): void {
+  const evidenceNo = singleReviewEvidenceNo.value;
+  if (evidenceNo) {
+    emit("open-evidence", evidenceNo);
+  }
+}
 </script>
 
 <template>
@@ -157,8 +185,52 @@ function update(patch: Partial<ReviewDraft>): void {
 
       <!-- 2. 原文内容：本条复核判断所依据的材料原文 -->
       <el-descriptions-item label="原文内容">
-        <div class="review-quote">{{ review.evidence_quote || "本条复核没有关联证据原文，请人工核对材料后再下结论。" }}</div>
-        <el-button v-if="review.evidence_no" link type="primary" class="block-gap-sm" @click="emit('open-evidence')">
+        <template v-if="judgmentEvidences.length">
+          <div v-for="item in judgmentEvidences" :key="item.evidence_no || item.quote_text" class="review-quote block-gap-sm">
+            <div v-if="item.field_path" class="text-muted">字段属性：{{ item.field_path }}</div>
+            {{ item.quote_text || "本条证据没有记录引用原文。" }}
+          </div>
+        </template>
+        <div v-else class="review-quote">{{ review.evidence_quote || "本条复核没有关联证据原文，请人工核对材料后再下结论。" }}</div>
+        <el-button
+          v-if="singleReviewEvidenceNo"
+          link
+          type="primary"
+          class="block-gap-sm"
+          @click="openSingleReviewEvidence"
+        >
+          <template #icon><FileSearch :size="14" /></template>
+          查看完整证据
+        </el-button>
+        <el-dropdown
+          v-else-if="reviewEvidenceOptions.length > 1"
+          trigger="click"
+          class="block-gap-sm"
+          @command="openReviewEvidence"
+        >
+          <el-button link type="primary">
+            <template #icon><FileSearch :size="14" /></template>
+            查看完整证据（{{ reviewEvidenceOptions.length }}）
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="item in reviewEvidenceOptions"
+                :key="item.evidence_no"
+                :command="item.evidence_no"
+              >
+                {{ item.field_path || "字段原文" }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button
+          v-else-if="review.evidence_no"
+          link
+          type="primary"
+          class="block-gap-sm"
+          @click="emit('open-evidence', review.evidence_no)"
+        >
           <template #icon><FileSearch :size="14" /></template>
           查看完整证据
         </el-button>
@@ -304,8 +376,8 @@ function update(patch: Partial<ReviewDraft>): void {
       <el-form-item v-if="needsFieldValue" label="最终生效的字段值" required>
         <el-input
           :model-value="draft.fieldValue"
-          :disabled="disabled"
-          placeholder="填写人工确认后的字段值"
+          :disabled="disabled || fieldValueReadOnly"
+          :placeholder="fieldValueReadOnly ? '沿用系统候选值' : '填写人工修改后的字段值'"
           style="max-width: 420px"
           @update:model-value="update({ fieldValue: $event })"
         />

@@ -119,7 +119,7 @@ export function createScene(payload: {
   });
 }
 
-/* 配置修改完整时自动生效；未通过校验时保存修改并返回未生效原因。 */
+/* 配置修改只保存草稿并返回发布就绪状态；场景版本必须由管理员显式发布。 */
 
 export function getSceneDraft(scenarioCode: string): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft`);

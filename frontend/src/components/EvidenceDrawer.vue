@@ -110,6 +110,7 @@ const uploadVersionText = computed(() => {
       <el-descriptions :column="1" size="small" border>
         <el-descriptions-item label="材料">{{ materialName || evidence.document_name || "未关联材料" }}</el-descriptions-item>
         <el-descriptions-item label="文件">{{ evidence.document_name || "未记录文件名" }}</el-descriptions-item>
+        <el-descriptions-item v-if="evidence.field_path" label="字段属性">{{ evidence.field_path }}</el-descriptions-item>
         <el-descriptions-item label="原文内容核对">{{ evidence.quote_check_label || "未记录内容核对结论" }}</el-descriptions-item>
       </el-descriptions>
       <p v-if="evidence.historical || evidence.is_current_upload === false" class="text-hint">这段原文来自历史上传文件。</p>

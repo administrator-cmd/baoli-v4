@@ -53,10 +53,11 @@ export type AuditFieldView = AuditField & {
  */
 export interface OcrReconcileRequest {
   action: "ADOPT_JOB" | "RETRY_SUBMIT";
+  artifact_no: string;
   /** ADOPT_JOB 时填写的供应商作业号。 */
   job_id?: string;
   reason: string;
-  idempotency_key?: string;
+  idempotency_key: string;
 }
 
 /** 只读 OCR 状态查询结果。 */
@@ -66,6 +67,29 @@ export interface DocumentOcrStatus {
   status: string;
   job_id: string | null;
   deadline_at: string | null;
+  message: string;
+}
+
+/** 当前上传文件的同步处理产物状态。 */
+export interface DocumentArtifactStatus {
+  document_no: string;
+  artifact_type: "MATERIAL_CLASSIFY" | "DOCUMENT_PARSE";
+  artifact_no: string | null;
+  status: string;
+  message: string;
+}
+
+export interface ExternalArtifactReconcileRequest {
+  artifact_no: string;
+  reason: string;
+  idempotency_key: string;
+}
+
+export interface ExternalArtifactReconcileResponse {
+  document_no: string;
+  artifact_type: string;
+  artifact_no: string;
+  status: string;
   message: string;
 }
 
@@ -301,12 +325,21 @@ export function executeAuditNode(
   });
 }
 
+/** 恢复因审核检查点缺失而终止的当前节点；恢复后仍需用户重新执行节点。 */
+export function recoverFailedAuditNode(taskNo: string, nodeCode: string, inputRevision: number): Promise<AuditTaskView> {
+  return request<AuditTaskView>(`/audit-tasks/${encodeURIComponent(taskNo)}/recover-failed-node`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ node_code: nodeCode, input_revision: inputRevision }),
+  });
+}
+
 /** 提交人工复核结论；幂等标识绑定任务与待办集合，重发复用同一后台操作。 */
 export function submitManualReviews(
   taskNo: string,
   reviews: Array<{
     review_no: string;
-    decision: "CONFIRM_ABNORMAL" | "MARK_NORMAL" | "EVIDENCE_INSUFFICIENT" | "CONFIRM_FIELD" | "MODIFY_FIELD";
+    decision: "CONFIRM_ABNORMAL" | "MARK_NORMAL" | "EVIDENCE_INSUFFICIENT" | "CONFIRM_FIELD" | "MODIFY_FIELD" | "MARK_NOT_PRESENT";
     business_note: string;
     field_value?: string;
     /** 人工结论的依据类型：人工说明 / 文档证据 / 上传记录。 */
@@ -338,6 +371,34 @@ export function submitFieldCorrections(taskNo: string, payload: FieldCorrectionR
 export function getDocumentOcr(taskNo: string, documentNo: string): Promise<DocumentOcrStatus> {
   return request<DocumentOcrStatus>(
     `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/ocr`,
+  );
+}
+
+/** 只读查询 8018/8010 在当前上传文件上的真实产物状态。 */
+export function getDocumentArtifact(
+  taskNo: string,
+  documentNo: string,
+  artifactType: DocumentArtifactStatus["artifact_type"],
+): Promise<DocumentArtifactStatus> {
+  return request<DocumentArtifactStatus>(
+    `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/artifacts/${encodeURIComponent(artifactType)}`,
+  );
+}
+
+/** 人工确认同步外部调用结果未知后，解除当前占位以重新执行节点。 */
+export function reconcileDocumentArtifact(
+  taskNo: string,
+  documentNo: string,
+  artifactType: DocumentArtifactStatus["artifact_type"],
+  payload: ExternalArtifactReconcileRequest,
+): Promise<ExternalArtifactReconcileResponse> {
+  return request<ExternalArtifactReconcileResponse>(
+    `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/artifacts/${encodeURIComponent(artifactType)}/reconcile`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
   );
 }
 

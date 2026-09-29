@@ -8,6 +8,7 @@ import type { CapabilityItem, DraftCalculationItem, DraftFieldItem, DraftMateria
 import type { ToolCatalogItem } from "@/api/contracts/system";
 import { createDraftRule, getSceneDraft, updateDraftRule, type DraftRulePayload } from "@/api/scenes";
 import { getCapabilityCatalog } from "@/api/system";
+import BackButton from "@/components/BackButton.vue";
 import {
   artifactTypeOptions,
   checkLevelOptions,
@@ -585,13 +586,13 @@ onMounted(load);
 <template>
   <div class="app-panel app-reading">
     <div class="app-detail-head">
-      <el-button text aria-label="返回规则列表" @click="back">← 返回</el-button>
+      <BackButton label="返回规则列表" @click="back" />
       <span class="app-detail-head__name">{{ isCreate ? "新增规则" : `编辑规则：${form.name}` }}</span>
       <span v-if="draftRevision !== null" class="text-hint">草稿修订 {{ draftRevision }}</span>
     </div>
 
     <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="loadError">
-      <el-button size="small" @click="back">返回规则列表</el-button>
+      <BackButton label="返回规则列表" @click="back" />
     </el-alert>
     <el-alert
       v-else-if="catalogError"

@@ -24,7 +24,6 @@ const props = defineProps<{
   jobStatus: string | null;
   /** 解析失败的真实原因（来自作业的 failure 字段）。 */
   failureMessage: string | null;
-  failureCode: string | null;
   /** 模板格式的中文名，由服务端给出。 */
   profileName: string | null;
   /** 本次浏览器选择的文件大小；刷新后浏览器不再保留该信息。 */
@@ -101,7 +100,7 @@ function onFileChange(file: { raw?: File; name: string }): void {
         type="info"
         show-icon
         :closable="false"
-        title="该作业已形成转换结果，服务端不再接受改动工作表绑定"
+        title="当前导入内容已生成"
       >
         如需调整规则内容，请在下方重新上传规则库文件开始新的导入。
       </el-alert>
@@ -144,7 +143,6 @@ function onFileChange(file: { raw?: File; name: string }): void {
       title="规则解析失败"
     >
       <div>{{ failureMessage }}</div>
-      <div>错误码：{{ failureCode ?? "未提供错误码" }}</div>
       <div>确认工作表用途后可以重新提交解析；已识别的文件与工作表不会丢失。</div>
     </el-alert>
   </div>

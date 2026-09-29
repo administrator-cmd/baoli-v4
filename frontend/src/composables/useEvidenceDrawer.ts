@@ -13,8 +13,8 @@ export interface EvidenceDrawerState {
   loading: Ref<boolean>;
   /** 按字段打开证据；没有证据编号时明确提示，不打开空抽屉。 */
   openForField: (field: AuditField) => Promise<void>;
-  /** 按当前人工复核待办打开它引用的证据。 */
-  openForReview: (review: PendingReview) => Promise<void>;
+  /** 按当前人工复核待办打开指定属性的证据；未指定时使用待办摘要证据。 */
+  openForReview: (review: PendingReview, evidenceNo?: string) => Promise<void>;
   close: () => void;
 }
 
@@ -61,9 +61,9 @@ export function useEvidenceDrawer(options: {
     await load(taskNo, target.evidence_no);
   }
 
-  async function openForReview(review: PendingReview): Promise<void> {
+  async function openForReview(review: PendingReview, selectedEvidenceNo?: string): Promise<void> {
     const taskNo = options.taskNo.value;
-    const evidenceNo = review.evidence_no;
+    const evidenceNo = selectedEvidenceNo ?? review.evidence_no;
     if (!evidenceNo) return;
     // 显式标注类型：避免对含递归 JsonValue 的对象字面量做深层可赋值性推导（TS2589）。
     const placeholder: AuditField = {

@@ -78,6 +78,11 @@ export interface AuditField {
   raw_value: string | null;
   normalized_value: JsonValue;
   evidence_no: string | null;
+  evidences?: Array<{
+    evidence_no: string;
+    field_path: string | null;
+    locator_status: string;
+  }>;
 }
 
 export interface RuleInputSnapshot {
@@ -224,6 +229,7 @@ export interface PendingReview {
     normalized_value?: JsonValue;
     evidence?: {
       evidence_no?: string | null;
+      field_path?: string | null;
       page_no?: number | null;
       quote_text?: string | null;
       bbox?: JsonValue;
@@ -234,6 +240,15 @@ export interface PendingReview {
       quote_check?: string | null;
       quote_check_label?: string | null;
     } | null;
+    evidences?: Array<{
+      evidence_no?: string | null;
+      field_path?: string | null;
+      page_no?: number | null;
+      quote_text?: string | null;
+      locator_status?: string | null;
+      quote_check?: string | null;
+      quote_check_label?: string | null;
+    }>;
     /**
      * 主体/签章一致性核对的判据：
      *   retrieval 是本次检索的真实范围、候选身份与双方原文；
@@ -268,6 +283,27 @@ export interface TaskReviewJudgment {
   status: string | null;
   message: string | null;
   raw_value: string | null;
+  normalized_value?: JsonValue;
+  evidence?: {
+    evidence_no?: string | null;
+    field_path?: string | null;
+    page_no?: number | null;
+    quote_text?: string | null;
+    bbox?: JsonValue;
+    locator_status?: string | null;
+    locator_note?: string | null;
+    quote_check?: string | null;
+    quote_check_label?: string | null;
+  } | null;
+  evidences?: Array<{
+    evidence_no?: string | null;
+    field_path?: string | null;
+    page_no?: number | null;
+    quote_text?: string | null;
+    locator_status?: string | null;
+    quote_check?: string | null;
+    quote_check_label?: string | null;
+  }>;
   retrieval?: RetrievalRecordSnapshot | null;
   seal_records?: SealRecord[] | null;
   subject_query?: SubjectQuerySnapshot | null;
@@ -299,6 +335,8 @@ export interface AuditTask extends ApiResponse {
   unconfigured_check_node_codes?: string[];
   /** 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。 */
   input_revision: number;
+  /** 当前失败节点是否具备可核对的等待点恢复条件。 */
+  can_recover_failed_node: boolean;
   /** 任务冻结的普通规则、计算规则与未配置检查范围。 */
   scope?: TaskScope | null;
   latest_operation: OperationAccepted | null;
@@ -365,14 +403,16 @@ export interface AuditTaskSummary extends ApiResponse {
 export interface Evidence extends ApiResponse {
   evidence_no: string;
   document_name: string | null;
+  /** 结构化字段的顶层属性名；普通字段与规则证据为空。 */
+  field_path: string | null;
   page_no: number | null;
   quote_text: string;
   bbox: number[] | null;
   /** 位置（页码/坐标）的核对结论；位置只是辅助信息，对不上不影响内容可用。 */
   locator_status: "VERIFIED" | "UNVERIFIED" | "UNLOCATABLE";
   locator_note: string | null;
-  /** 内容依据的核对结论：引文能否在所属材料里找到原文。 */
-  quote_check?: "FOUND" | "NOT_FOUND" | "NOT_CHECKABLE" | "PENDING" | null;
+  /** 内容依据的核对结论：引文或字段值能否在所属材料里找到原文。 */
+  quote_check?: "FOUND" | "VALUE_FOUND" | "NOT_FOUND" | "NOT_CHECKABLE" | "PENDING" | null;
   quote_check_label?: string | null;
   /** 该证据所属的上传版本与产物；旧上传的证据按历史身份查看。 */
   document_upload_no: string | null;

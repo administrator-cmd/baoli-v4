@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 
 import type { ScenarioListItem } from "@/api/contracts";
 import {
   createScene,
-  deleteScene,
   listScenes,
   restoreScene,
   setSceneEnabled,
@@ -130,25 +129,6 @@ async function toggleEnabled(row: ScenarioListItem): Promise<void> {
   }
 }
 
-async function deleteRow(row: ScenarioListItem): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `确认删除场景「${row.scenario_name}」？删除为逻辑删除：历史版本、任务、报告与证据全部保留；场景不再用于新建方案与任务。`,
-      "删除场景",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  try {
-    await deleteScene(row.scenario_code);
-    ElMessage.success("场景已移入已删除列表");
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
-  }
-}
-
 async function restoreRow(row: ScenarioListItem): Promise<void> {
   try {
     await restoreScene(row.scenario_code);
@@ -161,32 +141,6 @@ async function restoreRow(row: ScenarioListItem): Promise<void> {
 
 function goDetail(row: ScenarioListItem): void {
   void router.push({ name: "scene-detail", params: { scenarioCode: row.scenario_code } });
-}
-
-/**
- * 「配置」直接进场景详情的材料 tab。
- *
- * 材料/字段/规则/节点都是场景详情的 tab，不是独立页面；场景身份只在路径里。
- * tab 是否存在由场景详情校验（无法识别的值退回基本信息），这里只负责给出入口。
- */
-function goConfig(row: ScenarioListItem): void {
-  void router.push({
-    name: "scene-detail",
-    params: { scenarioCode: row.scenario_code },
-    query: { tab: "materials" },
-  });
-}
-
-function goCreatePlan(row: ScenarioListItem): void {
-  if (!row.enabled || row.published_version_no == null) {
-    ElMessage.warning("只有已发布且启用的场景才能创建方案");
-    return;
-  }
-  void router.push({ name: "plan-new", query: { scenario: row.scenario_code } });
-}
-
-function goImport(row: ScenarioListItem): void {
-  void router.push({ name: "scene-imports", query: { scenario: row.scenario_code } });
 }
 
 onMounted(() => {
@@ -248,6 +202,8 @@ onMounted(() => {
       :data="items"
       border
       stripe
+      :header-cell-style="{ textAlign: 'center' }"
+      :cell-style="{ textAlign: 'center' }"
       v-loading="loading"
       empty-text="暂无数据"
     >
@@ -267,9 +223,9 @@ onMounted(() => {
       </el-table-column>
       <el-table-column label="配置状态" width="150">
         <template #default="{ row }">
-          <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>修改未生效</el-tag>
+          <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>配置待完善</el-tag>
           <el-tag v-else-if="row.published_version_no" type="success" size="small" effect="light" disable-transitions>已生效</el-tag>
-          <el-tag v-else type="info" size="small" effect="light" disable-transitions>待配置</el-tag>
+          <el-tag v-else type="info" size="small" effect="light" disable-transitions>待发布</el-tag>
           <div v-if="row.sync_error" class="text-hint">{{ row.sync_error.message }}</div>
         </template>
       </el-table-column>
@@ -289,23 +245,12 @@ onMounted(() => {
       <el-table-column label="更新时间" width="170">
         <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="260" fixed="right">
+      <el-table-column label="操作" width="150" align="center" fixed="right">
         <template #default="{ row }">
           <template v-if="!filters.deleted">
             <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" size="small" @click="goConfig(row)">配置</el-button>
             <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
-            <el-dropdown trigger="click">
-              <el-button link type="primary" size="small">更多</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item :disabled="!row.enabled || row.published_version_no == null" @click="goCreatePlan(row)">创建方案</el-dropdown-item>
-                  <el-dropdown-item @click="goImport(row)">导入规则</el-dropdown-item>
-                  <el-dropdown-item divided @click="deleteRow(row)">删除</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
           </template>
           <template v-else>
             <el-button link type="primary" size="small" @click="restoreRow(row)">恢复</el-button>

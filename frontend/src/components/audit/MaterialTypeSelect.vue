@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted } from "vue";
 
-import type { MaterialTypeItem } from "@/api/contracts";
-import { ApiError } from "@/api/http";
-import { getMaterialTypes } from "@/api/system";
+import { useMaterialTypeCatalog, type MaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
 
 /**
  * 材料类型选择：上传材料时由用户从 8018 支持目录中选择。
@@ -17,36 +15,14 @@ const model = defineModel<string>({ required: true });
 const props = defineProps<{
   /** 上传等操作进行中：与目录不可用一起决定选择框能否操作。 */
   disabled?: boolean;
+  catalog?: MaterialTypeCatalog;
+  showError?: boolean;
 }>();
 
-const items = ref<MaterialTypeItem[]>([]);
-const catalogError = ref<string | null>(null);
-const loading = ref(false);
-
-/** 目录是否可用：不可用时调用方必须禁用上传，不能传一个未经核对的类型。 */
-const available = ref(false);
-
-async function load(): Promise<void> {
-  loading.value = true;
-  try {
-    items.value = await getMaterialTypes();
-    catalogError.value = null;
-    available.value = true;
-  } catch (error) {
-    items.value = [];
-    available.value = false;
-    catalogError.value =
-      error instanceof ApiError
-        ? `材料类型目录读取失败：${error.message}`
-        : "材料类型目录读取失败，请检查 8018 服务配置。";
-  } finally {
-    loading.value = false;
-  }
-}
-
-onMounted(() => void load());
-
-defineExpose({ available, reload: load });
+const catalog = props.catalog ?? useMaterialTypeCatalog();
+onMounted(() => {
+  if (!props.catalog) void catalog.reload();
+});
 </script>
 
 <template>
@@ -55,17 +31,17 @@ defineExpose({ available, reload: load });
       v-model="model"
       filterable
       clearable
-      :loading="loading"
-      :disabled="props.disabled || !available"
+      :loading="catalog.state.loading"
+      :disabled="props.disabled || !catalog.state.available"
       placeholder="请选择材料类型"
       size="small"
       style="min-width: 180px"
     >
-      <el-option v-for="item in items" :key="item.id" :label="item.name" :value="item.name" />
+      <el-option v-for="item in catalog.state.items" :key="item.id" :label="item.name" :value="item.name" />
     </el-select>
-    <div v-if="catalogError" class="text-hint">
-      {{ catalogError }}（该目录不可用时不能上传）
-      <el-button link type="primary" size="small" :loading="loading" @click="load">重试</el-button>
+    <div v-if="catalog.state.error && props.showError !== false" class="text-hint">
+      {{ catalog.state.error }}（该目录不可用时不能上传）
+      <el-button link type="primary" size="small" :loading="catalog.state.loading" @click="catalog.reload">重试</el-button>
     </div>
   </div>
 </template>

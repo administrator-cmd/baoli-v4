@@ -3,12 +3,22 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { PlanAdjustments, PlanConfig, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
+import type { PlanAdjustments, PlanConfig, PlanFieldItem, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
 import { createPlan, getPlan, getPlanAdjustments, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
+import BackButton from "@/components/BackButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import CalculationSources from "@/components/CalculationSources.vue";
-import { nodeLabel, reportContentTypeOptions, reportFormatOptions, reportResultSortOptions, valueTypeOptions } from "@/constants/labels";
+import {
+  defaultExtractionStrategy,
+  extractionStrategyOptions,
+  extractionStrategySupports,
+  nodeLabel,
+  reportContentTypeOptions,
+  reportFormatOptions,
+  reportResultSortOptions,
+  valueTypeOptions,
+} from "@/constants/labels";
 
 /**
  * 方案编辑：以已发布场景版本为基准的个性化配置。
@@ -64,6 +74,9 @@ const canCreateTask = computed(() => Boolean(
   && !hasUnsavedBasic.value && !hasUnsavedConfig.value && !planStatusError.value && !saving.value,
 ));
 const sectionDialogVisible = ref(false);
+const fieldSchemaDialogVisible = ref(false);
+const editingFieldSchema = ref<PlanFieldItem | null>(null);
+const fieldSchemaText = ref("");
 const editingSectionKey = ref<string | null>(null);
 const sectionForm = reactive({
   title: "",
@@ -82,6 +95,66 @@ const fieldOptions = computed(() => (config.value?.fields ?? []).map((field) => 
   value: field.field_key,
   label: `${config.value?.materials.find((material) => material.material_key === field.material_key)?.name ?? field.material_key} · ${field.name}`,
 })));
+
+function handlePlanFieldTypeChange(field: PlanFieldItem): void {
+  if (!extractionStrategySupports(field.extraction_strategy, field.value_type)) {
+    field.extraction_strategy = defaultExtractionStrategy(field.value_type);
+    field.structure_schema = null;
+  }
+}
+
+function handlePlanFieldStrategyChange(field: PlanFieldItem): void {
+  if (field.extraction_strategy !== "STRUCTURED") {
+    field.structure_schema = null;
+  }
+}
+
+function openFieldSchemaEditor(field: PlanFieldItem): void {
+  editingFieldSchema.value = field;
+  fieldSchemaText.value = field.structure_schema ? JSON.stringify(field.structure_schema, null, 2) : "";
+  fieldSchemaDialogVisible.value = true;
+}
+
+function applyFieldSchema(): void {
+  const field = editingFieldSchema.value;
+  if (!field) return;
+  const text = fieldSchemaText.value.trim();
+  if (!text) {
+    ElMessage.warning("结构化抽取必须填写结构定义");
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    ElMessage.warning("结构定义不是有效的 JSON");
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    ElMessage.warning("结构定义的根节点必须是 JSON 对象");
+    return;
+  }
+  field.structure_schema = parsed as Record<string, unknown>;
+  fieldSchemaDialogVisible.value = false;
+}
+
+function validatePlanFieldStrategies(fields: PlanFieldItem[]): boolean {
+  for (const field of fields) {
+    if (!extractionStrategySupports(field.extraction_strategy, field.value_type)) {
+      ElMessage.warning(`字段“${field.name}”的数据类型与抽取策略不匹配`);
+      return false;
+    }
+    if (field.extraction_strategy === "STRUCTURED" && !field.structure_schema) {
+      ElMessage.warning(`字段“${field.name}”使用结构化抽取，必须填写结构定义`);
+      return false;
+    }
+    if (field.extraction_strategy !== "STRUCTURED" && field.structure_schema) {
+      ElMessage.warning(`字段“${field.name}”不是结构化抽取，不能保留结构定义`);
+      return false;
+    }
+  }
+  return true;
+}
 
 const selectedScene = computed(() => scenes.value.find((item) => item.scenario_code === basicForm.scenario_code) ?? null);
 
@@ -275,6 +348,7 @@ async function saveConfig(): Promise<void> {
   if (!code || !currentConfig || saving.value) {
     return;
   }
+  if (!validatePlanFieldStrategies(currentConfig.fields)) return;
   const submittedConfigJson = JSON.stringify(currentConfig);
   saving.value = true;
   try {
@@ -408,6 +482,7 @@ function adjustmentValue(value: unknown): string {
       :show-refresh="false"
     >
       <template #actions>
+        <BackButton label="返回方案列表" @click="router.push({ name: 'plans' })" />
         <el-button
           v-if="planCode"
           type="primary"
@@ -422,7 +497,6 @@ function adjustmentValue(value: unknown): string {
           @click="openCreateTask"
         >创建任务</el-button>
         <el-button v-if="planCode" @click="router.push({ name: 'plan-new', query: { previous: planCode } })">基于当前场景重新生成</el-button>
-        <el-button @click="router.push({ name: 'plans' })">返回列表</el-button>
       </template>
     </PageHeader>
 
@@ -578,9 +652,36 @@ function adjustmentValue(value: unknown): string {
                 </el-table-column>
                 <el-table-column label="数据类型" width="150">
                   <template #default="{ row }">
-                    <el-select v-model="row.value_type" :aria-label="`${row.name}的数据类型`">
+                    <el-select v-model="row.value_type" :aria-label="`${row.name}的数据类型`" @change="handlePlanFieldTypeChange(row)">
                       <el-option v-for="item in valueTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
                     </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column label="抽取策略" width="155">
+                  <template #default="{ row }">
+                    <el-select v-model="row.extraction_strategy" :aria-label="`${row.name}的抽取策略`" @change="handlePlanFieldStrategyChange(row)">
+                      <el-option
+                        v-for="item in extractionStrategyOptions"
+                        :key="item.value"
+                        :value="item.value"
+                        :label="item.label"
+                        :disabled="!extractionStrategySupports(item.value, row.value_type)"
+                      />
+                    </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column label="结构定义" width="110">
+                  <template #default="{ row }">
+                    <el-button
+                      v-if="row.extraction_strategy === 'STRUCTURED'"
+                      link
+                      type="primary"
+                      size="small"
+                      @click="openFieldSchemaEditor(row)"
+                    >
+                      {{ row.structure_schema ? "编辑" : "填写" }}
+                    </el-button>
+                    <span v-else class="text-muted">不适用</span>
                   </template>
                 </el-table-column>
                 <el-table-column label="必抽" width="75">
@@ -695,6 +796,27 @@ function adjustmentValue(value: unknown): string {
           <template #footer>
             <el-button @click="sectionDialogVisible = false">取消</el-button>
             <el-button type="primary" @click="applySection">应用修改</el-button>
+          </template>
+        </el-dialog>
+
+        <el-dialog v-model="fieldSchemaDialogVisible" title="编辑字段结构" width="min(680px, 96vw)" :close-on-click-modal="false">
+          <el-alert
+            type="info"
+            show-icon
+            :closable="false"
+            :title="editingFieldSchema ? `字段：${editingFieldSchema.name}` : '结构化字段'"
+          />
+          <el-input
+            v-model="fieldSchemaText"
+            class="block-gap-sm"
+            type="textarea"
+            :rows="14"
+            placeholder='例如：{"type":"object","properties":{"付款期限":{"type":"string"}},"required":["付款期限"],"additionalProperties":false}'
+          />
+          <div class="text-hint">填写 JSON Schema。保存方案时后端会继续校验支持的类型、属性和约束。</div>
+          <template #footer>
+            <el-button @click="fieldSchemaDialogVisible = false">取消</el-button>
+            <el-button type="primary" @click="applyFieldSchema">应用修改</el-button>
           </template>
         </el-dialog>
 

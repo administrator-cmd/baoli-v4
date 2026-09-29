@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
 
+import BackButton from "@/components/BackButton.vue";
+
 /**
  * 未知路径：明确说明页面不存在并回到默认列表页，
  * 不猜测对象、不跳转到别的业务记录。
@@ -14,7 +16,7 @@ const router = useRouter();
       <template #description>
         <p>当前地址没有对应的页面；可能是链接已失效或输入有误。</p>
       </template>
-      <el-button type="primary" @click="router.push('/audit-tasks')">返回审核任务</el-button>
+      <BackButton label="返回审核任务" @click="router.push('/audit-tasks')" />
     </el-empty>
   </el-card>
 </template>

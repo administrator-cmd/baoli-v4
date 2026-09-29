@@ -13,6 +13,10 @@ import {
 import {
   artifactSourceLabel,
   artifactSourceOptions,
+  defaultExtractionStrategy,
+  extractionStrategyLabel,
+  extractionStrategyOptions,
+  extractionStrategySupports,
   periodScopeLabel,
   periodScopeOptions,
   statementScopeLabel,
@@ -80,6 +84,8 @@ const form = reactive({
   material_key: "",
   name: "",
   value_type: "STRING",
+  extraction_strategy: "RAW_TEXT" as "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED",
+  structure_schema_text: "",
   unit: "",
   currency: "",
   artifact_source: "",
@@ -126,6 +132,8 @@ function openCreate(): void {
   form.material_key = materials.value[0]?.material_key ?? "";
   form.name = "";
   form.value_type = "STRING";
+  form.extraction_strategy = "RAW_TEXT";
+  form.structure_schema_text = "";
   form.unit = "";
   form.currency = "";
   form.artifact_source = "";
@@ -142,6 +150,8 @@ function openEdit(item: DraftFieldItem): void {
   form.material_key = item.material_key;
   form.name = item.name;
   form.value_type = item.value_type;
+  form.extraction_strategy = item.extraction_strategy ?? defaultExtractionStrategy(item.value_type);
+  form.structure_schema_text = item.structure_schema ? JSON.stringify(item.structure_schema, null, 2) : "";
   form.unit = item.unit ?? "";
   form.currency = item.currency ?? "";
   form.artifact_source = item.artifact_source ?? "";
@@ -157,9 +167,47 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败";
 }
 
+function handleValueTypeChange(): void {
+  if (!extractionStrategySupports(form.extraction_strategy, form.value_type)) {
+    form.extraction_strategy = defaultExtractionStrategy(form.value_type);
+    form.structure_schema_text = "";
+  }
+}
+
+function handleExtractionStrategyChange(): void {
+  if (form.extraction_strategy !== "STRUCTURED") {
+    form.structure_schema_text = "";
+  }
+}
+
+function parsedStructureSchema(): Record<string, unknown> | null {
+  if (form.extraction_strategy !== "STRUCTURED") return null;
+  const text = form.structure_schema_text.trim();
+  if (!text) {
+    throw new Error("结构化抽取必须填写结构定义");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("结构定义不是有效的 JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("结构定义的根节点必须是 JSON 对象");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 async function submitForm(): Promise<void> {
   if (!props.scenarioCode || !form.name.trim() || !form.material_key) {
     ElMessage.warning("请选择所属材料并填写字段名称");
+    return;
+  }
+  let structureSchema: Record<string, unknown> | null;
+  try {
+    structureSchema = parsedStructureSchema();
+  } catch (error) {
+    ElMessage.warning(describeError(error));
     return;
   }
   saving.value = true;
@@ -168,6 +216,8 @@ async function submitForm(): Promise<void> {
       material_key: form.material_key,
       name: form.name.trim(),
       value_type: form.value_type,
+      extraction_strategy: form.extraction_strategy,
+      structure_schema: structureSchema,
       unit: form.unit.trim() ? form.unit.trim() : null,
       // 币种与产物来源：留空表示未声明 / 常规字段抽取，不表示“随便选一个”。
       currency: form.currency.trim() ? form.currency.trim() : null,
@@ -279,6 +329,9 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="数据类型" width="100">
           <template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template>
         </el-table-column>
+        <el-table-column label="抽取策略" width="120">
+          <template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template>
+        </el-table-column>
         <el-table-column label="单位" width="80">
           <template #default="{ row }">{{ row.unit || "—" }}</template>
         </el-table-column>
@@ -297,7 +350,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="是否必填" width="100">
           <template #default="{ row }">{{ row.required ? "是" : "否" }}</template>
         </el-table-column>
-        <el-table-column label="抽取方式" min-width="200" show-overflow-tooltip>
+        <el-table-column label="抽取要求" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">{{ row.instruction || "—" }}</template>
         </el-table-column>
         <el-table-column label="是否被规则引用" width="140">
@@ -316,7 +369,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         </el-table-column>
       </el-table>
 
-      <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑字段' : '新增字段'" width="600px" :close-on-click-modal="false">
+      <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑字段' : '新增字段'" width="min(680px, 96vw)" :close-on-click-modal="false">
         <el-form label-width="100px">
           <el-form-item label="所属材料" required>
             <el-select v-model="form.material_key" placeholder="请选择材料位" style="width: 100%">
@@ -331,9 +384,30 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <el-input v-model="form.name" maxlength="255" placeholder="例如：应收账款金额" />
           </el-form-item>
           <el-form-item label="字段类型" required>
-            <el-select v-model="form.value_type" style="width: 100%">
+            <el-select v-model="form.value_type" style="width: 100%" @change="handleValueTypeChange">
               <el-option v-for="item in valueTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="抽取策略" required>
+            <el-select v-model="form.extraction_strategy" style="width: 100%" @change="handleExtractionStrategyChange">
+              <el-option
+                v-for="item in extractionStrategyOptions"
+                :key="item.value"
+                :value="item.value"
+                :label="item.label"
+                :disabled="!extractionStrategySupports(item.value, form.value_type)"
+              />
+            </el-select>
+            <div class="text-hint">文本和条款保留原文；金额、日期和是否值由系统确定性转换；一个字段包含多个业务属性时使用结构化抽取。</div>
+          </el-form-item>
+          <el-form-item v-if="form.extraction_strategy === 'STRUCTURED'" label="结构定义" required>
+            <el-input
+              v-model="form.structure_schema_text"
+              type="textarea"
+              :rows="10"
+              placeholder='例如：{"type":"object","properties":{"付款期限":{"type":"string"}},"required":["付款期限"],"additionalProperties":false}'
+            />
+            <div class="text-hint">填写 JSON Schema。系统按这个结构校验模型返回值，并要求每个有值属性分别提供原文证据。</div>
           </el-form-item>
           <el-form-item label="单位">
             <el-input v-model="form.unit" maxlength="40" placeholder="金额类字段建议填写（如：元）；不填写表示未声明" />

@@ -12,9 +12,8 @@ import { getSceneDraft } from "@/api/scenes";
  * 场景草稿已有确认 Sheet 时，直接下载这些角色，忽略任何勾选。
  * 还没有确认绑定时，由用户勾选本次要下载的工作表：不默认全选、不写场景。
  *
- * 一份模板就是**一份 base Excel**——系统唯一的模板，勾选哪些表就生成哪些表。
- * 没有业务族这一层：合同场景与财报场景用的是同一份模板，差异只在「选了哪些表、
- * 填了什么内容」。
+ * 模板按当前场景 Schema 生成。场景选择 Sheet，并可覆盖 Sheet 名与列别名；
+ * 勾选哪些表就生成哪些表。
  */
 const props = defineProps<{
   scenarioCode: string | null;
@@ -50,7 +49,7 @@ async function startDownload(): Promise<void> {
       window.location.assign(unifiedTemplateUrl(props.scenarioCode));
       return;
     }
-    const profile = await getProfileSheets();
+    const profile = await getProfileSheets(props.scenarioCode ?? undefined);
     sheets.value = profile.sheets.map((item) => ({
       sheet_role: item.sheet_role,
       code_prefix: item.code_prefix,

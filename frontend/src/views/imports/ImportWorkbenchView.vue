@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, h, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { apiFileUrl, getOperation, isOperationActive, isOperationFinished, operationIdempotencyKey, OPERATION_POLL_INTERVAL_MS, type ApiError, type OperationView } from "@/api/http";
+import { apiFileUrl, getOperation, isOperationActive, isOperationFinished, operationIdempotencyKey, type ApiError, type OperationView } from "@/api/http";
 import {
-  abortImportJob,
   applyImportToDraft,
   createImportJob,
   getImportJob,
@@ -28,10 +27,8 @@ import type {
   UploadPolicy,
 } from "@/api/contracts";
 import type { ConfigOrigin, DraftNodeItem } from "@/api/contracts/scenes";
-import CalculationSources from "@/components/CalculationSources.vue";
 import CandidateCorrectionDialog from "@/components/import/CandidateCorrectionDialog.vue";
 import CandidateTable, { type CandidateColumn, type CandidateRow } from "@/components/import/CandidateTable.vue";
-import CoverageReconciliation from "@/components/import/CoverageReconciliation.vue";
 import FileUploadCard from "@/components/import/FileUploadCard.vue";
 import ImportIssueCard from "@/components/import/ImportIssueCard.vue";
 import ImportJobPicker from "@/components/import/ImportJobPicker.vue";
@@ -40,7 +37,6 @@ import ImportStepNav from "@/components/import/ImportStepNav.vue";
 import TemplateDownloadButton from "@/components/scenes/TemplateDownloadButton.vue";
 import SheetBindingTable from "@/components/import/SheetBindingTable.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
-import OperationPanel from "@/components/OperationPanel.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatGrid, { type StatItem } from "@/components/StatGrid.vue";
@@ -65,7 +61,7 @@ import { initialBindingOf, type NodeOption, type SheetBindingDraft } from "@/con
 
 const route = useRoute();
 const router = useRouter();
-const { operation, watching, track, requery, reset: resetTracking } = useOperationTracker();
+const { operation, watching, track, reset: resetTracking } = useOperationTracker();
 const { pending, failure, formMessage, run, setFailure } = useRequestRunner();
 
 type CandidateTab = "material" | "field" | "rule" | "calculation";
@@ -99,8 +95,6 @@ const correctionTarget = ref<{ targetType: "MATERIAL" | "FIELD" | "RULE"; target
 );
 const correctionPending = ref(false);
 
-const pollIntervalSeconds = OPERATION_POLL_INTERVAL_MS / 1000;
-
 /* 业务问题作答：状态与提交流程见 useDecisionAnswers。能力缺口在场景发布页逐条确认。 */
 const {
   selectedOptions,
@@ -125,9 +119,6 @@ const candidateTabModel = computed<CandidateTab>({
     candidateTab.value = value === "field" || value === "rule" || value === "calculation" ? value : "material";
   },
 });
-
-/** 本模板未配置的业务检查类别：执行时显式跳过，不代表检查通过。 */
-const optionalCheckNodes = ["INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK_RATING"];
 
 /** 下载模板使用的场景：已打开作业时用作业所属场景，否则用上传前选中的场景。 */
 const templateScenarioCode = computed(() => job.value?.profile?.scenario_code || uploadScenarioCode.value || null);
@@ -263,9 +254,6 @@ const candidateIndex = computed(() => {
  * 不按工作表名称在前端硬编码。
  */
 const bindingSheets = computed<ImportSheet[]>(() => (job.value?.sheets ?? []).filter((sheet) => !isSystemExcludedSheet(sheet)));
-/** 系统已自动排除的工作表：页面如实列出名称与状态，不静默隐藏。 */
-const systemExcludedSheets = computed<ImportSheet[]>(() => (job.value?.sheets ?? []).filter((sheet) => isSystemExcludedSheet(sheet)));
-
 /** 已排除的候选不参与有效统计：它们是明确不发布的项。 */
 const proposalTotals = computed(() =>
   proposalSheets.value.reduce(
@@ -299,10 +287,6 @@ const decisionCounts = computed(() => {
 const ambiguousCount = computed(() => decisionCounts.value.PENDING);
 /** 明确候选：已自动识别或已人工处理，不需要逐项确认。 */
 const confirmedCandidateCount = computed(() => decisionCounts.value.AUTO + decisionCounts.value.MANUAL);
-/** 本模板没有配置任何规则的业务检查节点。 */
-const uncoveredCheckNodes = computed(() =>
-  optionalCheckNodes.filter((node) => !proposalSheets.value.some((sheet) => sheet.rules.some((rule) => rule.node === node))),
-);
 /** 还没有选择用途、也没有显式排除的工作表：必须由业务选择用途或显式排除，没有默认值。 */
 const unidentifiedSheets = computed(() => bindingSheets.value.filter((sheet) => !bindingFor(sheet).role && !bindingFor(sheet).excluded));
 /** 已填写用途但没有表头行的工作表：同样不能被提交入口放过。 */
@@ -317,12 +301,18 @@ const excludedSheetNames = computed(() =>
     .filter((sheet) => isSystemExcludedSheet(sheet) || bindingFor(sheet).excluded)
     .map((sheet) => sheet.name),
 );
-/** 作业级失败：后台操作面板已经显示同一次失败时不重复显示。 */
-const jobFailure = computed(() => (operation.value?.failure_code ? null : job.value?.failure ?? null));
+/** 面向业务展示解析失败原因；操作编号、阶段等技术信息不进入页面。 */
+const jobFailure = computed(() => {
+  if (job.value?.failure) return job.value.failure;
+  if (!operation.value?.failure_code) return null;
+  return {
+    code: operation.value.failure_code,
+    message: operation.value.failure_message ?? "规则解析未完成",
+  };
+});
 const published = computed(() => job.value?.status === "PUBLISHED");
 /** 已写入场景配置，或历史作业已经产生过场景版本。这两种都不能再改这份导入作业。 */
 const sealed = computed(() => published.value || job.value?.status === "APPLIED");
-const operationFailed = computed(() => operation.value?.status === "FAILED" || operation.value?.status === "INTERRUPTED");
 const operationRunning = computed(() => isOperationActive(operation.value?.status) || watching.value);
 
 /** 已经形成转换结果或已发布的作业，服务端不再接受改动绑定与重复解析。 */
@@ -412,7 +402,7 @@ const conversionDisabledReason = computed(() => {
   }
   if (sealed.value) {
     return job.value.status === "APPLIED"
-      ? "该导入作业已写入场景配置，不能再改。请到场景配置页核对，或重新上传。"
+      ? "该导入作业已写入场景草稿，不能再改。请到场景配置页核对，或重新上传。"
       : "该导入作业已产生场景版本，不能再改。如需调整请重新上传。";
   }
   if (job.value.proposals) {
@@ -533,7 +523,8 @@ const fieldRows = computed<CandidateRow[]>(() =>
       name: field.name,
       values: [
         field.name,
-        `${valueTypeLabel(field.value_type)}${field.unit ? `（${field.unit}）` : ""}`,
+        `${valueTypeLabel(field.value_type)}${field.unit ? `（${field.unit}）` : ""}`
+          + `${field.currency ? ` / ${field.currency}` : ""}`,
         field.material_name ?? "未关联材料",
         field.instruction || "未填写抽取要求",
       ],
@@ -542,6 +533,7 @@ const fieldRows = computed<CandidateRow[]>(() =>
       details: [
         { label: "候选标识", value: field.candidate_ref },
         { label: "字段类型编码", value: field.value_type ?? "未声明" },
+        { label: "币种", value: field.currency ?? "未声明" },
         { label: "原始识别内容", value: originalSummary(field.original) },
       ],
     })),
@@ -652,142 +644,8 @@ function describeTarget(target: { material_name: string | null; field_name: stri
   return [target.material_name, target.field_name].filter(Boolean).join(" · ");
 }
 
-/**
- * 来源单元格原文索引：按工作表名称 + 行号取原始单元格内容。
- * 预览逐条核对时用它把候选的来源坐标还原成 Excel 原文，而不是只显示地址。
- */
-const cellOriginalIndex = computed(() => {
-  const index = new Map<string, Map<number, Record<string, JsonValue>>>();
-  for (const sheet of job.value?.sheets ?? []) {
-    const rows = new Map<number, Record<string, JsonValue>>();
-    for (const row of sheet.rows) {
-      rows.set(row.row_no, row.cells);
-    }
-    index.set(sheet.name, rows);
-  }
-  return index;
-});
-
-/** 把来源坐标还原成「地址=原文」的可读文本；读不到时如实说明，不猜内容。 */
-function cellOriginalText(sheetName: string, rowNo: number, cells: string[]): string {
-  const row = cellOriginalIndex.value.get(sheetName)?.get(rowNo);
-  if (!row) {
-    return "未找到对应的原始单元格内容";
-  }
-  const entries = cells.map((address) => `${address}=${formatBusinessValue(row[address] as JsonValue)}`);
-  return entries.length ? entries.join("；") : "该行没有可展示的原文单元格";
-}
-
-/** 规则原文对照：优先使用服务端返回的 source_texts（列名 → 原文），否则回退到来源单元格。 */
-function ruleSourceText(rule: ProposalRuleView): string {
-  const texts = rule.comparison.source_texts;
-  if (texts && Object.keys(texts).length) {
-    return Object.entries(texts)
-      .map(([column, value]) => `${column}：${value}`)
-      .join("；");
-  }
-  return cellOriginalText(rule.source_sheet, rule.source_row, rule.source_cells);
-}
-
-/** 规则方向 / 阈值 / 单位：支持状态不为 SUPPORTED 时必须显式标注，不能显示成普通规则。 */
-function ruleSupportLabel(rule: ProposalRuleView): string | null {
-  const status = rule.comparison.support_status;
-  if (!status || status === "SUPPORTED") {
-    return null;
-  }
-  return rule.comparison.support_message ?? "该规则当前无法无条件执行";
-}
-
-/** 预览逐条明细：每条显示来源、原文对照、方向/阈值/单位、适用条件、支持状态。 */
-const previewMaterials = computed(() =>
-  proposalSheets.value.flatMap((sheet) =>
-    sheet.materials
-      .filter((material) => material.decision_state !== "EXCLUDED")
-      .map((material) => ({
-        ref: material.candidate_ref,
-        title: material.name,
-        source: sourceText(material),
-        original: cellOriginalText(material.source_sheet, material.source_row, material.source_cells),
-        summary: `${material.required ? "必传" : "按需上传"}${material.description ? ` · ${material.description}` : ""}`,
-        note: material.description || "",
-        state: material.decision_state,
-      })),
-  ),
-);
-
-const previewFields = computed(() =>
-  proposalSheets.value.flatMap((sheet) =>
-    sheet.fields
-      .filter((field) => field.decision_state !== "EXCLUDED")
-      .map((field) => ({
-        ref: field.candidate_ref,
-        title: field.name,
-        source: sourceText(field),
-        original: cellOriginalText(field.source_sheet, field.source_row, field.source_cells),
-        summary: `${valueTypeLabel(field.value_type)}${field.unit ? `（${field.unit}）` : ""} · 来源材料 ${field.material_name ?? "未关联"}`,
-        note: field.instruction || "",
-        state: field.decision_state,
-      })),
-  ),
-);
-
-const previewRules = computed(() =>
-  proposalSheets.value.flatMap((sheet) =>
-    sheet.rules
-      .filter((rule) => rule.decision_state !== "EXCLUDED")
-      .map((rule) => ({
-        ref: rule.candidate_ref,
-        title: rule.name,
-        source: sourceText(rule),
-        original: ruleSourceText(rule),
-        summary: `${rule.node_name || nodeLabel(rule.node)} · ${ruleComparisonText(rule)}`,
-        note: [
-          `适用条件：${ruleApplicability(rule)}`,
-          `方向：${rule.comparison.direction_label ?? rule.comparison.comparison_label ?? "未标注"}`,
-          rule.comparison.threshold === undefined || rule.comparison.threshold === null
-            ? ""
-            : `阈值：${formatBusinessValue(rule.comparison.threshold)}`,
-          (rule.comparison.input_units ?? []).some(Boolean) ? `单位：${(rule.comparison.input_units ?? []).filter(Boolean).join(" / ")}` : "",
-        ]
-          .filter(Boolean)
-          .join("；"),
-        support: ruleSupportLabel(rule),
-        requirement: rule.comparison.requirement || "未填写审核要求",
-        state: rule.decision_state,
-      })),
-  ),
-);
-
-const previewCalculations = computed(() =>
-  includedCalculations.value.map((item) => ({
-    ref: item.candidate_ref,
-    code: item.rule_code,
-    title: item.rule_name,
-    formula: item.formula,
-    parameters: item.parameters.map(calculationParameterText).join("；") || "无参数声明",
-    result: `${item.result_code} / ${item.result_type}`,
-    bands: `${item.bands.length} 个判定区间`,
-    unresolved: item.unresolved_identifiers.join("、"),
-    source: sourceText(item),
-    original: cellOriginalText(item.source_sheet, item.source_row, item.source_cells),
-    origin: item.origin,
-    parameterSources: item.parameter_sources,
-    bandSources: item.band_sources,
-  })),
-);
-
-const previewReportSections = computed(() =>
-  proposalSheets.value.flatMap((sheet) =>
-    sheet.report_sections.map((section) => ({
-      ref: `${sheet.sheet_key}-${section.section_name}`,
-      title: section.section_name,
-      sheet: sheet.sheet_name,
-    })),
-  ),
-);
-
-/** 导入预览中已能确定的阻断项：未处理问题与未确认用途的工作表。 */
-const previewBlockers = computed<string[]>(() => {
+/** 写入草稿前已能确定的阻断项：未处理问题与未确认用途的工作表。 */
+const writeBlockers = computed<string[]>(() => {
   const items: string[] = [];
   if (openIssues.value.length) {
     items.push(`还有 ${openIssues.value.length} 项业务问题没有处理；提交业务结论后才能导入。`);
@@ -878,7 +736,7 @@ function initialiseBindings(importJob: ImportJobView, preserveAnswers = false): 
  */
 function inferStep(importJob: ImportJobView): number {
   if (importJob.status === "PUBLISHED" || importJob.status === "APPLIED") {
-    return 4;
+    return 3;
   }
   if (!importJob.proposals) {
     return importJob.latest_operation && isOperationActive(importJob.latest_operation.status) ? 1 : 0;
@@ -1165,40 +1023,6 @@ async function submitConversion(saveBindings: boolean): Promise<void> {
   });
 }
 
-/** 正在提交中止请求；中止是同步请求，用它给按钮显示 loading。 */
-const aborting = ref(false);
-
-/**
- * 中止本次未结束的后台操作。
- * 这是「释放服务端活跃占用」而不是删除：作业状态与已保存的裁决都不改，
- * 中止后可重新发起转换；作业行锁保证执行线程不会与随后的重试并发写同一份草稿。
- */
-async function abortConversion(): Promise<void> {
-  const jobNo = job.value?.job_no;
-  if (!jobNo) {
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      "确认中止正在进行的规则解析与转换？中止后该作业不再处于执行中，可重新发起转换；作业状态与已保存的裁决不会被改动。",
-      "中止转换",
-      { type: "warning", confirmButtonText: "中止", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  aborting.value = true;
-  try {
-    const aborted = await abortImportJob(jobNo);
-    operation.value = aborted;
-    ElMessage.success("转换已中止，可重新发起");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "中止失败");
-  } finally {
-    aborting.value = false;
-  }
-}
-
 /**
  * 候选原地修正 / 排除 / 恢复：走同一裁决接口，带上页面看到的草稿修订号。
  * 修订过期（IMPORT_DRAFT_REVISION_CONFLICT）由 FailureNotice 显示，提示刷新后重试。
@@ -1282,7 +1106,7 @@ async function saveDecisions(): Promise<void> {
   });
 }
 
-/** 写入所属场景配置；完整配置在服务端自动生效。 */
+/** 用导入结果替换 Excel 管理的草稿内容；流程节点保留，场景不会自动发布。 */
 async function applyToSceneDraft(): Promise<void> {
   if (!job.value || sealed.value) {
     return;
@@ -1301,10 +1125,32 @@ async function applyToSceneDraft(): Promise<void> {
       return;
     }
     try {
+      const hasExistingBusinessDraft = Boolean(
+        draft.sheets.length
+        || draft.materials.length
+        || draft.fields.length
+        || draft.rules.some((rule) => !rule.system)
+        || draft.calculations.length
+        || draft.sections.length,
+      );
       await ElMessageBox.confirm(
-        `目标场景配置为第 ${draft.revision_no} 次修订，现有 ${draft.materials.length} 个材料位、${draft.fields.length} 个字段、${draft.rules.filter((rule) => !rule.system).length} 条业务规则、${draft.calculations.length} 条计算规则。导入将替换材料、字段、规则、计算配置、报告章节和 Sheet 绑定；流程节点保留。配置完整时会自动生成生效版本，已有方案和任务不变。确认导入？`,
-        "确认导入",
-        { type: "warning", confirmButtonText: "确认导入", cancelButtonText: "取消" },
+        h("div", [
+          h("p", { style: { marginBottom: "12px" } },
+            `本次将导入 ${proposalTotals.value.materials} 个材料位、${proposalTotals.value.fields} 个字段、${proposalTotals.value.rules} 条业务规则、${includedCalculations.value.length} 条计算规则。`),
+          ...(hasExistingBusinessDraft
+            ? [h("p", { style: { marginBottom: "12px" } },
+                `当前草稿已有 ${draft.materials.length} 个材料位、${draft.fields.length} 个字段、${draft.rules.filter((rule) => !rule.system).length} 条业务规则、${draft.calculations.length} 条计算规则；其中的人工修改将被覆盖。`)]
+            : []),
+          h("p", { style: { marginBottom: "12px" } },
+            "材料、字段、业务规则、计算配置、报告章节和 Sheet 绑定将被整份替换；流程节点、节点顺序和依赖关系继续保留。"),
+          h("p", "本次操作只生成草稿，不会发布场景，也不会影响当前已发布版本、已有方案和审核任务。"),
+        ]),
+        hasExistingBusinessDraft ? "覆盖现有草稿" : "生成场景草稿",
+        {
+          type: hasExistingBusinessDraft ? "warning" : "info",
+          confirmButtonText: hasExistingBusinessDraft ? "覆盖现有草稿" : "生成场景草稿",
+          cancelButtonText: "取消",
+        },
       );
     } catch {
       return;
@@ -1314,7 +1160,7 @@ async function applyToSceneDraft(): Promise<void> {
       return;
     }
     await receiveJob(await applyImportToDraft(jobNo, jobRevision, draft.revision_no), true);
-    ElMessage.success("已写入场景配置，请核对生效状态");
+    ElMessage.success("已生成场景草稿，请核对并调整后再发布");
     await router.push({ name: "scene-detail", params: { scenarioCode }, query: { tab: "source", importJob: jobNo } });
   });
 }
@@ -1339,7 +1185,7 @@ watch(
   },
 );
 
-/** 离开第三步前落一次答案暂存，避免未提交答案只存在内存里。 */
+/** 离开歧义处理步骤前落一次答案暂存，避免未提交答案只存在内存里。 */
 watch(activeStep, (next, previous) => {
   if (previous === 2 && next !== 2) {
     void flushDecisionDraft().catch((error) => setFailure(error));
@@ -1350,21 +1196,11 @@ watch(activeStep, (next, previous) => {
 <template>
   <div class="import-workbench">
     <PageHeader
-      eyebrow="规则库导入"
       :title="job ? '规则库导入工作台' : '规则库导入'"
       :object-name="job?.source_filename ?? null"
-      :subtitle="
-        job
-          ? '确认工作表与节点绑定、处理业务问题，然后写入场景配置。'
-          : '在已创建的场景下上传规则库 Excel。'
-      "
-      :notes="job ? [`模板协议：${job.profile?.display_name || job.profile_version}`] : []"
       :busy="pending"
       @refresh="job ? loadJob(job.job_no) : loadImportJobs()"
     >
-      <template #status>
-        <StatusBadge v-if="job" :status="job.status" />
-      </template>
       <template #actions>
         <TemplateDownloadButton :scenario-code="templateScenarioCode" label="下载当前场景模板" />
       </template>
@@ -1403,7 +1239,6 @@ watch(activeStep, (next, previous) => {
           :job-created-at="null"
           :job-status="null"
           :failure-message="null"
-          :failure-code="null"
           :profile-name="null"
           :selected-file-size="null"
           :policy="uploadPolicy?.rulebook ?? null"
@@ -1428,23 +1263,7 @@ watch(activeStep, (next, previous) => {
         <ImportStepNav :steps="steps" :active="activeStep" clickable @select="activeStep = $event" />
       </el-card>
 
-      <!-- 后台解析操作：真实状态，任何步骤下都可见 -->
-      <OperationPanel
-        v-if="operation"
-        class="block-gap"
-        :operation="operation"
-        :watching="watching"
-        label="规则解析与转换"
-        :poll-seconds="pollIntervalSeconds"
-        :can-retry="operationFailed"
-        :can-abort="operationRunning"
-        :aborting="aborting"
-        @requery="requery()"
-        @retry="submitConversion(false)"
-        @abort="abortConversion"
-      />
-
-      <!-- 作业级失败：后台操作面板没有显示同一次失败时，在这里显示中文原因与错误码 -->
+      <!-- 只展示业务失败原因与下一步，不暴露内部操作状态。 -->
       <el-alert
         v-if="jobFailure"
         class="block-gap"
@@ -1453,7 +1272,6 @@ watch(activeStep, (next, previous) => {
         :closable="false"
         :title="jobFailure.message"
       >
-        <div>错误码：{{ jobFailure.code }}</div>
         <div>{{ failureNextStep(jobFailure.code) }}</div>
       </el-alert>
 
@@ -1465,7 +1283,6 @@ watch(activeStep, (next, previous) => {
           :job-created-at="job.created_at"
           :job-status="job.status"
           :failure-message="job.failure?.message ?? null"
-          :failure-code="job.failure?.code ?? null"
           :profile-name="job.profile?.display_name || job.profile_version"
           :selected-file-size="selectedFileSize"
           :policy="uploadPolicy?.rulebook ?? null"
@@ -1489,10 +1306,6 @@ watch(activeStep, (next, previous) => {
         <template #header>第二步 · 确认工作表用途和表头</template>
 
         <el-alert v-if="nodeLoadError" class="block-gap-sm" type="error" show-icon :closable="false" :title="nodeLoadError" />
-        <p class="text-hint block-gap-sm">
-          下方「绑定节点」的选项来自当前场景已配置的节点实例。需要新增或调整节点
-          （包括它们的顺序与上游依赖）请到场景详情的「流程」页签，那里是节点配置的唯一入口。
-        </p>
 
         <SheetBindingTable
           class="block-gap"
@@ -1503,16 +1316,6 @@ watch(activeStep, (next, previous) => {
           :problems-of="sheetProblems"
           @update:draft="updateBinding"
         />
-
-        <p class="text-hint block-gap-sm">
-          未出现在本文件里的工作表不会被解析；某一类工作表缺失表示该类检查未配置，
-          执行时会显示「未配置并跳过」，不等于检查通过。
-          <template v-if="systemExcludedSheets.length">
-            模板已自动排除
-            {{ systemExcludedSheets.map((sheet) => sheet.name).join("、") }}：
-            说明页与没有业务数据的工作表不能绑定业务用途。
-          </template>
-        </p>
 
         <el-alert
           v-if="bindingBlocked"
@@ -1526,13 +1329,7 @@ watch(activeStep, (next, previous) => {
         </el-alert>
 
         <div class="sticky-actions">
-          <div class="sticky-actions__bar">
-            <div>
-              <div :class="conversionDisabledReason ? 'text-danger' : 'text-muted'">
-                {{ conversionDisabledReason ?? `共 ${bindingSheets.length} 张待确认工作表，用途均已确认，可以开始解析。` }}
-              </div>
-              <div class="text-hint">解析会把工作表内容转换成材料、字段和规则候选；这一步不会修改原始文件。</div>
-            </div>
+          <div class="sticky-actions__bar binding-actions">
             <div class="card-actions">
               <el-button @click="activeStep = 0">上一步</el-button>
               <el-button :disabled="!job.profile?.scenario_code" @click="openSceneFlow">配置场景流程</el-button>
@@ -1577,7 +1374,7 @@ watch(activeStep, (next, previous) => {
           v-else-if="operationRunning && !hasProposals"
           kind="loading"
           title="正在解析规则库"
-          description="解析是后台操作；完成后这里会显示材料、字段和规则候选。"
+          description="完成后将显示需要确认的材料、字段和规则。"
         />
         <template v-else-if="hasProposals">
           <el-alert
@@ -1598,7 +1395,7 @@ watch(activeStep, (next, previous) => {
               :closable="false"
               :title="`有 ${openIssues.length} 项需要业务判断`"
             >
-              提交业务结论后才能进入导入预览。
+              提交业务结论后才能写入场景草稿。
             </el-alert>
             <div class="stack block-gap">
               <ImportIssueCard
@@ -1701,7 +1498,7 @@ watch(activeStep, (next, previous) => {
         <div class="sticky-actions">
           <div class="sticky-actions__bar">
             <span class="text-muted">
-              {{ openIssues.length ? "存在需要业务确认的内容，确认后才能进入导入预览。" : "没有待确认问题，可以进入导入预览。" }}
+              {{ openIssues.length ? "存在需要业务确认的内容，处理后才能写入草稿。" : "没有待确认问题，可以生成场景草稿。" }}
             </span>
             <div class="card-actions">
               <el-button @click="activeStep = 1">上一步</el-button>
@@ -1709,192 +1506,94 @@ watch(activeStep, (next, previous) => {
                 提交业务结论
               </el-button>
               <el-button v-else type="primary" :disabled="!hasProposals" @click="activeStep = 3">
-                下一步：导入预览
+                下一步：写入草稿
               </el-button>
             </div>
           </div>
         </div>
       </el-card>
 
-      <!-- 第四步：导入预览。只读核对，不发布场景。 -->
+      <!-- 第四步：确认写入草稿。详细核对与调整在场景配置页完成。 -->
       <el-card v-else-if="activeStep === 3" shadow="never" class="block-gap">
         <template #header>
           <div class="card-header">
-            <span>第四步 · 导入预览</span>
-            <StatusBadge :status="previewBlockers.length ? 'BLOCKED' : 'READY'" />
+            <span>第四步 · 写入场景草稿</span>
+            <StatusBadge :status="job.status === 'APPLIED' ? 'APPLIED' : writeBlockers.length ? 'BLOCKED' : 'READY'" />
           </div>
         </template>
 
-        <el-descriptions :column="3" border>
-          <el-descriptions-item label="所属场景">
-            {{ job.profile?.scenario_name || job.profile?.scenario_code || "未记录场景" }}
-          </el-descriptions-item>
-          <el-descriptions-item label="材料位">{{ proposalTotals.materials }}</el-descriptions-item>
-          <el-descriptions-item label="任务字段">{{ proposalTotals.fields }}</el-descriptions-item>
-          <el-descriptions-item label="审核规则">{{ proposalTotals.rules }}</el-descriptions-item>
-          <el-descriptions-item label="计算规则">{{ includedCalculations.length }}</el-descriptions-item>
-          <el-descriptions-item label="报告章节" :span="3">{{ proposalTotals.reportSections }}</el-descriptions-item>
-        </el-descriptions>
+        <el-alert v-if="job.status === 'APPLIED'" type="success" show-icon :closable="false" title="已生成场景草稿">
+          本次导入没有发布场景版本。请进入场景配置核对和调整，完成后由管理员手动发布。
+        </el-alert>
 
-        <el-descriptions :column="1" border class="block-gap">
-          <el-descriptions-item label="不参与本次导入的工作表">
-            <template v-if="excludedSheetNames.length">
-              <el-tag v-for="name in excludedSheetNames" :key="name" class="tag-gap" type="info" disable-transitions>{{ name }}</el-tag>
-            </template>
-            <span v-else class="text-muted">本次没有被排除的工作表。</span>
-          </el-descriptions-item>
-          <el-descriptions-item label="未配置检查的节点">
-            <template v-if="uncoveredCheckNodes.length">
-              <el-tag v-for="node in uncoveredCheckNodes" :key="node" class="tag-gap" type="warning" disable-transitions>
-                {{ nodeLabel(node) }}
-              </el-tag>
-              <div class="text-hint">这些能力类型在本次转换结果里没有规则。执行时会显式记为未配置并跳过，不代表检查通过。</div>
-            </template>
-            <span v-else class="text-muted">这些能力类型在本次转换结果里都有规则。</span>
-          </el-descriptions-item>
-        </el-descriptions>
+        <template v-else>
+          <el-descriptions :column="2" border>
+            <el-descriptions-item label="目标场景" :span="2">
+              {{ job.profile?.scenario_name || job.profile?.scenario_code || "未记录场景" }}
+            </el-descriptions-item>
+            <el-descriptions-item label="材料">{{ proposalTotals.materials }}</el-descriptions-item>
+            <el-descriptions-item label="字段">{{ proposalTotals.fields }}</el-descriptions-item>
+            <el-descriptions-item label="业务规则">{{ proposalTotals.rules }}</el-descriptions-item>
+            <el-descriptions-item label="计算规则">{{ includedCalculations.length }}</el-descriptions-item>
+            <el-descriptions-item label="报告章节">{{ proposalTotals.reportSections }}</el-descriptions-item>
+            <el-descriptions-item label="不参与导入的工作表">{{ excludedSheetNames.length }}</el-descriptions-item>
+          </el-descriptions>
 
-        <!-- 逐条明细：材料 / 字段 / 规则 / 报告章节，含来源与原文对照 -->
-        <el-card shadow="never" class="block-gap">
-          <template #header>逐条核对（不含已排除项）</template>
-          <el-collapse>
-            <el-collapse-item :title="`材料（${previewMaterials.length}）`" name="materials">
-              <el-table :data="previewMaterials" border size="small">
-                <el-table-column label="材料名称" prop="title" min-width="140" show-overflow-tooltip />
-                <el-table-column label="说明" prop="summary" min-width="140" show-overflow-tooltip />
-                <el-table-column label="来源" prop="source" min-width="160" show-overflow-tooltip />
-                <el-table-column label="原文对照" prop="original" min-width="200" show-overflow-tooltip />
-              </el-table>
-            </el-collapse-item>
-            <el-collapse-item :title="`字段（${previewFields.length}）`" name="fields">
-              <el-table :data="previewFields" border size="small">
-                <el-table-column label="字段名称" prop="title" min-width="140" show-overflow-tooltip />
-                <el-table-column label="类型 / 单位 / 来源材料" prop="summary" min-width="180" show-overflow-tooltip />
-                <el-table-column label="来源" prop="source" min-width="160" show-overflow-tooltip />
-                <el-table-column label="原文对照" prop="original" min-width="200" show-overflow-tooltip />
-              </el-table>
-            </el-collapse-item>
-            <el-collapse-item :title="`规则（${previewRules.length}）`" name="rules">
-              <el-table :data="previewRules" border size="small">
-                <el-table-column label="规则名称" prop="title" min-width="140" show-overflow-tooltip />
-                <el-table-column label="节点 / 判断方式" prop="summary" min-width="200" show-overflow-tooltip />
-                <el-table-column label="方向 / 阈值 / 单位 / 适用条件" prop="note" min-width="220" show-overflow-tooltip />
-                <el-table-column label="审核要求原文" prop="requirement" min-width="160" show-overflow-tooltip />
-                <el-table-column label="来源" prop="source" min-width="150" show-overflow-tooltip />
-                <el-table-column label="原文对照" prop="original" min-width="200" show-overflow-tooltip />
-                <el-table-column label="支持状态" min-width="160" show-overflow-tooltip>
-                  <template #default="{ row }">
-                    <span v-if="!row.support" class="text-muted">可执行</span>
-                    <el-tag v-else type="warning" size="small" effect="plain" disable-transitions>{{ row.support }}</el-tag>
-                  </template>
-                </el-table-column>
-              </el-table>
-            </el-collapse-item>
-            <el-collapse-item v-if="previewCalculations.length" :title="`计算规则（${previewCalculations.length}）`" name="calculations">
-              <el-table :data="previewCalculations" border size="small">
-                <el-table-column type="expand" width="48">
-                  <template #default="{ row }">
-                    <CalculationSources :origin="row.origin" :parameter-sources="row.parameterSources" :band-sources="row.bandSources" :show-job-link="false" />
-                  </template>
-                </el-table-column>
-                <el-table-column label="规则编号" prop="code" min-width="120" />
-                <el-table-column label="名称" prop="title" min-width="160" show-overflow-tooltip />
-                <el-table-column label="公式" prop="formula" min-width="200" show-overflow-tooltip />
-                <el-table-column label="参数来源" prop="parameters" min-width="240" show-overflow-tooltip />
-                <el-table-column label="结果编号 / 类型" prop="result" min-width="150" />
-                <el-table-column label="判定区间" prop="bands" min-width="130" />
-                <el-table-column label="未声明参数" min-width="150" show-overflow-tooltip>
-                  <template #default="{ row }">{{ row.unresolved || "无" }}</template>
-                </el-table-column>
-                <el-table-column label="来源" prop="source" min-width="150" show-overflow-tooltip />
-                <el-table-column label="原文对照" prop="original" min-width="180" show-overflow-tooltip />
-              </el-table>
-            </el-collapse-item>
-            <el-collapse-item :title="`报告章节（${previewReportSections.length}）`" name="reports">
-              <el-table :data="previewReportSections" border size="small">
-                <el-table-column label="章节名称" prop="title" min-width="200" show-overflow-tooltip />
-                <el-table-column label="来源工作表" prop="sheet" min-width="160" show-overflow-tooltip />
-              </el-table>
-            </el-collapse-item>
-          </el-collapse>
-        </el-card>
+          <div class="draft-write-scope block-gap">
+            <section>
+              <strong>本次替换</strong>
+              <span>材料、字段、业务规则、计算配置、报告章节和 Sheet 绑定</span>
+            </section>
+            <section>
+              <strong>继续保留</strong>
+              <span>流程节点、节点顺序和节点依赖</span>
+            </section>
+            <section>
+              <strong>不会影响</strong>
+              <span>当前已发布版本、已有方案和审核任务</span>
+            </section>
+          </div>
 
-        <!-- 逐业务行处置：每条来源业务记录必须有候选 / 排除 / 待处理问题 -->
-        <el-card shadow="never" class="block-gap">
-          <template #header>逐业务行处置</template>
-          <CoverageReconciliation :coverage="job.coverage" />
-        </el-card>
+          <el-alert class="block-gap" type="info" show-icon :closable="false" title="本次操作只生成草稿，不会自动发布">
+            写入后将在场景配置页继续核对和调整；只有管理员手动发布后，新配置才会生效。
+          </el-alert>
+        </template>
 
         <el-alert
-          v-if="previewBlockers.length"
+          v-if="writeBlockers.length"
           class="block-gap"
           type="error"
           show-icon
           :closable="false"
           title="存在阻断项，不能导入场景配置"
         >
-          <div v-for="item in previewBlockers" :key="item">{{ item }}</div>
+          <div v-for="item in writeBlockers" :key="item">{{ item }}</div>
         </el-alert>
-        <el-alert
-          v-else
-          class="block-gap"
-          type="success"
-          show-icon
-          :closable="false"
-          title="页面核对未发现阻断项"
-        >
-          这只是页面对当前配置的核对。确认导入后，以场景配置页显示的生效状态为准。
-        </el-alert>
-
         <div class="sticky-actions">
           <div class="sticky-actions__bar">
-            <span class="text-muted">本步核对导入结果；确认写入后，完整配置自动生效。</span>
+            <span class="text-muted">
+              {{ job.status === 'APPLIED' ? '草稿已生成，请到场景配置页继续处理。' : '确认后写入或覆盖当前场景草稿。' }}
+            </span>
             <div class="card-actions">
               <el-button @click="activeStep = 2">上一步</el-button>
-              <el-button type="primary" :disabled="previewBlockers.length > 0 || !hasProposals" @click="activeStep = 4">
-                下一步：确认导入
+              <el-button
+                v-if="job.status !== 'APPLIED'"
+                type="primary"
+                :loading="pending"
+                :disabled="writeBlockers.length > 0 || !hasProposals"
+                @click="applyToSceneDraft"
+              >
+                写入场景草稿
+              </el-button>
+              <el-button
+                v-else-if="job.profile?.scenario_code"
+                type="primary"
+                @click="router.push({ name: 'scene-detail', params: { scenarioCode: job.profile.scenario_code }, query: { tab: 'source' } })"
+              >
+                打开场景配置
               </el-button>
             </div>
           </div>
-        </div>
-      </el-card>
-
-      <el-card v-else shadow="never" class="block-gap">
-        <template #header>
-          <div class="card-header">
-            <span>第五步 · 确认导入</span>
-            <StatusBadge :status="job.status === 'APPLIED' ? 'APPLIED' : published ? 'PUBLISHED' : 'READY'" />
-          </div>
-        </template>
-
-        <el-alert v-if="job.status === 'APPLIED'" type="success" show-icon :closable="false" title="已写入场景配置">
-          本次导入已写入场景配置；生效状态以场景配置页为准。
-        </el-alert>
-        <el-alert v-else-if="published" type="info" show-icon :closable="false" title="这是历史上已经产生过场景版本的导入作业">
-          当时的版本保持不变。后续修改在场景配置页保存并自动生效。
-        </el-alert>
-        <template v-else>
-          <el-descriptions :column="1" border class="block-gap">
-            <el-descriptions-item label="所属场景">
-              {{ job.profile?.scenario_name || job.profile?.scenario_code || "未记录场景" }}
-            </el-descriptions-item>
-          </el-descriptions>
-          <p class="text-hint block-gap-sm">
-            写入会替换该场景当前配置中的材料、字段、规则、计算配置和 Sheet 绑定；配置完整时自动生成生效版本。
-          </p>
-          <el-button type="primary" :loading="pending" :disabled="Boolean(previewBlockers.length)" @click="applyToSceneDraft">
-            确认导入
-          </el-button>
-        </template>
-        <p v-if="formMessage" class="text-danger">{{ formMessage }}</p>
-        <div class="card-actions block-gap">
-          <el-button @click="activeStep = 3">上一步</el-button>
-          <el-button
-            v-if="job.profile?.scenario_code"
-            @click="router.push({ name: 'scene-detail', params: { scenarioCode: job.profile.scenario_code }, query: { tab: 'source' } })"
-          >
-            打开场景
-          </el-button>
         </div>
       </el-card>
     </template>
@@ -1913,9 +1612,37 @@ watch(activeStep, (next, previous) => {
 </template>
 
 <style scoped>
-.tag-gap {
-  margin-right: 6px;
-  margin-bottom: 4px;
+.draft-write-scope {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.draft-write-scope section {
+  padding: 14px 16px;
+  border-right: 1px solid var(--el-border-color);
+}
+
+.draft-write-scope section:last-child {
+  border-right: 0;
+}
+
+.draft-write-scope strong,
+.draft-write-scope span {
+  display: block;
+}
+
+.draft-write-scope strong {
+  margin-bottom: 5px;
+  font-size: 13px;
+}
+
+.draft-write-scope span {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 /* 每条能力缺口一行：说明与「逐条确认」在同一行，确认对象不会与说明错位。 */
@@ -1926,5 +1653,24 @@ watch(activeStep, (next, previous) => {
   justify-content: space-between;
   gap: 8px 16px;
   margin-bottom: 6px;
+}
+
+.binding-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 820px) {
+  .draft-write-scope {
+    grid-template-columns: 1fr;
+  }
+
+  .draft-write-scope section {
+    border-right: 0;
+    border-bottom: 1px solid var(--el-border-color);
+  }
+
+  .draft-write-scope section:last-child {
+    border-bottom: 0;
+  }
 }
 </style>

@@ -147,6 +147,9 @@ export interface ScenarioVersionRow {
 }
 
 export interface ScenarioDraftInfo {
+  schema_key?: string | null;
+  schema_version?: string | null;
+  schema_json?: Record<string, unknown> | null;
   revision_no: number;
   source: string;
   source_label: string;
@@ -159,6 +162,9 @@ export interface ScenarioDraftInfo {
 export interface ScenarioDetail extends ApiResponse {
   scenario_code: string;
   scenario_name: string;
+  schema_key?: string | null;
+  schema_version?: string | null;
+  schema_json?: Record<string, unknown> | null;
   category: string | null;
   description: string | null;
   enabled: boolean;
@@ -189,6 +195,8 @@ export interface DraftFieldItem {
   material_name: string | null;
   name: string;
   value_type: string;
+  extraction_strategy: "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED";
+  structure_schema: Record<string, unknown> | null;
   unit: string | null;
   /** 币种：金额比较与加总的口径之一；留空表示未声明，不表示人民币。 */
   currency?: string | null;
@@ -381,6 +389,9 @@ export interface ScenarioDraftView extends ApiResponse {
 export interface ScenarioVersionConfigView extends ApiResponse {
   scenario_code: string;
   scenario_name: string;
+  schema_key?: string | null;
+  schema_version?: string | null;
+  schema_json?: Record<string, unknown> | null;
   version_no: number;
   source: string;
   source_label: string;

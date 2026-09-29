@@ -2,7 +2,7 @@
 import { computed, h, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CircleCheck, Pencil } from "lucide-vue-next";
+import { CircleCheck, FileUp, Pencil, Plus, Power, Rocket, RotateCcw, Save, Trash2 } from "lucide-vue-next";
 
 import type {
   ConfigSyncError,
@@ -30,10 +30,11 @@ import SceneNodesPanel from "@/components/scenes/SceneNodesPanel.vue";
 import SceneRulesPanel from "@/components/scenes/SceneRulesPanel.vue";
 import SceneSectionsPanel from "@/components/scenes/SceneSectionsPanel.vue";
 import CalculationSources from "@/components/CalculationSources.vue";
+import BackButton from "@/components/BackButton.vue";
 
 /**
  * 场景配置按基本信息、材料、字段、规则、流程和报告组织。
- * 每次保存完整配置后自动生成生效版本。
+ * 保存只更新草稿；管理员在场景页显式发布后才生成生效版本。
  */
 const publishing = ref(false);
 const route = useRoute();
@@ -202,7 +203,7 @@ async function editDisabledRow(row: DraftDisabledSourceRow): Promise<void> {
   const code = scenarioCode.value;
   const revision = configDraft.value?.revision_no ?? 0;
   try {
-    const profile = await getProfileSheets();
+    const profile = await getProfileSheets(scenarioCode.value || undefined);
     if (sequence !== editSequence || code !== scenarioCode.value) return;
     const sheet = profile.sheets.find((item) => item.sheet_role === row.sheet_role);
     if (!sheet) throw new Error(`模板协议中找不到工作表角色 ${row.sheet_role}`);
@@ -448,32 +449,68 @@ function openPlanCreation(): void {
     <div v-else v-loading="loading">
       <template v-if="detail">
         <div class="app-detail-head">
-          <el-button text aria-label="返回场景选择" @click="router.push({ name: 'scene-config' })">← 返回</el-button>
-          <span class="app-detail-head__name">{{ detail.scenario_name }}</span>
-          <el-tag v-if="detail.category" size="small" effect="plain" disable-transitions>{{ detail.category }}</el-tag>
-          <el-tag :type="detail.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
-            {{ detail.enabled ? "启用" : "停用" }}
-          </el-tag>
-          <el-tag v-if="isDeleted" type="danger" size="small" effect="light" disable-transitions>已删除</el-tag>
-          <div class="card-actions">
-            <el-button v-if="returnImportJobNo" @click="router.push({ name: 'scene-import-detail', params: { jobNo: returnImportJobNo } })">返回导入作业</el-button>
-            <el-button v-if="!isDeleted" @click="toggleEnabled">{{ detail.enabled ? "停用" : "启用" }}</el-button>
-            <el-button v-if="!isDeleted" type="danger" plain @click="removeScenario">删除</el-button>
-            <el-button v-else type="primary" @click="restoreScenario">恢复场景</el-button>
+          <div class="app-detail-head__identity">
+            <BackButton label="返回场景列表" @click="router.push({ name: 'scene-config' })" />
+            <span class="app-detail-head__divider" aria-hidden="true" />
+            <div class="app-detail-head__title-wrap">
+              <h1 class="app-detail-head__name">{{ detail.scenario_name }}</h1>
+              <div class="app-detail-head__meta">
+                <el-tag v-if="detail.category" size="small" effect="plain" disable-transitions>{{ detail.category }}</el-tag>
+                <el-tag :type="detail.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
+                  {{ detail.enabled ? "已启用" : "已停用" }}
+                </el-tag>
+                <el-tag v-if="isDeleted" type="danger" size="small" effect="light" disable-transitions>已删除</el-tag>
+              </div>
+            </div>
+          </div>
+          <div class="app-detail-head__actions">
+            <BackButton
+              v-if="returnImportJobNo"
+              label="返回导入作业"
+              @click="router.push({ name: 'scene-import-detail', params: { jobNo: returnImportJobNo } })"
+            />
+            <el-button v-if="!isDeleted" plain @click="toggleEnabled">
+              <template #icon><Power :size="15" /></template>
+              {{ detail.enabled ? "停用场景" : "启用场景" }}
+            </el-button>
+            <el-button v-if="!isDeleted" type="danger" plain @click="removeScenario">
+              <template #icon><Trash2 :size="15" /></template>
+              删除场景
+            </el-button>
+            <el-button v-else type="primary" @click="restoreScenario">
+              <template #icon><RotateCcw :size="15" /></template>
+              恢复场景
+            </el-button>
           </div>
         </div>
 
         <div class="app-toolbar">
           <div class="app-toolbar__left">
-            <el-tag v-if="detail.draft?.sync_error || configError" type="warning" effect="plain">修改未生效</el-tag>
+            <el-tag v-if="detail.draft?.sync_error || configError" type="warning" effect="plain">配置待完善</el-tag>
             <el-tag v-else-if="detail.latest_version_no > 0" type="success" effect="plain">配置已生效</el-tag>
-            <el-tag v-else type="info" effect="plain">待配置</el-tag>
+            <el-tag v-else type="info" effect="plain">待发布</el-tag>
             <span class="text-muted">当前版本：{{ detail.latest_version_no > 0 ? `第 ${detail.latest_version_no} 版` : "无" }}</span>
             <span v-if="detail.draft?.sync_error || configError" class="text-danger">{{ detail.draft?.sync_error?.message || configError }}</span>
           </div>
           <div class="app-toolbar__right">
-            <el-button :disabled="isDeleted" @click="openImports">规则库导入</el-button>
-            <el-button v-if="!isDeleted && detail.enabled && detail.latest_version_no > 0" type="primary" @click="openPlanCreation">创建方案</el-button>
+            <el-button :disabled="isDeleted" @click="openImports">
+              <template #icon><FileUp :size="15" /></template>
+              规则库导入
+            </el-button>
+            <el-button
+              v-if="!isDeleted && detail.draft"
+              type="primary"
+              :loading="publishing"
+              :disabled="Boolean(publishBlockedReason)"
+              @click="publishScene"
+            >
+              <template #icon><Rocket :size="15" /></template>
+              发布场景
+            </el-button>
+            <el-button v-if="!isDeleted && detail.enabled && detail.latest_version_no > 0" @click="openPlanCreation">
+              <template #icon><Plus :size="15" /></template>
+              创建方案
+            </el-button>
           </div>
         </div>
 
@@ -499,7 +536,7 @@ function openPlanCreation(): void {
                 <span>{{ detail.draft ? `第 ${detail.draft.revision_no} 次修订` : "还没有草稿" }}</span>
               </el-form-item>
               <el-form-item label="生效状态">
-                <span>{{ detail.draft?.sync_error || configError ? "本次修改未生效" : detail.latest_version_no > 0 ? "当前配置已生效" : "待配置" }}</span>
+                <span>{{ detail.draft?.sync_error || configError ? "配置待完善" : detail.latest_version_no > 0 ? "当前配置已生效" : "待发布" }}</span>
               </el-form-item>
               <el-form-item label="已发布版本">
                 <span>{{ detail.latest_version_no > 0 ? `第 ${detail.latest_version_no} 版` : "尚未发布" }}</span>
@@ -514,7 +551,10 @@ function openPlanCreation(): void {
                 <span>{{ formatDate(detail.updated_at) }}</span>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" :disabled="!canEditBasic" :loading="saving" @click="saveBasic">保存基本资料</el-button>
+                <el-button type="primary" :disabled="!canEditBasic" :loading="saving" @click="saveBasic">
+                  <template #icon><Save :size="15" /></template>
+                  保存基本资料
+                </el-button>
               </el-form-item>
             </el-form>
           </el-tab-pane>
@@ -607,7 +647,6 @@ function openPlanCreation(): void {
               我确认该项本次不可判定
             </el-checkbox>
           </div>
-          <el-button :loading="publishing" :disabled="isDeleted || !detail.draft || Boolean(publishBlockedReason)" @click="publishScene">确认并生效</el-button>
         </el-alert>
       </template>
     </div>
@@ -648,6 +687,99 @@ function openPlanCreation(): void {
   gap: 12px;
   margin-bottom: 8px;
 }
+
+.app-detail-head {
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 2px 0 18px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.app-detail-head__identity,
+.app-detail-head__actions,
+.app-detail-head__meta {
+  display: flex;
+  align-items: center;
+}
+
+.app-detail-head__identity {
+  min-width: 0;
+  gap: 14px;
+}
+
+.app-detail-head__actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.app-detail-head__divider {
+  width: 1px;
+  height: 24px;
+  background: var(--el-border-color);
+}
+
+.app-detail-head__title-wrap {
+  min-width: 0;
+}
+
+.app-detail-head__name {
+  margin: 0;
+  overflow: hidden;
+  color: var(--el-text-color-primary);
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-detail-head__meta {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+@media (max-width: 900px) {
+  .app-detail-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .app-detail-head__actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .app-detail-head__identity {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .app-detail-head__divider {
+    display: none;
+  }
+
+  .app-detail-head__identity {
+    flex-wrap: wrap;
+  }
+
+  .app-detail-head__title-wrap {
+    flex: 1 1 calc(100% - 140px);
+  }
+
+  .app-detail-head__actions {
+    width: 100%;
+  }
+
+  .app-detail-head__actions .el-button {
+    flex: 1 1 auto;
+  }
+}
+
 .disabled-row-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));

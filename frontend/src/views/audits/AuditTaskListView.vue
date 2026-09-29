@@ -26,7 +26,7 @@ import type { DetailTab } from "@/constants/auditWorkspaces";
 import { nodeLabel, nodeOptions, statusLabel } from "@/constants/labels";
 
 /**
- * 审核任务列表：任务只能从已发布且启用的方案版本创建；
+ * 审核任务列表：任务从已启用且配置生效的方案创建；
  * 旧任务没有方案关联时显示“历史任务配置”，不伪造关联、不改写历史结果。
  */
 const route = useRoute();
@@ -132,12 +132,11 @@ const scenes = ref<ScenarioOption[]>([]);
 const planOptions = ref<PlanOption[]>([]);
 const createVisible = ref(false);
 const createSaving = ref(false);
-const createPrefillLoading = ref(false);
+const createOptionsLoading = ref(false);
 const createError = ref<string | null>(null);
-const createForm = reactive({ scenario_code: "", plan_code: "", task_name: "", remark: "" });
+const createForm = reactive({ plan_code: "", task_name: "", remark: "" });
 let createAttemptKey: string | null = null;
 let createAttemptPayload: string | null = null;
-let planOptionsRequest = 0;
 let snapshotRequest = 0;
 let createOpenRequest = 0;
 
@@ -147,38 +146,26 @@ async function openCreate(planCode?: string): Promise<void> {
   // 每次打开弹窗生成新的幂等标识：失败重开时不会与上一次请求的内容冲突。
   createAttemptKey = null;
   createAttemptPayload = null;
-  ++planOptionsRequest;
   ++snapshotRequest;
   createSnapshot.value = null;
   snapshotLoading.value = false;
   snapshotError.value = null;
   planOptions.value = [];
   createError.value = null;
-  createForm.scenario_code = "";
   createForm.plan_code = "";
   createForm.task_name = "";
   createForm.remark = "";
-  createPrefillLoading.value = true;
+  createOptionsLoading.value = true;
   try {
-    const payload = await listSceneOptions();
+    const planPayload = await listPlanOptions();
     if (request !== createOpenRequest || !createVisible.value) return;
-    scenes.value = payload.items.filter((item) => item.enabled);
+    planOptions.value = planPayload.items;
+    if (!planOptions.value.length) {
+      createError.value = "当前没有可用于创建任务的方案。";
+    }
     if (!planCode) return;
-    const selected = await getPlan(planCode);
-    if (request !== createOpenRequest || !createVisible.value) return;
-    if (selected.deleted || !selected.enabled || !selected.effective) {
-      createError.value = "该方案当前不可用于创建任务，请在方案管理中核对启用状态和配置范围。";
-      return;
-    }
-    if (!scenes.value.some((item) => item.scenario_code === selected.scenario_code)) {
-      createError.value = "该方案所属场景当前不可用于创建任务。";
-      return;
-    }
-    createForm.scenario_code = selected.scenario_code;
-    await onScenarioChange();
-    if (request !== createOpenRequest || !createVisible.value || createError.value) return;
     if (!planOptions.value.some((item) => item.plan_code === planCode)) {
-      createError.value = "该方案不在当前可用方案列表中，请刷新后核对方案状态。";
+      createError.value = "该方案当前不可用于创建任务，请核对方案状态。";
       return;
     }
     createForm.plan_code = planCode;
@@ -187,34 +174,7 @@ async function openCreate(planCode?: string): Promise<void> {
       createError.value = failure instanceof Error ? failure.message : "创建任务所需信息读取失败";
     }
   } finally {
-    if (request === createOpenRequest) createPrefillLoading.value = false;
-  }
-}
-
-async function onScenarioChange(): Promise<void> {
-  const scenarioCode = createForm.scenario_code;
-  const request = ++planOptionsRequest;
-  createForm.plan_code = "";
-  planOptions.value = [];
-  createError.value = null;
-  if (!scenarioCode) {
-    return;
-  }
-  try {
-    const payload = await listPlanOptions(scenarioCode);
-    if (request !== planOptionsRequest || createForm.scenario_code !== scenarioCode) {
-      return;
-    }
-    planOptions.value = payload.items;
-    if (!payload.items.length) {
-      createError.value = "该场景还没有范围已生效的启用方案：请先在方案管理中建立方案并保存成功。";
-    } else {
-      createError.value = null;
-    }
-  } catch (failure) {
-    if (request === planOptionsRequest && createForm.scenario_code === scenarioCode) {
-      createError.value = failure instanceof Error ? failure.message : "方案列表读取失败";
-    }
+    if (request === createOpenRequest) createOptionsLoading.value = false;
   }
 }
 
@@ -222,11 +182,11 @@ async function onScenarioChange(): Promise<void> {
 const createSnapshot = ref<PlanSelection | null>(null);
 const snapshotLoading = ref(false);
 const snapshotError = ref<string | null>(null);
-const canCreateTask = computed(() => Boolean(
-  createSnapshot.value?.effective
-  && createSnapshot.value.scope_hash
-  && createSnapshot.value.plan_code === createForm.plan_code,
-));
+const canCreateTask = computed(() => {
+  const snapshot = createSnapshot.value;
+  return Boolean(snapshot?.effective && snapshot.enabled && !snapshot.deleted
+    && snapshot.scope_hash && snapshot.plan_code === createForm.plan_code);
+});
 
 async function loadCreateSnapshot(): Promise<void> {
   const planCode = createForm.plan_code;
@@ -279,7 +239,8 @@ async function submitCreate(): Promise<void> {
     return;
   }
   const snapshot = createSnapshot.value;
-  if (!snapshot?.effective || !snapshot.scope_hash || snapshot.plan_code !== createForm.plan_code) {
+  if (!snapshot?.effective || !snapshot.enabled || snapshot.deleted
+    || !snapshot.scope_hash || snapshot.plan_code !== createForm.plan_code) {
     ElMessage.warning("方案范围尚未读取或已变化，请重新核对后创建任务");
     return;
   }
@@ -479,7 +440,7 @@ async function loadFilterOptions(): Promise<void> {
     <PageHeader
       eyebrow="审核管理"
       title="审核任务"
-      subtitle="任务只能从已发布且启用的方案版本创建；创建时冻结场景版本与规则快照，之后不随升级变化。"
+      subtitle="任务从已启用且配置生效的方案创建；创建时冻结方案配置，后续修改不影响已有任务。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -642,14 +603,10 @@ async function loadFilterOptions(): Promise<void> {
         :closable="false"
         :title="`方案配置尚未生效：${createSnapshot.sync_error?.message ?? '配置不完整'}`"
       />
+      <el-alert v-if="createSnapshot && (createSnapshot.deleted || !createSnapshot.enabled)" class="block-gap-sm" type="warning" show-icon :closable="false" title="方案已停用或删除，不能创建任务" />
       <el-form label-width="100px" class="block-gap-sm">
-        <el-form-item label="场景" required>
-          <el-select v-model="createForm.scenario_code" filterable :disabled="createPrefillLoading" placeholder="选择场景" style="width: 100%" @change="onScenarioChange">
-            <el-option v-for="item in scenes" :key="item.scenario_code" :value="item.scenario_code" :label="item.scenario_name" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="方案" required>
-          <el-select v-model="createForm.plan_code" filterable :disabled="createPrefillLoading || !createForm.scenario_code" placeholder="选择已启用的方案" style="width: 100%">
+          <el-select v-model="createForm.plan_code" filterable :loading="createOptionsLoading" :disabled="createOptionsLoading" placeholder="选择已启用的方案" style="width: 100%">
             <el-option v-for="item in planOptions" :key="item.plan_code" :value="item.plan_code" :label="item.plan_name" />
           </el-select>
         </el-form-item>
@@ -662,7 +619,7 @@ async function loadFilterOptions(): Promise<void> {
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createSaving" :disabled="createPrefillLoading || snapshotLoading || !canCreateTask" @click="submitCreate">创建任务</el-button>
+        <el-button type="primary" :loading="createSaving" :disabled="createOptionsLoading || snapshotLoading || !canCreateTask" @click="submitCreate">创建任务</el-button>
       </template>
     </el-dialog>
 

@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 
 import { listPlans } from "@/api/plans";
 import type { PlanListItem } from "@/api/contracts";
+import BackButton from "@/components/BackButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
 
 const router = useRouter();
@@ -46,7 +47,7 @@ onMounted(() => void load());
   <div class="app-panel">
     <PageHeader eyebrow="方案管理" title="方案编辑" subtitle="选择方案后调整材料、字段、规则和报告章节。" :show-refresh="false">
       <template #actions>
-        <el-button @click="router.push({ name: 'plans' })">返回方案列表</el-button>
+        <BackButton label="返回方案列表" @click="router.push({ name: 'plans' })" />
       </template>
     </PageHeader>
 

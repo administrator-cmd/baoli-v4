@@ -56,6 +56,7 @@ export interface EvidenceRow {
   material_name: string | null;
   filename: string | null;
   document_upload_no: string | null;
+  field_path: string | null;
   page_no: number | null;
   quote_text: string;
   locator_status: "VERIFIED" | "UNVERIFIED" | "UNLOCATABLE";

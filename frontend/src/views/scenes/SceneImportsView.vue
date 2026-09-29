@@ -19,7 +19,7 @@ import { statusLabel } from "@/constants/labels";
 
 /**
  * 规则库导入（入口列表）：文件名、所属场景、状态与待处理数来自真实作业。
- * 新增导入必须先选定已创建的场景。确认后写入场景配置，完整配置自动生效。
+ * 新增导入必须先选定已创建的场景。确认后只写入场景草稿，由管理员核对后显式发布。
  */
 const router = useRouter();
 const route = useRoute();
