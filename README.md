@@ -4,7 +4,7 @@ FastAPI + Vue 3 的规则库驱动审核系统。管理员创建场景、导入�
 
 ## 本地配置
 
-后端统一读取仓库根目录 `.env`，以 `.env.example` 为配置说明。至少填写 `BAOLI_DATABASE_URL`，数据库名必须是 `baoli_v4`；相对的 `BAOLI_DATA_DIR` 也相对于仓库根目录。环境变量优先于 `.env`，修改配置后需重启后端。
+后端统一读取仓库根目录 `.env`，以 `.env.example` 为配置说明。至少填写 `BAOLI_DATABASE_URL`，数据库名允许 `baoli_v4` 或开发验证库 `baoli_v4_dev`；相对的 `BAOLI_DATA_DIR` 也相对于仓库根目录。环境变量优先于 `.env`，修改配置后需重启后端。
 
 应用启动只读校验数据库结构，不自动建库或迁移。结构变更直接修改 `backend/database/schema.sql`，从空库执行该文件；`CREATE TABLE IF NOT EXISTS` 不会升级现有表。数据库密码中的 URL 特殊字符需按 SQLAlchemy URL 规则编码。
 
@@ -46,6 +46,6 @@ npm run dev
 
 ## 当前边界
 
-系统使用 `backend/config/unified_profile.json` 作为唯一模板协议；场景选择并绑定需要的 Sheet，完整配置保存后生成不可变版本，任务创建时冻结方案完整配置。具体规则见[规则库与审核执行契约](docs/规则库与审核执行契约.md)。
+系统使用 `backend/config/unified_profile.json` 作为内部执行协议；场景保存自己的 Excel 映射 Schema，选择并绑定需要的 Sheet。完整配置保存后生成不可变版本，任务创建时冻结方案完整配置。当前场景适配器仅支持 Sheet 名及列别名，不支持任意新增业务列。具体规则见[规则库与审核执行契约](docs/规则库与审核执行契约.md)。
 
 当前没有身份认证、角色或数据范围控制。大量新改动仅完成静态实现，真实业务材料、外部服务、浏览器及数据库链路尚未完整复验；不能把旧验证结果当作当前系统验收，详情见[状态台账](docs/当前状态与问题台账.md)。

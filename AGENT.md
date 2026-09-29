@@ -10,6 +10,7 @@
 ## 本机工具
 
 - 开发分支：`dev`；`main` 为稳定分支。操作前以 `git branch --show-current` 核对实际分支。
+- 现在又多了一个 dev2 的测试开发分支
 - Python 环境：Conda `dd`，解释器 `C:\Users\29550\miniconda3\envs\dd\python.exe`。
 - Node/npm：本机记录为 Node 23.11.1、npm 10.9.2；以实际命令输出为准。
 - MySQL 工具目录：`D:\develop\mysql-8.4.11\bin\`。

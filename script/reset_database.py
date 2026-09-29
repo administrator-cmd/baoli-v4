@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""清空 baoli_v4 数据库：删除库内全部数据表。
+"""清空已配置的 baoli_v4 或 baoli_v4_dev 数据库：删除库内全部数据表。
 
 用途：本地反复验证导入/审核流程时，不必逐张手工删表。
 
 安全约束（与后端 database.py 保持一致）：
-- 只接受 mysql+pymysql，且库名必须是 baoli_v4；其它连接目标直接拒绝。
+- 只接受 mysql+pymysql，且库名必须是 baoli_v4 或 baoli_v4_dev；其它连接目标直接拒绝。
 - 默认只列出将要删除的表，不做任何修改；必须显式加 --yes 才会真正执行。
 - 只 DROP 库内的表，绝不 DROP DATABASE，也绝不创建任何表。
 
@@ -33,23 +33,18 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import pymysql  # noqa: E402
-from sqlalchemy.engine import URL, make_url  # noqa: E402
+from sqlalchemy.engine import URL  # noqa: E402
 
-from app.config import get_settings  # noqa: E402
+from app.config import get_settings, validated_database_url  # noqa: E402
 
 
 def _validated_database_url() -> URL:
     """与后端相同的目标校验：驱动与库名都不能被改到别处。"""
     settings = get_settings()
-    if not settings.database_url:
-        raise SystemExit("数据库未配置：请在项目根目录 .env 设置 BAOLI_DATABASE_URL，并指向 baoli_v4")
     try:
-        url = make_url(settings.database_url)
-    except Exception as exc:
-        raise SystemExit(f"数据库连接配置无效：请检查 BAOLI_DATABASE_URL（{exc}）") from exc
-    if url.drivername != "mysql+pymysql" or url.database != "baoli_v4":
-        raise SystemExit(f"拒绝执行：数据库目标必须是 mysql+pymysql 的 baoli_v4，当前是 {url.drivername}/{url.database}")
-    return url.set(database="baoli_v4")
+        return validated_database_url(settings.database_url)
+    except ValueError as exc:
+        raise SystemExit(f"拒绝执行：数据库目标无效（{exc}）") from exc
 
 
 def _connection_kwargs(url: URL) -> dict[str, object]:
@@ -83,7 +78,7 @@ def _drop_tables(connection: pymysql.Connection, tables: list[str]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="删除 baoli_v4 库内的全部数据表（不可恢复）")
+    parser = argparse.ArgumentParser(description="删除当前配置的 baoli_v4 / baoli_v4_dev 库内全部数据表（不可恢复）")
     parser.add_argument("--yes", action="store_true", help="确认执行；不加此参数时只列出将要删除的表")
     args = parser.parse_args()
 

@@ -54,9 +54,9 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import pymysql  # noqa: E402
-from sqlalchemy.engine import URL, make_url  # noqa: E402
+from sqlalchemy.engine import URL  # noqa: E402
 
-from app.config import get_settings  # noqa: E402
+from app.config import get_settings, validated_database_url  # noqa: E402
 
 LEGACY_STATUS = "TYPE_MISMATCH"
 REVIEW_STATUS = "TYPE_REVIEW"
@@ -66,15 +66,10 @@ REVIEW_TYPE = "MATERIAL_TYPE_MISMATCH"
 def _validated_database_url() -> URL:
     """与后端相同的目标校验：驱动与库名都不能被改到别处。"""
     settings = get_settings()
-    if not settings.database_url:
-        raise SystemExit("数据库未配置：请在项目根目录 .env 设置 BAOLI_DATABASE_URL，并指向 baoli_v4")
     try:
-        url = make_url(settings.database_url)
-    except Exception as exc:
-        raise SystemExit(f"数据库连接配置无效：请检查 BAOLI_DATABASE_URL（{exc}）") from exc
-    if url.drivername != "mysql+pymysql" or url.database != "baoli_v4":
-        raise SystemExit(f"拒绝执行：数据库目标必须是 mysql+pymysql 的 baoli_v4，当前是 {url.drivername}/{url.database}")
-    return url.set(database="baoli_v4")
+        return validated_database_url(settings.database_url)
+    except ValueError as exc:
+        raise SystemExit(f"拒绝执行：数据库目标无效（{exc}）") from exc
 
 
 def _connection_kwargs(url: URL) -> dict[str, object]:
