@@ -76,10 +76,10 @@ def _artifact_content(artifact: StoredArtifact) -> dict[str, Any]:
     # 产物信封是内部契约（domain），不依赖具体供应商模块。
     from pydantic import ValidationError
 
-    from ..domain.external_artifacts import ExternalArtifact
+    from ..domain.external_artifacts import ready_artifact_payload
 
     try:
-        return ExternalArtifact.model_validate(artifact.metadata_json).content
+        return ready_artifact_payload(artifact.metadata_json).content
     except ValidationError as exc:
         raise BusinessError(
             "ARTIFACT_METADATA_INVALID",

@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import ValidationError
 
+from ..domain import scenario_schema
 from ..domain.proposals import ProposalBundle
 from ..domain.workbook import WorkbookIR
 from ..errors import BusinessError
@@ -37,6 +38,8 @@ class ImportGraphState(TypedDict, total=False):
     source_filename: str
     source_size: int
     source_sha256: str
+    scenario_code: str
+    schema_json: dict[str, Any]
     workbook_ir: dict[str, Any]
     bindings: dict[str, dict[str, Any]]
     proposals: dict[str, Any]
@@ -71,6 +74,13 @@ def _required_int(state: ImportGraphState, key: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise _state_error("导入流程状态缺少必要整数字段", details={"field": key})
     return value
+
+
+def _required_schema(state: ImportGraphState) -> dict[str, Any]:
+    value = state.get("schema_json")
+    if not isinstance(value, dict):
+        raise _state_error("导入流程缺少场景 schema 快照")
+    return scenario_schema.normalize_schema(value)
 
 
 def _workbook_from_state(state: ImportGraphState) -> WorkbookIR:
@@ -155,12 +165,17 @@ def import_decision_signature(items: list[dict[str, Any]]) -> str:
 
 
 def _read_workbook(state: ImportGraphState) -> dict[str, Any]:
+    schema = _required_schema(state)
     workbook = read_workbook_ir(
         resolve_storage_path(_required_string(state, "source_path")),
         workbook_id=_required_string(state, "workbook_id"),
         source_filename=_required_string(state, "source_filename"),
         source_size=_required_int(state, "source_size"),
         source_sha256=_required_string(state, "source_sha256"),
+        profile=scenario_schema.effective_profile(schema),
+        scenario_code=_required_string(state, "scenario_code"),
+        schema_key=schema["schema_key"],
+        schema_version=schema["schema_version"],
     )
     return _stage_update(state, "read_workbook", workbook_ir=workbook.model_dump(mode="json"))
 
@@ -178,7 +193,14 @@ def _convert_sheet_chunks(state: ImportGraphState) -> dict[str, Any]:
     # 转换入口统一返回（候选集合，节点版附加信息）。附加信息的形状必须按类型判断，
     # 不能把整份 value 当成 notes 列表：对 dict 做 list() 只会得到字符串键，
     # 后续 note.get(...) 会立刻失败。
-    bundle, node_payload = convert_workbook_with_notes(workbook, bindings)
+    schema = _required_schema(state)
+    if workbook.scenario_code != _required_string(state, "scenario_code"):
+        raise _state_error("导入流程的场景与工作簿读取时不一致")
+    if workbook.schema_key != schema["schema_key"] or workbook.schema_version != schema["schema_version"]:
+        raise _state_error("导入流程的场景 schema 与工作簿读取时不一致")
+    bundle, node_payload = convert_workbook_with_notes(
+        workbook, bindings, profile=scenario_schema.effective_profile(schema)
+    )
     notes = _node_notes_of(node_payload)
     proposal_json = bundle.model_dump(mode="json")
     questions = [*_decision_targets(bundle), *_node_note_targets(notes)]
@@ -442,6 +464,8 @@ def run_workbook_read(
     source_filename: str,
     source_size: int,
     source_sha256: str,
+    scenario_code: str,
+    schema_json: dict[str, Any],
 ) -> dict[str, Any]:
     """导入图入口：读取工作簿并产出 IR。"""
     config = _config(job_no)
@@ -457,6 +481,8 @@ def run_workbook_read(
                 "source_filename": source_filename,
                 "source_size": source_size,
                 "source_sha256": source_sha256,
+                "scenario_code": scenario_code,
+                "schema_json": schema_json,
             },
             config=config,
             )
@@ -473,6 +499,8 @@ def run_sheet_conversion(
     checkpoint_ns: str,
     workbook_ir: dict[str, Any],
     bindings: dict[str, dict[str, Any]],
+    scenario_code: str,
+    schema_json: dict[str, Any],
 ) -> dict[str, Any]:
     """导入图入口：按工作表绑定转换出候选、问题与覆盖对账。"""
     config = _config(job_no)
@@ -485,6 +513,8 @@ def run_sheet_conversion(
                 "start_stage": "convert_sheet_chunks",
                 "workbook_ir": workbook_ir,
                 "bindings": bindings,
+                "scenario_code": scenario_code,
+                "schema_json": schema_json,
                 "decisions": [],
                 "stage_history": [],
             },

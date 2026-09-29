@@ -58,6 +58,10 @@ class ImportJob(Base, TimestampMixin):
     source_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     source_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     profile_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    # 上传时冻结场景导入协议。后续绑定、转换必须沿用这份快照。
+    schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # **上传入口的场景身份**：用户先建场景，再在该场景下上传 Excel。
     # 场景不由 Excel 表头推断——猜错场景会拿另一套列协议去解释它，报出一堆
     # 与真实问题无关的缺列错误，而用户手里的文件根本没变。
@@ -101,6 +105,9 @@ class ScenarioTemplate(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     scenario_code: Mapped[str] = mapped_column(String(80), nullable=False)
     scenario_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 业务类型：页面维护的展示与筛选属性，不参与执行语义。
     category: Mapped[str | None] = mapped_column(String(80))
     description: Mapped[str | None] = mapped_column(Text)
@@ -236,6 +243,10 @@ class ScenarioVersion(Base, TimestampMixin):
     import_job_id: Mapped[int | None] = mapped_column(ForeignKey("import_job.id"))
     scenario_code: Mapped[str] = mapped_column(String(80), nullable=False)
     scenario_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 已发布版本冻结场景协议，不随场景模板的后续编辑改变。
+    schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     version_no: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     # 来源：IMPORT / FORM / COPY / REVISION。旧数据在迁移中统一标为 IMPORT。
@@ -621,6 +632,7 @@ class TaskFact(Base, TimestampMixin):
     decimal_value: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     text_value: Mapped[str | None] = mapped_column(Text)
     date_value: Mapped[date | None] = mapped_column(Date)
+    boolean_value: Mapped[bool | None] = mapped_column(Boolean)
     unit: Mapped[str | None] = mapped_column(String(40))
     currency: Mapped[str | None] = mapped_column(String(40))
     source_execution_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -708,6 +720,7 @@ class Evidence(Base, TimestampMixin):
         ),
         CheckConstraint("document_upload_id IS NOT NULL OR rule_result_id IS NOT NULL OR field_value_id IS NOT NULL"),
         CheckConstraint("page_no IS NULL OR page_no >= 1"),
+        CheckConstraint("field_path IS NULL OR field_value_id IS NOT NULL"),
         Index("idx_evidence_task", "audit_task_id"),
         Index("idx_evidence_upload", "document_upload_id"),
         Index("idx_evidence_rule_result", "rule_result_id"),
@@ -720,6 +733,8 @@ class Evidence(Base, TimestampMixin):
     document_upload_id: Mapped[int | None] = mapped_column(BigInteger)
     rule_result_id: Mapped[int | None] = mapped_column(BigInteger)
     field_value_id: Mapped[int | None] = mapped_column(BigInteger)
+    # 结构化字段的顶层属性路径；普通字段与规则证据为空。
+    field_path: Mapped[str | None] = mapped_column(String(255))
     page_no: Mapped[int | None] = mapped_column(Integer)
     quote_text: Mapped[str] = mapped_column(Text, nullable=False)
     bbox_json: Mapped[list[float] | None] = mapped_column(JSON)
@@ -855,6 +870,9 @@ class ScenarioDraft(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     scenario_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="FORM", server_default=text("'FORM'"))
     base_version_no: Mapped[int | None] = mapped_column(Integer)
@@ -964,6 +982,11 @@ class ScenarioDraftField(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("draft_id", "field_key"),
         CheckConstraint("sort_no >= 0"),
+        CheckConstraint("extraction_strategy IN ('RAW_TEXT', 'DETERMINISTIC', 'STRUCTURED')"),
+        CheckConstraint(
+            "(extraction_strategy = 'STRUCTURED' AND structure_schema_json IS NOT NULL) OR "
+            "(extraction_strategy <> 'STRUCTURED' AND structure_schema_json IS NULL)"
+        ),
         Index("idx_scenario_draft_field_draft", "draft_id"),
         Index("idx_scenario_draft_field_material", "draft_id", "material_key"),
     )
@@ -974,6 +997,10 @@ class ScenarioDraftField(Base, TimestampMixin):
     material_key: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     value_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    extraction_strategy: Mapped[str] = mapped_column(String(30), nullable=False)
+    # 非结构化字段必须落 SQL NULL；JSON 默认会把 Python None 编码成 JSON null，
+    # 无法满足 chk_scenario_draft_field_structure 的 IS NULL 约束。
+    structure_schema_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     unit: Mapped[str | None] = mapped_column(String(40))
     # 币种是金额比较与加总的口径之一：留空表示未声明，不表示人民币。
     currency: Mapped[str | None] = mapped_column(String(40))
@@ -1136,6 +1163,11 @@ class PlanField(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("plan_id", "field_key"),
         CheckConstraint("sort_no >= 0"),
+        CheckConstraint("extraction_strategy IN ('RAW_TEXT', 'DETERMINISTIC', 'STRUCTURED')"),
+        CheckConstraint(
+            "(extraction_strategy = 'STRUCTURED' AND structure_schema_json IS NOT NULL) OR "
+            "(extraction_strategy <> 'STRUCTURED' AND structure_schema_json IS NULL)"
+        ),
         Index("idx_plan_field_plan", "plan_id"),
         Index("idx_plan_field_material", "plan_id", "material_key"),
     )
@@ -1146,6 +1178,9 @@ class PlanField(Base, TimestampMixin):
     material_key: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     value_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    extraction_strategy: Mapped[str] = mapped_column(String(30), nullable=False)
+    # 与场景草稿字段保持一致，非结构化字段写 SQL NULL。
+    structure_schema_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     unit: Mapped[str | None] = mapped_column(String(40))
     # 币种留空表示未声明，不表示人民币。
     currency: Mapped[str | None] = mapped_column(String(40))

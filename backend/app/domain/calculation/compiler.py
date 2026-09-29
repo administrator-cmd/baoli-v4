@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from ...errors import BusinessError
+from ..currency import canonical_currency
 from .expression import (
     Binary,
     Expression,
@@ -292,7 +293,7 @@ def _assert_unit_currency_declared(
             details={"rule_code": definition.rule_code, "parameter_code": parameter.parameter_code},
         )
     declared_unit = (parameter.unit or "").strip()
-    declared_currency = (parameter.currency or "").strip()
+    declared_currency = canonical_currency(parameter.currency)
     if declared_unit and declared_unit != (upstream_unit or "").strip():
         raise BusinessError(
             "CALC_PARAMETER_UNIT_MISMATCH",
@@ -300,7 +301,7 @@ def _assert_unit_currency_declared(
             f"“{upstream_unit}”不一致。系统不做单位换算，请把两边写成同一口径",
             details={"rule_code": definition.rule_code, "parameter_code": parameter.parameter_code},
         )
-    if declared_currency and declared_currency != (upstream_currency or "").strip():
+    if declared_currency and declared_currency != canonical_currency(upstream_currency):
         raise BusinessError(
             "CALC_PARAMETER_CURRENCY_MISMATCH",
             f"{where}声明的币种“{declared_currency}”与{upstream_label}的币种"
@@ -346,7 +347,10 @@ def _assert_additive_unit_consistency(
             return
         if node.operator in "+-":
             names = identifiers(node)
-            pairs = {unit_currency(name) for name in names}
+            pairs = {
+                (unit, canonical_currency(currency))
+                for unit, currency in (unit_currency(name) for name in names)
+            }
             units = {unit for unit, _ in pairs}
             currencies = {currency for _, currency in pairs}
             if len(units) > 1 or len(currencies) > 1:
@@ -560,8 +564,12 @@ def _declared_currency_of(
     definition: CalculationDefinition, parameters: list[CalculationParameter]
 ) -> str | None:
     if (definition.currency or "").strip():
-        return definition.currency
-    currencies = {item.currency for item in parameters if (item.currency or "").strip()}
+        return canonical_currency(definition.currency)
+    currencies = {
+        canonical_currency(item.currency)
+        for item in parameters
+        if (item.currency or "").strip()
+    }
     return currencies.pop() if len(currencies) == 1 else None
 
 

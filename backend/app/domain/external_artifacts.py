@@ -9,7 +9,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +32,25 @@ class ExternalArtifact(BaseModel):
     status: str
     content: dict[str, Any]
     evidence: list[ExternalEvidence] = Field(default_factory=list)
+
+
+class ReadyOcrArtifact(BaseModel):
+    """OCR 完成后的产物与作业身份，供重提中断后的对账使用。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
+    artifact: ExternalArtifact
+    job_id: str = Field(min_length=1)
+    deadline_at: datetime
+    submit_attempts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def ready_artifact_payload(metadata: Any) -> ExternalArtifact:
+    """读取旧版直接信封或带作业身份的 OCR 信封。"""
+    if isinstance(metadata, dict) and "schema_version" in metadata:
+        return ReadyOcrArtifact.model_validate(metadata).artifact
+    return ExternalArtifact.model_validate(metadata)
 
 
 @dataclass(frozen=True)

@@ -4,10 +4,36 @@ from typing import Any
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL, make_url
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = BACKEND_DIR.parent
+
+# 业务库与开发验证库是两个明确的部署目标。这里集中声明允许的库名，
+# database.py、checkpoint 与维护脚本共用同一口径，避免只改一处导致应用和脚本
+# 实际连接到不同目标。其它库名一律拒绝，防止误把清库或 checkpoint 操作指向未知库。
+ALLOWED_DATABASE_NAMES = frozenset({"baoli_v4", "baoli_v4_dev"})
+
+
+def validated_database_url(database_url: str | None) -> URL:
+    """解析并校验应用允许使用的 MySQL 数据库目标。
+
+    返回原始 URL 的主机、账号、参数与数据库名，不偷偷改写目标库。
+    调用方根据自己的错误类型包装 ValueError，避免配置层依赖 HTTP 或业务异常。
+    """
+    if not database_url:
+        raise ValueError("BAOLI_DATABASE_URL 未配置")
+    try:
+        url = make_url(database_url)
+    except Exception as exc:  # noqa: BLE001 - 配置错误需要暴露原始原因
+        raise ValueError("BAOLI_DATABASE_URL 格式无效") from exc
+    if url.drivername != "mysql+pymysql":
+        raise ValueError(f"数据库驱动必须是 mysql+pymysql，当前是 {url.drivername}")
+    if url.database not in ALLOWED_DATABASE_NAMES:
+        allowed = "、".join(sorted(ALLOWED_DATABASE_NAMES))
+        raise ValueError(f"数据库目标必须是允许的库（{allowed}），当前是 {url.database or '未指定'}")
+    return url
 
 
 class Settings(BaseSettings):

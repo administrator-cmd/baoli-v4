@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..domain.identity import public_no
 from ..errors import BusinessError
 from ..models import ManualReview, RuleResult, TaskDocument, TaskFieldValue, AuditTask
 from ..schemas import (
@@ -17,6 +18,9 @@ from ..schemas import (
     DocumentUploadResponse,
     EvidenceResponse,
     ExecuteNodeRequest,
+    ExternalArtifactReconcileRequest,
+    ExternalArtifactReconcileResponse,
+    ExternalArtifactStatusResponse,
     FieldCorrectionRequest,
     FieldCorrectionResponse,
     ManualReviewRequest,
@@ -29,6 +33,7 @@ from ..schemas import (
     RetrievalDecisionResponse,
     RetrievalRequest,
     RetrievalResponse,
+    RecoverFailedNodeRequest,
     TaskEvidenceIndexResponse,
     ReviewDraftRequest,
     ReviewDraftResponse,
@@ -38,16 +43,23 @@ from ..schemas import (
 )
 from ..services import admin_query_service, rag_service, task_admin_service
 from ..services.audit import correct_field_value, reconcile_ocr
+from ..services.audit.interrupt import resume_task_creation_interrupt
+from ..services.audit.commands import reconcile_external_artifact, recover_failed_checkpoint_node
 from ..services.audit import evidence_view, report_view, risks_view
 from ..services.background_service import operation_view
 from ..services.operation_gateway import submit_manual_reviews, submit_node_execution
-from ..services.operation_log_service import record_operation, require_idempotent_replay
+from ..services.operation_log_service import require_idempotent_replay
 from ..services.operation_types import OBJECT_AUDIT_TASK
 from ..services.task_lookup import task_or_404
 from ..services.task_service import (
+    claim_task_command,
     copy_task,
+    external_artifact_status_view,
+    finish_task_command,
     ocr_status_view,
+    record_failed_task_command,
     remove_current_document_file,
+    task_of_command,
     task_view,
     upload_document,
 )
@@ -184,8 +196,7 @@ def copy_task_endpoint(task_no: str, payload: TaskCopyRequest, request: Request,
 
     明确不是「复制原任务的执行快照」：新任务冻结的是方案此刻的范围。没有方案或
     方案、场景已失效时拒绝。同一幂等标识 + 同一请求内容的重发返回原任务。
-    成功操作日志只在任务与审核等待点都成功之后写入；等待点失败时记一条失败记录，
-    重放该标识返回原来的失败原因。
+    命令占位与任务在首次提交时一起落库；等待点确认后追加成功操作日志。
     """
     request_payload = {"task_no": task_no, "task_name": payload.task_name}
     existing, request_hash = require_idempotent_replay(
@@ -214,23 +225,67 @@ def copy_task_endpoint(task_no: str, payload: TaskCopyRequest, request: Request,
                 details={"log_no": existing.log_no},
             )
         return AuditTaskResponse.model_validate({**task_view(db, replayed), "request_id": request.state.request_id})
-    created = copy_task(db, task_no, task_name=payload.task_name)
-    record_operation(
+    new_task_no = public_no("TASK")
+    command, reused = claim_task_command(
         db,
         object_type=OBJECT_AUDIT_TASK,
-        object_no=task_no,
-        object_name=payload.task_name,
         operation_type="TASK_COPY",
+        idempotency_key=payload.idempotency_key,
+        request=request_payload,
+        request_hash=request_hash,
+        task_no=new_task_no,
+    )
+    if reused:
+        copied = task_of_command(db, command)
+        detail = {"source_task_no": task_no, "new_task_no": copied.task_no}
+        if command.status == "FAILED":
+            record_failed_task_command(
+                db, command, object_no=task_no, object_name=payload.task_name, detail=detail
+            )
+            raise BusinessError(
+                "TASK_COPY_PREVIOUSLY_FAILED",
+                f"该幂等标识对应的复制任务命令此前执行失败：{command.failure_message or '原因未记录'}。",
+                status_code=409,
+                details={"operation_no": command.operation_no, "new_task_no": copied.task_no, "failure_code": command.failure_code},
+            )
+        if command.status == "PENDING":
+            try:
+                resume_task_creation_interrupt(db, copied, command.id)
+            except BusinessError:
+                record_failed_task_command(
+                    db, command, object_no=task_no, object_name=payload.task_name, detail=detail
+                )
+                raise
+            finish_task_command(
+                db, command, object_no=task_no, object_name=payload.task_name,
+                detail={**detail, "plan_scope_hash": copied.task_schema_json.get("plan_scope_hash")},
+            )
+        elif command.status != "SUCCEEDED":
+            raise BusinessError("TASK_COMMAND_STATE_INVALID", "任务复制命令状态无效", status_code=500)
+        return AuditTaskResponse.model_validate({**task_view(db, copied), "request_id": request.state.request_id})
+    try:
+        created = copy_task(
+            db, task_no, task_name=payload.task_name, new_task_no=new_task_no,
+            creation_operation_id=command.id,
+        )
+    except BusinessError:
+        db.rollback()
+        failed = db.scalar(select(AuditTask).where(AuditTask.task_no == new_task_no))
+        if failed is not None and failed.status == "FAILED":
+            record_failed_task_command(
+                db, command, object_no=task_no, object_name=payload.task_name,
+                detail={"source_task_no": task_no, "new_task_no": new_task_no},
+            )
+        raise
+    finish_task_command(
+        db, command, object_no=task_no, object_name=payload.task_name,
         detail={
             "source_task_no": task_no,
             "new_task_no": created.task_no,
             # 复制复制的是方案当前范围，指纹留痕以说明新任务冻结的是哪一版。
             "plan_scope_hash": created.task_schema_json.get("plan_scope_hash"),
         },
-        idempotency_key=payload.idempotency_key,
-        request_hash=request_hash,
     )
-    db.commit()
     return AuditTaskResponse.model_validate({**task_view(db, task_or_404(db, created.task_no)), "request_id": request.state.request_id})
 
 
@@ -296,10 +351,14 @@ def get_task_reviews(task_no: str, request: Request, db: Session = Depends(get_d
                     "status": judgment.get("status"),
                     "message": judgment.get("message"),
                     "raw_value": judgment.get("raw_value"),
+                    "normalized_value": judgment.get("normalized_value"),
+                    "evidence": judgment.get("evidence"),
+                    "evidences": judgment.get("evidences") if isinstance(judgment.get("evidences"), list) else [],
                     # 取证检索与印章记录随复核快照一起返回：主体核对的待办必须能看到
                     # 系统查过的范围、候选、双方原文与完整印章条目，不能只在后端保存。
                     "retrieval": judgment.get("retrieval"),
                     "seal_records": judgment.get("seal_records"),
+                    "subject_query": judgment.get("subject_query"),
                     # 材料类型待复核的原始识别结论：置信度、8018 判定的类型与命中关键词。
                     # 这些是人工判断"是不是放错材料位"的依据，只在后端保存等于没给。
                     "service_code": judgment.get("service_code"),
@@ -470,6 +529,18 @@ def execute(task_no: str, payload: ExecuteNodeRequest, request: Request, db: Ses
     )
 
 
+@router.post("/{task_no}/recover-failed-node", response_model=AuditTaskResponse)
+def recover_failed_node(
+    task_no: str,
+    payload: RecoverFailedNodeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> AuditTaskResponse:
+    """为检查点丢失的失败任务建立当前节点的新等待点，节点本身由用户随后执行。"""
+    recovered = recover_failed_checkpoint_node(db, task_no, payload)
+    return AuditTaskResponse.model_validate({**task_view(db, recovered), "request_id": request.state.request_id})
+
+
 @router.post("/{task_no}/manual-review", response_model=OperationAcceptedResponse, status_code=202)
 def manual_review(task_no: str, payload: ManualReviewRequest, request: Request, db: Session = Depends(get_db)) -> OperationAcceptedResponse:
     """提交人工复核恢复为后台操作。
@@ -577,6 +648,37 @@ def get_document_ocr(
     return OcrArtifactStatusResponse.model_validate(
         {**ocr_status_view(db, task_no, document_no), "request_id": request.state.request_id}
     )
+
+
+@router.get(
+    "/{task_no}/documents/{document_no}/artifacts/{artifact_type}",
+    response_model=ExternalArtifactStatusResponse,
+)
+def get_document_artifact(
+    task_no: str,
+    document_no: str,
+    artifact_type: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ExternalArtifactStatusResponse:
+    result = external_artifact_status_view(db, task_no, document_no, artifact_type)
+    return ExternalArtifactStatusResponse.model_validate({**result, "request_id": request.state.request_id})
+
+
+@router.post(
+    "/{task_no}/documents/{document_no}/artifacts/{artifact_type}/reconcile",
+    response_model=ExternalArtifactReconcileResponse,
+)
+def reconcile_document_artifact(
+    task_no: str,
+    document_no: str,
+    artifact_type: str,
+    payload: ExternalArtifactReconcileRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ExternalArtifactReconcileResponse:
+    result = reconcile_external_artifact(db, task_no, document_no, artifact_type, payload)
+    return ExternalArtifactReconcileResponse.model_validate({**result, "request_id": request.state.request_id})
 
 
 @router.post("/{task_no}/documents/{document_no}/ocr/reconcile", response_model=OcrReconcileResponse)

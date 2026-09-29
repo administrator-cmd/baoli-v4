@@ -64,14 +64,21 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..errors import BusinessError
+from . import field_strategy
 
 # 快照口径版本：拼接字段或语义变化时递增，避免旧指纹被按新口径重新解释。
 # v2：取值改为 JSON 安全投影（Decimal/date 显式编码），ref 加入评估作用域身份。
-FACT_SNAPSHOT_VERSION = "2"
+# v3：字段事实优先于同身份的统一事实，并排除已失效上传的抽取事实。
+# v4：把执行真正读取的状态、原文、规范值与证据引用纳入内容指纹。
+# v5：结构化字段冻结全部属性证据引用，不再只保留首条兼容引用。
+# v6：计算派生事实以 COMPUTED 作为已定型状态，保留真实计算值供下游 Agent 使用。
+# v7：抽取候选与统一事实合并为单条快照记录，统一事实是状态与有效值的唯一来源。
+# v8：字段金额统一为不带无意义小数尾零的十进制字符串，候选层与统一事实层同口径。
+FACT_SNAPSHOT_VERSION = "8"
 
 # 作用域摘要与内容摘要在 ref 里的截断长度。两者相加 + 固定前缀与分隔符
 # 不超过 40 字符，远小于 snapshot_ref 的字段长度上限。
@@ -93,6 +100,7 @@ _FACT_VALUE_KEYS = (
     "raw_value",
     "normalized_value",
     "evidence_id",
+    "evidence_ids",
 )
 
 
@@ -207,6 +215,8 @@ def _fact_identity(item: dict[str, Any]) -> dict[str, Any]:
     """
     return {
         "fact_code": item.get("fact_code"),
+        "field_key": item.get("field_key"),
+        "fact_kind": item.get("fact_kind"),
         "material_key": item.get("material_key"),
         "period_scope": item.get("period_scope"),
         "statement_scope": item.get("statement_scope"),
@@ -216,8 +226,15 @@ def _fact_identity(item: dict[str, Any]) -> dict[str, Any]:
         "decimal_value": item.get("decimal_value"),
         "text_value": item.get("text_value"),
         "date_value": item.get("date_value"),
+        "boolean_value": item.get("boolean_value"),
         "unit": item.get("unit"),
         "currency": item.get("currency"),
+        # 工具和模型实际读取这些字段。值相同但状态或证据不同，属于不同输入快照。
+        "status": item.get("status"),
+        "raw_value": item.get("raw_value"),
+        "normalized_value": item.get("normalized_value"),
+        "evidence_id": item.get("evidence_id"),
+        "evidence_ids": item.get("evidence_ids") or [],
     }
 
 
@@ -362,6 +379,7 @@ def resolve_rule_inputs(
                     "raw_value": None,
                     "normalized_value": None,
                     "evidence_id": None,
+                    "evidence_ids": [],
                 }
             )
             continue
@@ -374,6 +392,7 @@ def resolve_rule_inputs(
                 "raw_value": decode_value(fact.get("raw_value")),
                 "normalized_value": decode_value(fact.get("normalized_value")),
                 "evidence_id": fact.get("evidence_id"),
+                "evidence_ids": list(fact.get("evidence_ids") or []),
             }
         )
     return resolved
@@ -400,6 +419,7 @@ def facts_of_task_fact_rows(
     rows: list[Any],
     *,
     field_code_index: dict[str, str] | None = None,
+    field_definitions: dict[str, dict[str, Any]] | None = None,
     material_states: dict[str, str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """把 `task_fact` 的 ORM 行投影成快照输入（财报统一事实路径）。
@@ -419,10 +439,31 @@ def facts_of_task_fact_rows(
     """
     index = field_code_index or {}
     states = material_states or {}
-    return [
+    facts: list[dict[str, Any]] = []
+    for row in rows:
+        executable = (
+            row.status in {"PRESENT", "REVIEWED"}
+            if row.fact_kind == "EXTRACTED"
+            else row.fact_kind == "DERIVED" and row.status == "COMPUTED"
+        )
+        field_key = index.get(str(row.fact_code), str(row.fact_code))
+        normalized = (
+            task_fact_value(row, field_definition=(field_definitions or {}).get(field_key))
+            if executable
+            else None
+        )
+        decimal_projection = None
+        if executable and row.value_type == "DECIMAL":
+            if field_definitions and field_key in field_definitions:
+                # 统一事实的执行值已经按字段契约归一成十进制文本；快照指纹也必须使用
+                # 这个业务口径，不能把数据库 DECIMAL 的固定 scale 当成业务差异。
+                decimal_projection = encode_value(Decimal(str(normalized))) if normalized is not None else None
+            else:
+                decimal_projection = encode_value(row.decimal_value)
+        facts.append(
         {
             "fact_code": row.fact_code,
-            "field_key": index.get(str(row.fact_code), str(row.fact_code)),
+            "field_key": field_key,
             "fact_kind": row.fact_kind,
             "material_key": row.material_key,
             "period_scope": row.period_scope,
@@ -430,39 +471,141 @@ def facts_of_task_fact_rows(
             "entity_scope": row.entity_scope,
             "revision_no": row.revision_no,
             "value_type": row.value_type,
-            "decimal_value": encode_value(row.decimal_value),
-            "text_value": encode_value(row.text_value),
-            "date_value": encode_value(row.date_value),
+            "decimal_value": decimal_projection,
+            "text_value": encode_value(row.text_value) if executable else None,
+            "date_value": encode_value(row.date_value) if executable else None,
+            "boolean_value": row.boolean_value if executable else None,
             "unit": row.unit,
             "currency": row.currency,
             # 以下键供工具解析输入（见 _FACT_VALUE_KEYS），不参与指纹（见 _fact_identity）
             "status": row.status,
             "material_state": states.get(row.material_key) if row.material_key else None,
             "raw_value": encode_value(row.text_value) if row.text_value is not None else None,
-            "normalized_value": encode_value(_normalized_value_of(row)),
+            "normalized_value": encode_value(normalized),
             "evidence_id": None,
+            "evidence_ids": [],
         }
-        for row in rows
-    ]
+        )
+    return facts
 
 
-def _normalized_value_of(row: Any) -> Any:
-    """统一事实的规范取值：按 `value_type` 从定型列里取那一个真实存在的值。
+def task_fact_value(row: Any, *, field_definition: dict[str, Any] | None = None) -> Any:
+    """统一事实的可执行值：按字段类型从定型列还原，结构化字段还原为业务 JSON。
 
-    三列都取不到时返回 `None`（事实本身没有取值），不补 0、不补空串。
+    这是规则、计算快照和 Agent 共用的读取口径。三类标量列都取不到时返回
+    `None`，不补 0、不补空串；结构化 JSON 损坏或不再符合冻结 Schema 时明确
+    报错，不能把损坏的 JSON 文本继续交给规则执行。
     """
+    if field_definition is not None and field_strategy.strategy_of(field_definition) == field_strategy.STRUCTURED:
+        if row.text_value is None:
+            return None
+        schema = field_definition.get("structure_schema")
+        if not isinstance(schema, dict):
+            raise BusinessError(
+                "TASK_FACT_STRUCTURE_SCHEMA_MISSING",
+                "结构化统一事实缺少字段 Schema，无法还原可执行值",
+                status_code=500,
+                details={"fact_code": row.fact_code, "field_key": field_definition.get("field_key")},
+            )
+        try:
+            return field_strategy.normalize_structured_value(row.text_value, schema)
+        except ValueError as exc:
+            raise BusinessError(
+                "TASK_FACT_STRUCTURED_VALUE_INVALID",
+                "结构化统一事实不符合字段 Schema，无法参与执行",
+                status_code=500,
+                details={"fact_code": row.fact_code, "field_key": field_definition.get("field_key")},
+            ) from exc
     value_type = str(row.value_type or "")
     if value_type == "DECIMAL":
-        return row.decimal_value
+        if row.decimal_value is None:
+            return None
+        # 字段执行契约一直使用 JSON 安全的十进制字符串；派生事实留在内部快照时
+        # 保留 Decimal，避免计算精度丢失。
+        return canonical_field_value(row.decimal_value, field_definition) if field_definition is not None else row.decimal_value
     if value_type == "DATE":
-        return row.date_value
+        if row.date_value is None:
+            return None
+        return row.date_value.isoformat() if field_definition is not None else row.date_value
+    if value_type == "BOOLEAN":
+        return row.boolean_value
     return row.text_value
+
+
+def canonical_field_value(value: Any, field_definition: dict[str, Any]) -> Any:
+    """把候选层与统一事实层的同一字段值归一成可直接比较的业务值。"""
+    if value is None:
+        return None
+    if field_strategy.strategy_of(field_definition) == field_strategy.STRUCTURED:
+        schema = field_definition.get("structure_schema")
+        if not isinstance(schema, dict):
+            raise BusinessError(
+                "TASK_FACT_STRUCTURE_SCHEMA_MISSING",
+                "结构化字段缺少字段 Schema，无法比较候选值与统一事实",
+                status_code=500,
+                details={"field_key": field_definition.get("field_key")},
+            )
+        try:
+            return field_strategy.normalize_structured_value(value, schema)
+        except ValueError as exc:
+            raise BusinessError(
+                "TASK_FIELD_VALUE_INVALID",
+                "字段候选值不符合冻结的结构 Schema",
+                status_code=500,
+                details={"field_key": field_definition.get("field_key")},
+            ) from exc
+    value_type = str(field_definition.get("value_type") or "")
+    if value_type == "DECIMAL":
+        try:
+            decimal_value = value if isinstance(value, Decimal) else Decimal(str(value).strip())
+        except (InvalidOperation, ValueError) as exc:
+            raise BusinessError(
+                "TASK_FIELD_VALUE_INVALID",
+                "金额字段候选值不是有效十进制数",
+                status_code=500,
+                details={"field_key": field_definition.get("field_key"), "value": str(value)},
+            ) from exc
+        if not decimal_value.is_finite():
+            raise BusinessError(
+                "TASK_FIELD_VALUE_INVALID",
+                "金额字段候选值必须是有限十进制数",
+                status_code=500,
+                details={"field_key": field_definition.get("field_key"), "value": str(value)},
+            )
+        decimal_text = format(decimal_value, "f")
+        if "." in decimal_text:
+            decimal_text = decimal_text.rstrip("0").rstrip(".")
+        return "0" if decimal_text == "-0" else decimal_text
+    if value_type == "DATE":
+        if type(value) is date:
+            return value.isoformat()
+        try:
+            return date.fromisoformat(str(value).strip()).isoformat()
+        except ValueError as exc:
+            raise BusinessError(
+                "TASK_FIELD_VALUE_INVALID",
+                "日期字段候选值不是有效 ISO 日期",
+                status_code=500,
+                details={"field_key": field_definition.get("field_key"), "value": str(value)},
+            ) from exc
+    if value_type == "BOOLEAN":
+        if not isinstance(value, bool):
+            raise BusinessError(
+                "TASK_FIELD_VALUE_INVALID",
+                "布尔字段候选值不是布尔值",
+                status_code=500,
+                details={"field_key": field_definition.get("field_key"), "value": str(value)},
+            )
+        return value
+    return value.strip() if isinstance(value, str) else value
 
 
 def facts_of_field_value_rows(
     rows: list[Any],
     *,
+    field_definitions: dict[str, dict[str, Any]],
     material_states: dict[str, str | None] | None = None,
+    evidence_ids_by_field_value: dict[int, list[int]] | None = None,
 ) -> list[dict[str, Any]]:
     """把 `task_field_value` 的 ORM 行投影成快照输入（合同审核路径）。
 
@@ -471,35 +614,53 @@ def facts_of_field_value_rows(
 
     投影同时带上**工具解析输入所需的那几个键**（`_FACT_VALUE_KEYS`）：冻结内容
     既是指纹的输入，也是运行期解析 `inputs` 的唯一来源，两者不能各投影一份。
+    类型、单位和币种取自任务创建时冻结的字段定义，不由事实行推断。
     """
     states = material_states or {}
-    return [
-        {
-            "fact_code": row.field_key,
-            "field_key": row.field_key,
-            "fact_kind": "EXTRACTED",
-            "material_key": row.material_key,
-            "period_scope": None,
-            "statement_scope": None,
-            "entity_scope": None,
-            "revision_no": row.revision_no,
-            "value_type": row.value_type,
-            "decimal_value": None,
-            # 字段事实的规范值在 normalized_value 里；原文与规范值分开保存，
-            # 指纹取规范值——判定依据的是规范值。
-            "text_value": encode_value(row.normalized_value),
-            "date_value": None,
-            "unit": row.unit,
-            "currency": row.currency,
-            # 以下键供工具解析输入，不参与指纹（见 _fact_identity）
-            "status": row.status,
-            "material_state": states.get(row.material_key),
-            "raw_value": row.raw_value,
-            "normalized_value": encode_value(row.normalized_value_json),
-            "evidence_id": row.evidence_id,
-        }
-        for row in rows
-    ]
+    evidence_ids = evidence_ids_by_field_value or {}
+    facts: list[dict[str, Any]] = []
+    for row in rows:
+        field = field_definitions.get(row.field_key)
+        if field is None or field.get("material_key") != row.material_key:
+            raise BusinessError(
+                "TASK_SCHEMA_FIELD_MISSING",
+                "当前字段事实不在任务冻结的字段清单中，无法生成事实快照",
+                status_code=500,
+                details={"field_key": row.field_key, "material_key": row.material_key},
+            )
+        normalized = (
+            canonical_field_value(row.normalized_value_json, field)
+            if row.status in {"PRESENT", "REVIEWED"}
+            else None
+        )
+        facts.append(
+            {
+                "fact_code": row.field_key,
+                "field_key": row.field_key,
+                "fact_kind": "EXTRACTED",
+                "material_key": row.material_key,
+                "period_scope": None,
+                "statement_scope": None,
+                "entity_scope": None,
+                "revision_no": row.revision_no,
+                "value_type": field["value_type"],
+                "decimal_value": None,
+                # 字段事实的规范值在 normalized_value_json 里；原文与规范值分开保存，
+                # 指纹取规范值——判定依据的是规范值。
+                "text_value": encode_value(normalized),
+                "date_value": None,
+                "unit": field.get("unit"),
+                "currency": field.get("currency"),
+                # 以下键供工具解析输入，不参与指纹（见 _fact_identity）
+                "status": row.status,
+                "material_state": states.get(row.material_key),
+                "raw_value": row.raw_value,
+                "normalized_value": encode_value(normalized),
+                "evidence_id": row.evidence_id,
+                "evidence_ids": sorted(set(evidence_ids.get(row.id) or [])),
+            }
+        )
+    return facts
 
 
 def fact_value_keys() -> tuple[str, ...]:

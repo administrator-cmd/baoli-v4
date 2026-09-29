@@ -28,6 +28,7 @@
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
@@ -47,6 +48,11 @@ TURN_TOOL_CALLS = "TOOL_CALLS"
 TURN_CONTENT = "CONTENT"
 TURN_REFUSAL = "REFUSAL"
 TURN_ERROR = "ERROR"
+
+# 首次请求之外最多再重试三次。只覆盖明确的临时故障；鉴权、请求契约和
+# 响应契约错误不会因重复请求而恢复，必须直接暴露。
+LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+LLM_RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 
 
 @dataclass(frozen=True)
@@ -118,49 +124,100 @@ def _require_settings() -> tuple[str, str, str]:
 
 
 def _post(body: dict[str, Any]) -> dict[str, Any]:
-    """发一次 chat/completions 请求，把网络与 HTTP 失败转成可识别的业务错误。"""
+    """调用 chat/completions；临时故障最多重试三次，最终失败明确抛出。"""
     baseurl, api_key, _ = _require_settings()
     settings = get_settings()
-    try:
-        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
-            response = client.post(
-                _endpoint(baseurl),
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=body,
-            )
-            response.raise_for_status()
-    except httpx.TimeoutException as exc:
-        logger.warning("远程大模型请求超时 error_type=%s", type(exc).__name__)
-        raise BusinessError(
-            "LLM_TIMEOUT",
-            "远程大模型请求超时",
-            status_code=504,
-            details={"service": "LLM"},
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-        logger.warning("远程大模型返回 HTTP 错误 status_code=%s", status_code)
-        if status_code in {401, 403}:
-            raise BusinessError(
-                "LLM_AUTH_FAILED",
-                "远程大模型鉴权失败",
-                status_code=502,
-                details={"service": "LLM"},
-            ) from exc
-        raise BusinessError(
-            "LLM_EXTERNAL_FAILED",
-            "远程大模型服务返回错误",
-            status_code=502,
-            details={"service": "LLM"},
-        ) from exc
-    except httpx.RequestError as exc:
-        logger.warning("远程大模型网络请求失败 error_type=%s", type(exc).__name__)
-        raise BusinessError(
-            "LLM_NETWORK_FAILED",
-            "远程大模型网络请求失败",
-            status_code=502,
-            details={"service": "LLM"},
-        ) from exc
+    max_attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+    with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = client.post(
+                    _endpoint(baseurl),
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=body,
+                )
+                response.raise_for_status()
+                break
+            except httpx.TimeoutException as exc:
+                if attempt < max_attempts:
+                    delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
+                    logger.warning(
+                        "远程大模型请求超时，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
+                        attempt,
+                        max_attempts,
+                        delay,
+                        type(exc).__name__,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning(
+                    "远程大模型请求超时，重试已用尽 attempt=%s retry_count=%s error_type=%s",
+                    attempt,
+                    len(LLM_RETRY_DELAYS_SECONDS),
+                    type(exc).__name__,
+                )
+                raise BusinessError(
+                    "LLM_TIMEOUT",
+                    "远程大模型请求超时",
+                    status_code=504,
+                    details={"service": "LLM"},
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in LLM_RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
+                    delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
+                    logger.warning(
+                        "远程大模型返回可重试 HTTP 错误，将重试 status_code=%s attempt=%s max_attempts=%s delay_seconds=%s",
+                        status_code,
+                        attempt,
+                        max_attempts,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning(
+                    "远程大模型返回 HTTP 错误 status_code=%s attempt=%s retry_count=%s",
+                    status_code,
+                    attempt,
+                    attempt - 1,
+                )
+                if status_code in {401, 403}:
+                    raise BusinessError(
+                        "LLM_AUTH_FAILED",
+                        "远程大模型鉴权失败",
+                        status_code=502,
+                        details={"service": "LLM"},
+                    ) from exc
+                raise BusinessError(
+                    "LLM_EXTERNAL_FAILED",
+                    "远程大模型服务返回错误",
+                    status_code=502,
+                    details={"service": "LLM"},
+                ) from exc
+            except httpx.RequestError as exc:
+                if attempt < max_attempts:
+                    delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
+                    logger.warning(
+                        "远程大模型网络请求失败，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
+                        attempt,
+                        max_attempts,
+                        delay,
+                        type(exc).__name__,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning(
+                    "远程大模型网络请求失败，重试已用尽 attempt=%s retry_count=%s error_type=%s",
+                    attempt,
+                    len(LLM_RETRY_DELAYS_SECONDS),
+                    type(exc).__name__,
+                )
+                raise BusinessError(
+                    "LLM_NETWORK_FAILED",
+                    "远程大模型网络请求失败",
+                    status_code=502,
+                    details={"service": "LLM"},
+                ) from exc
     try:
         return response.json()
     except ValueError as exc:

@@ -69,11 +69,15 @@ def read_workbook_ir(
     source_filename: str,
     source_size: int,
     source_sha256: str,
+    profile: dict[str, Any] | None = None,
+    scenario_code: str | None = None,
+    schema_key: str | None = None,
+    schema_version: str | None = None,
 ) -> WorkbookIR:
     """读取工作簿 IR（工作表、表头候选与截断标记）。
 
     **不判断场景**：场景由上传入口决定（用户先建场景、再在该场景下上传）。
-    这里只按统一模板协议给每张 Sheet 一个**绑定建议**——建议不写库，
+    这里只按场景有效 Profile 给每张 Sheet 一个**绑定建议**——建议不写库，
     绑定结果必须由用户在绑定步骤确认（见 `import_sheet.bound_node_code`）。
     """
     settings = get_settings()
@@ -178,9 +182,10 @@ def read_workbook_ir(
             )
         )
     workbook.close()
-    # 按统一模板协议给每张 Sheet 一个**建议**角色。建议只用于页面预选，
+    # 按场景有效 Profile 给每张 Sheet 一个**建议**角色。建议只用于页面预选，
     # 不写库、不生成节点、不决定场景：绑定结果由用户确认后落库。
-    profile = unified_profile.load_unified_profile()
+    if profile is None:
+        profile = unified_profile.load_unified_profile()
     for sheet in sheets:
         header_row = sheet.header_candidates[0] if sheet.header_candidates else None
         header = next((row for row in sheet.rows if row.row_no == header_row), None) if header_row else None
@@ -191,6 +196,9 @@ def read_workbook_ir(
         source_filename=source_filename,
         source_size=source_size,
         source_sha256=source_sha256,
-        profile_version=unified_profile.UNIFIED_PROFILE_VERSION,
+        profile_version=profile["profile_version"],
+        scenario_code=scenario_code,
+        schema_key=schema_key,
+        schema_version=schema_version,
         sheets=sheets,
     )

@@ -20,7 +20,7 @@ from .state import _node_codes_of_type
 from ...errors import BusinessError
 from ...models import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
 from .evidence import _fact_evidence_suffix, _quote_check_of
-from .facts import _input_trace
+from .facts import _current_field_fact_pairs, _input_trace
 from .shared import BASIS_TYPE_LABELS, LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _current_uploads, _material_names, _scenario
 from .state import _current_execution_ids, _current_node_executions, _risk_rule_keys, _scope_results
 from datetime import UTC, datetime
@@ -43,23 +43,9 @@ def _render_report_groups(
     material_names = _material_names(manifest)
     field_defs = {item["field_key"]: item for item in manifest["fields"]}
     field_names = {item["field_key"]: item["name"] for item in manifest["fields"]}
-    facts = {
-        (item.field_key, item.material_key): item
-        for item in db.scalars(
-            select(TaskFieldValue)
-            .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
-            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-            .where(
-                TaskFieldValue.audit_task_id == task.id,
-                TaskFieldValue.scenario_version_id == task.scenario_version_id,
-                # 报告只展示当前事实版本，且必须属于当前上传版本。
-                TaskFieldValue.is_current.is_(True),
-                TaskDocument.audit_task_id == task.id,
-                TaskDocument.material_key == TaskFieldValue.material_key,
-                TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
-            )
-        ).all()
-    }
+    current_pairs = _current_field_fact_pairs(db, task)
+    facts = {key: pair[0] for key, pair in current_pairs.items()}
+    fact_statuses = {key: pair[1].status for key, pair in current_pairs.items()}
     evidence_by_id = {
         item.id: item for item in db.scalars(select(Evidence).where(Evidence.audit_task_id == task.id)).all()
     }
@@ -107,11 +93,14 @@ def _render_report_groups(
                         continue
                     fact = facts.get((field_key, definition["material_key"]))
                     label = f"{material_names.get(definition['material_key'], '未知材料')} · {definition['name']}"
-                    if fact is not None and fact.status in {"PRESENT", "REVIEWED"}:
+                    if fact is not None and fact_statuses.get((field_key, definition["material_key"])) in {"PRESENT", "REVIEWED"}:
                         lines.append(f"- {label}：{fact.raw_value}{_fact_evidence_suffix(evidence_by_id, fact)}")
                     else:
                         # 未取得的值明确标记，不编造内容；也不把“未提供”写成“不适用”。
-                        lines.append(f"- {label}：未形成有效结果（{fact.status if fact else 'NOT_EXECUTED'}）")
+                        lines.append(
+                            f"- {label}：未形成有效结果（"
+                            f"{fact_statuses.get((field_key, definition['material_key']), 'NOT_EXECUTED')}）"
+                        )
             if content_type in {"AUDIT_RESULT", "FIELD_AND_RESULT", "CONCLUSION"}:
                 # 按**实际结果涉及的材料**筛选，而不是按规则声明的适用材料：
                 # 只发生在补充协议内部的异常不能混进主合同报告；跨材料检查涉及两侧，
@@ -194,6 +183,23 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     # 报告只取当前有效执行批次：节点序号不晚于当前节点、每个节点取最新一条未失效执行。
     current_executions = _current_node_executions(db, task)
     current_execution_ids = {item.id for item in current_executions.values()}
+    unfinished_node_codes = sorted(
+        node["node_code"]
+        for node in manifest["nodes"]
+        if node.get("enabled", True)
+        and (node.get("node_type") or node["node_code"]) != "REPORT_OUTPUT"
+        and (
+            node["node_code"] not in current_executions
+            or current_executions[node["node_code"]].status not in {"SUCCEEDED", "SKIPPED"}
+        )
+    )
+    if unfinished_node_codes:
+        raise BusinessError(
+            "REPORT_UPSTREAM_NODE_UNFINISHED",
+            "仍有已启用的审核节点未完成，不能提前生成报告",
+            status_code=409,
+            details={"node_codes": unfinished_node_codes},
+        )
     # 报告输出节点按**能力类型**解析实例码：`node_code` 是用户配置的实例码，
     # 写死能力类型当实例码会在用户改过实例码后一条都匹配不上——
     # 报告输出规则的产物就会被误算进「预期结果缺失」。
@@ -204,23 +210,9 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     }
     # 已配置但供应商没有质量结论的检查：必须在报告里如实呈现，不能被当成已通过。
     capability_gap_items = manifest.get("capability_gaps") or []
-    fields = {
-        (item.field_key, item.material_key): item
-        for item in db.scalars(
-            select(TaskFieldValue)
-            .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
-            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-            .where(
-                TaskFieldValue.audit_task_id == task.id,
-                TaskFieldValue.scenario_version_id == task.scenario_version_id,
-                # 报告只展示当前事实版本，且必须属于当前上传版本。
-                TaskFieldValue.is_current.is_(True),
-                TaskDocument.audit_task_id == task.id,
-                TaskDocument.material_key == TaskFieldValue.material_key,
-                TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
-            )
-        ).all()
-    }
+    current_pairs = _current_field_fact_pairs(db, task)
+    fields = {key: pair[0] for key, pair in current_pairs.items()}
+    field_statuses = {key: pair[1].status for key, pair in current_pairs.items()}
     field_status_labels = {
         "PENDING": "尚未形成结果",
         "NOT_PRESENT": "未抽取到",
@@ -250,14 +242,6 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         "RUNNING": "执行中",
     }
     status_labels = {**field_status_labels, **ruled_status_labels}
-    task_status_labels = {
-        "READY": "待执行",
-        "RUNNING": "执行中",
-        "WAITING_REVIEW": "等待人工复核",
-        "BLOCKED": "已阻断，需要处理",
-        "COMPLETED": "已完成",
-        "FAILED": "执行失败",
-    }
     document_status_labels = {
         "WAITING_UPLOAD": "等待上传",
         "UPLOADED": "已上传，尚未处理",
@@ -280,6 +264,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         "EVIDENCE_INSUFFICIENT": "证据不足",
         "CONFIRM_FIELD": "确认字段",
         "MODIFY_FIELD": "修改字段",
+        "MARK_NOT_PRESENT": "确认字段不存在",
     }
     unfinished_rule_statuses = {"EVIDENCE_INSUFFICIENT", "NOT_EXECUTED", "PENDING_REVIEW"}
     pairs = _current_uploads(db, task)
@@ -289,17 +274,32 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     uploaded_keys = {key for key, upload in uploads_by_material.items() if upload is not None}
     out_of_scope_field_keys: set[tuple[str, str]] = set()
     unfinished_field_names: list[str] = []
+    confirmed_missing_field_ids = {
+        review.field_value_id
+        for review in db.scalars(
+            select(ManualReview).where(
+                ManualReview.audit_task_id == task.id,
+                ManualReview.status == "RESOLVED",
+                ManualReview.review_type == "FIELD_CONFIRMATION",
+                ManualReview.decision == "MARK_NOT_PRESENT",
+                ManualReview.field_value_id.is_not(None),
+            )
+        ).all()
+        if review.field_value_id is not None
+    }
     for field in task.task_schema_json["fields"]:
         key = (field["field_key"], field["material_key"])
         fact = fields.get(key)
-        if fact is not None and fact.status in {"PRESENT", "REVIEWED"}:
+        if fact is not None and field_statuses.get(key) in {"PRESENT", "REVIEWED"}:
+            continue
+        if fact is not None and field_statuses.get(key) == "NOT_PRESENT" and fact.id in confirmed_missing_field_ids:
             continue
         # 可选材料未上传时该字段不在本次有效执行范围内（6.3）；引用它的规则是否适用
         # 由规则自己的适用条件决定，这里既不当作通过，也不当作执行故障。
         if field["material_key"] not in uploaded_keys and not material_defs[field["material_key"]]["required"]:
             out_of_scope_field_keys.add(key)
             continue
-        state = fact.status if fact else "NOT_EXECUTED"
+        state = field_statuses.get(key, "NOT_EXECUTED")
         unfinished_field_names.append(
             f"{material_names.get(field['material_key'], field['material_key'])}·{field['name']}"
             f"（{field_status_labels.get(state, state)}）"
@@ -384,24 +384,27 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         # 这里按**能力类型**解析出的实例码集合判断，不按固定实例码比较。
         if execution.node_code not in report_node_codes and execution.status in {"FAILED", "BLOCKED"}
     ]
-    risk_execution = next(
-        (current_executions[code] for code in sorted(risk_node_codes) if code in current_executions),
-        None,
-    )
+    expected_risk_keys = {item["rule_key"] for item in risk_rules}
+    risk_execution_ids = {
+        current_executions[code].id for code in risk_node_codes if code in current_executions
+    }
     risk_results = (
         db.scalars(
             select(RuleResult)
             .where(
                 RuleResult.audit_task_id == task.id,
-                RuleResult.node_execution_id == risk_execution.id,
+                RuleResult.node_execution_id.in_(risk_execution_ids),
+                RuleResult.rule_key.in_(expected_risk_keys),
             )
             .order_by(RuleResult.id)
         ).all()
-        if risk_configured and risk_execution is not None
+        if risk_configured and risk_execution_ids
         else []
     )
     if risk_configured and not risk_results:
         raise BusinessError("RISK_RESULT_MISSING", "已配置风险评级规则但未形成结果，不能生成无风险结论", status_code=409)
+    produced_risk_keys = {item.rule_key for item in risk_results}
+    missing_risk_keys = expected_risk_keys - produced_risk_keys
     risk_inconclusive = [item for item in risk_results if item.status in unfinished_rule_statuses]
     # 来源规则不适用的风险规则没有形成风险结论，它不算执行故障，但风险也不是“已判定”。
     risk_not_applicable = [item for item in risk_results if item.status == "NOT_APPLICABLE"]
@@ -409,12 +412,13 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         risk_configured
         and not risk_inconclusive
         and not risk_not_applicable
+        and not missing_risk_keys
         and len(risk_results) == len(risk_rules)
     )
     risk_level_by_key = {item["rule_key"]: item.get("parameters", {}).get("risk_level") for item in risk_rules}
     if not risk_configured:
         risk_label = "不可判定（本模板未配置风险评级规则，本次不输出“无风险”结论）"
-    elif risk_inconclusive or risk_not_applicable:
+    elif not risk_conclusion_available:
         risk_label = "部分不可判定（存在尚未形成结论或不适用的风险规则）"
     else:
         risk_label = "可判定（已配置的风险规则均已形成结论）"
@@ -457,14 +461,6 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         item.id: item for item in db.scalars(select(Evidence).where(Evidence.audit_task_id == task.id)).all()
     }
 
-    def evidence_suffix(evidence_id: int | None) -> str:
-        evidence = evidence_by_id.get(evidence_id) if evidence_id else None
-        if evidence is None:
-            return "（未记录证据原文）"
-        upload = uploads_by_id.get(evidence.document_upload_id)
-        location = f"{upload.original_filename} · " if upload else ""
-        return f"（证据：{location}原文：{evidence.quote_text}）"
-
     def effective_status_of(review: ManualReview) -> str | None:
         """该复核落到的业务对象当前状态：规则结果 / 字段事实 / 材料位。"""
         if review.rule_result_id is not None:
@@ -472,6 +468,8 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             return result.status if result else None
         if review.field_value_id is not None:
             fact = db.get(TaskFieldValue, review.field_value_id)
+            # 已完成复核指向的是当次裁决生成的不可变字段版本；报告展示当次
+            # “复核后状态”，而不是用今天的当前事实改写历史记录。
             return fact.status if fact else None
         if review.document_upload_id is not None:
             upload = db.get(DocumentUpload, review.document_upload_id)
@@ -490,17 +488,23 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             original.append(original_message)
         if original_value not in (None, ""):
             original.append(f"原值 {original_value}")
-        evidence_ref = judgment.get("evidence")
-        if isinstance(evidence_ref, dict):
+        evidence_refs = judgment.get("evidences")
+        if not isinstance(evidence_refs, list) or not evidence_refs:
+            evidence_ref = judgment.get("evidence")
+            evidence_refs = [evidence_ref] if isinstance(evidence_ref, dict) else []
+        for evidence_ref in evidence_refs:
+            if not isinstance(evidence_ref, dict):
+                continue
             locator = LOCATOR_STATUS_LABELS.get(evidence_ref.get("locator_status"), "状态未知")
             # 内容依据与位置分开说明：人工要看的是「这段原文还在不在材料里」，
             # 位置对不上不改变内容是否存在这件事。
             quote_check = evidence_ref.get("quote_check_label") or QUOTE_CHECK_LABELS.get(
                 evidence_ref.get("quote_check"), "内容依据状态未知"
             )
+            field_path = f"；字段属性：{evidence_ref['field_path']}" if evidence_ref.get("field_path") else ""
             original.append(
                 f"证据 {evidence_ref.get('evidence_no') or '未记录'}"
-                f"（内容依据：{quote_check}；位置：{locator}）"
+                f"（内容依据：{quote_check}；位置：{locator}{field_path}）"
             )
         conclusion = [
             f"人工结论：{decision_labels.get(review.decision, review.decision or '未记录')}",
@@ -532,7 +536,6 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         f"- 配置来源：{'页面表单配置' if manifest.get('source_kind') == 'FORM' else 'Excel 规则库导入'}",
         f"- Excel 格式版本：{manifest.get('profile_version') or '不适用（页面表单配置）'}",
         f"- 审核任务：{task.task_name}（任务编号 {task.task_no}）",
-        f"- 任务状态：{task_status_labels.get(task.status, task.status)}",
         f"- 报告生成时间：{datetime.now(UTC).isoformat(timespec='seconds')}",
         "- 报告生成状态：已生成。报告文件生成成功只表示报告已产出，不代表审核通过。",
         "",
@@ -608,10 +611,10 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         if key in out_of_scope_field_keys:
             lines.append(f"- {label}：材料未上传，本次不在有效执行范围内（未抽取，也不代表字段为空）")
             continue
-        if fact is not None and fact.status in {"PRESENT", "REVIEWED"}:
-            lines.append(f"- {label}：{fact.raw_value}{evidence_suffix(fact.evidence_id)}")
+        if fact is not None and field_statuses.get(key) in {"PRESENT", "REVIEWED"}:
+            lines.append(f"- {label}：{fact.raw_value}{_fact_evidence_suffix(evidence_by_id, fact)}")
         else:
-            state = fact.status if fact else "NOT_EXECUTED"
+            state = field_statuses.get(key, "NOT_EXECUTED")
             lines.append(f"- {label}：未形成有效结果（{field_status_labels.get(state, '状态未知')}）")
         review = reviews_by_field.get(fact.id) if fact else None
         if review is not None:
@@ -733,7 +736,11 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             lines.append(
                 f"- {item.rule_name}{level_label}：{risk_status_labels.get(item.status, item.status)}；{item.message}"
             )
-        if not risk_abnormal and not risk_inconclusive and not risk_not_applicable:
+        if missing_risk_keys:
+            lines.append("- 以下风险规则尚未形成结果：" + "、".join(
+                rule_name_by_key.get(key, key) for key in sorted(missing_risk_keys)
+            ))
+        if risk_conclusion_available and not risk_abnormal:
             lines.append("- 已配置的风险规则均未触发风险疑点。")
     lines.extend(["", "### 不确定事项与未完成项", ""])
     uncertain: list[str] = []
@@ -850,9 +857,10 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             purpose = f"规则“{result.rule_name}”"
         elif evidence.field_value_id is not None:
             fact = fact_by_id.get(evidence.field_value_id)
-            if fact is None or fact.evidence_id != evidence.id:
+            if fact is None or not fact.is_current:
                 continue
-            purpose = f"字段“{field_name_by_key.get(fact.field_key, fact.field_key)}”"
+            field_path = f"的属性“{evidence.field_path}”" if evidence.field_path else ""
+            purpose = f"字段“{field_name_by_key.get(fact.field_key, fact.field_key)}”{field_path}"
         else:
             continue
         upload = uploads_by_id.get(evidence.document_upload_id) if evidence.document_upload_id else None
@@ -927,10 +935,12 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
                 label = f"{material_names.get(field_definition['material_key'], '未知材料')} · {field_definition['name']}"
                 if key in out_of_scope_field_keys:
                     lines.append(f"- {label}：材料未上传，本次不在有效执行范围内")
-                elif fact is not None and fact.status in {"PRESENT", "REVIEWED"}:
-                    lines.append(f"- {label}：{fact.raw_value}{evidence_suffix(fact.evidence_id)}")
+                elif fact is not None and field_statuses.get(key) in {"PRESENT", "REVIEWED"}:
+                    lines.append(f"- {label}：{fact.raw_value}{_fact_evidence_suffix(evidence_by_id, fact)}")
+                elif fact is not None and field_statuses.get(key) == "NOT_PRESENT" and fact.id in confirmed_missing_field_ids:
+                    lines.append(f"- {label}：人工确认文档中不存在该字段")
                 else:
-                    state = fact.status if fact else "NOT_EXECUTED"
+                    state = field_statuses.get(key, "NOT_EXECUTED")
                     lines.append(f"- {label}：未形成有效结果（{field_status_labels.get(state, '状态未知')}）")
             lines.append("")
     else:

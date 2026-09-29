@@ -74,6 +74,10 @@ ResultType = Literal["DECIMAL", "PERCENT", "INTEGER", "AMOUNT"]
 #   ABS_RESULT 拿计算结果的绝对值比（例如「偏离幅度」类判定）
 ComparisonBasis = Literal["RESULT", "ABS_RESULT"]
 
+# 判定区间命中后形成的规则结论。它必须由业务显式配置：判定文本中的“良好”
+# “预警”等词没有稳定的系统语义，运行期不能据此猜测通过或异常。
+CalculationResultStatus = Literal["PASSED", "ABNORMAL", "PENDING_REVIEW"]
+
 COMPARISON_BASIS_LABELS: dict[str, str] = {
     "RESULT": "计算结果",
     "ABS_RESULT": "计算结果的绝对值",
@@ -209,6 +213,7 @@ class JudgementBand(StrictModel):
     upper_inclusive: bool
     comparison_basis: ComparisonBasis
     judgement: str = Field(min_length=1, max_length=255)
+    result_status: CalculationResultStatus
     risk_level: str | None = Field(default=None, max_length=40)
     action: str | None = Field(default=None, max_length=255)
     # 容差口径：上下界是绝对值还是相对比例。必须显式声明（口径见上面的 ToleranceKind），

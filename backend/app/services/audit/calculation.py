@@ -2,7 +2,7 @@
 
 执行流程（每一步都是显式的，没有跳过分支）：
 
-1. 取本任务当前有效的字段抽取事实，按 (字段编号, 期间, 报表口径, 主体范围) 建索引；
+1. 取本任务当前有效的字段事实和已计算派生事实，按来源、编号、期间与报表口径建索引；
 2. 按计算规则之间的依赖做**拓扑序**执行，保证上游结果先于下游产出；
 3. 每条规则求值 → 判定 → 写 `task_fact`（DERIVED）→ 写 `rule_result`；
 4. 上游结果写入后立即进入索引，供同一批里的下游规则引用。
@@ -24,13 +24,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
-from ...domain import calculation as calc
+from ...domain import calculation as calc, workflow_dag
 from ...domain.calculation import schema as calc_schema
+from ...domain.identity import public_no
 from ...errors import BusinessError
-from ...models import AuditTask, NodeExecution, RuleResult, TaskFact
+from ...models import AuditTask, ManualReview, NodeExecution, RuleResult, TaskFact
 from .shared import _material_names
 
 
@@ -95,24 +96,33 @@ def _calculation_rules(manifest: dict[str, Any], enabled_codes: set[str]) -> lis
 
 
 def _field_facts(db: Session, task: AuditTask, execution: NodeExecution) -> dict[tuple[str, str, str, str], calc.FactValue]:
-    """当前有效的字段抽取事实，按计算参数的定位键建索引。
+    """当前有效的字段与上游计算事实，按计算参数的定位键建索引。
 
-    只取 `fact_kind = EXTRACTED` 且 `is_current` 的事实：历史版本与人工修正版本
-    不参与计算——重跑会新增版本，把历史版本也算进来会让同一个数被算两遍。
+    EXTRACTED 只取已确认的数值事实；DERIVED 只取已经 COMPUTED 的数值事实。
+    这样分属不同计算节点的规则也能引用上游结果，未算出值的派生事实不会混入。
     """
     facts: dict[tuple[str, str, str, str], calc.FactValue] = {}
     rows = db.scalars(
         select(TaskFact).where(
             TaskFact.audit_task_id == task.id,
-            TaskFact.fact_kind == "EXTRACTED",
             TaskFact.is_current.is_(True),
+            or_(
+                and_(
+                    TaskFact.fact_kind == "EXTRACTED",
+                    TaskFact.status.in_(("PRESENT", "REVIEWED")),
+                ),
+                and_(
+                    TaskFact.fact_kind == "DERIVED",
+                    TaskFact.status == calc.CALC_STATUS_COMPUTED,
+                ),
+            ),
             TaskFact.decimal_value.is_not(None),
         )
     ).all()
     for row in rows:
         facts[
             calc.fact_key(
-                source_type="FIELD",
+                source_type="FIELD" if row.fact_kind == "EXTRACTED" else "CALC_RESULT",
                 source_code=row.fact_code,
                 period_scope=row.period_scope,
                 statement_scope=row.statement_scope,
@@ -209,15 +219,14 @@ def _write_fact(
             TaskFact.period_scope == definition.period_policy,
             TaskFact.statement_scope == definition.statement_scope,
             TaskFact.entity_scope == "SELF",
-            TaskFact.is_current.is_(True),
         )
     ).all()
-    revision_no = 1
-    if previous:
-        revision_no = max(item.revision_no for item in previous) + 1
+    revision_no = max((item.revision_no for item in previous), default=0) + 1
+    current = [item for item in previous if item.is_current]
+    if current:
         db.execute(
             update(TaskFact)
-            .where(TaskFact.id.in_([item.id for item in previous]))
+            .where(TaskFact.id.in_([item.id for item in current]))
             .values(is_current=False)
         )
         db.flush()
@@ -287,6 +296,34 @@ def _result_payload(
     if result.missing_parameters:
         payload["missing_parameters"] = list(result.missing_parameters)
     return payload
+
+
+def _calculation_review_available(db: Session, task: AuditTask, manifest: dict[str, Any], node_code: str) -> bool:
+    plans = workflow_dag.plans_of(manifest)
+    by_code = {plan.node_instance_code: plan for plan in plans}
+    completed = set(
+        db.scalars(
+            select(NodeExecution.node_code).where(
+                NodeExecution.audit_task_id == task.id,
+                NodeExecution.status.in_(("SUCCEEDED", "SKIPPED")),
+            )
+        ).all()
+    )
+
+    def depends_on_calculation(code: str, seen: set[str]) -> bool:
+        if code == node_code:
+            return True
+        if code in seen:
+            return False
+        return any(depends_on_calculation(dependency, seen | {code}) for dependency in by_code[code].depends_on)
+
+    return any(
+        plan.node_type == "MANUAL_REVIEW"
+        and plan.enabled
+        and plan.node_instance_code not in completed
+        and depends_on_calculation(plan.node_instance_code, set())
+        for plan in plans
+    )
 
 
 def _calculation(
@@ -368,21 +405,49 @@ def _calculation(
             )
         status = _rule_status_of(result, judgement)
         counts[status] = counts.get(status, 0) + 1
-        db.add(
-            RuleResult(
-                audit_task_id=task.id,
-                node_execution_id=execution.id,
-                # rule_key 与 rule_code 取同一个业务编号：唯一键仍建在 rule_key 上，
-                # 历史读取路径与新的业务编号路径看到的是同一条规则。
-                rule_key=rule.definition.rule_code,
-                rule_code=rule.definition.rule_code,
-                legacy_rule_key=None,
-                rule_name=rule.definition.rule_name,
-                status=status,
-                message=_message_of(result, judgement),
-                result_json=_result_payload(rule=rule, result=result, judgement=judgement),
-            )
+        record = RuleResult(
+            audit_task_id=task.id,
+            node_execution_id=execution.id,
+            # rule_key 与 rule_code 取同一个业务编号：唯一键仍建在 rule_key 上，
+            # 历史读取路径与新的业务编号路径看到的是同一条规则。
+            rule_key=rule.definition.rule_code,
+            rule_code=rule.definition.rule_code,
+            legacy_rule_key=None,
+            rule_name=rule.definition.rule_name,
+            status=status,
+            message=_message_of(result, judgement),
+            result_json=_result_payload(rule=rule, result=result, judgement=judgement),
         )
+        db.add(record)
+        if status == "PENDING_REVIEW":
+            if not _calculation_review_available(db, task, manifest, node_code):
+                raise BusinessError(
+                    "CALC_REVIEW_NODE_UNAVAILABLE",
+                    "计算结果需要人工确认，但当前流程没有依赖该计算且尚未执行的人工复核节点",
+                    status_code=409,
+                    details={"rule_code": rule.definition.rule_code, "calculation_node": node_code},
+                )
+            db.flush()
+            db.add(
+                ManualReview(
+                    review_no=public_no("REV"),
+                    audit_task_id=task.id,
+                    rule_result_id=record.id,
+                    review_type="RULE_RESULT",
+                    status="PENDING",
+                    system_judgment_json={
+                        "origin": "CALCULATION",
+                        "status": status,
+                        "message": record.message,
+                        "rule_key": record.rule_key,
+                        "result_code": rule.definition.result_code,
+                        "calculation_status": result.status,
+                        "calculated_value": None if result.value is None else format(result.value, "f"),
+                        "judgement": judgement.to_payload() if judgement is not None else None,
+                    },
+                    business_note=record.message,
+                )
+            )
     return {
         "rule_count": len(rules),
         "computed_count": computed,
@@ -397,22 +462,26 @@ def _calculation(
 def _rule_status_of(result: calc.EvaluationResult, judgement: calc.JudgementResult | None) -> str:
     """计算结果 → 规则结果状态。
 
-    映射是显式的，不做任何「好/坏」推断：
+    映射只读命中区间显式配置的结果状态，不做任何「好/坏」推断：
 
     - 没算出来（除零 / 输入缺失 / 数值不可计算）→ `EVIDENCE_INSUFFICIENT`，
       具体原因在消息里。它不是合格，也不是不合格。
-    - 算出结果但没有命中任何判定区间 → `ABNORMAL`。配置留下的空隙必须让人看到，
-      不能当成通过。
-    - 命中判定区间 → `PENDING_REVIEW`。判定区间的结论是**业务文本**
-      （「预警」「良好」「优秀」…），系统不解释它是好是坏：把「预警」判成不合格
-      等于系统替业务定义了等级语义，而样本里这套语义没有权威口径。
-      判定结论与命中的区间随结果一起落库，由人工确认最终业务结论。
+    - 算出结果但没有命中任何判定区间 → `EVIDENCE_INSUFFICIENT`。配置
+      留下的空隙没有业务结论，不能当成通过或异常。
+    - 命中判定区间 → 使用该区间配置的 `PASSED` / `ABNORMAL` /
+      `PENDING_REVIEW`。判定文本仍只用于展示。
     """
     if result.status != calc.CALC_STATUS_COMPUTED or judgement is None:
         return "EVIDENCE_INSUFFICIENT"
     if judgement.status == calc.JUDGEMENT_UNMATCHED:
-        return "ABNORMAL"
-    return "PENDING_REVIEW"
+        return "EVIDENCE_INSUFFICIENT"
+    if judgement.band is None:
+        raise BusinessError(
+            "CALC_JUDGEMENT_BAND_MISSING",
+            "计算结果显示已命中判定区间，但没有返回对应区间",
+            status_code=500,
+        )
+    return judgement.band.result_status
 
 
 def _message_of(result: calc.EvaluationResult, judgement: calc.JudgementResult | None) -> str:

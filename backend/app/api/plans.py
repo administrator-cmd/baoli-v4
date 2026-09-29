@@ -30,7 +30,7 @@ from ..schemas import (
 from ..services import plan_service
 from ..domain.identity import public_no
 from ..services.audit.interrupt import start_audit_interrupt
-from ..services.operation_log_service import OBJECT_PLAN, record_operation, require_idempotent_replay
+from ..services.operation_log_service import OBJECT_PLAN, require_idempotent_replay
 from ..services.plan_service import (
     copy_plan,
     create_plan,
@@ -46,7 +46,14 @@ from ..services.plan_service import (
     update_plan,
     update_plan_config,
 )
-from ..services.task_service import create_task_from_plan
+from ..services.task_service import (
+    claim_task_command,
+    create_task_from_plan,
+    finish_task_command,
+    record_failed_task_command,
+    task_of_command,
+)
+from ..services.audit.interrupt import resume_task_creation_interrupt
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])
@@ -252,8 +259,7 @@ def create_task_from_plan_endpoint(
     请求携带 `expected_scope_hash`（页面预览看到的范围指纹）：与锁定后的实际指纹
     不一致时返回 `PLAN_SCOPE_CHANGED`，任务必须冻结用户刚刚确认的那一版范围。
 
-    成功操作日志只在**任务与审核等待点都成功之后**才写入；等待点初始化失败时写入一条
-    `result=FAILED` 的同键记录，重放该标识返回原来的失败原因，不会以 201/reused 冒充成功。
+    命令占位与任务在首次提交时一起落库；等待点确认后追加成功操作日志。
     """
     # 顺序很重要：历史命令优先于一切状态校验。成功创建任务后方案/场景可能已被停用或删除，
     # 此时同幂等标识的重发仍必须返回原任务或原失败，而不是被门禁挡成 409/404。
@@ -273,6 +279,48 @@ def create_task_from_plan_endpoint(
     if existing is not None:
         return _replay_task_created(request, db, existing)
 
+    task_no = public_no("TASK")
+    command, reused = claim_task_command(
+        db,
+        object_type=OBJECT_PLAN,
+        operation_type="TASK_CREATE",
+        idempotency_key=payload.idempotency_key,
+        request=request_payload,
+        request_hash=request_hash,
+        task_no=task_no,
+    )
+    if reused:
+        task = task_of_command(db, command)
+        detail = {"task_no": task.task_no, "plan_code": plan_code}
+        if command.status == "FAILED":
+            record_failed_task_command(
+                db, command, object_no=plan_code, object_name=task.task_schema_json["plan_name"], detail=detail
+            )
+            raise BusinessError(
+                "TASK_CREATE_PREVIOUSLY_FAILED",
+                f"该幂等标识对应的创建任务命令此前执行失败：{command.failure_message or '原因未记录'}。",
+                status_code=409,
+                details={"operation_no": command.operation_no, "task_no": task.task_no, "failure_code": command.failure_code},
+            )
+        if command.status == "PENDING":
+            try:
+                resume_task_creation_interrupt(db, task, command.id)
+            except BusinessError:
+                record_failed_task_command(
+                    db, command, object_no=plan_code, object_name=task.task_schema_json["plan_name"], detail=detail
+                )
+                raise
+            detail.update({
+                "plan_scope_hash": task.task_schema_json.get("plan_scope_hash"),
+                "scenario_version_no": task.task_schema_json.get("scenario_version_no"),
+            })
+            finish_task_command(
+                db, command, object_no=plan_code, object_name=task.task_schema_json["plan_name"], detail=detail
+            )
+        elif command.status != "SUCCEEDED":
+            raise BusinessError("TASK_COMMAND_STATE_INVALID", "任务创建命令状态无效", status_code=500)
+        return _frozen_task_created_response(request, db, task, reused=True)
+
     # 到这里才是真正的新命令：此时才校验方案/场景是否可用于新建任务。
     plan = plan_or_404(db, plan_code)
     scenario_template = db.scalar(
@@ -285,9 +333,7 @@ def create_task_from_plan_endpoint(
     if not scenario_template.enabled:
         raise BusinessError("SCENARIO_DISABLED", "该场景已停用，不能用于创建任务", status_code=409, details={"scenario_code": plan.scenario_code})
 
-    # 命令记录与任务在同一次提交中对账：任务编号预生成并写进记录，
-    # 等待点建立时的提交会把两者一起落库。
-    task_no = public_no("TASK")
+    # 任务编号已在命令占位里冻结；等待点第一次提交会同时保存两者。
     task = create_task_from_plan(
         db,
         plan,
@@ -299,29 +345,18 @@ def create_task_from_plan_endpoint(
     try:
         # 等待点建立失败会把任务显式标为 FAILED 并提交；此时记一条失败记录，
         # 让同幂等标识的重放返回这次失败，而不是「什么都没发生」地重试成假成功。
-        start_audit_interrupt(db, task)
-    except BusinessError as failure:
-        record_operation(
-            db,
-            object_type=OBJECT_PLAN,
-            object_no=plan_code,
-            object_name=plan.plan_name,
-            operation_type="TASK_CREATE",
-            detail={"task_no": task_no, "plan_code": plan_code},
-            idempotency_key=payload.idempotency_key,
-            request_hash=request_hash,
-            result="FAILED",
-            failure_code=failure.code,
-            failure_message=failure.message,
-        )
-        db.commit()
+        start_audit_interrupt(db, task, creation_operation_id=command.id)
+    except BusinessError:
+        db.rollback()
+        failed = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no))
+        if failed is not None and failed.status == "FAILED":
+            record_failed_task_command(
+                db, command, object_no=plan_code, object_name=plan.plan_name,
+                detail={"task_no": task_no, "plan_code": plan_code},
+            )
         raise
-    record_operation(
-        db,
-        object_type=OBJECT_PLAN,
-        object_no=plan_code,
-        object_name=plan.plan_name,
-        operation_type="TASK_CREATE",
+    was_reused = finish_task_command(
+        db, command, object_no=plan_code, object_name=plan.plan_name,
         detail={
             "task_no": task_no,
             "plan_code": plan_code,
@@ -329,12 +364,9 @@ def create_task_from_plan_endpoint(
             "plan_scope_hash": plan.scope_hash,
             "scenario_version_no": task.task_schema_json.get("scenario_version_no"),
         },
-        idempotency_key=payload.idempotency_key,
-        request_hash=request_hash,
     )
-    db.commit()
     task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no)) or task
-    return _frozen_task_created_response(request, db, task, reused=False)
+    return _frozen_task_created_response(request, db, task, reused=was_reused)
 
 
 def _replay_task_created(

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..domain import capabilities, tool_catalog
@@ -218,7 +219,12 @@ def _scene_node_types(scene_code: str) -> frozenset[str] | None:
     return frozenset(types) if types else None
 
 
-def _assert_scene_scope(spec: tool_catalog.ToolSpec, scene_code: str | None) -> None:
+def _assert_scene_scope(
+    spec: tool_catalog.ToolSpec,
+    scene_code: str | None,
+    *,
+    declared_nodes: frozenset[str] | None = None,
+) -> None:
     """工具是否适用于该场景。
 
     `allowed_scenes` 显式声明时按它判断（精确名单优先）。
@@ -244,7 +250,7 @@ def _assert_scene_scope(spec: tool_catalog.ToolSpec, scene_code: str | None) -> 
     if not spec.allowed_nodes:
         # 工具本身不限定节点，场景层面因此没有可推导的约束。
         return
-    declared = _scene_node_types(scene_code)
+    declared = declared_nodes if declared_nodes is not None else _scene_node_types(scene_code)
     if declared is None:
         # 场景 Profile 不可读：配置问题，不当作越权。
         return
@@ -383,12 +389,42 @@ def resolve(
         )
     effective_scene = scene_type if scene_type is not None else (context.scene_code if context else None)
     effective_node = node_code if node_code is not None else (context.node_code if context else None)
-    _assert_scene_scope(spec, effective_scene)
-    if spec.allowed_nodes and effective_node is not None and effective_node not in spec.allowed_nodes:
+    manifest = None
+    if context is not None and context.task_id is not None and context.database_session is not None:
+        from ..models import AuditTask
+
+        task = context.database_session.get(AuditTask, context.task_id)
+        if task is None:
+            raise BusinessError("TOOL_TASK_MISSING", "工具调用关联的审核任务不存在", status_code=500)
+        manifest = task.manifest_json
+    node_types = None
+    if isinstance(manifest, dict):
+        node_types = {
+            str(item["node_code"]): str(item.get("node_type") or item["node_code"])
+            for item in manifest.get("nodes", [])
+            if isinstance(item, dict) and item.get("node_code")
+        }
+    _assert_scene_scope(
+        spec,
+        effective_scene,
+        declared_nodes=frozenset(node_types.values()) if node_types is not None else None,
+    )
+    if effective_node is not None and node_types is not None and effective_node not in node_types:
+        raise BusinessError(
+            "TOOL_NODE_NOT_ALLOWED",
+            "工具调用的节点不在任务冻结的流程中",
+            details={"tool_id": spec.tool_id, "node_code": effective_node},
+        )
+    effective_node_type = (
+        node_types[effective_node]
+        if effective_node is not None and node_types is not None
+        else effective_node
+    )
+    if spec.allowed_nodes and effective_node_type is not None and effective_node_type not in spec.allowed_nodes:
         raise BusinessError(
             "TOOL_NODE_NOT_ALLOWED",
             f"工具“{spec.label}”不能挂在这个节点上",
-            details={"tool_id": spec.tool_id, "node_code": effective_node, "allowed": sorted(spec.allowed_nodes)},
+            details={"tool_id": spec.tool_id, "node_code": effective_node, "node_type": effective_node_type, "allowed": sorted(spec.allowed_nodes)},
         )
     _resolve_policy_version(spec, context)
     _assert_catalog_identity(spec, context)
@@ -474,6 +510,40 @@ def _effective_parameters(
     if fixed is None:
         return parameters
     return {**parameters, "check_item": fixed}
+
+
+def _same_published_value(key: str, requested: Any, published: Any) -> bool:
+    if isinstance(requested, bool) or isinstance(published, bool):
+        return type(requested) is type(published) and requested == published
+    if key == "threshold" and isinstance(requested, (int, float, str)) and isinstance(published, (int, float, str)):
+        try:
+            return Decimal(str(requested)) == Decimal(str(published))
+        except InvalidOperation:
+            pass
+    return requested == published
+
+
+def _bind_published_parameters(
+    spec: tool_catalog.ToolSpec,
+    requested: dict[str, Any],
+    published: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if published is None:
+        raise BusinessError(
+            "TOOL_RULE_PARAMETERS_MISSING",
+            f"工具“{spec.label}”缺少任务冻结的规则参数，本次调用未执行",
+            status_code=500,
+            details={"tool_id": spec.tool_id},
+        )
+    if set(requested) != set(published) or any(
+        not _same_published_value(key, requested[key], published[key]) for key in requested
+    ):
+        raise BusinessError(
+            "TOOL_RULE_PARAMETERS_MISMATCH",
+            f"工具“{spec.label}”的调用参数与已发布规则不一致，本次调用未执行",
+            details={"tool_id": spec.tool_id, "requested": requested, "published": published},
+        )
+    return dict(published)
 
 
 def _identity_of(item: dict[str, Any]) -> tuple[str, str | None]:
@@ -588,6 +658,8 @@ def invoke(
     version: str | None = None,
     scene_type: str | None = None,
     node_code: str | None = None,
+    published_parameters: dict[str, Any] | None = None,
+    published_tool_id: str | None = None,
 ) -> dict[str, Any]:
     """执行一次工具调用：校验后调真实 handler，返回它的结果。
 
@@ -619,6 +691,14 @@ def invoke(
             f"工具“{spec.label}”的 parameters 必须是对象",
             details={"tool_id": spec.tool_id},
         )
+    if context is not None and context.caller_identity == "audit_agent":
+        if published_tool_id != spec.tool_id:
+            raise BusinessError(
+                "TOOL_RULE_CAPABILITY_MISMATCH",
+                f"工具“{spec.label}”与当前已发布规则的能力不一致，本次调用未执行",
+                details={"tool_id": spec.tool_id, "rule_tool_id": published_tool_id},
+            )
+        parameters = _bind_published_parameters(spec, parameters, published_parameters)
     if not isinstance(inputs, list) or any(not isinstance(item, dict) for item in inputs):
         raise BusinessError(
             "TOOL_INPUT_INVALID",

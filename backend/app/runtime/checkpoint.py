@@ -17,7 +17,7 @@ from typing import Any, Iterator
 import pymysql
 from pymysql.cursors import DictCursor
 
-from ..config import get_settings
+from ..config import get_settings, validated_database_url
 from ..errors import BusinessError
 
 
@@ -30,20 +30,15 @@ def _connection_kwargs() -> dict[str, object]:
             "数据库未配置，无法连接 checkpoint 存储",
             status_code=500,
         )
-    from sqlalchemy.engine import make_url
-
     try:
-        url = make_url(settings.database_url)
-    except Exception as exc:  # noqa: BLE001 - 配置错误必须显式暴露
-        raise BusinessError("CHECKPOINT_DSN_INVALID", "数据库连接配置无效", status_code=500) from exc
-    if url.drivername != "mysql+pymysql" or url.database != "baoli_v4":
+        url = validated_database_url(settings.database_url)
+    except ValueError as exc:
         raise BusinessError(
             "CHECKPOINT_DSN_INVALID",
-            "checkpoint 存储只允许使用 mysql+pymysql 的 baoli_v4 数据库",
+            "checkpoint 存储的数据库目标无效",
             status_code=500,
-            details={"drivername": url.drivername, "database": url.database},
-        )
-    url = url.set(database="baoli_v4")
+            details={"reason": str(exc)},
+        ) from exc
     return {
         "host": url.host or "127.0.0.1",
         "port": url.port or 3306,

@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..domain import capabilities, financial_report, manifest as manifest_module, node_rulebook, unified_profile
+from ..domain import capabilities, currency, field_strategy, financial_report, manifest as manifest_module, node_rulebook, scenario_schema, unified_profile
 from ..domain.audit_vocab import SCOPE_NOT_APPLICABLE
 from ..domain.node_registry import NODE_TYPE_LABELS, legacy_node_type_of
 from ..domain.manifest import (
@@ -202,7 +202,15 @@ def ensure_draft(db: Session, template: ScenarioTemplate) -> ScenarioDraft:
     draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == template.scenario_code))
     if draft is not None:
         return draft
-    draft = ScenarioDraft(scenario_code=template.scenario_code, revision_no=1, source="FORM", base_version_no=None)
+    draft = ScenarioDraft(
+        scenario_code=template.scenario_code,
+        revision_no=1,
+        source="FORM",
+        base_version_no=None,
+        schema_key=template.schema_key,
+        schema_version=template.schema_version,
+        schema_json=template.schema_json,
+    )
     db.add(draft)
     db.flush()
     latest = _latest_published_version(db, template.scenario_code)
@@ -281,6 +289,9 @@ def ensure_draft_from_published_version(db: Session, version: ScenarioVersion) -
         revision_no=1,
         source="EXCEL",
         base_version_no=version.version_no,
+        schema_key=version.schema_key,
+        schema_version=version.schema_version,
+        schema_json=version.schema_json,
     )
     db.add(draft)
     db.flush()
@@ -325,13 +336,51 @@ def _load_manifest_into_draft(db: Session, draft: ScenarioDraft, manifest: dict[
     profile_version = manifest.get("profile_version")
     if isinstance(profile_version, str) and profile_version:
         draft.profile_version = profile_version
+    schema = scenario_schema.normalize_schema(manifest.get("scenario_schema"))
+    draft.schema_key = schema["schema_key"]
+    draft.schema_version = schema["schema_version"]
+    draft.schema_json = schema
     _write_config_into_draft(db, draft, config, replace_nodes=True)
 
 
 def load_import_config_into_draft(
     db: Session, draft: ScenarioDraft, config: dict[str, Any], *, profile_version: str
 ) -> None:
-    """导入只替换业务配置，节点实例保留场景管理员当前的编排。"""
+    """导入替换 Excel 业务配置，并保留同一字段在场景内维护的抽取策略。"""
+    existing_fields = db.scalars(
+        select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft.id)
+    ).all()
+    strategies: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    strategy_owners: dict[str, str] = {}
+    for existing in existing_fields:
+        if not existing.source_ref:
+            continue
+        source_ref = str(existing.source_ref)
+        previous_owner = strategy_owners.get(source_ref)
+        if previous_owner is not None:
+            raise BusinessError(
+                "SCENARIO_FIELD_SOURCE_REF_DUPLICATE",
+                "场景草稿中存在重复字段编号，无法确定 Excel 再次导入时应保留哪一套抽取配置",
+                status_code=409,
+                details={
+                    "source_ref": source_ref,
+                    "field_keys": [previous_owner, existing.field_key],
+                },
+            )
+        strategy_owners[source_ref] = existing.field_key
+        strategies[source_ref] = (existing.extraction_strategy, existing.structure_schema_json)
+    for item in config.get("fields") or []:
+        preserved = strategies.get(str(item.get("source_ref") or ""))
+        if preserved is not None:
+            item["extraction_strategy"], item["structure_schema_json"] = preserved
+        extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+            value_type=str(item.get("value_type") or ""),
+            extraction_strategy=item.get("extraction_strategy"),
+            structure_schema=item.get("structure_schema_json"),
+            field_name=str(item.get("name") or item.get("source_ref") or "未命名字段"),
+        )
+        item["extraction_strategy"] = extraction_strategy
+        item["structure_schema_json"] = structure_schema
     draft.profile_version = profile_version
     _write_config_into_draft(db, draft, config, replace_nodes=False)
 
@@ -419,6 +468,8 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
             "material_name": material_names.get(item.material_key),
             "name": item.name,
             "value_type": item.value_type,
+            "extraction_strategy": item.extraction_strategy,
+            "structure_schema": item.structure_schema_json,
             "unit": item.unit,
             # 币种与产物来源是金额口径与主体核对的配置事实，草稿视图必须一并返回，
             # 否则页面看不到、也改不了它们。
@@ -435,9 +486,8 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
         }
         for item in fields
     ]
-    rule_items = [
-        _draft_rule_view(item, material_names, field_map, rule_names) for item in rules
-    ]
+    rule_map = {rule.rule_key: rule for rule in rules}
+    rule_items = [_draft_rule_view(item, material_names, field_map, rule_names, rule_map) for item in rules]
     explicit_extraction_outputs = {
         key
         for rule in rules
@@ -449,7 +499,27 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
     # 归属必须是**用户配置的实例码**，与 compile_form_manifest 的派生口径一致：
     # 这里写能力类型会让预览与真实发布结果不一致。
     nodes, _, _, _, _, _ = _draft_rows(db, draft.id)
-    instance_by_type = {item.node_type: item.node_code for item in nodes}
+    # 同一能力类型可以有多个节点实例，不能用普通字典让后一个实例覆盖前一个。
+    # 字段抽取优先沿用唯一的 Sheet 绑定；没有唯一绑定时，只有场景本身恰好
+    # 只有一个同类节点才有确定归属。多个实例且没有唯一绑定时保持 None，
+    # 让发布校验明确报告“无法确定”，不在草稿视图里编造一个归属。
+    node_codes_by_type: dict[str, list[str]] = {}
+    for node in nodes:
+        node_codes_by_type.setdefault(node.node_type, []).append(node.node_code)
+    instance_by_type = {
+        node_type: codes[0]
+        for node_type, codes in node_codes_by_type.items()
+        if len(codes) == 1
+    }
+    extraction_sheet_nodes = {
+        sheet.node_code
+        for sheet in sheets
+        if sheet.sheet_role == "FIELD_EXTRACTION" and sheet.node_code
+    }
+    if len(extraction_sheet_nodes) == 1:
+        extraction_node_code = next(iter(extraction_sheet_nodes))
+    else:
+        extraction_node_code = instance_by_type.get("FIELD_EXTRACTION")
     for item in fields:
         if item.field_key in explicit_extraction_outputs:
             continue
@@ -458,7 +528,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
             {
                 "rule_key": stable_key("rule", draft.scenario_code, f"extract:{item.field_key}"),
                 "name": f"抽取{item.name}",
-                "node": instance_by_type.get("FIELD_EXTRACTION"),
+                "node": extraction_node_code,
                 "operator": "LLM_EXTRACT",
                 "enabled": True,
                 "system": True,
@@ -526,12 +596,16 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
         }
         for item in sections
     ]
+    profile = scenario_schema.effective_profile(draft.schema_json)
     return {
         "scenario_code": draft.scenario_code,
         "revision_no": draft.revision_no,
         "source": draft.source,
         "source_label": DRAFT_SOURCE_LABELS.get(draft.source, draft.source),
         "base_version_no": draft.base_version_no,
+        "schema_key": draft.schema_key,
+        "schema_version": draft.schema_version,
+        "schema_json": draft.schema_json,
         # 草稿的来源格式版本：页面据此说明这份配置按哪种格式导出。
         "profile_version": draft.profile_version,
         # 当前配置是否已生效：NULL 表示已生效；非空时页面显示“尚未生效 + 原因”。
@@ -547,9 +621,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
         "sheets": [
             {
                 "sheet_role": item.sheet_role,
-                "sheet_role_label": unified_profile.sheet_role_label(
-                    unified_profile.load_unified_profile(), item.sheet_role
-                ),
+                "sheet_role_label": unified_profile.sheet_role_label(profile, item.sheet_role),
                 "node_code": item.node_code,
                 "sort_no": item.sort_no,
             }
@@ -572,6 +644,7 @@ def _draft_rule_view(
     material_names: dict[str, str],
     field_map: dict[str, ScenarioDraftField],
     rule_names: dict[str, str],
+    rule_map: dict[str, ScenarioDraftRule],
 ) -> dict[str, Any]:
     definition = item.rule_json if isinstance(item.rule_json, dict) else {}
     parameters = definition.get("parameters") if isinstance(definition.get("parameters"), dict) else {}
@@ -589,6 +662,28 @@ def _draft_rule_view(
             }
         )
     applicability = definition.get("applicability") if isinstance(definition.get("applicability"), dict) else {}
+    material_keys = list(dict.fromkeys(str(key) for key in (definition.get("materials") or []) if str(key)))
+    if item.operator_code == "RISK_TRIGGER":
+        source_keys = list(dict.fromkeys([
+            *(definition.get("source_rule_keys") or []),
+            *([definition["source_rule_key"]] if definition.get("source_rule_key") else []),
+        ]))
+        for source_key in source_keys:
+            source = rule_map.get(source_key)
+            if source is None or not isinstance(source.rule_json, dict):
+                continue
+            source_definition = source.rule_json
+            for material_key in source_definition.get("materials") or []:
+                if material_key not in material_keys:
+                    material_keys.append(material_key)
+            for source_input in source_definition.get("inputs") or []:
+                material_key = source_input.get("material_key")
+                if material_key and material_key not in material_keys:
+                    material_keys.append(material_key)
+            for field_key in source_definition.get("outputs") or []:
+                field = field_map.get(field_key)
+                if field is not None and field.material_key not in material_keys:
+                    material_keys.append(field.material_key)
     return {
         "rule_key": item.rule_key,
         "name": item.name,
@@ -599,7 +694,7 @@ def _draft_rule_view(
         "inputs": inputs,
         "materials": [
             {"material_key": key, "material_name": material_names.get(key)}
-            for key in definition.get("materials", [])
+            for key in material_keys
         ],
         "outputs": [
             {"field_key": key, "field_name": field_map[key].name, "material_key": field_map[key].material_key}
@@ -730,6 +825,9 @@ def version_config_view(db: Session, scenario_code: str, version_no: int) -> dic
         "scenario_code": version.scenario_code,
         "scenario_name": version.scenario_name,
         "version_no": version.version_no,
+        "schema_key": version.schema_key,
+        "schema_version": version.schema_version,
+        "schema_json": version.schema_json,
         "source": version.source,
         "source_label": VERSION_SOURCE_LABELS.get(version.source, version.source),
         "change_summary": version.change_summary,
@@ -931,7 +1029,7 @@ def list_scenario_options(db: Session) -> list[dict[str, Any]]:
     ]
 
 
-def _default_draft_nodes(draft_id: int) -> list[ScenarioDraftNode]:
+def _default_draft_nodes(draft_id: int, schema: dict[str, Any]) -> list[ScenarioDraftNode]:
     """统一模板协议声明的标准节点集：每种能力类型一个实例。
 
     节点实例码直接用能力类型名（`MATERIAL_CHECK`、`DOCUMENT_PREPARE`……），顺序取协议
@@ -941,7 +1039,7 @@ def _default_draft_nodes(draft_id: int) -> list[ScenarioDraftNode]:
     这只是**预置的起点**，不是固定结构：预置后用户仍可增删节点、改实例码、改顺序与依赖
     （同一能力类型配多个实例也照旧支持）。本函数只在新建场景时调用一次，不覆盖已有配置。
     """
-    profile = unified_profile.load_unified_profile()
+    profile = scenario_schema.effective_profile(schema)
     rows: list[ScenarioDraftNode] = []
     for sequence_no, node in enumerate(profile["node_types"], start=1):
         node_type = node["node_type"]
@@ -967,6 +1065,7 @@ def create_scenario(db: Session, payload: dict[str, Any]) -> ScenarioTemplate:
     name = str(payload.get("scenario_name") or "").strip()
     if not name:
         raise BusinessError("SCENARIO_NAME_REQUIRED", "场景名称不能为空", status_code=400)
+    schema = scenario_schema.normalize_schema(payload.get("schema_json"))
     scenario_code = public_no("SCN")
     template = ScenarioTemplate(
         scenario_code=scenario_code,
@@ -975,15 +1074,26 @@ def create_scenario(db: Session, payload: dict[str, Any]) -> ScenarioTemplate:
         description=(str(payload.get("description")).strip() or None) if payload.get("description") else None,
         enabled=bool(payload.get("enabled", True)),
         latest_version_no=0,
+        schema_key=schema["schema_key"],
+        schema_version=schema["schema_version"],
+        schema_json=schema,
     )
     db.add(template)
     db.flush()
-    draft = ScenarioDraft(scenario_code=scenario_code, revision_no=0, source="FORM", base_version_no=None)
+    draft = ScenarioDraft(
+        scenario_code=scenario_code,
+        revision_no=0,
+        source="FORM",
+        base_version_no=None,
+        schema_key=schema["schema_key"],
+        schema_version=schema["schema_version"],
+        schema_json=schema,
+    )
     db.add(draft)
     db.flush()
     # 节点是流程的必填输入（编译时缺失即报错）。新场景直接带上协议声明的标准节点集：
     # 空着会让导入的「绑定节点」没有东西可选，用户得先把 9 个节点手工建一遍。
-    for row in _default_draft_nodes(draft.id):
+    for row in _default_draft_nodes(draft.id, schema):
         db.add(row)
     db.flush()
     # 新建场景是空配置，必然不能发布（没有材料位）。这里就写下真实的阻断原因，
@@ -1007,17 +1117,33 @@ def update_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) ->
 
     场景名称会进入下一次发布的版本。名称变化时锁定草稿并递增修订号，
     使旧的 expected_revision 不能把另一位管理员改过的名称发布出去。
-    配置完整时保存即生成生效版本；配置不完整时保留未生效状态。
+    保存只更新场景草稿与发布就绪状态；生成生效版本必须由管理员显式发布。
     """
     template = template_or_404(db, scenario_code, lock=True)
-    name_changed = False
+    config_changed = False
     if "scenario_name" in payload and payload["scenario_name"] is not None:
         name = str(payload["scenario_name"]).strip()
         if not name:
             raise BusinessError("SCENARIO_NAME_REQUIRED", "场景名称不能为空", status_code=400)
         if name != template.scenario_name:
             template.scenario_name = name
-            name_changed = True
+            config_changed = True
+    if "schema_json" in payload:
+        schema = scenario_schema.normalize_schema(payload["schema_json"])
+        current = scenario_schema.normalize_schema(template.schema_json)
+        if schema != current:
+            if (schema["schema_key"], schema["schema_version"]) == (
+                current["schema_key"], current["schema_version"]
+            ):
+                raise BusinessError(
+                    "SCENARIO_SCHEMA_VERSION_UNCHANGED",
+                    "场景字段映射已变化，必须修改 schema_key 或 schema_version",
+                    status_code=409,
+                )
+            template.schema_key = schema["schema_key"]
+            template.schema_version = schema["schema_version"]
+            template.schema_json = schema
+            config_changed = True
     if "category" in payload:
         category = payload.get("category")
         template.category = (str(category).strip() or None) if category is not None else None
@@ -1026,7 +1152,7 @@ def update_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) ->
         template.description = (str(description).strip() or None) if description is not None else None
     if "enabled" in payload and payload["enabled"] is not None:
         template.enabled = bool(payload["enabled"])
-    if name_changed:
+    if config_changed:
         draft = db.scalar(
             select(ScenarioDraft)
             .where(ScenarioDraft.scenario_code == template.scenario_code)
@@ -1040,6 +1166,9 @@ def update_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) ->
                 .where(ScenarioDraft.scenario_code == template.scenario_code)
                 .with_for_update()
             )
+        draft.schema_key = template.schema_key
+        draft.schema_version = template.schema_version
+        draft.schema_json = template.schema_json
         _bump_draft(draft)
         db.flush()
     record_operation(
@@ -1050,7 +1179,7 @@ def update_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) ->
         operation_type="UPDATE",
         detail={"scenario_code": scenario_code},
     )
-    if name_changed:
+    if config_changed:
         _commit_config_change(db, template, draft)
     else:
         db.commit()
@@ -1143,6 +1272,9 @@ def copy_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) -> S
         description=source.description,
         enabled=True,
         latest_version_no=0,
+        schema_key=source.schema_key,
+        schema_version=source.schema_version,
+        schema_json=source.schema_json,
     )
     db.add(template)
     db.flush()
@@ -1156,6 +1288,9 @@ def copy_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) -> S
         # 复制保留来源格式版本：复制出来的是同一份业务配置，不因复制换一种导出格式。
         profile_version=source_draft.profile_version,
         sync_error=source_draft.sync_error,
+        schema_key=source_draft.schema_key,
+        schema_version=source_draft.schema_version,
+        schema_json=source_draft.schema_json,
     )
     db.add(draft)
     db.flush()
@@ -1228,6 +1363,8 @@ def copy_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) -> S
                 ),
                 name=item.name,
                 value_type=item.value_type,
+                extraction_strategy=item.extraction_strategy,
+                structure_schema_json=item.structure_schema_json,
                 unit=item.unit,
                 currency=item.currency,
                 artifact_source=item.artifact_source,
@@ -1449,6 +1586,9 @@ def scenario_detail(db: Session, scenario_code: str) -> dict[str, Any]:
     ) or 0
     return {
         "scenario_code": template.scenario_code,
+        "schema_key": template.schema_key,
+        "schema_version": template.schema_version,
+        "schema_json": template.schema_json,
         "scenario_name": template.scenario_name,
         "category": template.category,
         "description": template.description,
@@ -1516,7 +1656,8 @@ def update_draft_disabled_source_row(
         raise BusinessError("DISABLED_SOURCE_ROW_NOT_FOUND", "停用来源行不存在", status_code=404)
     row = dict(rows[index])
     role = row["sheet_role"]
-    definition = unified_profile.sheet_definition(unified_profile.load_unified_profile(), role)
+    profile = scenario_schema.effective_profile(draft.schema_json)
+    definition = unified_profile.sheet_definition(profile, role)
     profile_columns = {column["key"]: column for column in definition["columns"]}
     stored_columns = {column["key"]: column for column in row["columns"]}
     if set(stored_columns) != set(profile_columns) or len(stored_columns) != len(row["columns"]):
@@ -1639,7 +1780,8 @@ def activate_disabled_source_row(
     nodes, sheets, materials, fields, _rules, sections = _draft_rows(db, draft.id)
     binding = next((sheet for sheet in sheets if sheet.sheet_role == role), None)
     node = next((item for item in nodes if binding is not None and item.node_code == binding.node_code), None)
-    definition = unified_profile.sheet_definition(unified_profile.load_unified_profile(), role)
+    profile = scenario_schema.effective_profile(draft.schema_json)
+    definition = unified_profile.sheet_definition(profile, role)
     if node is None or not node.enabled or node.node_type not in definition["node_types"]:
         raise BusinessError(
             "DISABLED_SOURCE_ROW_NODE_INVALID",
@@ -1688,6 +1830,7 @@ def activate_disabled_source_row(
         profile_version=draft.profile_version or "",
         material_by_code=material_by_code,
         field_by_code=field_by_code,
+        profile=profile,
     )
     if conversion.notes:
         raise BusinessError(
@@ -1746,6 +1889,8 @@ def activate_disabled_source_row(
             material_key=material_key,
             name=candidate["name"],
             value_type=candidate["value_type"],
+            extraction_strategy=field_strategy.default_extraction_strategy(candidate["value_type"]),
+            structure_schema_json=None,
             unit=candidate["unit"],
             currency=candidate["currency"],
             artifact_source=candidate["artifact_source"],
@@ -1973,7 +2118,7 @@ def _activate_disabled_rule_group_locked(
     nodes, sheets, materials, fields, stored_rules, _sections = _draft_rows(db, draft.id)
     node_by_code = {item.node_code: item for item in nodes}
     binding_by_role = {item.sheet_role: item for item in sheets}
-    profile = unified_profile.load_unified_profile()
+    profile = scenario_schema.effective_profile(draft.schema_json)
     profile_version = draft.profile_version or ""
     existing_risks = _draft_risks_by_code(stored_rules)
     selected_rows, selected_risks = _disabled_rule_group_rows(source_row, rows, existing_risks)
@@ -2057,6 +2202,7 @@ def _activate_disabled_rule_group_locked(
             material_by_code=material_by_code,
             field_by_code=field_by_code,
             field_catalog=field_catalog,
+            profile=profile,
         )
         if conversion.notes:
             raise BusinessError(
@@ -2265,6 +2411,7 @@ def _activate_disabled_calculation_locked(
         scenario_code=template.scenario_code,
         node_codes=node_codes,
         profile_version=draft.profile_version or "",
+        profile=scenario_schema.effective_profile(draft.schema_json),
     )
     activated = converted["calculations"]
     if len(activated) != 1 or activated[0]["rule_code"] != rule_code:
@@ -2559,7 +2706,7 @@ def _save_draft(
     object_name: str,
     detail: dict[str, Any],
 ) -> ScenarioDraft:
-    """记录配置修改；完整配置在同一事务内生成生效版本。"""
+    """记录配置修改并保存草稿；不自动生成场景版本。"""
     record_operation(
         db,
         object_type=OBJECT_SCENARIO,
@@ -2575,11 +2722,9 @@ def _save_draft(
 
 
 def _commit_config_change(db: Session, template: ScenarioTemplate, draft: ScenarioDraft) -> None:
-    """配置不完整时保存原因；完整时保存与版本发布共用一个事务。"""
-    if _refresh_publish_readiness(db, template, draft):
-        publish_draft(db, template.scenario_code, {"expected_revision": draft.revision_no})
-    else:
-        db.commit()
+    """刷新草稿的发布就绪状态并提交；发布只能走管理员显式发布入口。"""
+    _refresh_publish_readiness(db, template, draft)
+    db.commit()
 
 
 def _calculation_view_rows(raw: Any) -> list[dict[str, Any]]:
@@ -2640,7 +2785,7 @@ def assess_publish(
 
     acknowledged = list(acknowledged_capability_gaps or [])
     nodes, sheets, _materials, _fields, rules, _sections = _draft_rows(db, draft.id)
-    profile = unified_profile.load_unified_profile()
+    profile = scenario_schema.effective_profile(draft.schema_json)
     known_types = {str(item["node_type"]) for item in profile["node_types"]}
     node_by_code = {item.node_code: item for item in nodes}
     if not sheets:
@@ -2858,6 +3003,9 @@ def _publish_manifest(
         import_job_id=None,
         scenario_code=template.scenario_code,
         scenario_name=template.scenario_name,
+        schema_key=draft.schema_key,
+        schema_version=draft.schema_version,
+        schema_json=draft.schema_json,
         version_no=version_no,
         status="PUBLISHED",
         source=source,
@@ -3089,6 +3237,12 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
             status_code=400,
             details={"value_type": value_type, "allowed": sorted(DRAFT_VALUE_TYPES)},
         )
+    extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+        value_type=value_type,
+        extraction_strategy=payload.get("extraction_strategy"),
+        structure_schema=payload.get("structure_schema"),
+        field_name=name,
+    )
     source_ref = _normalized_source_ref(payload.get("source_ref"))
     _assert_field_source_ref_available(db, draft.id, source_ref)
     field_key = stable_key("fld", scenario_code, _item_ref())
@@ -3099,6 +3253,8 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
             material_key=material_key,
             name=name,
             value_type=value_type,
+            extraction_strategy=extraction_strategy,
+            structure_schema_json=structure_schema,
             unit=(str(payload["unit"]).strip() or None) if payload.get("unit") else None,
             currency=(str(payload["currency"]).strip() or None) if payload.get("currency") else None,
             artifact_source=(
@@ -3174,6 +3330,23 @@ def update_draft_field(db: Session, scenario_code: str, field_key: str, payload:
                 details={"value_type": value_type, "allowed": sorted(DRAFT_VALUE_TYPES)},
             )
         item.value_type = value_type
+    if "extraction_strategy" in payload or "structure_schema" in payload or "value_type" in payload:
+        extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+            value_type=item.value_type,
+            extraction_strategy=(
+                payload.get("extraction_strategy")
+                if "extraction_strategy" in payload
+                else item.extraction_strategy
+            ),
+            structure_schema=(
+                payload.get("structure_schema")
+                if "structure_schema" in payload
+                else item.structure_schema_json
+            ),
+            field_name=item.name,
+        )
+        item.extraction_strategy = extraction_strategy
+        item.structure_schema_json = structure_schema
     if "unit" in payload:
         unit = payload.get("unit")
         item.unit = (str(unit).strip() or None) if unit else None
@@ -3370,6 +3543,25 @@ def _normalize_rule_payload(
                 status_code=400,
                 details={"rule": name},
             )
+        if operator in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} or "DECIMAL" in input_types or "DECIMAL_CN" in input_types:
+            currencies = [
+                currency.canonical_currency(field_map[item["field_key"]].currency)
+                for item in inputs
+            ]
+            if any(not value for value in currencies):
+                raise BusinessError(
+                    "RULE_CURRENCY_MISSING",
+                    "金额比较字段必须全部声明币种，系统不默认人民币",
+                    status_code=400,
+                    details={"rule": name},
+                )
+            if len(set(currencies)) > 1:
+                raise BusinessError(
+                    "RULE_CURRENCY_MISMATCH",
+                    f"比较字段的币种不一致（{' / '.join(sorted(set(currencies)))}），系统不做汇率换算",
+                    status_code=400,
+                    details={"rule": name},
+                )
     if operator == "LLM_VALIDATE":
         if not inputs:
             raise BusinessError("RULE_INPUT_COUNT_INVALID", "智能判断必须选择至少一个输入字段", status_code=400, details={"rule": name})
@@ -3894,6 +4086,7 @@ def compile_draft_manifest(
         nodes=nodes,
         sheets=sheets,
         profile_version=draft.profile_version or unified_profile.UNIFIED_PROFILE_VERSION,
+        scenario_schema_config=draft.schema_json,
     )
     return compile_form_manifest(
         scene_code=template.scenario_code,

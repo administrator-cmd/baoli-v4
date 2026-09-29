@@ -1,24 +1,28 @@
 import logging
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import UploadFile
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..errors import BusinessError, exception_summary
 from .audit.interrupt import start_audit_interrupt
+from .audit.recovery import can_recover_failed_node
+from .audit.facts import _current_field_fact_pairs
 # 复核批次的划分与哈希口径只有一份（`services.audit.reviews`）：
 # 任务视图给出的本批、提交校验用的本批、检查点里的哈希必须是同一个集合，
 # 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
 from .audit.reviews import _current_review_batch, _review_hash
-from .audit.state import _node_codes_of_type, _single_node_code_of_type
+from .audit.state import _node_codes_of_type
 from ..models import (
     AuditPlan,
     AuditTask,
+    BackgroundOperation,
     DocumentUpload,
     Evidence,
     ManualReview,
@@ -28,6 +32,7 @@ from ..models import (
     ScenarioVersion,
     StoredArtifact,
     TaskDocument,
+    TaskFact,
     TaskFieldValue,
     WorkflowCheckpoint,
 )
@@ -36,13 +41,159 @@ from . import rag_service
 from .background_service import assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
 from ..domain.node_registry import legacy_node_type_of
+from ..domain.manifest import build_task_schema
+from ..domain import fact_snapshot, workflow_dag
 from ..integrations.http_services import list_material_types
 from .operation_types import OBJECT_AUDIT_TASK
+from .operation_log_service import record_operation
 from .task_lookup import scenario_or_404, task_or_404
 from .storage_service import DOCUMENT_EXTENSIONS, save_upload
 
 
 logger = logging.getLogger(__name__)
+
+
+def claim_task_command(
+    db: Session,
+    *,
+    object_type: str,
+    operation_type: str,
+    idempotency_key: str,
+    request: dict[str, Any],
+    request_hash: str,
+    task_no: str,
+) -> tuple[BackgroundOperation, bool]:
+    """Reserve the command before creating a task; the first checkpoint commit saves both."""
+    identity = (
+        BackgroundOperation.object_type == object_type,
+        BackgroundOperation.object_no == operation_type,
+        BackgroundOperation.operation_type == operation_type,
+        BackgroundOperation.idempotency_key == idempotency_key,
+    )
+
+    def existing_command() -> BackgroundOperation | None:
+        return db.scalar(select(BackgroundOperation).where(*identity))
+
+    def checked(command: BackgroundOperation) -> tuple[BackgroundOperation, bool]:
+        if command.request_hash != request_hash:
+            raise BusinessError(
+                "OPERATION_IDEMPOTENCY_CONFLICT",
+                "同一幂等标识已用于不同的请求内容，拒绝复用已有操作",
+                status_code=409,
+                details={"operation_no": command.operation_no},
+            )
+        return command, True
+
+    existing = existing_command()
+    if existing is not None:
+        return checked(existing)
+    command = BackgroundOperation(
+        operation_no=public_no("OP"),
+        object_type=object_type,
+        # The operation_log key is global within a command type, not per plan/task.
+        object_no=operation_type,
+        operation_type=operation_type,
+        idempotency_key=idempotency_key,
+        status="PENDING",
+        phase="COMMAND_ACCEPTED",
+        request_hash=request_hash,
+        request_json=request,
+        result_json={"task_no": task_no},
+    )
+    db.add(command)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = existing_command()
+        if existing is None:
+            raise
+        return checked(existing)
+    return command, False
+
+
+def task_of_command(db: Session, command: BackgroundOperation) -> AuditTask:
+    detail = command.result_json if isinstance(command.result_json, dict) else {}
+    task_no = detail.get("task_no")
+    task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no)) if task_no else None
+    if task is None:
+        raise BusinessError(
+            "TASK_COMMAND_TASK_MISSING",
+            "任务命令已提交，但关联任务不存在，命令与任务记录不一致",
+            status_code=500,
+            details={"operation_no": command.operation_no, "task_no": task_no},
+        )
+    return task
+
+
+def finish_task_command(
+    db: Session,
+    command: BackgroundOperation,
+    *,
+    object_no: str,
+    object_name: str,
+    detail: dict[str, Any],
+) -> bool:
+    """Complete the command and append its immutable audit log in one transaction."""
+    locked = db.scalar(
+        select(BackgroundOperation).where(BackgroundOperation.id == command.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if locked is None:
+        raise BusinessError("TASK_COMMAND_MISSING", "任务命令记录不存在", status_code=500)
+    if locked.status == "SUCCEEDED":
+        return True
+    if locked.status != "PENDING":
+        raise BusinessError("TASK_COMMAND_FAILED", "任务等待点初始化失败，不能返回创建成功", status_code=409)
+    record_operation(
+        db,
+        object_type=locked.object_type,
+        object_no=object_no,
+        object_name=object_name,
+        operation_type=locked.operation_type,
+        detail=detail,
+        idempotency_key=locked.idempotency_key,
+        request_hash=locked.request_hash,
+    )
+    locked.status = "SUCCEEDED"
+    locked.phase = "INTERRUPT_WAITING"
+    locked.finished_at = datetime.now(UTC)
+    db.commit()
+    return False
+
+
+def record_failed_task_command(
+    db: Session,
+    command: BackgroundOperation,
+    *,
+    object_no: str,
+    object_name: str,
+    detail: dict[str, Any],
+) -> None:
+    """Append the original failure once, including after a crash before logging it."""
+    locked = db.scalar(
+        select(BackgroundOperation).where(BackgroundOperation.id == command.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if locked is None or locked.status != "FAILED":
+        raise BusinessError("TASK_COMMAND_STATE_INVALID", "任务命令尚未处于失败终态", status_code=500)
+    if locked.phase == "FAILURE_LOGGED":
+        return
+    record_operation(
+        db,
+        object_type=locked.object_type,
+        object_no=object_no,
+        object_name=object_name,
+        operation_type=locked.operation_type,
+        detail=detail,
+        idempotency_key=locked.idempotency_key,
+        request_hash=locked.request_hash,
+        result="FAILED",
+        failure_code=locked.failure_code,
+        failure_message=locked.failure_message,
+    )
+    locked.phase = "FAILURE_LOGGED"
+    db.commit()
 
 
 def _verified_material_type(declared: str) -> str:
@@ -218,6 +369,9 @@ def create_task_from_plan(
             status_code=409,
             details={"plan_code": plan.plan_code},
         )
+    # 旧方案的范围可能早于节点停用规则保存：只校验既有选择仍可执行，
+    # 不重新计算或改写用户已确认的方案范围。
+    build_task_schema(manifest, scope["enabled_rule_keys"], allow_empty=True)
     schema["scenario_code"] = scenario.scenario_code
     schema["scenario_version_no"] = scenario.version_no
     # 方案身份与范围指纹随任务冻结：任务详情与幂等重放都读它，
@@ -229,14 +383,18 @@ def create_task_from_plan(
     schema["selected_sheets"] = [dict(item) for item in manifest.get("selected_sheets") or []]
     nodes = list(manifest.get("nodes") or [])
     if not nodes:
-        # `min()` 对空序列会抛 ValueError，那不是业务错误；这里显式报出业务原因。
         raise BusinessError(
             "SCENARIO_NODE_REQUIRED",
             "该场景版本没有配置任何节点，不能创建任务：请先在场景配置里建立节点并重新发布",
             status_code=409,
             details={"scenario_code": scenario.scenario_code, "version_no": scenario.version_no},
         )
-    first_node = min(nodes, key=lambda item: item["sequence_no"])
+    first_ready = workflow_dag.ready_node(workflow_dag.plans_of(manifest), completed=set())
+    if first_ready is None:
+        raise BusinessError("SCENARIO_NODE_NOT_READY", "该场景没有可执行的起始节点", status_code=409)
+    ordered_nodes = sorted(nodes, key=lambda item: item["sequence_no"])
+    first_node = next(item for item in ordered_nodes if item["node_code"] == first_ready.node_instance_code)
+    first_node_index = ordered_nodes.index(first_node)
     task = AuditTask(
         task_no=task_no or public_no("TASK"),
         scenario_version_id=scenario.id,
@@ -249,7 +407,7 @@ def create_task_from_plan(
         manifest_json=deepcopy(manifest),
         task_schema_json=schema,
         checkpoint_json={
-            "node_index": 0,
+            "node_index": first_node_index,
             "current_node": first_node["node_code"],
             "phase": "AWAITING_CONFIRMATION",
         },
@@ -271,7 +429,14 @@ def create_task_from_plan(
     return task
 
 
-def copy_task(db: Session, task_no: str, *, task_name: str) -> AuditTask:
+def copy_task(
+    db: Session,
+    task_no: str,
+    *,
+    task_name: str,
+    new_task_no: str | None = None,
+    creation_operation_id: int | None = None,
+) -> AuditTask:
     """按源任务所属方案的**当前范围**重新创建任务。
 
     明确不是「复制原任务的执行快照」：复制出来的是一个全新的任务，它冻结的是
@@ -301,9 +466,9 @@ def copy_task(db: Session, task_no: str, *, task_name: str) -> AuditTask:
             status_code=409,
             details={"plan_code": plan.plan_code},
         )
-    created = create_task_from_plan(db, plan, task_name=task_name, remark=source.remark)
+    created = create_task_from_plan(db, plan, task_name=task_name, remark=source.remark, task_no=new_task_no)
     # 与新建任务同一口径：任务与等待点都成功后，才记一条成功操作日志。
-    start_audit_interrupt(db, created)
+    start_audit_interrupt(db, created, creation_operation_id=creation_operation_id)
     db.refresh(created)
     return created
 
@@ -319,7 +484,7 @@ def _invalidate_for_input_change(
     """任务输入变化（替换 / 首次补传 / 移除当前文件）的统一失效流程。
 
     受影响的处理产物、字段事实、后续结果与报告一起失效；旧版本事实保留可追溯。
-    失效通过“节点执行批次 + current_upload_id 绑定”表达，旧版本事实本身保留，
+    失效通过“节点执行批次 + current_upload_id 绑定 + 统一事实当前标记”表达，旧版本事实本身保留，
     因此不覆盖原始字段值和原始规则结论，历史仍能查到当时抽到了什么、判定了什么。
     调用方负责更新材料位指针，并在完成后重新建立审核等待点。
     """
@@ -339,7 +504,7 @@ def _invalidate_for_input_change(
         .select_from(TaskFieldValue)
         .where(
             TaskFieldValue.audit_task_id == task.id,
-            TaskFieldValue.document_upload_id == previous_upload_id,
+            TaskFieldValue.is_current.is_(True),
         )
     ) or 0
     affected_rule_results = db.scalar(
@@ -352,6 +517,11 @@ def _invalidate_for_input_change(
         select(func.count())
         .select_from(NodeExecution)
         .where(NodeExecution.audit_task_id == task.id, NodeExecution.status != "INVALIDATED")
+    ) or 0
+    invalidated_task_facts = db.scalar(
+        select(func.count())
+        .select_from(TaskFact)
+        .where(TaskFact.audit_task_id == task.id, TaskFact.is_current.is_(True))
     ) or 0
     db.execute(
         update(StoredArtifact)
@@ -384,36 +554,51 @@ def _invalidate_for_input_change(
         .where(NodeExecution.audit_task_id == task.id)
         .values(status="INVALIDATED")
     )
-    # 材料变化后任务退回材料检查节点：节点实例码由用户配置，按**能力类型**解析，
-    # 不写死能力类型当实例码（用户把实例码改成别的值时写死会一条都找不到）。
-    material_check_code = _single_node_code_of_type(
-        manifest, "MATERIAL_CHECK", purpose="材料变化后的退回节点"
-    )
-    material_check_index = next(
-        index
-        for index, item in enumerate(
-            sorted(manifest["nodes"], key=lambda row: row["sequence_no"])
+    # 当前实现会让全部节点和全部统一事实失效并从 DAG 起点重跑，因此候选层也必须
+    # 按同一范围整体退出当前位。只撤销被替换材料会留下“候选仍当前、TaskFact 已失效”
+    # 的半套事实，任务详情与规则输入配对时会明确报错。
+    db.execute(
+        update(TaskFieldValue)
+        .where(
+            TaskFieldValue.audit_task_id == task.id,
+            TaskFieldValue.is_current.is_(True),
         )
-        if item["node_code"] == material_check_code
+        .values(is_current=False)
     )
-    task.current_node = material_check_code
+    # 所有节点执行都已失效，抽取与派生事实也不能继续作为后续节点的当前输入。
+    db.execute(
+        update(TaskFact)
+        .where(TaskFact.audit_task_id == task.id, TaskFact.is_current.is_(True))
+        .values(is_current=False)
+    )
+    # 全部有效执行已失效，从 DAG 的首个就绪节点重新开始；场景可以不配置材料检查。
+    first_ready = workflow_dag.ready_node(workflow_dag.plans_of(manifest), completed=set())
+    if first_ready is None:
+        raise BusinessError("AUDIT_WORKFLOW_NO_START", "材料变化后流程没有可执行的起始节点", status_code=500)
+    first_node_code = first_ready.node_instance_code
+    first_node_index = next(
+        index for index, item in enumerate(sorted(manifest["nodes"], key=lambda row: row["sequence_no"]))
+        if item["node_code"] == first_node_code
+    )
+    task.current_node = first_node_code
     task.status = "READY"
     task.pending_review_hash = None
     task.checkpoint_json = {
-        "node_index": material_check_index,
-        "current_node": material_check_code,
+        "node_index": first_node_index,
+        "current_node": first_node_code,
         "phase": "AWAITING_CONFIRMATION",
     }
     # 当前有效事实与结果已失效：必须递增输入修订号，使携带旧修订的命令被明确拒绝。
     task.input_revision = (task.input_revision or 0) + 1
     logger.info(
         "材料位%s使影响范围内的结果失效 task_no=%s material_name=%s 受影响产物=%s 旧版本字段事实=%s "
-        "失效规则结果=%s 失效节点执行=%s 失效待复核项=%s 新输入修订=%s",
+        "失效统一事实=%s 失效规则结果=%s 失效节点执行=%s 失效待复核项=%s 新输入修订=%s",
         action_label,
         task.task_no,
         document.material_name,
         affected_artifacts,
         superseded_field_values,
+        invalidated_task_facts,
         affected_rule_results,
         affected_executions,
         invalidated_reviews,
@@ -425,12 +610,13 @@ def _invalidate_for_input_change(
         "invalidated_rule_results": int(affected_rule_results),
         "invalidated_node_executions": int(affected_executions),
         "invalidated_reviews": int(invalidated_reviews or 0),
-        "reset_to_node": material_check_code,
+        "reset_to_node": first_node_code,
         "description": (
             f"{action_label}「{document.material_name}」的当前文件：{affected_artifacts} 个处理产物、"
             f"{superseded_field_values} 条旧版本字段事实不再进入当前结果，"
+            f"{invalidated_task_facts} 条统一事实已失效，"
             f"{affected_rule_results} 条规则结果与 {affected_executions} 个节点执行已失效，"
-            f"任务回到材料检查节点等待确认。历史事实仍可追溯。"
+            f"任务回到起始节点等待确认。历史事实仍可追溯。"
         ),
     }
 
@@ -484,12 +670,14 @@ async def upload_document(
         select(func.count()).select_from(NodeExecution).where(NodeExecution.audit_task_id == task.id)
     ) or 0
     # 输入变化不止“替换”：首次补传此前缺失的当前文件，同样改变任务已经依据的结论。
-    # 只要任务已越过材料检查（移动过节点或执行过任何节点），补传就必须与替换走同一套失效流程。
-    # 材料检查节点按**能力类型**解析实例码：写死能力类型当实例码会在用户改过实例码后失效。
+    # 只要任务已越过起始节点（移动过节点或执行过任何节点），补传就必须与替换走同一套失效流程。
     task_manifest = task.manifest_json
+    first_ready = workflow_dag.ready_node(workflow_dag.plans_of(task_manifest), completed=set())
+    if first_ready is None:
+        raise BusinessError("AUDIT_WORKFLOW_NO_START", "任务流程没有可执行的起始节点", status_code=500)
     input_changed = (
         bool(previous_upload_id)
-        or task.current_node not in _node_codes_of_type(task_manifest, "MATERIAL_CHECK")
+        or task.current_node != first_ready.node_instance_code
         or execution_count > 0
     )
     # 类型核对放在所有任务侧校验之后、写文件之前：请求本身不合法时不必打扰 8018，
@@ -524,7 +712,7 @@ async def upload_document(
     )
     db.add(record)
     db.flush()
-    # 首次上传且任务尚未越过材料检查时没有失效范围；其余情况给出真实影响范围供页面展示。
+    # 首次上传且任务尚未越过起始节点时没有失效范围；其余情况给出真实影响范围供页面展示。
     impact: dict[str, Any] | None = None
     if input_changed:
         # 补传/替换文件是明确的新版本输入：受影响的处理产物、字段事实、后续结果与报告一起失效。
@@ -599,6 +787,52 @@ def remove_current_document_file(
     return document, impact
 
 
+def external_artifact_status_view(
+    db: Session, task_no: str, document_no: str, artifact_type: str
+) -> dict[str, Any]:
+    """查询当前上传版本的 8018/8010 产物状态，不触发外部请求。"""
+    if artifact_type not in {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE"}:
+        raise BusinessError("ARTIFACT_TYPE_INVALID", "仅支持查询 8018 或 8010 文件处理产物", status_code=400)
+    task = task_or_404(db, task_no)
+    document = db.scalar(
+        select(TaskDocument).where(
+            TaskDocument.audit_task_id == task.id,
+            TaskDocument.document_no == document_no,
+        )
+    )
+    if document is None:
+        raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
+    base = {
+        "document_no": document_no,
+        "artifact_type": artifact_type,
+        "artifact_no": None,
+    }
+    if document.current_upload_id is None:
+        return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件"}
+    upload = db.get(DocumentUpload, document.current_upload_id)
+    if upload is None:
+        raise BusinessError("TASK_DOCUMENT_UPLOAD_MISSING", "当前上传文件不存在", status_code=500)
+    artifact = db.scalar(
+        select(StoredArtifact).where(
+            StoredArtifact.document_upload_id == upload.id,
+            StoredArtifact.artifact_type == artifact_type,
+            StoredArtifact.upload_sha256 == upload.sha256,
+        )
+    )
+    if artifact is None:
+        return {**base, "status": "NOT_SUBMITTED", "message": "当前上传文件尚无该处理产物"}
+    return {
+        **base,
+        "artifact_no": artifact.artifact_no,
+        "status": artifact.status,
+        "message": (
+            "处理结果未知，需人工核对"
+            if artifact.status == "PROCESSING"
+            else "处理产物已就绪" if artifact.status == "READY" else f"处理产物状态：{artifact.status}"
+        ),
+    }
+
+
 def ocr_status_view(db: Session, task_no: str, document_no: str) -> dict[str, Any]:
     """当前上传文件对应的 OCR 产物只读状态。
 
@@ -654,7 +888,7 @@ def ocr_status_view(db: Session, task_no: str, document_no: str) -> dict[str, An
         "status": artifact.status,
         "job_id": job_id if isinstance(job_id, str) else None,
         "deadline_at": deadline_at,
-        "submit_attempts": attempts if isinstance(attempts, int) else None,
+        "submit_attempts": len(attempts) if isinstance(attempts, list) else attempts if isinstance(attempts, int) else None,
         "message": message,
     }
 
@@ -778,8 +1012,14 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         if isinstance(document_prepare_result, dict)
         else {}
     )
-    evidence_rows = db.scalars(select(Evidence).where(Evidence.audit_task_id == task.id)).all()
+    evidence_rows = db.scalars(
+        select(Evidence).where(Evidence.audit_task_id == task.id).order_by(Evidence.id)
+    ).all()
     evidence_by_id = {item.id: item for item in evidence_rows}
+    field_evidence_by_fact: dict[int, list[Evidence]] = {}
+    for evidence_row in evidence_rows:
+        if evidence_row.field_value_id is not None and evidence_row.rule_result_id is None:
+            field_evidence_by_fact.setdefault(evidence_row.field_value_id, []).append(evidence_row)
     field_facts = db.scalars(
         select(TaskFieldValue)
         .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
@@ -794,8 +1034,9 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         )
         .order_by(TaskFieldValue.id)
     ).all()
-    # 规则结果只取当前有效执行批次：非 INVALIDATED 口径之上，再按节点取最大执行的批次，
-    # 排除同一节点被重跑后遗留的旧批次结果。盲区：同一节点若有两个都未失效的批次，只展示较新的一批。
+    # 规则结果只取当前有效执行批次：非 INVALIDATED 口径之上，再按节点取最新批次。
+    # 人工复核节点允许形成多批成功执行记录；任务当前页展示最新批是明确的页面口径，
+    # 历史批次仍保留在执行记录中追溯。
     current_execution_ids = {item.id for item in executions.values()}
     rule_results = (
         db.scalars(
@@ -853,9 +1094,10 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     }
     # 当前事实按字段+材料取 is_current 版本；fields_by_id 保留该上传下的全部修订，
     # 使仍挂在历史修订上的待复核项不会因为查不到事实而报错。
-    current_field_facts = {
-        (item.field_key, item.material_key): item for item in field_facts if item.is_current
-    }
+    current_field_pairs = _current_field_fact_pairs(db, task)
+    current_field_facts = {key: pair[0] for key, pair in current_field_pairs.items()}
+    current_task_facts = {key: pair[1] for key, pair in current_field_pairs.items()}
+    current_fact_status_by_field = {key: pair[1].status for key, pair in current_field_pairs.items()}
     fields_by_id = {item.id: item for item in field_facts}
     rules_by_id = {item.id: item for item in rule_results}
     documents_by_id = {item.id: item for item in documents}
@@ -891,15 +1133,44 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     extraction_finished = any(
         executions[code].status == "SUCCEEDED" for code in extraction_codes if code in executions
     )
+    # 新版 manifest 把每个字段的抽取归属冻结在节点契约里。字段状态必须看自己的
+    # 归属节点；只要任意一个抽取节点完成就把所有尚未抽取字段标成 NOT_EXECUTED，
+    # 会把后续节点尚未开始的字段提前显示成已执行失败。
+    extraction_owner_by_field: dict[str, str] = {}
+    for node in manifest.get("nodes") or []:
+        if str(node.get("node_type") or node.get("node_code")) != "FIELD_EXTRACTION":
+            continue
+        contract = node.get("execution_contract")
+        if not isinstance(contract, dict) or not isinstance(contract.get("field_keys"), list):
+            continue
+        for field_key in contract["field_keys"]:
+            extraction_owner_by_field[str(field_key)] = str(node["node_code"])
     field_view = []
     field_correction_candidates = []
     for field in task.task_schema_json["fields"]:
-        fact = current_field_facts.get((field["field_key"], field["material_key"]))
+        field_identity = (field["field_key"], field["material_key"])
+        fact = current_field_facts.get(field_identity)
+        task_fact = current_task_facts.get(field_identity)
         fact_is_current = fact is not None and fact.status != "NOT_EXECUTED"
         document = documents_by_material_key[field["material_key"]]
         evidence = evidence_by_id.get(fact.evidence_id) if fact_is_current and fact.evidence_id in evidence_by_id else None
-        status = fact.status if fact else ("NOT_EXECUTED" if extraction_finished else "PENDING")
-        normalized_value = fact.normalized_value_json if fact_is_current else None
+        field_evidences = field_evidence_by_fact.get(fact.id, []) if fact_is_current and fact else []
+        owner_code = extraction_owner_by_field.get(field["field_key"])
+        owner_execution = executions.get(owner_code) if owner_code else None
+        owner_finished = (
+            owner_execution is not None and owner_execution.status == "SUCCEEDED"
+            if owner_code
+            else extraction_finished
+        )
+        status = task_fact.status if task_fact else ("NOT_EXECUTED" if owner_finished else "PENDING")
+        # 当前事实行会保留待复核候选，供人工查看；任务字段结果里的“标准化结果”
+        # 只展示可执行事实，避免把 EVIDENCE_UNCLEAR / NORMALIZATION_FAILED 的
+        # 候选误显示成已经生效的值。
+        normalized_value = (
+            fact_snapshot.task_fact_value(task_fact, field_definition=field)
+            if fact_is_current and task_fact is not None and task_fact.status in {"PRESENT", "REVIEWED"}
+            else None
+        )
         field_view.append(
             {
                 # 字段键与材料键是主动纠错的定位依据；页面据此对某个字段事实发起纠错。
@@ -912,6 +1183,14 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 "normalized_value": normalized_value,
                 "evidence_no": evidence.evidence_no if evidence else None,
                 "evidence_locator_status": evidence.locator_status if evidence else None,
+                "evidences": [
+                    {
+                        "evidence_no": item.evidence_no,
+                        "field_path": item.field_path,
+                        "locator_status": item.locator_status,
+                    }
+                    for item in field_evidences
+                ],
                 # 材料未上传时字段属于“缺输入”；不适用与否由规则自己的适用条件决定。
                 "material_uploaded": document.current_upload_id is not None,
                 "material_required": document.required,
@@ -1043,6 +1322,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 rules_by_id=rules_by_id,
                 evidence_rows=evidence_rows,
                 evidence_by_id=evidence_by_id,
+                current_fact_status_by_field=current_fact_status_by_field,
             )
             for item in reviews
         ],
@@ -1059,6 +1339,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 rules_by_id=rules_by_id,
                 evidence_rows=evidence_rows,
                 evidence_by_id=evidence_by_id,
+                current_fact_status_by_field=current_fact_status_by_field,
             )
             for item in all_pending
         ],
@@ -1076,6 +1357,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         },
         "pending_review_hash": batch_hash,
         "pending_review_count": len(reviews),
+        "can_recover_failed_node": can_recover_failed_node(db, task),
         "latest_operation": operation_view(latest) if (latest := latest_operation(db, OBJECT_AUDIT_TASK, task.task_no)) else None,
     }
 
@@ -1091,6 +1373,7 @@ def _pending_review_view(
     rules_by_id: dict[int, RuleResult],
     evidence_rows: list[Evidence],
     evidence_by_id: dict[int, Evidence],
+    current_fact_status_by_field: dict[tuple[str, str], str],
 ) -> dict[str, Any]:
     """复核表单只暴露业务上下文，不返回内部标识符。"""
     material_name: str | None = None
@@ -1119,7 +1402,7 @@ def _pending_review_view(
             raise BusinessError("REVIEW_FIELD_SCHEMA_MISSING", "复核字段不在任务字段清单中", status_code=500)
         field_name = field["name"]
         material_name = document.material_name
-        effective_status = fact.status
+        effective_status = current_fact_status_by_field.get((fact.field_key, fact.material_key))
         evidence = evidence_by_id.get(fact.evidence_id) if fact.evidence_id is not None else None
         evidence_quote = evidence.quote_text if evidence else None
         evidence_no = evidence.evidence_no if evidence else None
@@ -1143,6 +1426,14 @@ def _pending_review_view(
         "raw_value": judgment.get("raw_value"),
         "normalized_value": judgment.get("normalized_value"),
         "evidence": judgment.get("evidence"),
+        "evidences": judgment.get("evidences") if isinstance(judgment.get("evidences"), list) else [],
+        # 人工复核必须看到系统当时使用的完整业务依据。它们已经冻结在
+        # system_judgment_json 中，这里只做投影，不重新检索或重算。
+        "retrieval": judgment.get("retrieval"),
+        "seal_records": judgment.get("seal_records") if isinstance(judgment.get("seal_records"), list) else [],
+        "subject_query": judgment.get("subject_query"),
+        "service_code": judgment.get("service_code"),
+        "service_result": judgment.get("service_result"),
     }
     return {
         "review_no": review.review_no,

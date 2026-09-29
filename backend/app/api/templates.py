@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..domain import unified_profile
+from ..domain import scenario_schema, unified_profile
 from ..errors import BusinessError
 from ..models import ScenarioDraft, ScenarioDraftSheet
 from ..services.scenario_admin_service import template_or_404
@@ -33,6 +33,9 @@ def template_catalog(request: Request) -> dict:
         "request_id": request.state.request_id,
         "profile_version": profile.get("profile_version"),
         "display_name": profile.get("display_name"),
+        # 这里没有场景上下文；不要把统一协议版本冒充成场景 Schema 身份。
+        "scenario_schema_key": None,
+        "scenario_schema_version": None,
         "download_path": "/rulebook-templates/download",
         "download_requires_scenario": True,
         **unified_profile.profile_summary(profile),
@@ -61,8 +64,9 @@ def download_template(
     一次下载就是**一份 base Excel**：同一份模板里的表可以一起下载，导入时按 Sheet
     独立转换，不存在「只能属于一个业务族」的限制。
     """
-    profile = unified_profile.load_unified_profile()
     template = template_or_404(db, scenario_code)
+    schema = scenario_schema.normalize_schema(template.schema_json)
+    profile = scenario_schema.effective_profile(schema)
     bound = _confirmed_sheet_roles(db, scenario_code, profile)
     if bound:
         selected = bound
@@ -76,6 +80,7 @@ def download_template(
         scene_name=scene_name,
         sheet_roles=selected,
         download_only=download_only,
+        scenario_schema_identity=scenario_schema.identity(schema),
     )
     filename = f"{scene_name}-规则库模板.xlsx"
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
@@ -87,17 +92,33 @@ def download_template(
 
 
 @router.get("/sheets")
-def list_sheets(request: Request) -> dict:
+def list_sheets(
+    request: Request,
+    scenario_code: str | None = Query(default=None, min_length=2, max_length=80),
+    db: Session = Depends(get_db),
+) -> dict:
     """统一模板协议声明的 Sheet 与列协议。
 
     页面据此渲染「Sheet 绑定」步骤：每张 Sheet 列出它可以绑定的节点类型与列定义。
     只返回声明，不含任何示例数据。
     """
-    profile = unified_profile.load_unified_profile()
+    # 保持旧调用方的全局目录响应；显式传入场景时才叠加该场景的列别名和 Sheet 名。
+    scenario_identity: dict[str, str] | None = None
+    if scenario_code:
+        scenario = template_or_404(db, scenario_code)
+        schema = scenario_schema.normalize_schema(scenario.schema_json)
+        scenario_identity = scenario_schema.identity(schema)
+        profile = scenario_schema.effective_profile(schema)
+    else:
+        profile = unified_profile.load_unified_profile()
     return {
         "request_id": request.state.request_id,
         "profile_version": profile.get("profile_version"),
         "display_name": profile.get("display_name"),
+        "scenario_schema_key": scenario_identity["schema_key"] if scenario_identity else None,
+        "scenario_schema_version": scenario_identity["schema_version"] if scenario_identity else None,
+        # 保留旧字段：schema_version 在这里表示统一执行协议自身的版本，
+        # 场景 Schema 版本使用上面的 scenario_schema_version。
         "schema_version": profile.get("schema_version"),
         "instruction_sheet": unified_profile.instruction_sheet_name(profile),
         "node_types": [
@@ -116,6 +137,7 @@ def list_sheets(request: Request) -> dict:
                 "aliases": list(sheet.get("aliases", [])),
                 "header_signature": list(sheet.get("header_signature", [])),
                 "node_types": list(sheet["node_types"]),
+                "column_count": len(sheet["columns"]),
                 "columns": [
                     {
                         "key": column["key"],
@@ -125,6 +147,7 @@ def list_sheets(request: Request) -> dict:
                         "data_type": column.get("data_type"),
                         "allowed_values": list(column.get("allowed_values", [])),
                         "value_labels": dict(column.get("value_labels", {})),
+                        "aliases": list(column.get("aliases", [])),
                     }
                     for column in sheet["columns"]
                 ],

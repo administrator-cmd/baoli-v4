@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from ..domain import quality_judgement
+from ..domain.currency import canonical_currency
 from ..errors import BusinessError
 
 
@@ -55,8 +56,18 @@ def _comparison(
 #   normalized_value：服务端规范化后的值
 #   value_type：字段类型（DECIMAL / DATE / STRING / CLAUSE / BOOLEAN）
 #   unit：字段声明的单位；为空表示未声明，不表示与另一方一致
+#   currency：字段声明的币种；为空表示未声明，不表示与另一方一致
 #   material_state：材料位当前状态（PREPARED / TYPE_REVIEW / TYPE_REJECTED / ONLY_UPLOADED）
-INPUT_KEYS = ("field_key", "material_key", "status", "normalized_value", "value_type", "unit", "material_state")
+INPUT_KEYS = (
+    "field_key",
+    "material_key",
+    "status",
+    "normalized_value",
+    "value_type",
+    "unit",
+    "currency",
+    "material_state",
+)
 
 # 材料类型不可用：依赖该材料的检查缺少有效依据。两种来源必须分开：
 #   TYPE_REVIEW   = 类型待复核，**尚未由人定案**；
@@ -159,20 +170,42 @@ def _unit_gap(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
     单位或币种不一致时系统不做换算，也不因为数值相等就通过；
     只有一方声明单位时同样无法确认口径，按证据不足处理。
     """
-    units = [(item.get("unit") or "").strip() for item in inputs]
-    declared = [unit for unit in units if unit]
-    if not declared:
-        return None
-    if len(set(declared)) > 1:
-        return {
-            "status": "EVIDENCE_INSUFFICIENT",
-            "message": f"比较双方口径不一致（{' / '.join(units)}），系统不做单位或币种换算，规则未能判断",
-        }
-    if len(declared) != len(units):
-        return {
-            "status": "EVIDENCE_INSUFFICIENT",
-            "message": f"只有部分字段声明了单位（{' / '.join(units)}），口径无法确认，规则未能判断",
-        }
+    dimensions = (
+        ("单位", "unit"),
+        ("币种", "currency"),
+    )
+    for label, key in dimensions:
+        values = [
+            canonical_currency(item.get(key)) if key == "currency" else (item.get(key) or "").strip()
+            for item in inputs
+        ]
+        declared = [value for value in values if value]
+        if key == "currency" and any(
+            str(item.get("value_type") or "").upper() in {"DECIMAL", "DECIMAL_CN"}
+            for item in inputs
+        ) and not declared:
+            return {
+                "status": "EVIDENCE_INSUFFICIENT",
+                "message": "金额字段没有声明币种，系统不默认人民币，规则未能判断",
+            }
+        if not declared:
+            continue
+        if len(set(declared)) > 1:
+            return {
+                "status": "EVIDENCE_INSUFFICIENT",
+                "message": (
+                    f"比较双方{label}口径不一致（{' / '.join(values)}），"
+                    "系统不做单位或币种换算，规则未能判断"
+                ),
+            }
+        if len(declared) != len(values):
+            return {
+                "status": "EVIDENCE_INSUFFICIENT",
+                "message": (
+                    f"只有部分字段声明了{label}（{' / '.join(values)}），"
+                    "口径无法确认，规则未能判断"
+                ),
+            }
     return None
 
 

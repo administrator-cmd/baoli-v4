@@ -19,15 +19,15 @@
   预置给出默认节点集，之后的节点实例、顺序、依赖与 Sheet→节点绑定都由用户在
   场景配置里确认后落库（`scenario_draft_node` 与 `import_sheet.bound_node_code`）。
 
-一份 base Excel
----------------
-「只有一份协议」说的是**系统只有一份模板**：一次下载、一次上传、一次导入都针对它。
-场景（合同审查 / 财报分析）的差异体现在「选了哪些 Sheet、绑了哪些节点、填了什么内容」上，
-**不体现在表结构上**——不存在「合同版表」与「财报版表」，因此也没有业务族（family）这一层。
-同一张「01_材料位」表，合同场景填它的材料位，财报场景填它自己的。
+场景 Schema
+-----------
+统一 Profile 是内部执行协议的稳定底座。场景通过 `scenario_schema` 声明自己的
+Schema 身份、Sheet 展示名、Sheet 别名和列别名；模板生成与导入读取该场景的有效
+Profile。场景选择使用哪些 Sheet、各自绑定哪个节点实例，并填写业务内容。
+当前适配器尚不支持新增任意业务列或改变内部字段类型，未知配置会明确报错。
 
-Sheet 名由协议固定，用户不得改名：角色由 Sheet 名直接确定，绑定步骤只用来指定
-「这张表绑到哪个节点实例」，不再需要猜这张表是什么。
+Sheet 角色由场景配置与工作簿表头给出建议，绑定步骤由用户确认并保存；
+不能仅凭 Sheet 名将其作为已经确认的业务归属。
 
 每张表声明一个**编号前缀**（`code_prefix`）。填写编号时，前缀让跨表引用无歧义；填写名称时，
 系统只在当前规则库内做精确匹配，名称重复或不存在会明确报错，不按相似度猜测。
@@ -456,7 +456,8 @@ def suggest_sheet_role(profile: dict[str, Any], sheet_name: str, header_cells: s
 
     1. 表头签名：它比名称可靠——「04_勾稽核算规则库」与「05_经营指标计算规则库」
        在名称上都像计算，只有列结构能区分；
-    2. 名称与别名：签名无命中、**或签名命中多张表**时用名称作为决胜依据。
+    2. 名称与别名：签名无命中、**或签名命中多张表**时用名称作为决胜依据，
+       但该 Sheet 的必填列也必须在表头中，避免同名错表被预选。
        05 与 06 的列结构完全相同，签名无法区分，但它们的 display_name 与 aliases
        是各自声明的、互不相同，此时用名称是**确定性**的判定，不是猜测；
     3. 都无法确定时返回 None，由用户在绑定步骤选择。
@@ -474,11 +475,28 @@ def suggest_sheet_role(profile: dict[str, Any], sheet_name: str, header_cells: s
     name_matches: list[str] = []
     for sheet in profile["sheets"]:
         names = {sheet.get("display_name"), *sheet.get("aliases", [])}
-        if normalized in {str(item).strip() for item in names if item}:
+        required_columns = [column for column in sheet["columns"] if column.get("required")]
+        headers_match = all(
+            any(str(label).strip() in header_cells for label in (column["name"], *(column.get("aliases") or [])))
+            for column in required_columns
+        )
+        if normalized in {str(item).strip() for item in names if item} and headers_match:
             name_matches.append(sheet["sheet_role"])
     if len(name_matches) == 1:
         return name_matches[0]
-    # 签名与名称都无法唯一确定：交用户决定，不猜。
+    # 场景可以给列声明自己的别名；当 Sheet 名也不同，按完整的必填列集合
+    # 给出唯一建议。多张表都匹配时仍交给用户确认。
+    column_matches: list[str] = []
+    for sheet in profile["sheets"]:
+        required_columns = [column for column in sheet["columns"] if column.get("required")]
+        if required_columns and all(
+            any(str(label).strip() in header_cells for label in (column["name"], *(column.get("aliases") or [])))
+            for column in required_columns
+        ):
+            column_matches.append(sheet["sheet_role"])
+    if len(column_matches) == 1:
+        return column_matches[0]
+    # 仍无法唯一确定：交用户决定，不猜。
     return None
 
 

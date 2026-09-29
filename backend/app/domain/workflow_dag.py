@@ -198,6 +198,41 @@ def ready_node(
     return None
 
 
+def ready_node_for_pending_review(
+    plans: list[NodePlan],
+    *,
+    completed: set[str],
+) -> NodePlan | None:
+    """有待办时，只选择能够到达人工复核的就绪节点。"""
+    review_nodes = [
+        plan for plan in plans
+        if plan.enabled and plan.node_type == "MANUAL_REVIEW" and plan.node_instance_code not in completed
+    ]
+    if len(review_nodes) != 1:
+        return None
+    review = review_nodes[0]
+    by_code = {plan.node_instance_code: plan for plan in plans}
+    path = {review.node_instance_code}
+    pending = list(review.depends_on)
+    while pending:
+        code = pending.pop()
+        if code in path:
+            continue
+        path.add(code)
+        pending.extend(by_code[code].depends_on)
+    if any(by_code[code].node_type in {"RISK_RATING", "REPORT_OUTPUT"} for code in path):
+        return None
+
+    ready = [
+        plan for plan in plans
+        if plan.enabled
+        and plan.node_instance_code in path
+        and plan.node_instance_code not in completed
+        and all(code in completed for code in plan.depends_on)
+    ]
+    return next((plan for plan in ready if plan.node_type == "MANUAL_REVIEW"), ready[0] if ready else None)
+
+
 def pending_nodes(plans: list[NodePlan], *, completed: set[str]) -> list[NodePlan]:
     """仍未完成且已启用的节点。"""
     return [plan for plan in plans if plan.enabled and plan.node_instance_code not in completed]

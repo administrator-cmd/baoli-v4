@@ -116,6 +116,8 @@ class AuditGraphState(TypedDict, total=False):
     agent_review_pending: bool | None
     # Agent 复核前正在评估的节点与检查点，提交后据此恢复执行位置。
     agent_review_restore: dict[str, Any] | None
+    # 字段更正使原 Agent 评估快照失效时，退出旧评估并重跑受影响节点。
+    agent_review_recalculate: bool | None
 
 
 class AuditNodeRunner(Protocol):
@@ -554,6 +556,11 @@ def _prepare_agent_context(state: AuditGraphState, runtime: Runtime[AuditGraphCo
     )
 
 
+def _route_prepared_context(state: AuditGraphState) -> str:
+    """准备上下文阶段发现输入不可用时，直接进入人工复核。"""
+    return "prepare_agent_review" if state.get("loop_status") == LOOP_NEEDS_HUMAN else "call_model"
+
+
 def _call_model(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
     """调用模型**一次**，把这一轮的响应写回 State。
 
@@ -771,6 +778,11 @@ def _after_apply_manual_reviews(state: AuditGraphState) -> str:
     return "await_manual_review" if state.get("phase") == "WAITING_REVIEW" else "save_node_result"
 
 
+def _after_apply_agent_reviews(state: AuditGraphState) -> str:
+    # 字段事实变化后，原评估快照已失效；等待重新执行 DAG 选出的节点。
+    return "save_node_result" if state.get("agent_review_recalculate") else "save_evaluation_result"
+
+
 def _route_model_response(state: AuditGraphState) -> str:
     """按本轮响应决定下一步。
 
@@ -856,7 +868,11 @@ _builder.add_edge("advance_workflow", "save_node_result")
 # Agent 循环的边：冻结规则实例 → 准备上下文 → 调模型 →（按响应路由）。
 _builder.add_edge("load_evaluation", "load_rule_instance")
 _builder.add_edge("load_rule_instance", "prepare_agent_context")
-_builder.add_edge("prepare_agent_context", "call_model")
+_builder.add_conditional_edges(
+    "prepare_agent_context",
+    _route_prepared_context,
+    {"call_model": "call_model", "prepare_agent_review": "prepare_agent_review"},
+)
 _builder.add_conditional_edges(
     "call_model",
     _route_model_response,
@@ -877,7 +893,11 @@ _builder.add_conditional_edges(
 )
 # 人工复核等待点：Agent 复核批与人工复核节点批共用同一个 interrupt 节点。
 _builder.add_edge("prepare_agent_review", "await_manual_review")
-_builder.add_edge("apply_agent_reviews", "save_evaluation_result")
+_builder.add_conditional_edges(
+    "apply_agent_reviews",
+    _after_apply_agent_reviews,
+    {"save_node_result": "save_node_result", "save_evaluation_result": "save_evaluation_result"},
+)
 # 保存规则结果后推进游标：还有规则就冻结下一条，全部处理完才收尾节点。
 _builder.add_edge("save_evaluation_result", "advance_rule_cursor")
 _builder.add_conditional_edges(

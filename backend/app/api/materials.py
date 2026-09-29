@@ -158,6 +158,7 @@ def export_evidence(
             item["task_name"],
             item["filename"],
             item["object_name"],
+            item["field_path"],
             item["page_no"],
             item["reference_type"],
             item["locator_status"],
@@ -168,6 +169,6 @@ def export_evidence(
     ]
     return csv_response(
         "证据记录列表.csv",
-        ["证据编号", "任务", "来源文件", "关联对象", "页码", "依据类型", "定位核对", "引用原文", "历史版本"],
+        ["证据编号", "任务", "来源文件", "关联对象", "字段属性", "页码", "依据类型", "定位核对", "引用原文", "历史版本"],
         rows,
     )

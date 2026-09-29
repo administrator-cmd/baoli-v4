@@ -43,10 +43,11 @@ from ...domain import capabilities, node_registry, workflow_dag
 from ...domain.identity import public_no
 from ...domain.manifest import comparison_label
 from ...errors import BusinessError, exception_summary
-from ...models import AuditTask, ManualReview, NodeExecution, RuleResult
+from ...models import AuditTask, Evidence, ManualReview, NodeExecution, RuleResult
 from ...schemas import ManualReviewRequest
 from ..task_lookup import task_or_404
-from .facts import _field_extraction, _material_check
+from .facts import _field_extraction, _material_check, _refresh_extraction_rule_results
+from .evidence import _copy_evidence_to_rule, _rule_evidence_snapshots
 from .calculation import _calculation
 from .quality import _document_prepare, _sync_type_review_pending
 from .reporting import _report_output
@@ -55,7 +56,12 @@ from .reviews import (
     _apply_review_decisions,
     _current_review_batch,
     _decision_command_no,
+    _invalidate_execution_records,
+    _invalidate_file_quality_results,
     _invalidate_retry_results,
+    _invalidate_validation_results,
+    _next_node_for_recalculation,
+    _recompute_file_quality_results,
     _review_hash,
     _validate_review_payloads,
 )
@@ -570,7 +576,31 @@ def graph_advance_workflow(
             },
             "last_error": None,
         }
-    next_node = _next_node_after(db, task, manifest, nodes)
+    try:
+        next_node = _next_node_after(db, task, manifest, nodes)
+    except BusinessError as exc:
+        execution.status = "BLOCKED"
+        execution.failure_code = exc.code
+        execution.failure_message = exc.message
+        task.status = "BLOCKED"
+        _save_flow_checkpoint(db, task)
+        db.commit()
+        return {
+            "current_node": task.current_node,
+            "node_index": current_index,
+            "phase": checkpoint["phase"],
+            "last_execution": {
+                "task_no": task.task_no,
+                "node_name": nodes[current_index]["name"],
+                "execution_status": execution.status,
+                "task_status": task.status,
+                "next_node_name": None,
+                "result_summary": execution.result_json,
+                "failure_code": exc.code,
+                "failure_message": exc.message,
+            },
+            "last_error": None,
+        }
     if next_node:
         task.current_node = next_node["node_code"]
         task.status = "READY"
@@ -646,7 +676,26 @@ def _next_node_after(
     completed = _completed_nodes(db, task)
     # 刚执行的节点已写入 SUCCEEDED/SKIPPED，因此 completed 里已包含它。
     completed.add(task.current_node)
-    ready = workflow_dag.ready_node(plans, completed=completed)
+    pending_reviews = list(
+        db.scalars(
+            select(ManualReview.review_no).where(
+                ManualReview.audit_task_id == task.id,
+                ManualReview.status == "PENDING",
+            )
+        ).all()
+    )
+    ready = (
+        workflow_dag.ready_node_for_pending_review(plans, completed=completed)
+        if pending_reviews
+        else workflow_dag.ready_node(plans, completed=completed)
+    )
+    if pending_reviews and ready is None:
+        raise BusinessError(
+            "AUDIT_REVIEW_NODE_UNAVAILABLE",
+            "仍有待人工复核项，但当前流程无法到达人工复核节点",
+            status_code=409,
+            details={"review_nos": pending_reviews},
+        )
     if ready is not None:
         return next((item for item in nodes if item["node_code"] == ready.node_instance_code), None)
     blocked = workflow_dag.blocked_nodes(plans, completed=completed)
@@ -664,8 +713,9 @@ def graph_prepare_manual_review(db: Session, task_no: str, graph_namespace: str)
     """进入人工复核前的准备：补齐类型待复核的待办，并选出本批待复核项。"""
     task = task_or_404(db, task_no, lock=True)
     checkpoint = _validate_graph_namespace(task, graph_namespace)
+    manifest = _task_manifest(task)
     if checkpoint.get("phase") != "AWAITING_CONFIRMATION" or task.current_node != _single_node_code_of_type(
-        _task_manifest(task), "MANUAL_REVIEW", purpose="人工复核等待点"
+        manifest, "MANUAL_REVIEW", purpose="人工复核等待点"
     ):
         raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核准备状态", status_code=409)
     _, nodes, current_index = _scenario_nodes(db, task)
@@ -1168,23 +1218,54 @@ def graph_prepare_agent_context(
     消息历史只在**首次**进入这条规则实例时生成；已有历史就原样保留——
     重新生成等于把模型已经看到的内容换掉，恢复后的判断会与中断前不一致。
 
+    输入门禁先于消息复用：恢复或重放时即使已有消息，也不能让无效字段事实
+    绕过当前规则的输入校验。正常恢复的输入没有变化，仍会原样复用消息。
+
     提示里只用**本规则实际使用的**事实与标识：给全量事实会让模型在无关字段上
     做判断，也会让它有机会引用不属于这条规则的输入。
     """
     with _agent_step(db, task_no, graph_namespace):
         task = task_or_404(db, task_no, lock=True)
         _graph_namespace_or_fail(task, graph_namespace)
-        if messages:
-            return {"messages": list(messages), "last_error": None}
         manifest = _task_manifest(task)
         instance = rule_instance or {}
         rule = _rule_of_instance(manifest, node_code, instance)
         agent = _agent_module()
+        inputs = list(instance.get("inputs") or [])
+        invalid = [
+            item for item in inputs
+            if item.get("status") not in {"PRESENT", "REVIEWED"}
+            or item.get("normalized_value") is None
+        ]
+        if invalid:
+            # Agent 规则无论使用哪个算子，都只能读取已经定型的字段事实。
+            # 候选原文保留给人工复核，但不会进入提示词或工具调用参数。
+            return {
+                "messages": [],
+                "loop_status": LOOP_NEEDS_HUMAN,
+                "unresolved_items": [{
+                    "kind": "INCOMPLETE_FIELD_FACTS",
+                    "message": (
+                        "规则输入没有全部形成有效字段事实，未调用大模型："
+                        + "、".join(
+                            f"{item.get('field_key')}@{item.get('material_key')}（{item.get('status')}）"
+                            for item in invalid
+                        )
+                    ),
+                    "missing_inputs": [
+                        f"{item.get('field_key')}@{item.get('material_key')}" for item in invalid
+                    ],
+                }],
+                "last_error": None,
+            }
+        if messages:
+            return {"messages": list(messages), "last_error": None}
         return {
             "messages": agent.initial_messages(
                 rule,
-                list(instance.get("inputs") or []),
+                inputs,
                 material_names=_material_names(manifest),
+                manifest=manifest,
             ),
             "last_error": None,
         }
@@ -1410,7 +1491,7 @@ def graph_execute_tool_calls(
                 unresolved.append({"kind": "TOOL_NOT_AUTHORIZED", "tool_name": tool_name, "message": result["message"]})
                 results.append(agent.tool_result_entry(call, result))
                 continue
-            result, _ = agent.invoke_tool(db, call=call, inputs=inputs, context=context, runtime=runtime)
+            result, _ = agent.invoke_tool(db, call=call, inputs=inputs, context=context, runtime=runtime, rule=rule, manifest=manifest)
             if result.get("status") in {"NEEDS_RECONCILE", "FAILED"}:
                 unresolved.append(
                     {
@@ -1600,6 +1681,7 @@ def graph_prepare_agent_review(
                 inputs=list(instance.get("inputs") or []),
                 fact_snapshot_ref=fact_snapshot_ref,
             )
+            review_evidences = _rule_evidence_snapshots(db, result.id)
             db.add(
                 ManualReview(
                     review_no=public_no("REV"),
@@ -1612,6 +1694,10 @@ def graph_prepare_agent_review(
                         "evaluation_id": evaluation_id,
                         "rule_key": rule.get("rule_key"),
                         "rule_name": rule.get("name"),
+                        "status": result.status,
+                        "message": result.message,
+                        "evidence": review_evidences[0] if review_evidences else None,
+                        "evidences": review_evidences,
                         "candidate_verdict": candidate_verdict,
                         "deterministic_tool_results": tool_results or [],
                         "unresolved_items": unresolved_items or [],
@@ -1712,8 +1798,86 @@ def graph_apply_agent_reviews(
             raise BusinessError("MANUAL_REVIEW_INCOMPLETE", "必须处理当前全部待复核项")
         normalized_values = _validate_review_payloads(db, task, reviews, requested)
         command_no = _decision_command_no(db, task)
-        _, _, field_changes = _apply_review_decisions(db, task, reviews, requested, normalized_values, command_no)
+        _, material_state_changed, field_changes = _apply_review_decisions(
+            db, task, reviews, requested, normalized_values, command_no
+        )
+        db.flush()
+        manifest = _task_manifest(task)
         _, nodes, _ = _scenario_nodes(db, task)
+        file_quality_recompute = None
+        if material_state_changed:
+            invalidated_quality = _invalidate_file_quality_results(db, task, manifest)
+            file_quality_recompute = _recompute_file_quality_results(
+                db, task, manifest, invalidated_quality["node_codes"]
+            )
+        if field_changes:
+            execution = _running_execution(db, task)
+            _refresh_extraction_rule_results(db, task, manifest)
+            changed_field_keys = {str(item["field_key"]) for item in field_changes}
+            invalidation = _invalidate_validation_results(db, task, manifest, changed_field_keys)
+            recalculation_required = invalidation["invalidated_executions"] > 0
+            if recalculation_required and execution is not None:
+                affected_node_codes = set(invalidation["affected_node_codes"])
+                if execution.node_code not in affected_node_codes:
+                    # 受影响的已完成分支需要回退时，当前 Agent 执行无法继续悬挂为 RUNNING；
+                    # 它尚未形成有效节点结果，显式终止后由 DAG 在合适位置重新执行。
+                    _invalidate_execution_records(db, task, [execution.id])
+                execution.finished_at = datetime.now(UTC)
+                execution.result_json = {
+                    **(execution.result_json or {}),
+                    "invalidated_reason": (
+                        "人工复核改变字段事实，原规则评估使用的事实快照已失效"
+                        if execution.node_code in affected_node_codes
+                        else "人工复核改变字段事实，流程转入受影响分支重算，当前未完成执行已终止"
+                    ),
+                }
+            if recalculation_required:
+                next_node = _next_node_for_recalculation(db, task, manifest, nodes)
+                if next_node is None:
+                    raise BusinessError(
+                        "AUDIT_RECALCULATION_NODE_MISSING",
+                        "人工复核改变评估依据并失效旧结果后没有可执行的重算节点",
+                        status_code=500,
+                    )
+                next_index = _index_of(nodes, next_node["node_code"])
+                task.current_node = next_node["node_code"]
+                task.status = "READY"
+                task.pending_review_hash = None
+                _set_task_checkpoint(task, node_index=next_index, phase="AWAITING_CONFIRMATION")
+                _save_flow_checkpoint(db, task)
+                db.commit()
+                return {
+                    "current_node": task.current_node,
+                    "node_index": next_index,
+                    "phase": "AWAITING_CONFIRMATION",
+                    "review_hash": None,
+                    "review_count": None,
+                    "review_decisions": None,
+                    "manual_review_result": {
+                        "task_no": task.task_no,
+                        "resolved_count": len(reviews),
+                        "status": task.status,
+                        "field_changes": field_changes,
+                        "material_state_changed": material_state_changed,
+                        "agent_review": True,
+                        "recalculation_node": next_node["node_code"],
+                        "file_quality_recompute": file_quality_recompute,
+                    },
+                    "agent_review_pending": False,
+                    "agent_review_recalculate": True,
+                    "agent_review_restore": None,
+                    "execution_id": None,
+                    "rule_instance": None,
+                    "evaluation_id": None,
+                    "fact_snapshot_ref": None,
+                    "fact_snapshot_hash": None,
+                    "messages": None,
+                    "pending_tool_calls": [],
+                    "tool_results": [],
+                    "candidate_verdict": None,
+                    "unresolved_items": [],
+                    "last_error": None,
+                }
         # 恢复执行位置：任务回到正在评估的节点，检查点回到复核之前的那一份。
         task.current_node = node_code
         task.status = "RUNNING"
@@ -1737,9 +1901,13 @@ def graph_apply_agent_reviews(
                 "resolved_count": len(reviews),
                 "status": task.status,
                 "field_changes": field_changes,
+                "material_state_changed": material_state_changed,
                 "agent_review": True,
+                "file_quality_recompute": file_quality_recompute,
             },
             "agent_review_pending": False,
+            "agent_review_recalculate": False,
+            "agent_review_restore": None,
             # 本批人工结论已落库：这条规则的循环不再「等待人工复核」，
             # 汇总进节点执行结果的状态因此是 DONE 而不是 NEEDS_HUMAN。
             # 继续报 NEEDS_HUMAN 会让一个已经复核完的节点看起来还在等人。
@@ -1970,20 +2138,39 @@ def _upsert_agent_rule_result(
         message = str(verdict.get("message") or "")
     if record is not None:
         record.result_json = {**(record.result_json or {}), **payload}
-        return record
-    record = RuleResult(
-        audit_task_id=task.id,
-        node_execution_id=execution.id,
-        rule_key=rule["rule_key"],
-        rule_code=rule.get("rule_code") or rule.get("rule_key"),
-        legacy_rule_key=rule.get("legacy_rule_key"),
-        rule_name=str(rule.get("name") or rule["rule_key"]),
-        status=status,
-        message=message,
-        result_json=payload,
+    else:
+        record = RuleResult(
+            audit_task_id=task.id,
+            node_execution_id=execution.id,
+            rule_key=rule["rule_key"],
+            rule_code=rule.get("rule_code") or rule.get("rule_key"),
+            legacy_rule_key=rule.get("legacy_rule_key"),
+            rule_name=str(rule.get("name") or rule["rule_key"]),
+            status=status,
+            message=message,
+            result_json=payload,
+        )
+        db.add(record)
+        db.flush()
+    evidence_numbers = list(
+        db.scalars(
+            select(Evidence.evidence_no)
+            .where(Evidence.audit_task_id == task.id, Evidence.rule_result_id == record.id)
+            .order_by(Evidence.id)
+        ).all()
     )
-    db.add(record)
-    db.flush()
+    if not evidence_numbers:
+        source_evidence_ids = [
+            evidence_id
+            for item in (inputs or [])
+            if isinstance(item, dict)
+            for evidence_id in (
+                item.get("evidence_ids")
+                or ([item["evidence_id"]] if item.get("evidence_id") else [])
+            )
+        ]
+        evidence_numbers = _copy_evidence_to_rule(db, task, record, source_evidence_ids)
+    record.result_json = {**(record.result_json or {}), "evidence_nos": evidence_numbers}
     return record
 
 

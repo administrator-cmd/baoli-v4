@@ -240,6 +240,9 @@ class ImportJobResponse(ApiResponse):
     status: str
     # 统一模板协议的版本标识：系统只有一份协议，这里记录按哪一版解释这份文件。
     profile_version: str
+    schema_key: str | None = Field(default=None, description="上传时冻结的业务场景 Schema 标识")
+    schema_version: str | None = Field(default=None, description="业务场景 Schema 版本；profile.schema_version 是内部统一协议版本")
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
     # 作业所属场景 + 统一模板协议摘要（Sheet 数量、名称与可绑定的节点类型）。
     # 页面据此显示真实的表数量与名称，不写死任何场景的表清单。
     profile: dict[str, Any] = Field(default_factory=dict)
@@ -277,6 +280,9 @@ class ScenarioVersionResponse(ApiResponse):
     scenario_name: str
     version_no: int
     status: str
+    schema_key: str | None = None
+    schema_version: str | None = None
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
     manifest: dict[str, Any]
     published_at: datetime
 
@@ -374,6 +380,7 @@ class AuditTaskResponse(ApiResponse):
     scope: dict[str, Any] = Field(default_factory=dict)
     # 该任务上最近一次后台操作的受理状态；有活跃操作时页面据此继续查询。
     latest_operation: dict[str, Any] | None = None
+    can_recover_failed_node: bool = False
 
 
 class AuditTaskSummaryResponse(ApiResponse):
@@ -401,6 +408,11 @@ class ExecuteNodeRequest(BaseModel):
     input_revision: int | None = Field(default=None, ge=0)
 
 
+class RecoverFailedNodeRequest(BaseModel):
+    node_code: str
+    input_revision: int = Field(ge=0)
+
+
 class OperationRequest(BaseModel):
     """可能触发长处理的操作入口共用请求体。"""
 
@@ -418,7 +430,7 @@ class ExecuteNodeResponse(ApiResponse):
 
 class ManualReviewItem(BaseModel):
     review_no: str
-    decision: Literal["CONFIRM_ABNORMAL", "MARK_NORMAL", "EVIDENCE_INSUFFICIENT", "CONFIRM_FIELD", "MODIFY_FIELD"]
+    decision: Literal["CONFIRM_ABNORMAL", "MARK_NORMAL", "EVIDENCE_INSUFFICIENT", "CONFIRM_FIELD", "MODIFY_FIELD", "MARK_NOT_PRESENT"]
     business_note: str = Field(min_length=1, max_length=2000)
     field_value: str | None = None
     # 这条人工结论的依据类型。默认人工业务判断；不得把旧引文当成新值的文档证明。
@@ -492,9 +504,34 @@ class OcrReconcileRequest(BaseModel):
     """
 
     action: Literal["ADOPT_JOB", "RETRY_SUBMIT"]
+    artifact_no: str = Field(min_length=1, max_length=40)
     job_id: str | None = Field(default=None, max_length=200)
     reason: str = Field(min_length=1, max_length=2000)
-    idempotency_key: str | None = Field(default=None, max_length=120)
+    idempotency_key: str = Field(min_length=1, max_length=120)
+
+
+class ExternalArtifactReconcileRequest(BaseModel):
+    """人工确认同步外部调用结果未知，解除占位后重新执行节点。"""
+
+    artifact_no: str = Field(min_length=1, max_length=40)
+    reason: str = Field(min_length=1, max_length=2000)
+    idempotency_key: str = Field(min_length=1, max_length=120)
+
+
+class ExternalArtifactStatusResponse(ApiResponse):
+    document_no: str
+    artifact_type: str
+    artifact_no: str | None = None
+    status: str
+    message: str
+
+
+class ExternalArtifactReconcileResponse(ApiResponse):
+    document_no: str
+    artifact_type: str
+    artifact_no: str
+    status: str
+    message: str
 
 
 class OcrReconcileResponse(ApiResponse):
@@ -595,6 +632,7 @@ class DocumentUploadResponse(ApiResponse):
 class EvidenceResponse(ApiResponse):
     evidence_no: str
     document_name: str | None
+    field_path: str | None
     page_no: int | None
     quote_text: str
     bbox: list[float] | None
@@ -649,6 +687,7 @@ class ScenarioCreateRequest(BaseModel):
     category: str | None = Field(default=None, max_length=80)
     description: str | None = Field(default=None, max_length=4000)
     enabled: bool = True
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
 
 
 class ScenarioUpdateRequest(BaseModel):
@@ -656,6 +695,7 @@ class ScenarioUpdateRequest(BaseModel):
     category: str | None = Field(default=None, max_length=80)
     description: str | None = Field(default=None, max_length=4000)
     enabled: bool | None = None
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
 
 
 class ScenarioEnabledRequest(BaseModel):
@@ -763,6 +803,8 @@ class DraftFieldRequest(BaseModel):
     material_key: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=255)
     value_type: Literal["STRING", "DECIMAL", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"] = "STRING"
+    extraction_strategy: Literal["RAW_TEXT", "DETERMINISTIC", "STRUCTURED"] | None = None
+    structure_schema: dict[str, Any] | None = None
     unit: str | None = Field(default=None, max_length=40)
     # 币种是金额比较与加总的口径之一；留空表示未声明，不表示人民币。
     currency: str | None = Field(default=None, max_length=40)
@@ -783,6 +825,8 @@ class DraftFieldUpdateRequest(BaseModel):
     material_key: str | None = Field(default=None, min_length=1, max_length=40)
     name: str | None = Field(default=None, min_length=1, max_length=255)
     value_type: Literal["STRING", "DECIMAL", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"] | None = None
+    extraction_strategy: Literal["RAW_TEXT", "DETERMINISTIC", "STRUCTURED"] | None = None
+    structure_schema: dict[str, Any] | None = None
     unit: str | None = Field(default=None, max_length=40)
     currency: str | None = Field(default=None, max_length=40)
     artifact_source: Literal["SEAL"] | None = None
@@ -866,6 +910,9 @@ class DraftSectionUpdateRequest(BaseModel):
 
 class ScenarioDraftViewResponse(ApiResponse):
     scenario_code: str
+    schema_key: str | None = None
+    schema_version: str | None = None
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
     revision_no: int
     source: str
     source_label: str
@@ -898,6 +945,9 @@ class ScenarioDraftViewResponse(ApiResponse):
 class ScenarioVersionConfigResponse(ApiResponse):
     scenario_code: str
     scenario_name: str
+    schema_key: str | None = None
+    schema_version: str | None = None
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
     version_no: int
     source: str
     source_label: str
@@ -941,6 +991,9 @@ class ScenarioPublishResponse(ApiResponse):
 class ScenarioDetailResponse(ApiResponse):
     scenario_code: str
     scenario_name: str
+    schema_key: str | None = None
+    schema_version: str | None = None
+    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
     category: str | None = None
     description: str | None = None
     enabled: bool
@@ -1079,7 +1132,7 @@ class TaskCopyRequest(BaseModel):
 
     task_name: str = Field(min_length=1, max_length=255)
     # 复制同样是一次真实写操作：响应丢失时用同一幂等标识重发，返回原任务。
-    idempotency_key: str | None = Field(default=None, max_length=120)
+    idempotency_key: str = Field(min_length=1, max_length=120)
 
 
 class DocumentRemoveResponse(ApiResponse):

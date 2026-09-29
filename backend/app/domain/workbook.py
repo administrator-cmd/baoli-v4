@@ -49,6 +49,9 @@ class WorkbookIR(BaseModel):
     # 猜错场景会拿另一套列协议去解释这份 Excel，报出一堆与真实问题无关的缺列错误，
     # 而用户手里的文件根本没变。历史作业没有这一项，读取方按「未记录场景」处理。
     scenario_code: str | None = None
+    # 新导入记录场景协议身份；历史 IR 与草稿行转换的内部 IR 没有该身份。
+    schema_key: str | None = None
+    schema_version: str | None = None
     sheets: list[WorkbookSheet]
 
 

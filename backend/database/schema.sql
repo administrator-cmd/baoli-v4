@@ -1,7 +1,7 @@
 -- ============================================================================
 -- baoli-v4 合同审核验证版：完整数据库结构（唯一权威脚本）
 --
--- 适用数据库：baoli_v4（应用与 checkpoint 运行时都只允许连接该库）
+-- 适用数据库：baoli_v4；开发验证可使用 baoli_v4_dev（应用与 checkpoint 使用同一目标）
 -- 前置条件：MySQL >= 8.0.19（已按 MySQL 8.4.11 核对）
 --   - 业务表使用 utf8mb4_0900_ai_ci 排序规则，需要 MySQL 8.0+
 --   - 第 8 节的 checkpoint 表由 langgraph-checkpoint-mysql 3.0.0 使用。
@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS scenario_template (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_code VARCHAR(80) NOT NULL,
     scenario_name VARCHAR(255) NOT NULL,
+    schema_key VARCHAR(80) NOT NULL,
+    schema_version VARCHAR(40) NOT NULL,
+    schema_json JSON NOT NULL,
     -- 业务类型是页面维护的展示与筛选属性，不参与执行语义。
     category VARCHAR(80) NULL,
     description TEXT NULL,
@@ -140,6 +143,10 @@ CREATE TABLE IF NOT EXISTS import_job (
     source_sha256 CHAR(64) NOT NULL,
     source_size BIGINT NOT NULL,
     profile_version VARCHAR(40) NOT NULL,
+    -- 导入时冻结场景协议，后续绑定与转换读取此快照。
+    schema_key VARCHAR(80) NOT NULL,
+    schema_version VARCHAR(40) NOT NULL,
+    schema_json JSON NOT NULL,
     -- 上传入口的**场景身份**：用户先建场景、再在该场景下上传 Excel。
     -- 场景不由 Excel 表头推断——猜错场景会拿另一套列协议解释它，报出一堆与真实问题
     -- 无关的缺列错误，而用户手里的文件根本没变。历史作业没有这一列，
@@ -251,6 +258,9 @@ CREATE TABLE IF NOT EXISTS scenario_version (
     import_job_id BIGINT NULL,
     scenario_code VARCHAR(80) NOT NULL,
     scenario_name VARCHAR(255) NOT NULL,
+    schema_key VARCHAR(80) NOT NULL,
+    schema_version VARCHAR(40) NOT NULL,
+    schema_json JSON NOT NULL,
     version_no INT NOT NULL,
     status VARCHAR(30) NOT NULL,
     -- 来源：IMPORT=规则库导入；FORM=页面表单发布；COPY=复制场景；REVISION=从某一版本创建的修订。
@@ -362,13 +372,16 @@ CREATE TABLE IF NOT EXISTS scenario_rule (
 -- 可重复执行：已存在的模板身份不会被重建，计数器只增不减。
 -- 这里不使用 ON DUPLICATE KEY UPDATE + VALUES()（该写法自 MySQL 8.0.20 起已弃用），
 -- 改为给子查询起别名后引用它。
-INSERT INTO scenario_template (scenario_code, scenario_name, latest_version_no)
-SELECT derived.scenario_code, derived.scenario_name, derived.max_version
+INSERT INTO scenario_template (scenario_code, scenario_name, schema_key, schema_version, schema_json, latest_version_no)
+SELECT version.scenario_code, version.scenario_name,
+       version.schema_key, version.schema_version, version.schema_json, version.version_no
 FROM (
-    SELECT scenario_code, MAX(scenario_name) AS scenario_name, MAX(version_no) AS max_version
+    SELECT scenario_code, MAX(version_no) AS max_version
     FROM scenario_version
     GROUP BY scenario_code
 ) AS derived
+JOIN scenario_version AS version
+    ON version.scenario_code = derived.scenario_code AND version.version_no = derived.max_version
 ON DUPLICATE KEY UPDATE
     latest_version_no = GREATEST(scenario_template.latest_version_no, derived.max_version);
 
@@ -385,6 +398,9 @@ ON DUPLICATE KEY UPDATE
 CREATE TABLE IF NOT EXISTS scenario_draft (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_code VARCHAR(80) NOT NULL,
+    schema_key VARCHAR(80) NOT NULL,
+    schema_version VARCHAR(40) NOT NULL,
+    schema_json JSON NOT NULL,
     revision_no INT NOT NULL DEFAULT 0,
     source VARCHAR(20) NOT NULL DEFAULT 'FORM',
     base_version_no INT NULL,
@@ -507,6 +523,8 @@ CREATE TABLE IF NOT EXISTS scenario_draft_field (
     material_key VARCHAR(40) NOT NULL,
     name VARCHAR(255) NOT NULL,
     value_type VARCHAR(30) NOT NULL,
+    extraction_strategy VARCHAR(30) NOT NULL,
+    structure_schema_json JSON NULL,
     unit VARCHAR(40) NULL,
     -- 币种是金额比较与加总的口径之一：留空表示未声明，不表示人民币。
     currency VARCHAR(40) NULL,
@@ -527,6 +545,13 @@ CREATE TABLE IF NOT EXISTS scenario_draft_field (
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     CONSTRAINT uq_scenario_draft_field_key UNIQUE (draft_id, field_key),
+    CONSTRAINT chk_scenario_draft_field_strategy CHECK (
+        extraction_strategy IN ('RAW_TEXT', 'DETERMINISTIC', 'STRUCTURED')
+    ),
+    CONSTRAINT chk_scenario_draft_field_structure CHECK (
+        (extraction_strategy = 'STRUCTURED' AND structure_schema_json IS NOT NULL)
+        OR (extraction_strategy <> 'STRUCTURED' AND structure_schema_json IS NULL)
+    ),
     CONSTRAINT fk_scenario_draft_field_draft
         FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT,
@@ -654,6 +679,8 @@ CREATE TABLE IF NOT EXISTS plan_field (
     material_key VARCHAR(40) NOT NULL,
     name VARCHAR(255) NOT NULL,
     value_type VARCHAR(30) NOT NULL,
+    extraction_strategy VARCHAR(30) NOT NULL,
+    structure_schema_json JSON NULL,
     unit VARCHAR(40) NULL,
     currency VARCHAR(40) NULL,
     artifact_source VARCHAR(30) NULL,
@@ -668,6 +695,13 @@ CREATE TABLE IF NOT EXISTS plan_field (
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     CONSTRAINT uq_plan_field_key UNIQUE (plan_id, field_key),
+    CONSTRAINT chk_plan_field_strategy CHECK (
+        extraction_strategy IN ('RAW_TEXT', 'DETERMINISTIC', 'STRUCTURED')
+    ),
+    CONSTRAINT chk_plan_field_structure CHECK (
+        (extraction_strategy = 'STRUCTURED' AND structure_schema_json IS NOT NULL)
+        OR (extraction_strategy <> 'STRUCTURED' AND structure_schema_json IS NULL)
+    ),
     CONSTRAINT fk_plan_field_plan
         FOREIGN KEY (plan_id) REFERENCES audit_plan (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT,
@@ -1074,6 +1108,7 @@ CREATE TABLE IF NOT EXISTS task_fact (
     decimal_value DECIMAL(38, 10) NULL,
     text_value TEXT NULL,
     date_value DATE NULL,
+    boolean_value TINYINT(1) NULL,
     unit VARCHAR(40) NULL,
     currency VARCHAR(40) NULL,
     -- 产生这条事实的节点执行批次。
@@ -1163,6 +1198,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     document_upload_id BIGINT NULL,
     rule_result_id BIGINT NULL,
     field_value_id BIGINT NULL,
+    -- 结构化字段的顶层属性路径；普通字段与规则证据为空。
+    field_path VARCHAR(255) NULL,
     page_no INT NULL,
     quote_text TEXT NOT NULL,
     bbox_json JSON NULL,
@@ -1181,6 +1218,7 @@ CREATE TABLE IF NOT EXISTS evidence (
         document_upload_id IS NOT NULL OR rule_result_id IS NOT NULL OR field_value_id IS NOT NULL
     ),
     CONSTRAINT chk_evidence_page_no CHECK (page_no IS NULL OR page_no >= 1),
+    CONSTRAINT chk_evidence_field_path CHECK (field_path IS NULL OR field_value_id IS NOT NULL),
     CONSTRAINT fk_evidence_task
         FOREIGN KEY (audit_task_id) REFERENCES audit_task (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT,
@@ -1748,9 +1786,10 @@ BEGIN
        OR OLD.document_upload_id <> NEW.document_upload_id
        OR OLD.revision_no <> NEW.revision_no
        OR OLD.origin <> NEW.origin
+       OR NOT (OLD.extraction_execution_id <=> NEW.extraction_execution_id)
        OR OLD.status <> NEW.status
        OR NOT (OLD.raw_value <=> NEW.raw_value)
-       OR CAST(OLD.normalized_value_json AS CHAR) <> CAST(NEW.normalized_value_json AS CHAR) THEN
+       OR NOT (CAST(OLD.normalized_value_json AS CHAR) <=> CAST(NEW.normalized_value_json AS CHAR)) THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'task field value revision is immutable';
     END IF;
 END$$
@@ -1773,9 +1812,11 @@ BEGIN
        OR OLD.value_type <> NEW.value_type
        OR NOT (OLD.decimal_value <=> NEW.decimal_value)
        OR NOT (OLD.text_value <=> NEW.text_value)
-       OR NOT (OLD.date_value <=> NEW.date_value)
-       OR NOT (OLD.unit <=> NEW.unit)
+        OR NOT (OLD.date_value <=> NEW.date_value)
+        OR NOT (OLD.boolean_value <=> NEW.boolean_value)
+        OR NOT (OLD.unit <=> NEW.unit)
        OR NOT (OLD.currency <=> NEW.currency)
+       OR NOT (OLD.source_execution_id <=> NEW.source_execution_id)
        OR OLD.revision_no <> NEW.revision_no
        OR OLD.status <> NEW.status
        OR NOT (OLD.input_snapshot_json <=> NEW.input_snapshot_json)

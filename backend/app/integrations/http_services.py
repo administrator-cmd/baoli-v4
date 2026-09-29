@@ -99,15 +99,24 @@ def validate_material_type(
             status_code=409,
         )
     with _client(settings.request_timeout_seconds) as client:
-        catalog_response = _request(
-            client,
-            "GET",
-            f"{base_url}/supported-types",
-            service_code="MATERIAL_CLASSIFY",
-            operation="LIST_TYPES",
-        )
-        catalog = _json_object(catalog_response, "MATERIAL_CLASSIFY", "LIST_TYPES")
-        supported_names = _supported_type_names(catalog)
+        try:
+            catalog_response = _request(
+                client,
+                "GET",
+                f"{base_url}/supported-types",
+                service_code="MATERIAL_CLASSIFY",
+                operation="LIST_TYPES",
+            )
+            catalog = _json_object(catalog_response, "MATERIAL_CLASSIFY", "LIST_TYPES")
+            supported_names = _supported_type_names(catalog)
+        except BusinessError as exc:
+            # 类型目录查询是只读请求，/validate 尚未调用；本次产物占位可以安全撤销。
+            raise BusinessError(
+                "MATERIAL_TYPE_CATALOG_FAILED",
+                f"8018 材料类型目录查询失败：{exc.message}",
+                status_code=exc.status_code,
+                details={"cause_code": exc.code, **(exc.details or {})},
+            ) from exc
         if doc_type not in supported_names:
             raise BusinessError(
                 "MATERIAL_TYPE_UNSUPPORTED",

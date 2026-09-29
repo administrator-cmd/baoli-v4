@@ -19,7 +19,7 @@ from ...operators import execute_operator
 from ..llm_extraction import validate_fields_with_llm
 from ..rag_service import build_task_index, retrieve_evidence
 from .artifacts import _artifact_payload
-from .evidence import _copy_evidence_to_rule
+from .evidence import _copy_evidence_to_rule, _rule_evidence_snapshots
 from .facts import _comparison_view, _field_inputs, _input_summary, _rule_standard_view
 from .shared import SUBJECT_ARTIFACT_SOURCE, _applicability_json, _applicability_state, _current_uploads, _is_subject_rule, _material_input_problem, _material_names, _material_type_review_notice, _not_applicable_message, _subject_query, _subject_type_review_notice, _uploaded_material_keys
 from .state import _current_execution_ids, _result_material_keys
@@ -494,18 +494,28 @@ def _execute_rules(
             material_problem = _material_input_problem(inputs)
             if material_problem is not None:
                 result = material_problem
-            elif not any(item.get("status") in {"PRESENT", "REVIEWED"} for item in inputs):
-                # 规则适用但输入完全没有有效事实时属于缺输入，不做语义判断，也不因此产生人工复核项。
+            elif any(
+                item.get("status") not in {"PRESENT", "REVIEWED"}
+                or item.get("normalized_value") is None
+                for item in inputs
+            ):
+                # 语义判断的每个声明输入都必须是当前有效事实。不能因为其中一个字段
+                # 有值就把其它 EVIDENCE_UNCLEAR / NORMALIZATION_FAILED 候选一并交给 LLM。
                 result = {
                     "status": "EVIDENCE_INSUFFICIENT",
                     "message": (
-                        "规则输入缺少有效字段事实，本次未执行语义判断："
+                        "规则输入没有全部形成有效字段事实，本次未执行语义判断："
                         + "、".join(
                             f"{item['field_key']}@{item['material_key']}（{item.get('status')}）" for item in inputs
                         )
                     ),
-                    "blocked_reason": "NO_FIELD_FACT",
-                    "missing_inputs": [f"{item['field_key']}@{item['material_key']}" for item in inputs],
+                    "blocked_reason": "INCOMPLETE_FIELD_FACTS",
+                    "missing_inputs": [
+                        f"{item['field_key']}@{item['material_key']}"
+                        for item in inputs
+                        if item.get("status") not in {"PRESENT", "REVIEWED"}
+                        or item.get("normalized_value") is None
+                    ],
                 }
             else:
                 # 正文检索只在规则声明的材料范围内使用当前 OCR 产物；候选会连同
@@ -628,10 +638,13 @@ def _execute_rules(
         else:
             relevant_fields = set(result.get("evidence_field_keys", [])) if rule["operator"] == "LLM_VALIDATE" else None
             evidence_ids = [
-                item["evidence_id"]
+                evidence_id
                 for item in inputs
-                if item.get("evidence_id")
-                and (relevant_fields is None or item["field_key"] in relevant_fields)
+                if relevant_fields is None or item["field_key"] in relevant_fields
+                for evidence_id in (
+                    item.get("evidence_ids")
+                    or ([item["evidence_id"]] if item.get("evidence_id") else [])
+                )
             ]
         evidence_numbers = _copy_evidence_to_rule(db, task, record, evidence_ids)
         record.result_json = {**(record.result_json or {}), "evidence_nos": evidence_numbers}
@@ -667,6 +680,7 @@ def _execute_rules(
                 status_code=500,
             )
         if requires_review:
+            review_evidences = _rule_evidence_snapshots(db, record.id)
             db.add(
                 ManualReview(
                     review_no=public_no("REV"),
@@ -679,6 +693,8 @@ def _execute_rules(
                         "message": result["message"],
                         "rule_key": rule["rule_key"],
                         "rule_result": dict(result),
+                        "evidence": review_evidences[0] if review_evidences else None,
+                        "evidences": review_evidences,
                         # 证据不足时把本次检索的真实范围与候选一并快照，
                         # 人工可以据此看到“系统查过哪些材料、找到了什么”，
                         # 也能按候选身份（索引号 / 分块号 / 条目序号）指回具体依据。

@@ -99,21 +99,24 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
         )
         .order_by(NodeExecution.id.desc())
     )
-    if not execution or not execution.result_json:
-        stale_report = db.scalar(
-            select(NodeExecution.id)
-            .where(
-                NodeExecution.audit_task_id == task.id,
-                NodeExecution.node_code.in_(report_node_codes),
-                NodeExecution.status == "INVALIDATED",
+    if not execution or execution.status == "SKIPPED" or not execution.result_json:
+        if execution and execution.status == "SKIPPED" and execution.result_json:
+            reason = execution.result_json["skip_reason"]
+        else:
+            stale_report = db.scalar(
+                select(NodeExecution.id)
+                .where(
+                    NodeExecution.audit_task_id == task.id,
+                    NodeExecution.node_code.in_(report_node_codes),
+                    NodeExecution.status == "INVALIDATED",
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        reason = (
-            "此前生成的报告已随字段、规则或材料变化失效，需要重新执行报告输出节点"
-            if stale_report
-            else "报告输出节点尚未执行"
-        )
+            reason = (
+                "此前生成的报告已随字段、规则或材料变化失效，需要重新执行报告输出节点"
+                if stale_report
+                else "报告输出节点尚未执行"
+            )
         return {
             "task_no": task.task_no,
             "status": "NOT_GENERATED",
@@ -229,13 +232,7 @@ def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]
         and document.current_upload_id == upload.id
     )
     is_current_target = False
-    if evidence.field_value_id is not None:
-        fact = db.get(TaskFieldValue, evidence.field_value_id)
-        if not fact or fact.audit_task_id != task.id:
-            raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
-        # 只有仍指向这条证据的当前字段事实才算当前版本；历史版本的证据按历史身份展示。
-        is_current_target = bool(fact.evidence_id == evidence.id and fact.is_current)
-    elif evidence.rule_result_id is not None:
+    if evidence.rule_result_id is not None:
         result = db.get(RuleResult, evidence.rule_result_id)
         if not result or result.audit_task_id != task.id:
             raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
@@ -248,6 +245,12 @@ def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]
             )
             is not None
         )
+    elif evidence.field_value_id is not None:
+        fact = db.get(TaskFieldValue, evidence.field_value_id)
+        if not fact or fact.audit_task_id != task.id:
+            raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
+        # 结构化字段可以有多条属性证据；只要所属事实仍是当前版本，这些证据都属于当前事实。
+        is_current_target = bool(fact.is_current)
     elif evidence.artifact_id is None:
         raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
     artifact = db.get(StoredArtifact, evidence.artifact_id) if evidence.artifact_id else None
@@ -255,6 +258,7 @@ def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]
     return {
         "evidence_no": evidence.evidence_no,
         "document_name": upload.original_filename if upload else None,
+        "field_path": evidence.field_path,
         "page_no": evidence.page_no,
         "quote_text": evidence.quote_text,
         "bbox": evidence.bbox_json,

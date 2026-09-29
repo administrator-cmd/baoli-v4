@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..errors import BusinessError
+from ..domain.scenario_schema import default_schema
 from ..models import ScenarioTemplate, ScenarioVersion
 
 
@@ -36,11 +37,15 @@ def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int
     """为新发布分配版本号。调用方必须在同一事务内完成发布提交。"""
     template = _lock_template(db, scenario_code)
     if template is None:
+        schema = default_schema()
         db.add(
             ScenarioTemplate(
                 scenario_code=scenario_code,
                 scenario_name=scenario_name,
                 latest_version_no=0,
+                schema_key=schema["schema_key"],
+                schema_version=schema["schema_version"],
+                schema_json=schema,
             )
         )
         try:

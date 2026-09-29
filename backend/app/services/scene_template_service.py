@@ -43,6 +43,7 @@ def _instruction_rows(
     sheets: list[dict[str, Any]],
     *,
     download_only: bool,
+    scenario_schema_identity: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """说明页内容：模板、Sheet 与列的含义、系统不做什么。
 
@@ -53,7 +54,15 @@ def _instruction_rows(
     rows: list[list[str]] = [
         [f"{scene_name}规则库模板"],
         ["协议版本", profile.get("profile_version", "")],
-        ["Schema 版本", profile.get("schema_version", "")],
+        ["内部协议版本", profile.get("schema_version", "")],
+        [
+            "场景 Schema",
+            (
+                f"{scenario_schema_identity.get('schema_key')}@{scenario_schema_identity.get('schema_version')}"
+                if scenario_schema_identity
+                else "（未指定场景）"
+            ),
+        ],
         [],
         ["填写方式", "名称列填写中文业务名称；跨表引用列可填写业务名称或编号，不填写数据库 id。"],
         ["必填列", "表头为黄色的列必须填写；表头为白色的列可以留空。"],
@@ -111,6 +120,7 @@ def build_scene_template(
     scene_name: str,
     sheet_roles: list[str],
     download_only: bool = False,
+    scenario_schema_identity: dict[str, str] | None = None,
 ) -> bytes:
     """按统一模板协议生成模板。
 
@@ -143,7 +153,13 @@ def build_scene_template(
     instruction.column_dimensions["B"].width = 22
     instruction.column_dimensions["C"].width = 48
     instruction.column_dimensions["D"].width = 90
-    for row in _instruction_rows(profile, scene_name, sheets, download_only=download_only):
+    for row in _instruction_rows(
+        profile,
+        scene_name,
+        sheets,
+        download_only=download_only,
+        scenario_schema_identity=scenario_schema_identity,
+    ):
         instruction.append(row)
     for cell in instruction["A"]:
         cell.font = Font(bold=True)

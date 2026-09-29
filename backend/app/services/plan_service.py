@@ -19,7 +19,7 @@ from typing import Any, Callable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..domain import manifest as manifest_module
+from ..domain import field_strategy, manifest as manifest_module
 from ..domain import unified_profile
 from ..domain.manifest import FORM_VALUE_TYPES, build_task_schema, compile_form_manifest
 from ..errors import BusinessError
@@ -585,6 +585,8 @@ def copy_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> AuditPlan
                 material_key=item.material_key,
                 name=item.name,
                 value_type=item.value_type,
+                extraction_strategy=item.extraction_strategy,
+                structure_schema_json=item.structure_schema_json,
                 unit=item.unit,
                 currency=item.currency,
                 artifact_source=item.artifact_source,
@@ -688,6 +690,7 @@ def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, A
         "nodes": config["nodes"],
         "selected_sheets": config["sheets"],
         "profile_version": manifest.get("profile_version"),
+        "scenario_schema": manifest.get("scenario_schema"),
         "calculation_json": config["calculation_json"],
         "calculation_enabled": {
             str(item["rule_code"]): item.get("status") != "DISABLED"
@@ -768,6 +771,7 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
             nodes=list(context.get("nodes") or []),
             sheets=list(context.get("selected_sheets") or []),
             profile_version=context.get("profile_version") or unified_profile.UNIFIED_PROFILE_VERSION,
+            scenario_schema_config=context.get("scenario_schema"),
         )
         system_rule_enabled: dict[str, bool] = {}
         business_rules: list[dict[str, Any]] = []
@@ -898,6 +902,8 @@ def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
                 "material_key": item.material_key,
                 "name": item.name,
                 "value_type": item.value_type,
+                "extraction_strategy": item.extraction_strategy,
+                "structure_schema": item.structure_schema_json,
                 "unit": item.unit,
                 "currency": item.currency,
                 "artifact_source": item.artifact_source,
@@ -968,6 +974,7 @@ _ADJUSTMENT_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "材料位": (("name", "名称"), ("required", "是否必传"), ("description", "业务说明"), ("source_ref", "来源编号")),
     "字段": (
         ("name", "名称"), ("material_key", "所属材料"), ("value_type", "数据类型"),
+        ("extraction_strategy", "抽取策略"), ("structure_schema", "结构 Schema"),
         ("unit", "单位"), ("currency", "币种"), ("artifact_source", "产物来源"),
         ("period_scope", "期间口径"), ("statement_scope", "报表口径"),
         ("required", "是否必抽"), ("instruction", "提取要求"), ("source_ref", "来源编号"),
@@ -1178,13 +1185,22 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
                 f"字段的数据类型“{value_type}”不在允许取值内",
                 details={"allowed": sorted(FORM_VALUE_TYPES), "value_type": value_type},
             )
+        field_name = _required_key(item, "name", f"第 {index} 个字段")
+        extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+            value_type=value_type,
+            extraction_strategy=item.get("extraction_strategy"),
+            structure_schema=item.get("structure_schema"),
+            field_name=field_name,
+        )
         db.add(
             PlanField(
                 plan_id=plan.id,
                 field_key=_required_key(item, "field_key", f"第 {index} 个字段"),
                 material_key=_required_key(item, "material_key", f"第 {index} 个字段"),
-                name=_required_key(item, "name", f"第 {index} 个字段"),
+                name=field_name,
                 value_type=value_type,
+                extraction_strategy=extraction_strategy,
+                structure_schema_json=structure_schema,
                 unit=item.get("unit") or None,
                 currency=item.get("currency") or None,
                 artifact_source=item.get("artifact_source") or None,

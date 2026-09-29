@@ -1,6 +1,6 @@
 """计算三表的确定性转换。
 
-base Excel 是系统唯一的模板，转换**按 Sheet 独立进行、结果合并**：本模块只负责
+转换**按 Sheet 独立进行、结果合并**：本模块只负责
 06_计算定义 / 07_计算参数 / 08_计算判定 三张表，其余 Sheet 由 `node_rulebook` 负责
 （见 `llm_service.convert_workbook_with_notes`）。两边的候选共用 `ProposalBundle` 契约，
 因此下游的引用校验、裁决、编译、发布与页面展示不需要第二套代码。
@@ -80,10 +80,12 @@ OWNED_ROLES: frozenset[str] = frozenset(
 
 
 def convert_disabled_calculation_rows(
-    rows: list[dict[str, Any]], *, scenario_code: str, node_codes: dict[str, str], profile_version: str
+    rows: list[dict[str, Any]], *, scenario_code: str, node_codes: dict[str, str], profile_version: str,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把编辑后的 06/07/08 来源行交回原有计算转换器，避免另写一套解析口径。"""
-    profile = unified_profile.load_unified_profile()
+    # 重新启用历史来源行时必须使用草稿冻结的场景有效 Profile；独立调用才回退到内部协议。
+    profile = profile or unified_profile.load_unified_profile()
     if profile_version != profile["profile_version"]:
         raise BusinessError(
             "DISABLED_SOURCE_ROW_PROFILE_CHANGED",
@@ -309,7 +311,7 @@ class FinancialReportConverter:
         self.ir = ir
         self.bindings = bindings
         self.profile = profile
-        # 列协议来自**统一模板协议**的 sheets 段：一份协议定义全部 Sheet。
+        # 列协议来自导入时传入的场景有效 Profile。
         self.sheet_definitions = unified_profile.sheet_index(profile)
         # 当前正在转换的 Sheet：待确认事项由解析过程产生，需要一个落点。
         # 它在每次 convert_* 开始时被设置，不是跨调用共享状态。
@@ -1079,6 +1081,16 @@ class FinancialReportConverter:
                         required=False,
                     ),
                     "judgement": conclusion,
+                    # 判定文本只负责展示，不能决定执行状态。“预警”“一般”“良好”
+                    # 在不同业务里含义不同，因此状态必须由 08 表显式给出。
+                    "result_status": self._enum_of(
+                        row,
+                        "result_status",
+                        definition=self.sheet_definitions["CALC_JUDGEMENT"],
+                        sheet=self._sheet_of("CALC_JUDGEMENT"),
+                        row_no=row["row_no"],
+                        rule_name=rule_name,
+                    ),
                     "risk_level": self._enum_of(
                         row,
                         "risk_level",

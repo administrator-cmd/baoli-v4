@@ -98,6 +98,9 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "import_job": (
         "job_no",
         "profile_version",
+        "schema_key",
+        "schema_version",
+        "schema_json",
         # 场景身份：缺列会让导入作业无法回答「属于哪个场景」，页面只能按表头猜。
         "scenario_code",
         "profile_display_version",
@@ -129,6 +132,9 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "scenario_template": (
         "scenario_code",
         "scenario_name",
+        "schema_key",
+        "schema_version",
+        "schema_json",
         "category",
         "description",
         "enabled",
@@ -137,6 +143,9 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     "scenario_draft": (
         "scenario_code",
+        "schema_key",
+        "schema_version",
+        "schema_json",
         "revision_no",
         "source",
         "base_version_no",
@@ -159,6 +168,8 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "field_key",
         "material_key",
         "value_type",
+        "extraction_strategy",
+        "structure_schema_json",
         "unit",
         "currency",
         "artifact_source",
@@ -211,6 +222,8 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "material_key",
         "name",
         "value_type",
+        "extraction_strategy",
+        "structure_schema_json",
         "unit",
         "currency",
         "artifact_source",
@@ -270,6 +283,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "document_upload_id",
         "rule_result_id",
         "field_value_id",
+        "field_path",
         "page_no",
         "quote_text",
         "bbox_json",
@@ -303,7 +317,17 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         # 上传时声明并经 8018 目录核对过的材料类型：缺列会让材料校验没有 doc_type 可提交。
         "declared_material_type",
     ),
-    "scenario_version": ("scenario_code", "version_no", "source", "base_version_id", "manifest_hash", "manifest_json"),
+    "scenario_version": (
+        "scenario_code",
+        "schema_key",
+        "schema_version",
+        "schema_json",
+        "version_no",
+        "source",
+        "base_version_id",
+        "manifest_hash",
+        "manifest_json",
+    ),
     # 节点实例码、能力类型、依赖 DAG 与节点级配置：缺任一列都会让新调度器
     # 退回线性推进，或把能力类型当成实例码。
     "scenario_node": ("scenario_version_id", "node_code", "node_type", "name", "sequence_no", "depends_on", "enabled"),
@@ -325,6 +349,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "decimal_value",
         "text_value",
         "date_value",
+        "boolean_value",
         "unit",
         "currency",
         "source_execution_id",

@@ -485,7 +485,10 @@ def _execute_file_quality_rules(
     rules = [
         rule
         for rule in manifest["rules"]
-        if rule_node_type_of(rule) == "DOCUMENT_PREPARE" and rule["operator"] == "FILE_QUALITY_CHECK" and rule["rule_key"] in enabled_keys
+        if rule["node"] == execution.node_code
+        and rule_node_type_of(rule) == "DOCUMENT_PREPARE"
+        and rule["operator"] == "FILE_QUALITY_CHECK"
+        and rule["rule_key"] in enabled_keys
     ]
     for rule in rules:
         # 每条规则先取自己的参数：下面有多个「不适用 / 缺输入 / 材料类型待复核」的提前分支，

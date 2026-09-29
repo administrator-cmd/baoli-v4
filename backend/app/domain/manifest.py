@@ -10,7 +10,8 @@ from pydantic import ValidationError
 
 from .proposals import ProposalBundle
 from . import calculation as calc
-from . import capabilities, file_quality, node_registry, workflow_dag
+from . import capabilities, field_strategy, file_quality, node_registry, scenario_schema, workflow_dag
+from .currency import canonical_currency
 from .audit_vocab import SCOPE_NOT_APPLICABLE
 from .node_registry import LEGACY_NODE_SEQUENCE  # noqa: F401 - 旧 manifest 的节点序列仍按它读取
 from ..errors import BusinessError
@@ -567,6 +568,7 @@ def rule_comparison_view(
             "field_ref": item.get("field_ref"),
             "value_type": meta.get(item.get("field_ref"), {}).get("value_type"),
             "unit": meta.get(item.get("field_ref"), {}).get("unit"),
+            "currency": meta.get(item.get("field_ref"), {}).get("currency"),
         }
         for item in rule.get("inputs", [])
     ]
@@ -624,6 +626,7 @@ def rule_comparison_view(
         "support_status": support_status,
         "support_message": support_message,
         "input_units": [item.get("unit") for item in inputs],
+        "input_currencies": [item.get("currency") for item in inputs],
         # 风险成立条件与等级原文：等级差异必须显式可见，不能用较低风险等级覆盖来源异常等级。
         "risk_condition": rule.get("risk_condition"),
         "risk_condition_label": RISK_CONDITION_LABELS.get(rule.get("risk_condition") or ""),
@@ -2333,6 +2336,8 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
             "material_key": field["material_key"],
             "name": field["name"],
             "value_type": field["value_type"],
+            "extraction_strategy": field_strategy.strategy_of(field),
+            "structure_schema_json": field.get("structure_schema"),
             "unit": field.get("unit"),
             # 币种是金额比较与加总的口径之一，不能只保留单位。
             "currency": field.get("currency"),
@@ -2482,6 +2487,7 @@ def compile_inputs_of_config(
     nodes: list[Any],
     sheets: list[Any],
     profile_version: str | None,
+    scenario_schema_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """可编辑配置行 → `compile_form_manifest` 的入参。**唯一映射口径**。
 
@@ -2493,6 +2499,51 @@ def compile_inputs_of_config(
     node_type_by_code = {
         str(_config_value(node, "node_code")): _config_value(node, "node_type") for node in nodes
     }
+    rule_items = [
+        {
+            **(_config_value(item, "rule_json") or {}),
+            "rule_key": _config_value(item, "rule_key"),
+            "name": _config_value(item, "name"),
+            "node": _config_value(item, "node_code"),
+            "node_type": node_type_by_code.get(_config_value(item, "node_code")),
+            "operator": _config_value(item, "operator_code"),
+            "enabled": bool(_config_value(item, "enabled")),
+            "source_ref": _config_value(item, "source_ref"),
+            "origin": _config_value(item, "origin_json"),
+        }
+        for item in rules
+    ]
+    # 风险规则通过来源规则触发，不直接维护材料范围。编译前把来源规则的材料、
+    # 输入字段所属材料和输出字段所属材料汇总进风险规则，保证展示与执行口径一致。
+    field_materials = {
+        str(_config_value(item, "field_key")): str(_config_value(item, "material_key"))
+        for item in fields
+    }
+    rules_by_key = {str(item["rule_key"]): item for item in rule_items}
+    for rule in rule_items:
+        if rule.get("operator") != "RISK_TRIGGER":
+            continue
+        material_keys = list(dict.fromkeys(str(key) for key in (rule.get("materials") or []) if str(key)))
+        source_keys = list(dict.fromkeys([
+            *(rule.get("source_rule_keys") or []),
+            *([rule["source_rule_key"]] if rule.get("source_rule_key") else []),
+        ]))
+        for source_key in source_keys:
+            source = rules_by_key.get(str(source_key))
+            if source is None:
+                continue
+            for material_key in source.get("materials") or []:
+                if material_key not in material_keys:
+                    material_keys.append(material_key)
+            for source_input in source.get("inputs") or []:
+                material_key = source_input.get("material_key")
+                if material_key and material_key not in material_keys:
+                    material_keys.append(material_key)
+            for field_key in source.get("outputs") or []:
+                material_key = field_materials.get(str(field_key))
+                if material_key and material_key not in material_keys:
+                    material_keys.append(material_key)
+        rule["materials"] = material_keys
     return {
         "materials": [
             {
@@ -2512,6 +2563,8 @@ def compile_inputs_of_config(
                 "material_key": _config_value(item, "material_key"),
                 "name": _config_value(item, "name"),
                 "value_type": _config_value(item, "value_type"),
+                "extraction_strategy": _config_value(item, "extraction_strategy"),
+                "structure_schema": _config_value(item, "structure_schema_json"),
                 "unit": _config_value(item, "unit"),
                 # 币种是金额比较与加总的口径之一；产物来源决定主体核对从哪种产物取值。
                 "currency": _config_value(item, "currency"),
@@ -2525,22 +2578,7 @@ def compile_inputs_of_config(
             }
             for item in fields
         ],
-        "rules": [
-            {
-                **(_config_value(item, "rule_json") or {}),
-                "rule_key": _config_value(item, "rule_key"),
-                "name": _config_value(item, "name"),
-                # `node` 是**节点实例码**（规则归属），`node_type` 才是能力类型：
-                # 算子约束、节点专属校验与来源节点判定都比能力类型。两者必须分开传。
-                "node": _config_value(item, "node_code"),
-                "node_type": node_type_by_code.get(_config_value(item, "node_code")),
-                "operator": _config_value(item, "operator_code"),
-                "enabled": bool(_config_value(item, "enabled")),
-                "source_ref": _config_value(item, "source_ref"),
-                "origin": _config_value(item, "origin_json"),
-            }
-            for item in rules
-        ],
+        "rules": rule_items,
         "sections": [
             {
                 "section_key": _config_value(item, "section_key"),
@@ -2580,6 +2618,7 @@ def compile_inputs_of_config(
         # 统一模板协议的版本标识。系统只有一份协议，版本只记录「按哪一版解释」；
         # 由调用方解析（没记来源时用当前版本），不在这里默认——那会让本函数反向依赖协议模块。
         "profile_version": profile_version,
+        "scenario_schema_config": scenario_schema_config,
     }
 
 
@@ -2856,6 +2895,7 @@ def build_node_plan(
     calculations: list[dict[str, Any]] | None = None,
     node_instances: list[dict[str, Any]] | None = None,
     fields: list[dict[str, Any]] | None = None,
+    materials: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """把**用户配置的节点实例**编译成 manifest 的节点计划。
 
@@ -2929,7 +2969,146 @@ def build_node_plan(
     workflow_dag.validate_dag(workflow_dag.plans_of({"nodes": plans}))
     _assert_sequence_consistent(plans)
     _assert_risk_source_dependencies(rules, calculations or [], fields or [], plans)
+    _assert_review_dependencies(rules, calculations or [], materials or [], plans)
+    _assert_report_dependencies(plans)
     return plans
+
+
+def _assert_review_dependencies(
+    rules: list[dict[str, Any]],
+    calculations: list[dict[str, Any]],
+    materials: list[dict[str, Any]],
+    nodes: list[dict[str, Any]],
+) -> None:
+    by_code = {item["node_code"]: item for item in nodes}
+    enabled = {code: item for code, item in by_code.items() if item["enabled"]}
+    review_nodes = [item for item in enabled.values() if item["node_type"] == NODE_TYPE_MANUAL_REVIEW]
+    if len(review_nodes) > 1:
+        raise BusinessError(
+            "MANIFEST_REVIEW_NODE_AMBIGUOUS",
+            "流程只能启用一个人工复核节点，否则待复核项没有唯一等待点",
+            details={"node_codes": sorted(item["node_code"] for item in review_nodes)},
+        )
+
+    review_sources = {
+        code for code, item in enabled.items()
+        if item["node_type"] == node_registry.NODE_TYPE_DOCUMENT_PREPARE and materials
+    }
+    agent_sources: set[str] = set()
+    for rule in rules:
+        code = rule.get("node")
+        if not rule.get("enabled", True) or code not in enabled:
+            continue
+        node_type = enabled[code]["node_type"]
+        if node_type == NODE_TYPE_FIELD_EXTRACTION and rule["operator"] == "LLM_EXTRACT":
+            review_sources.add(code)
+        if node_type not in {NODE_TYPE_INTERNAL_VALIDATE, NODE_TYPE_CROSS_VALIDATE, NODE_TYPE_RISK_RATING}:
+            continue
+        capability = capabilities.capability_of(capabilities.capability_id_of_rule(rule))
+        spec = tool_catalog.tool_spec(capability.capability_id if capability else None)
+        if spec is not None and spec.agent_selectable:
+            agent_sources.add(code)
+        if node_type == NODE_TYPE_RISK_RATING:
+            continue
+        if (
+            rule["operator"] in {"LLM_VALIDATE", "DECIMAL_CN_EQUAL", "FIELD_EQUAL"}
+            or (capability is not None and capability.execution == capabilities.EXEC_SUBJECT_RETRIEVAL)
+            or (rule.get("parameters") or {}).get("requires_manual_review") is True
+        ):
+            review_sources.add(code)
+    review_sources.update(code for code in agent_sources if enabled[code]["node_type"] != NODE_TYPE_RISK_RATING)
+    review_sources.update(
+        str(item.get("node_instance_code") or item.get("node_code"))
+        for item in calculations
+        if item.get("status") != CONFIG_STATUS_DISABLED
+        and item.get("bands")
+        and str(item.get("node_instance_code") or item.get("node_code")) in enabled
+    )
+    if not review_sources and not agent_sources:
+        return
+    if not review_nodes:
+        raise BusinessError(
+            "MANIFEST_REVIEW_NODE_MISSING",
+            "流程中的字段、规则或材料处理可能产生待复核项，但没有启用人工复核节点",
+            details={"source_nodes": sorted(review_sources | agent_sources)},
+        )
+
+    review = review_nodes[0]
+    ancestors: set[str] = set()
+    pending = list(review["depends_on"])
+    while pending:
+        code = pending.pop()
+        if code in ancestors:
+            continue
+        ancestors.add(code)
+        pending.extend(by_code[code]["depends_on"])
+    missing = sorted(review_sources - ancestors)
+    forbidden = sorted(
+        code for code in ancestors
+        if by_code[code]["node_type"] in {NODE_TYPE_RISK_RATING, NODE_TYPE_REPORT_OUTPUT}
+    )
+    if missing or forbidden:
+        raise BusinessError(
+            "MANIFEST_REVIEW_DEPENDENCY_INVALID",
+            "人工复核节点必须依赖所有可能产生待办的节点，且到达它的路径不能经过风险或报告节点",
+            details={"review_node": review["node_code"], "missing_source_nodes": missing, "forbidden_nodes": forbidden},
+        )
+
+
+def _assert_report_dependencies(nodes: list[dict[str, Any]]) -> None:
+    by_code = {item["node_code"]: item for item in nodes}
+    enabled_codes = {
+        code for code, item in by_code.items()
+        if item["enabled"] and item["node_type"] != NODE_TYPE_REPORT_OUTPUT
+    }
+    for report in nodes:
+        if report["node_type"] != NODE_TYPE_REPORT_OUTPUT or not report["enabled"]:
+            continue
+        ancestors: set[str] = set()
+        pending = list(report["depends_on"])
+        while pending:
+            code = pending.pop()
+            if code in ancestors:
+                continue
+            ancestors.add(code)
+            pending.extend(by_code[code]["depends_on"])
+        missing = sorted(enabled_codes - ancestors)
+        if missing:
+            raise BusinessError(
+                "MANIFEST_REPORT_DEPENDENCY_MISSING",
+                "报告输出节点必须在全部已启用审核节点完成后执行",
+                details={"report_node": report["node_code"], "missing_node_codes": missing},
+            )
+
+
+def attach_execution_contracts(
+    nodes: list[dict[str, Any]],
+    rules: list[dict[str, Any]],
+    calculations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Freeze each node's rule and field scope into the published workflow."""
+    for node in nodes:
+        node_code = node["node_code"]
+        node_rules = [rule for rule in rules if rule["node"] == node_code]
+        node_calculations = [
+            item for item in calculations if item["node_instance_code"] == node_code
+        ]
+        input_fields = {
+            item["field_key"]
+            for rule in node_rules
+            for item in rule.get("inputs", [])
+        }
+        output_fields = {
+            field_key for rule in node_rules for field_key in rule.get("outputs", [])
+        }
+        node["execution_contract"] = {
+            "field_keys": sorted(output_fields) if node["node_type"] == NODE_TYPE_FIELD_EXTRACTION else [],
+            "rule_keys": sorted(rule["rule_key"] for rule in node_rules),
+            "calculation_rule_codes": sorted(item["rule_code"] for item in node_calculations),
+            "input_field_keys": sorted(input_fields),
+            "output_field_keys": sorted(output_fields),
+        }
+    return nodes
 
 
 def _assert_risk_source_dependencies(
@@ -3035,7 +3214,13 @@ def build_task_schema(
     「无法判断」，没有规则就记 SKIPPED 并写明原因），绝不写成通过。
     """
     known_rules = {item["rule_key"]: item for item in manifest["rules"]}
-    available_keys = {key for key, rule in known_rules.items() if rule.get("enabled", True)}
+    enabled_node_codes = {
+        item["node_code"] for item in manifest["nodes"] if item.get("enabled", True)
+    }
+    available_keys = {
+        key for key, rule in known_rules.items()
+        if rule.get("enabled", True) and rule["node"] in enabled_node_codes
+    }
     if enabled_rule_keys is None:
         selected_keys = set(available_keys)
     elif not enabled_rule_keys and not allow_empty:
@@ -3071,6 +3256,7 @@ def build_task_schema(
         str(code)
         for calculation in manifest.get("calculations", [])
         if calculation.get("status") != CONFIG_STATUS_DISABLED
+        and calculation.get("node_instance_code") in enabled_node_codes
         for code in calculation.get("depends_on_field_codes", [])
     }
     fields_by_code: dict[str, dict[str, Any]] = {}
@@ -3154,6 +3340,23 @@ def assert_frozen_calculations(
     missing_nodes: list[dict[str, str]] = []
     for item in compiled:
         rule_code = str(item.get("rule_code") or "")
+        bands = item.get("bands")
+        if not isinstance(bands, list) or not bands:
+            raise BusinessError(
+                "FROZEN_CALC_BAND_MISSING",
+                f"历史计算规则“{rule_code}”没有判定区间，不能重新发布",
+                details={"rule_code": rule_code},
+            )
+        # 历史编译产物重新发布时也必须满足当前判定契约。特别是结果状态不能
+        # 留到任务运行时才发现缺失，否则同一份无效配置会再次进入新版本。
+        for band in bands:
+            if not isinstance(band, dict):
+                raise BusinessError(
+                    "FROZEN_CALC_BAND_INVALID",
+                    f"历史计算规则“{rule_code}”包含无效判定区间，不能重新发布",
+                    details={"rule_code": rule_code},
+                )
+            _judgement_band(band)
         node_code = item.get("node_instance_code")
         if not isinstance(node_code, str) or node_code not in node_codes:
             missing_nodes.append({"rule_code": rule_code, "node_code": str(node_code or "")})
@@ -3185,6 +3388,7 @@ def compile_form_manifest(
     selected_sheets: list[dict[str, Any]],
     profile_version: str,
     compiled_at: datetime,
+    scenario_schema_config: dict[str, Any] | None = None,
     calculation_candidates: list[dict[str, Any]] | None = None,
     frozen_calculations: list[dict[str, Any]] | None = None,
     disabled_source_rows: list[dict[str, Any]] | None = None,
@@ -3286,6 +3490,12 @@ def compile_form_manifest(
                 "字段类型不受支持",
                 details={"field_name": name, "value_type": value_type, "allowed": sorted(FORM_VALUE_TYPES)},
             )
+        extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+            value_type=value_type,
+            extraction_strategy=item.get("extraction_strategy"),
+            structure_schema=item.get("structure_schema"),
+            field_name=name,
+        )
         if material_key not in material_by_key:
             raise BusinessError(
                 "MANIFEST_FIELD_MATERIAL_MISSING",
@@ -3302,6 +3512,8 @@ def compile_form_manifest(
                 "field_key": key,
                 "name": name,
                 "value_type": value_type,
+                "extraction_strategy": extraction_strategy,
+                "structure_schema": structure_schema,
                 "unit": item.get("unit"),
                 # 币种是金额比较与加总的口径之一；留空表示未声明，不表示人民币。
                 "currency": item.get("currency"),
@@ -3497,7 +3709,10 @@ def compile_form_manifest(
             # 金额比较与加总（含大小写金额一致性）：币种必须都声明且一致；
             # 币种未声明时不能做数值比较或求和，系统也不默认人民币。
             if operator in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} or "DECIMAL" in input_types or "DECIMAL_CN" in input_types:
-                currencies = {field_currencies.get(input_item["field_key"]) for input_item in inputs}
+                currencies = {
+                    canonical_currency(field_currencies.get(input_item["field_key"]))
+                    for input_item in inputs
+                }
                 missing_currency = any(not (value or "").strip() for value in currencies)
                 declared_currencies = {value for value in currencies if (value or "").strip()}
                 if missing_currency:
@@ -3699,13 +3914,14 @@ def compile_form_manifest(
             )
         rule["applicability"] = {"kind": applicability["kind"], "material_keys": material_keys}
 
-    # 字段抽取规则：每个字段一条，与导入编译使用同一确定性派生规则。
-    # 它们挂到**用户配置的字段抽取节点实例**上（同类多个时明确报错）。
-    extraction_node_code = (
-        instance_code_of_type(node_instances, NODE_TYPE_FIELD_EXTRACTION, purpose="字段抽取")
-        if compiled_fields
-        else None
-    )
+    # A field sheet binding gives the owner for system-generated extraction rules.
+    # Explicit extraction rules retain their configured node, including when there
+    # are multiple extraction nodes in one workflow.
+    extraction_sheet_nodes = {
+        str(item["node_code"])
+        for item in selected_sheets
+        if item["sheet_role"] == "FIELD_EXTRACTION" and item.get("node_code")
+    }
     extraction_output_counts: dict[str, int] = {}
     for rule in compiled_rules:
         if rule["operator"] != "LLM_EXTRACT":
@@ -3722,6 +3938,12 @@ def compile_form_manifest(
     for field in compiled_fields:
         if field["field_key"] in extraction_output_counts:
             continue
+        if len(extraction_sheet_nodes) == 1:
+            extraction_node_code = next(iter(extraction_sheet_nodes))
+        else:
+            extraction_node_code = instance_code_of_type(
+                node_instances, NODE_TYPE_FIELD_EXTRACTION, purpose="字段抽取"
+            )
         instruction = str(field["instruction"] or "").strip()
         extraction_enabled = (system_rule_enabled or {}).get(f"SYS-EXTRACT-{field['field_key']}", True)
         if extraction_enabled and not instruction:
@@ -3878,8 +4100,12 @@ def compile_form_manifest(
         compiled_calculations = []
         stored_inputs = []
 
+    normalized_scenario_schema = scenario_schema.normalize_schema(scenario_schema_config)
+    node_plan = build_node_plan(compiled_rules, compiled_calculations or None, node_instances, compiled_fields, compiled_materials)
     manifest = {
         "manifest_version": "1.0",
+        "scenario_schema": normalized_scenario_schema,
+        "execution_contract_version": "1",
         # 统一模板协议的版本标识：系统只有一份协议，这里记录按哪一版解释这份配置。
         "profile_version": profile_version,
         "source_kind": "FORM",
@@ -3890,7 +4116,7 @@ def compile_form_manifest(
         "rules": sorted(compiled_rules, key=lambda item: item["rule_key"]),
         # 节点来自**用户配置**：实例码、能力类型、名称、顺序、依赖与配置全部原样固化，
         # 不由系统按规则内容生成固定节点表。
-        "nodes": build_node_plan(compiled_rules, compiled_calculations or None, node_instances, compiled_fields),
+        "nodes": attach_execution_contracts(node_plan, compiled_rules, compiled_calculations),
         "calculations": sorted(compiled_calculations, key=lambda item: item["rule_code"]),
         # 有候选时随版本留下，修订时重新编译。只有冻结产物时不写空候选，
         # 否则加载草稿会把已编译的计算规则当成「没有计算配置」丢掉。

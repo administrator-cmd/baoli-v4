@@ -45,6 +45,7 @@ class JudgementResult:
                     "upper_inclusive": self.band.upper_inclusive,
                     "comparison_basis": self.band.comparison_basis,
                     "judgement": self.band.judgement,
+                    "result_status": self.band.result_status,
                     "risk_level": self.band.risk_level,
                     "action": self.band.action,
                 }

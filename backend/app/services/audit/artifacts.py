@@ -15,8 +15,8 @@
 
 import hashlib, json
 from ...domain.identity import public_no
-from ...errors import BusinessError
-from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult
+from ...errors import BusinessError, exception_summary
+from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult, ReadyOcrArtifact, ready_artifact_payload
 from .document_ports import document_service
 from ...models import AuditTask, DocumentUpload, StoredArtifact
 from ..storage_service import resolve_storage_path
@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 PRE_CONTACT_ERROR_CODES = {
     "EXTERNAL_CONFIG_MISSING",
+    "MATERIAL_TYPE_CATALOG_FAILED",
     "PROCESSED_ARTIFACT_MISSING",
     "DOCUMENT_SOURCE_MISSING",
     "MATERIAL_TYPE_MISSING",
@@ -48,7 +49,7 @@ def _artifact_for_upload(db: Session, upload: DocumentUpload, service_code: str)
 
 def _artifact_payload(artifact: StoredArtifact) -> ExternalArtifact:
     try:
-        payload = ExternalArtifact.model_validate(artifact.metadata_json)
+        payload = ready_artifact_payload(artifact.metadata_json)
     except ValidationError as exc:
         raise BusinessError(
             "ARTIFACT_METADATA_INVALID",
@@ -205,6 +206,91 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
     db.commit()
     return record
 
+def _submit_authorized_ocr_retry(
+    db: Session,
+    task: AuditTask,
+    upload: DocumentUpload,
+    parsed_artifact: StoredArtifact,
+    record: StoredArtifact,
+    *,
+    idempotency_key: str,
+) -> StoredArtifact:
+    """执行已持久化的人工重提意图；保留原作业与每次提交尝试。"""
+    metadata = record.metadata_json or {}
+    attempts = list(metadata["submit_attempts"])
+    attempt = dict(attempts[-1])
+    if (
+        record.status != "SUBMITTING"
+        or attempt["idempotency_key"] != idempotency_key
+        or attempt["state"] != "SUBMITTING"
+    ):
+        raise BusinessError("OCR_RETRY_INTENT_INVALID", "OCR 人工重提意图与当前作业状态不一致", status_code=409)
+
+    try:
+        processed_path, processed_filename = _processed_document_source(parsed_artifact)
+    except Exception as exc:
+        attempt = {
+            **attempt,
+            "state": "PRE_CONTACT_FAILED",
+            "failure_code": exc.code if isinstance(exc, BusinessError) else "OCR_RETRY_PREPARE_FAILED",
+            "failure_message": exc.message if isinstance(exc, BusinessError) else exception_summary(exc),
+        }
+        record.status = attempt["previous_status"]
+        record.relative_path = attempt["previous_relative_path"]
+        record.metadata_json = {
+            **attempt["previous_metadata"],
+            "submit_attempts": [*attempts[:-1], attempt],
+        }
+        db.flush()
+        raise
+    try:
+        submission = document_service().submit_processed_document(
+            file_path=processed_path, filename=processed_filename
+        )
+    except BusinessError as exc:
+        attempt = {**attempt, "failure_code": exc.code, "failure_message": exc.message}
+        if exc.code in {"EXTERNAL_CONFIG_MISSING", "PROCESSED_ARTIFACT_MISSING", "OCR_MULTIPART_INVALID"}:
+            attempt["state"] = "PRE_CONTACT_FAILED"
+            record.status = attempt["previous_status"]
+            record.relative_path = attempt["previous_relative_path"]
+            record.metadata_json = {
+                **attempt["previous_metadata"],
+                "submit_attempts": [*attempts[:-1], attempt],
+            }
+        else:
+            attempt["state"] = "UNKNOWN"
+            record.metadata_json = {**metadata, "submit_attempts": [*attempts[:-1], attempt]}
+        db.flush()
+        raise
+    except Exception as exc:
+        attempt = {
+            **attempt,
+            "state": "UNKNOWN",
+            "failure_code": "OCR_RETRY_UNEXPECTED_ERROR",
+            "failure_message": exception_summary(exc),
+        }
+        record.metadata_json = {**metadata, "submit_attempts": [*attempts[:-1], attempt]}
+        db.flush()
+        raise
+
+    attempt = {
+        **attempt,
+        "state": "PENDING",
+        "job_id": submission.job_id,
+        "deadline_at": submission.deadline_at.isoformat(),
+    }
+    record.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.pending"
+    record.status = "PENDING"
+    record.metadata_json = {
+        "job_id": submission.job_id,
+        "deadline_at": submission.deadline_at.isoformat(),
+        "submit_attempts": [*attempts[:-1], attempt],
+    }
+    # 供应商已返回作业号时先持久化；结果日志中断也不能丢失可续查的作业身份。
+    db.commit()
+    return record
+
+
 def _ocr_job_metadata(artifact: StoredArtifact) -> tuple[str, datetime]:
     if artifact.status != "PENDING" or not isinstance(artifact.metadata_json, dict):
         raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 作业记录无效", status_code=500)
@@ -228,8 +314,14 @@ def _complete_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, arti
     relative, payload = _persist_external_artifact(task, upload, "OCR", result)
     artifact.relative_path = relative
     artifact.status = "READY"
-    artifact.metadata_json = payload.model_dump(mode="json")
-    artifact.content_sha256 = _artifact_content_digest(artifact.metadata_json, result.binary_content)
+    current_metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
+    artifact.metadata_json = ReadyOcrArtifact(
+        artifact=payload,
+        job_id=job_id,
+        deadline_at=deadline_at,
+        submit_attempts=list(current_metadata.get("submit_attempts") or []),
+    ).model_dump(mode="json")
+    artifact.content_sha256 = _artifact_content_digest(payload.model_dump(mode="json"), result.binary_content)
     db.flush()
     return artifact
 

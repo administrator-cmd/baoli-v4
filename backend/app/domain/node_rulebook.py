@@ -454,9 +454,10 @@ def convert_disabled_config_row(
     source_row: dict[str, Any], *, profile_version: str,
     material_by_code: dict[str, dict[str, Any]], field_by_code: dict[str, dict[str, Any]],
     field_catalog: dict[tuple[str, str], dict[str, Any]] | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> SheetConversion:
     """将编辑后的停用配置行交回对应的原始 Sheet 解析器。"""
-    reader = _disabled_source_reader(source_row, profile_version=profile_version)
+    reader = _disabled_source_reader(source_row, profile_version=profile_version, profile=profile)
     role = source_row["sheet_role"]
     if field_catalog is None:
         field_catalog = _build_field_catalog(list(field_by_code.values()), list(material_by_code.values()))
@@ -504,8 +505,11 @@ def disabled_check_risk_codes(source_row: dict[str, Any]) -> list[str]:
     )
 
 
-def _disabled_source_reader(source_row: dict[str, Any], *, profile_version: str) -> SheetReader:
-    profile = unified_profile.load_unified_profile()
+def _disabled_source_reader(
+    source_row: dict[str, Any], *, profile_version: str, profile: dict[str, Any] | None = None
+) -> SheetReader:
+    # 来源行属于草稿的 Schema 快照；直接读取当前全局协议会让场景级列别名/覆盖失效。
+    profile = profile or unified_profile.load_unified_profile()
     if profile_version != profile["profile_version"]:
         raise BusinessError(
             "DISABLED_SOURCE_ROW_PROFILE_CHANGED",
@@ -815,7 +819,7 @@ def _convert_fields(
                     cell=reader.location(row, "currency").cell,
                     column=reader.column_names["currency"],
                     value=None,
-                    question_title=f"字段「{material['name']}·{name}」缺少币种，请填写明确币种或“按材料原文”",
+                    question_title=f"字段「{material['name']}·{name}」缺少币种，请填写明确币种（如“人民币”“美元”）",
                     question_options=[],
                     input_kind="TEXT",
                     resolve={"mode": "REPLACE", "target_type": "FIELD", "target_ref": ref, "property": "currency"},
@@ -2378,6 +2382,8 @@ class NodeSheets:
 def build_convert_bundle(
     ir: WorkbookIR,
     bindings: dict[str, dict[str, Any]],
+    *,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把已绑定的非计算 Sheet 确定性转换成候选集合。
 
@@ -2390,9 +2396,9 @@ def build_convert_bundle(
 
     本函数不调用任何模型，不读取向量索引。
     """
-    # 统一模板协议是全系统唯一的一份：列协议按它取。
-    # 转换分派只使用用户确认的 sheet_role，不按名称或表头猜。
-    profile = unified_profile.load_unified_profile()
+    # 导入链传入场景适配后的列协议；独立调用仍可使用内部协议。
+    if profile is None:
+        profile = unified_profile.load_unified_profile()
     sheet_definitions = unified_profile.sheet_index(profile)
     readers: dict[str, SheetReader] = {}
     # Sheet 键 → 用户绑定的**节点实例码**。规则必须落在实例上，不能落在能力类型上：

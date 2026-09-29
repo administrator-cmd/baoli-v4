@@ -304,7 +304,8 @@ def list_evidence_page(
                 is not None
             )
         elif fact is not None:
-            is_current_target = bool(fact.is_current and fact.evidence_id == evidence.id)
+            # 结构化字段的一条事实可以有多条属性证据，不能只把摘要证据标成当前。
+            is_current_target = bool(fact.is_current)
         historical = not (is_current_upload and is_current_target)
         items.append(
             {
@@ -316,6 +317,7 @@ def list_evidence_page(
                 "material_name": material_name,
                 "filename": upload.original_filename if upload else None,
                 "document_upload_no": upload.upload_no if upload else None,
+                "field_path": evidence.field_path,
                 "page_no": evidence.page_no,
                 "quote_text": evidence.quote_text,
                 "locator_status": evidence.locator_status,

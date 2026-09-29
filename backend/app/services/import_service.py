@@ -46,7 +46,7 @@ from .background_service import ACTIVE_STATUSES, assert_no_active_operation, lat
 from ..domain.identity import public_no
 from .operation_types import OBJECT_IMPORT_JOB
 from .operation_log_service import record_operation
-from ..domain import unified_profile
+from ..domain import scenario_schema, unified_profile
 from .storage_service import RULEBOOK_EXTENSIONS, save_upload
 
 
@@ -81,6 +81,29 @@ def _job_or_404(db: Session, job_no: str, *, lock: bool = False) -> ImportJob:
     if not job:
         raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": job_no})
     return job
+
+
+def _job_schema(job: ImportJob) -> dict[str, Any]:
+    if not isinstance(job.schema_json, dict):
+        raise BusinessError(
+            "IMPORT_SCENARIO_SCHEMA_MISSING",
+            "导入作业缺少创建时的场景 schema 快照，不能继续解释工作簿",
+            status_code=409,
+            details={"job_no": job.job_no},
+        )
+    schema = scenario_schema.normalize_schema(job.schema_json)
+    if job.schema_key != schema["schema_key"] or job.schema_version != schema["schema_version"]:
+        raise BusinessError(
+            "IMPORT_SCENARIO_SCHEMA_MISMATCH",
+            "导入作业的场景 schema 身份与快照不一致",
+            status_code=409,
+            details={"job_no": job.job_no},
+        )
+    return schema
+
+
+def _job_profile(job: ImportJob) -> dict[str, Any]:
+    return scenario_schema.effective_profile(_job_schema(job))
 
 
 def _ensure_import_mutable(db: Session, job: ImportJob) -> None:
@@ -157,6 +180,14 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
             status_code=409,
             details={"scenario_code": scenario_code},
         )
+    schema = scenario_schema.normalize_schema(template.schema_json)
+    if template.schema_key != schema["schema_key"] or template.schema_version != schema["schema_version"]:
+        raise BusinessError(
+            "SCENARIO_SCHEMA_MISMATCH",
+            "场景 schema 身份与保存的配置不一致，不能导入",
+            status_code=409,
+            details={"scenario_code": scenario_code},
+        )
     job_no = public_no("IMP")
     suffix = Path(upload.filename or "").suffix.lower()
     relative_path = f"imports/{job_no}/source{suffix}"
@@ -174,6 +205,8 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
             source_filename=upload.filename or f"规则库{suffix}",
             source_size=size,
             source_sha256=sha256,
+            scenario_code=scenario_code,
+            schema_json=schema,
         )
         workbook_ir = WorkbookIR.model_validate(graph_state["workbook_ir"])
         job = ImportJob(
@@ -186,6 +219,9 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
             profile_version=workbook_ir.profile_version,
             # 上传入口的场景身份：作业明确属于哪个场景，不从 Excel 内容猜。
             scenario_code=scenario_code,
+            schema_key=schema["schema_key"],
+            schema_version=schema["schema_version"],
+            schema_json=schema,
             profile_display_version=unified_profile.UNIFIED_PROFILE_VERSION,
             status="PARSED",
             workbook_ir_json=workbook_ir.model_dump(mode="json"),
@@ -214,9 +250,7 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
             # 名称命中协议声明的说明页时，它就是模板元数据：固定排除，状态用
             # METADATA_SHEET_STATUS（转换期读同一个值）。**隐藏与否不参与判断**：
             # 隐藏只是 Excel 展示属性，隐藏的业务 Sheet 仍由用户绑定与导入。
-            if sheet.name == unified_profile.instruction_sheet_name(
-                unified_profile.load_unified_profile()
-            ):
+            if sheet.name == unified_profile.instruction_sheet_name(scenario_schema.effective_profile(schema)):
                 status = METADATA_SHEET_STATUS
             db.add(
                 ImportSheet(
@@ -294,9 +328,13 @@ def _proposal_business_view(
             rule_names[rule["candidate_ref"]] = (
                 f"{rule['name']}（{'、'.join(material_scope)}）" if material_scope else rule["name"]
             )
-    # 有效字段的值类型与单位：规则比较视图据此展示比较双方的口径与单位，不做任何换算猜测。
+    # 有效字段的值类型、单位与币种：规则比较视图据此展示双方口径，不做任何换算猜测。
     field_meta = {
-        field["candidate_ref"]: {"value_type": field["value_type"], "unit": field.get("unit")}
+        field["candidate_ref"]: {
+            "value_type": field["value_type"],
+            "unit": field.get("unit"),
+            "currency": field.get("currency"),
+        }
         for sheet in effective.get("sheets", [])
         for field in sheet.get("fields", [])
     }
@@ -366,6 +404,7 @@ def _proposal_business_view(
                         "name": item["name"],
                         "value_type": item["value_type"],
                         "unit": item.get("unit"),
+                        "currency": item.get("currency"),
                         "required": item["required"],
                         "instruction": item["instruction"],
                         "material_ref": item["material_ref"],
@@ -373,7 +412,7 @@ def _proposal_business_view(
                         "decision_state": decision_state("FIELD", item["candidate_ref"], sheet_key),
                         "original": _origin_view(
                             origin_fields.get(item["candidate_ref"]),
-                            ("name", "value_type", "unit", "required", "instruction"),
+                            ("name", "value_type", "unit", "currency", "required", "instruction"),
                         ),
                         "source_sheet": sheet_name,
                         "source_row": item["source"]["row_no"],
@@ -509,16 +548,8 @@ def _unprocessed_note(snapshot: dict[str, Any]) -> str | None:
 
 
 def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
-    """作业所属场景与统一模板协议的摘要。
-
-    系统只有一份协议，因此这里读的就是当前这一份——不存在「按作业保存时的版本
-    加载另一份 Profile」这回事。作业记录的是**场景**（属于哪个业务），
-    协议是系统能力全集，两者职责分离。
-
-    作业没有记录场景时（历史作业）如实返回 `scenario_code=None`，不补一个场景：
-    页面据此显示「未记录场景」，而不是假装它属于某个场景。
-    """
-    profile = unified_profile.load_unified_profile()
+    """保持原有 profile 摘要形状，同时按作业的场景 schema 展示 Sheet 协议。"""
+    profile = _job_profile(job)
     summary = unified_profile.profile_summary(profile)
     # 角色目录是完整协议，不是场景草稿里已经确认的 Sheet。
     # 新场景还没有 scenario_draft_sheet 时也必须能选择角色。
@@ -530,6 +561,8 @@ def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
         **summary,
         "scenario_code": job.scenario_code,
         "scenario_name": scenario_name,
+        "scenario_schema_key": job.schema_key,
+        "scenario_schema_version": job.schema_version,
     }
 
 
@@ -568,13 +601,16 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
     draft_answers = (job.decisions_json or {}).get("draft_answers")
     draft_answers = draft_answers if isinstance(draft_answers, dict) else {}
     manifest_draft = job.manifest_draft_json if isinstance(job.manifest_draft_json, dict) else {}
-    profile = unified_profile.load_unified_profile()
+    profile = _job_profile(job)
     profile_roles = set(unified_profile.sheet_index(profile))
     return {
         "job_no": job.job_no,
         "source_filename": job.source_filename,
         "status": job.status,
         "profile_version": job.profile_version,
+        "schema_key": job.schema_key,
+        "schema_version": job.schema_version,
+        "schema_json": _job_schema(job),
         # 作业所属场景 + 统一模板协议摘要（Sheet 数量、名称与可绑定的节点类型）。
         # 页面据此显示真实的表数量与名称，不再写死「7 类工作表」——
         # 统一模板覆盖的是系统能力全集，任何具体场景都只用到其中一部分。
@@ -771,7 +807,7 @@ def update_sheet_bindings(db: Session, job_no: str, request: SheetBindingsReques
     assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
     _ensure_import_mutable(db, job)
     sheets = {item.sheet_key: item for item in db.scalars(select(ImportSheet).where(ImportSheet.import_job_id == job.id))}
-    profile = unified_profile.load_unified_profile()
+    profile = _job_profile(job)
     supported_roles = set(unified_profile.sheet_index(profile))
     nodes = _draft_nodes_of_scenario(db, job.scenario_code)
     request_keys = [item.sheet_key for item in request.bindings]
@@ -951,6 +987,8 @@ def retry_conversion(db: Session, job_no: str) -> ImportJob:
             checkpoint_ns=checkpoint_ns,
             workbook_ir=job.workbook_ir_json,
             bindings=bindings,
+            scenario_code=job.scenario_code,
+            schema_json=_job_schema(job),
         )
         bundle = ProposalBundle.model_validate(graph_state["proposals"])
         proposal_json = bundle.model_dump(mode="json")
@@ -1483,7 +1521,7 @@ def _validated_bound_sheets(
     - node_code 仍存在、仍启用、且其能力类型仍在该 Sheet 允许的类型中；
     - role 没有重复（两张表争同一个用途）。
     """
-    profile = unified_profile.load_unified_profile()
+    profile = _job_profile(job)
     supported_roles = set(unified_profile.sheet_index(profile))
     nodes = _draft_nodes_of_scenario(db, template.scenario_code)
     selected: list[dict[str, Any]] = []
@@ -1577,7 +1615,7 @@ def _validated_bound_sheets(
 def apply_import_to_draft(
     db: Session, job_no: str, *, expected_job_revision: int, expected_scene_revision: int
 ) -> ImportJob:
-    """把已确认的导入结果写入场景配置，完整时立即生成生效版本。
+    """把已确认的导入结果写入场景草稿，不生成或发布场景版本。
 
     不创建场景。场景身份以上传时记录的 scenario_code 为准，
     不从文件名、Sheet 名或表头另找一个场景。写入会替换该场景当前草稿里的
@@ -1632,6 +1670,15 @@ def apply_import_to_draft(
             status_code=409,
             details={"scenario_code": job.scenario_code},
         )
+    job_schema = _job_schema(job)
+    template_schema = scenario_schema.normalize_schema(template.schema_json)
+    if job_schema != template_schema or job.schema_key != template.schema_key or job.schema_version != template.schema_version:
+        raise BusinessError(
+            "IMPORT_SCENARIO_SCHEMA_CHANGED",
+            "场景导入协议已在上传后改变，请按当前场景重新导入规则库",
+            status_code=409,
+            details={"job_no": job.job_no, "scenario_code": job.scenario_code},
+        )
     if job.status not in {"PROPOSED", "PENDING_DECISION", "CONFIRMED"}:
         raise BusinessError("IMPORT_STATUS_NOT_READY", "导入作业尚未成功完成规则转换", status_code=409)
     if not job.proposals_json:
@@ -1650,6 +1697,17 @@ def apply_import_to_draft(
     selected_sheets = _validated_bound_sheets(db, job, template, list(sheets))
     try:
         draft = ensure_draft(db, template)
+        if (
+            draft.schema_json != job_schema
+            or draft.schema_key != job.schema_key
+            or draft.schema_version != job.schema_version
+        ):
+            raise BusinessError(
+                "IMPORT_DRAFT_SCHEMA_MISMATCH",
+                "场景草稿的导入协议与当前作业不一致，请重新导入规则库",
+                status_code=409,
+                details={"job_no": job.job_no, "scenario_code": job.scenario_code},
+            )
         if draft.revision_no != expected_scene_revision:
             raise BusinessError(
                 "SCENARIO_DRAFT_REVISION_CONFLICT",

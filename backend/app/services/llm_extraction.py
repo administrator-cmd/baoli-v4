@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..domain import field_strategy
 from ..domain.audit_vocab import SEAL_ARTIFACT_SOURCE, declared_artifact_source
 from ..errors import BusinessError
 from ..integrations.llm.gateway import call_json
@@ -41,6 +42,7 @@ class ExtractedField(BaseModel):
     raw_value: str | None = None
     normalized_value: Any | None = None
     evidence: ExtractedEvidence | None = None
+    property_evidence: dict[str, ExtractedEvidence] = Field(default_factory=dict)
 
 
 class ExtractionResponse(BaseModel):
@@ -55,6 +57,8 @@ def _requested_field(item: dict[str, Any]) -> dict[str, Any]:
         "field_key": item["field_key"],
         "name": item["name"],
         "value_type": item["value_type"],
+        "extraction_strategy": field_strategy.strategy_of(item),
+        "structure_schema": item.get("structure_schema"),
         "unit": item.get("unit"),
         "required": item["required"],
         "instruction": item["instruction"],
@@ -117,24 +121,82 @@ def validate_extraction_response(
     seal_sourced_keys = {
         item["field_key"] for item in fields if declared_artifact_source(item) is not None
     }
+    fields_by_key = {item["field_key"]: item for item in fields}
     allowed_statuses = {"PRESENT", "NOT_PRESENT", "EXTRACTION_FAILED", "EVIDENCE_UNCLEAR", "NORMALIZATION_FAILED"}
     for item in result.fields:
+        field = fields_by_key[item.field_key]
+        structured = field_strategy.strategy_of(field) == field_strategy.STRUCTURED
         if item.status not in allowed_statuses:
             raise BusinessError("LLM_EXTRACTION_STATUS_INVALID", "字段抽取返回了未知状态", details={"status": item.status})
-        if item.status == "PRESENT" and (item.raw_value is None or item.evidence is None):
+        has_value_payload = item.raw_value is not None or item.normalized_value is not None
+        has_evidence_payload = item.evidence is not None or bool(item.property_evidence)
+        if item.status in {"NOT_PRESENT", "EXTRACTION_FAILED"} and (has_value_payload or has_evidence_payload):
+            raise BusinessError(
+                "LLM_EXTRACTION_STATUS_CONFLICT",
+                "字段抽取状态与返回的候选值或证据冲突",
+                details={"field_key": item.field_key, "status": item.status},
+            )
+        if structured:
+            if item.evidence is not None:
+                raise BusinessError(
+                    "LLM_EXTRACTION_EVIDENCE_UNEXPECTED",
+                    f"结构化字段“{field['name']}”必须按属性提供证据，不能再返回字段级证据",
+                    details={"field_key": item.field_key},
+                )
+            if item.normalized_value is not None:
+                try:
+                    normalized = field_strategy.normalize_structured_value(
+                        item.normalized_value, field["structure_schema"]
+                    )
+                except ValueError as exc:
+                    if item.status == "PRESENT":
+                        raise BusinessError(
+                            "LLM_EXTRACTION_STRUCTURE_INVALID",
+                            f"结构化字段“{field['name']}”不符合配置的 Schema：{exc}",
+                            details={"field_key": item.field_key},
+                        ) from exc
+                else:
+                    expected_paths = field_strategy.structured_property_keys(normalized)
+                    actual_paths = set(item.property_evidence)
+                    if not expected_paths and item.status == "PRESENT":
+                        raise BusinessError(
+                            "LLM_EXTRACTION_STRUCTURE_EMPTY",
+                            f"结构化字段“{field['name']}”没有返回任何有值属性，不能标记为已抽取",
+                            details={"field_key": item.field_key},
+                        )
+                    if actual_paths - expected_paths or (item.status == "PRESENT" and expected_paths != actual_paths):
+                        raise BusinessError(
+                            "LLM_EXTRACTION_PROPERTY_EVIDENCE_INVALID",
+                            f"结构化字段“{field['name']}”的属性证据与候选值不一致",
+                            details={
+                                "field_key": item.field_key,
+                                "missing_paths": sorted(expected_paths - actual_paths),
+                                "unexpected_paths": sorted(actual_paths - expected_paths),
+                            },
+                        )
+            elif item.status == "PRESENT":
+                raise BusinessError(
+                    "LLM_EXTRACTION_STRUCTURE_INVALID",
+                    f"结构化字段“{field['name']}”没有返回业务 JSON",
+                    details={"field_key": item.field_key},
+                )
+        elif not structured and item.status == "PRESENT" and (item.raw_value is None or item.evidence is None):
             raise BusinessError("LLM_EXTRACTION_EVIDENCE_MISSING", "已抽取字段缺少原文或证据")
-        if item.evidence and item.evidence.artifact_type not in known_types:
+        if not structured and item.property_evidence:
+            raise BusinessError("LLM_EXTRACTION_PROPERTY_EVIDENCE_UNEXPECTED", "普通字段不能返回属性证据")
+        evidences = [item.evidence] if item.evidence is not None else []
+        evidences.extend(item.property_evidence.values())
+        if any(evidence.artifact_type not in known_types for evidence in evidences):
             raise BusinessError("LLM_EXTRACTION_EVIDENCE_INVALID", "字段抽取引用了不存在的文件处理产物")
         if (
             item.field_key in seal_sourced_keys
-            and item.evidence is not None
-            and item.evidence.artifact_type != SEAL_ARTIFACT_SOURCE
+            and any(evidence.artifact_type != SEAL_ARTIFACT_SOURCE for evidence in evidences)
         ):
             raise BusinessError(
                 "LLM_EXTRACTION_EVIDENCE_SOURCE_MISMATCH",
                 f"字段“{item.field_key}”声明取自印章识别产物，抽取结果的证据却指向"
-                f"“{item.evidence.artifact_type}”产物，系统不接受与声明的产物来源不一致的证据",
-                details={"field_key": item.field_key, "artifact_type": item.evidence.artifact_type},
+                "其它产物，系统不接受与声明的产物来源不一致的证据",
+                details={"field_key": item.field_key},
             )
 
 
@@ -153,7 +215,18 @@ def extract_document_fields(
 印章产物里有多个主体时原样返回识别到的原文，不要挑选、合并或推断哪一个才是正确的业务主体；
 抽取结果只表示印章上识别到了什么，不构成主体是否一致的结论。
 两组字段合计每个请求字段必须且只能返回一次。状态只允许 PRESENT、NOT_PRESENT、EXTRACTION_FAILED、EVIDENCE_UNCLEAR、NORMALIZATION_FAILED。
-    PRESENT 必须包含原文、规范值和证据原文；证据必须声明请求中已有的 artifact_type。没有坐标时 bbox 返回 null，不得伪造。严格返回 JSON，不包含 Markdown。"""
+    只要已经得到候选值和对应证据就必须返回 PRESENT；EVIDENCE_UNCLEAR 只用于候选值或证据不完整，
+    NORMALIZATION_FAILED 只用于无法按字段类型或 structure_schema 形成候选值，最终状态由后端重新校验决定；
+    普通字段标记 PRESENT 时必须包含 raw_value 和 evidence；normalized_value 只是建议值，后端会按原文重新计算；
+    extraction_strategy=STRUCTURED 且标记 PRESENT 时使用 normalized_value 保存业务 JSON，不使用字段级 evidence，
+    normalized_value 必须严格符合 structure_schema，property_evidence 必须按每个非空顶层属性
+    分别提供一条证据，键就是属性名；普通字段的 property_evidence 必须为空。结构 Schema
+    没有单位或币种元数据：带“元、万元、人民币”等业务口径的属性必须按 string 原样返回，
+    不能只返回裸 number 后让系统猜单位；纯计数、比例等无量纲属性才使用 number/integer。
+    所有证据必须声明请求中已有的 artifact_type。
+    STRING/CLAUSE 字段的规范值可以是便于理解的文本变体，系统最终以 raw_value
+    作为有效事实；DECIMAL、DATE、BOOLEAN 字段的规范值应按字段类型给出可执行的
+    值。没有坐标时 bbox 返回 null，不得伪造。严格返回 JSON，不包含 Markdown。"""
     try:
         result = ExtractionResponse.model_validate(call_json(payload, prompt))
     except ValidationError as exc:
@@ -180,6 +253,28 @@ def validate_fields_with_llm(
     retrieval: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按审核要求、输入事实与检索原文做语义判断；确定结论必须引用原文。"""
+    invalid = [
+        item
+        for item in inputs
+        if item.get("status") not in {"PRESENT", "REVIEWED"}
+        or item.get("normalized_value") is None
+    ]
+    if invalid:
+        raise BusinessError(
+            "LLM_VALIDATION_INPUT_INVALID",
+            "语义判断只能使用已经定型的字段事实，本次未调用大模型",
+            status_code=409,
+            details={
+                "missing_inputs": [
+                    f"{item.get('field_key')}@{item.get('material_key')}"
+                    for item in invalid
+                ],
+                "statuses": {
+                    f"{item.get('field_key')}@{item.get('material_key')}": item.get("status")
+                    for item in invalid
+                },
+            },
+        )
     prompt = """你是合同规则判断器。只依据输入字段事实、规则要求和本次提供的检索证据判断。
 status 只允许 PASSED、ABNORMAL、EVIDENCE_INSUFFICIENT、PENDING_REVIEW。输入不足不能返回 PASSED。
 evidence_field_keys 只能引用输入中已有 field_key。

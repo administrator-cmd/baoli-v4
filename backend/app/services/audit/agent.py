@@ -42,7 +42,7 @@ import json
 import logging
 from typing import Any
 
-from ...domain import fact_snapshot
+from ...domain import capabilities, fact_snapshot, tool_catalog
 from ...domain.tool_context import ToolExecutionContext
 from ...errors import BusinessError
 from ...integrations.llm.gateway import ModelTurn, TURN_CONTENT, TURN_REFUSAL, TURN_TOOL_CALLS, call_chat
@@ -95,6 +95,7 @@ _SYSTEM_PROMPT = """你是合同审核判断器。你的职责是：根据给定
 2. inputs 里的 field_key 与 material_key 必须逐字使用提示中给出的标识，
    不得改写、不得自行编造材料标识。
 3. 只使用本次提供的工具。不要假设存在其它工具。
+   parameters 必须与规则的固定参数完全一致，不能自行更改比较方向、阈值或审核标准。
 4. 结论只能取 PASSED、ABNORMAL、EVIDENCE_INSUFFICIENT、PENDING_REVIEW 之一。
    证据不足时返回 EVIDENCE_INSUFFICIENT，不要凭猜测判通过。
 5. 如果工具返回「不可判定」或「能力未实现」，如实反映在结论里，不要改写成通过。
@@ -113,6 +114,7 @@ def build_rule_context(
     rule: dict[str, Any],
     inputs: list[dict[str, Any]],
     *,
+    manifest: dict[str, Any],
     material_names: dict[str, str],
 ) -> str:
     """规则的评估上下文：规则要求 + 可用的字段事实。
@@ -120,10 +122,15 @@ def build_rule_context(
     只给**本次规则实际使用的**事实与标识。给全量事实会让模型在无关字段上做判断，
     也会让它有机会引用不属于这条规则的输入。
     """
+    tool_id = capabilities.capability_id_of_rule(rule)
+    published_parameters = published_tool_parameters(rule, manifest, tool_id)
     lines = [
         f"规则编号：{rule.get('rule_code') or rule.get('rule_key')}",
         f"规则名称：{rule.get('name')}",
         f"审核要求：{rule.get('requirement') or '（未填写）'}",
+        f"执行能力：{tool_id}",
+        "工具固定参数：" + json.dumps(published_parameters, ensure_ascii=False, sort_keys=True),
+        "threshold 如为十进制字符串，工具调用时按工具 Schema 填 JSON 数字；实际计算仍采用发布原值。",
         "",
         "可用字段事实（inputs 必须逐字使用这些标识）：",
     ]
@@ -134,16 +141,22 @@ def build_rule_context(
             f"（{material_names.get(material_key, material_key)}）："
             f"原文={item.get('raw_value')!r}，标准化值={item.get('normalized_value')!r}，"
             f"状态={item.get('status')}，类型={item.get('value_type')}，"
-            f"单位={item.get('unit') or '未声明'}"
+            f"单位={item.get('unit') or '未声明'}，币种={item.get('currency') or '未声明'}"
         )
     return "\n".join(lines)
 
 
-def initial_messages(rule: dict[str, Any], inputs: list[dict[str, Any]], *, material_names: dict[str, str]) -> list[dict[str, Any]]:
+def initial_messages(
+    rule: dict[str, Any],
+    inputs: list[dict[str, Any]],
+    *,
+    manifest: dict[str, Any],
+    material_names: dict[str, str],
+) -> list[dict[str, Any]]:
     """一条规则实例的初始消息历史。只在 `prepare_agent_context` 里生成一次。"""
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": build_rule_context(rule, inputs, material_names=material_names)},
+        {"role": "user", "content": build_rule_context(rule, inputs, manifest=manifest, material_names=material_names)},
     ]
 
 
@@ -339,22 +352,23 @@ def conflicts_with_tool(verdict: dict[str, Any], tool_results: list[dict[str, An
     模型据其它证据给出判断是允许的。
     """
     conflicts: list[dict[str, Any]] = []
-    decided = {
-        str(item.get("tool_name")): str(item.get("status"))
-        for item in tool_results
-        if item.get("status") in {"PASSED", "ABNORMAL"}
-    }
     model_status = verdict.get("status")
     if model_status not in {"PASSED", "ABNORMAL"}:
         return conflicts
-    for tool_name, tool_status in sorted(decided.items()):
+    for item in tool_results:
+        tool_status = item.get("status")
+        if tool_status not in {"PASSED", "ABNORMAL"}:
+            continue
         if tool_status != model_status:
+            tool_name = str(item.get("tool_name"))
+            tool_call_id = item.get("tool_call_id")
             conflicts.append(
                 {
                     "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
                     "tool_status": tool_status,
                     "model_status": model_status,
-                    "reason": f"工具“{tool_name}”判定为 {tool_status}，模型结论为 {model_status}",
+                    "reason": f"工具“{tool_name}”（{tool_call_id}）判定为 {tool_status}，模型结论为 {model_status}",
                 }
             )
     return conflicts
@@ -488,7 +502,6 @@ def validate_verdict(
 def _task_facts(
     db: Session,
     task: AuditTask,
-    manifest: dict[str, Any],
     materials: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """本任务当前有效的事实集合（合同审核走字段事实，财报走统一事实）。
@@ -501,7 +514,7 @@ def _task_facts(
     - 材料位状态随之冻结：算子按 `material_state` 判定依据是否可用，
       用当前值会让结论无法复现。
     """
-    from ...models import TaskFact, TaskFieldValue
+    from ...models import DocumentUpload, Evidence, TaskDocument, TaskFact, TaskFieldValue
     from sqlalchemy import select
 
     material_states = {
@@ -509,39 +522,163 @@ def _task_facts(
         for item in materials
         if item.get("material_key")
     }
+    field_definitions = {
+        str(field["field_key"]): field
+        for field in task.task_schema_json["fields"]
+    }
     field_code_index = {
         str(field["source_ref"]): str(field["field_key"])
-        for field in manifest.get("fields", [])
-        if field.get("source_ref") and field.get("field_key")
+        for field in field_definitions.values()
+        if field.get("source_ref")
     }
+    field_rows = list(
+        db.scalars(
+            select(TaskFieldValue)
+            .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
+            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
+            .where(
+                TaskFieldValue.audit_task_id == task.id,
+                TaskFieldValue.scenario_version_id == task.scenario_version_id,
+                TaskFieldValue.is_current.is_(True),
+                DocumentUpload.audit_task_id == task.id,
+                DocumentUpload.is_current.is_(True),
+                TaskDocument.audit_task_id == task.id,
+                TaskDocument.material_key == TaskFieldValue.material_key,
+                TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
+            )
+        ).all()
+    )
+    field_row_ids = [row.id for row in field_rows]
+    evidence_ids_by_field_value: dict[int, list[int]] = {}
+    if field_row_ids:
+        for field_value_id, evidence_id in db.execute(
+            select(Evidence.field_value_id, Evidence.id)
+            .where(
+                Evidence.audit_task_id == task.id,
+                Evidence.field_value_id.in_(field_row_ids),
+                Evidence.rule_result_id.is_(None),
+            )
+            .order_by(Evidence.field_value_id, Evidence.id)
+        ).all():
+            if field_value_id is not None:
+                evidence_ids_by_field_value.setdefault(field_value_id, []).append(evidence_id)
+    field_facts = fact_snapshot.facts_of_field_value_rows(
+        field_rows,
+        field_definitions=field_definitions,
+        material_states=material_states,
+        evidence_ids_by_field_value=evidence_ids_by_field_value,
+    )
+    task_fact_rows = list(
+        db.scalars(
+            select(TaskFact).where(
+                TaskFact.audit_task_id == task.id,
+                TaskFact.is_current.is_(True),
+            )
+        ).all()
+    )
+    task_facts = fact_snapshot.facts_of_task_fact_rows(
+        task_fact_rows,
+        field_code_index=field_code_index,
+        field_definitions=field_definitions,
+        material_states=material_states,
+    )
+    # 一个字段身份在快照中只能出现一次。TaskFact 决定状态与可执行值，
+    # TaskFieldValue 只补充统一事实没有保存的原文和证据引用。此前把两条记录都塞进
+    # 快照、再靠 setdefault 让 TaskFieldValue 抢先，会让候选表反过来成为执行来源，
+    # 同时把同一事实重复计入指纹。
+    extracted_by_identity: dict[tuple[str, Any], dict[str, Any]] = {}
     facts: list[dict[str, Any]] = []
-    facts.extend(
-        fact_snapshot.facts_of_task_fact_rows(
-            list(
-                db.scalars(
-                    select(TaskFact).where(
-                        TaskFact.audit_task_id == task.id,
-                        TaskFact.is_current.is_(True),
-                    )
-                ).all()
-            ),
-            field_code_index=field_code_index,
-            material_states=material_states,
+    for item in task_facts:
+        if item.get("fact_kind") != "EXTRACTED":
+            facts.append(item)
+            continue
+        identity = (str(item.get("field_key") or ""), item.get("material_key"))
+        if identity in extracted_by_identity:
+            raise BusinessError(
+                "TASK_FACT_IDENTITY_DUPLICATE",
+                "同一字段与材料位存在多条当前统一事实，无法冻结唯一执行输入",
+                status_code=500,
+                details={"field_key": identity[0], "material_key": identity[1]},
+            )
+        extracted_by_identity[identity] = item
+
+    for candidate in field_facts:
+        identity = (str(candidate.get("field_key") or ""), candidate.get("material_key"))
+        canonical = extracted_by_identity.pop(identity, None)
+        if canonical is None:
+            raise BusinessError(
+                "TASK_FACT_MISSING_FOR_FIELD",
+                "当前字段版本没有对应的统一事实，不能作为规则或 Agent 输入",
+                status_code=500,
+                details={"field_key": identity[0], "material_key": identity[1]},
+            )
+        if canonical.get("status") != candidate.get("status"):
+            raise BusinessError(
+                "TASK_FACT_FIELD_STATUS_MISMATCH",
+                "当前字段版本与统一事实的状态不一致，不能继续执行",
+                status_code=500,
+                details={
+                    "field_key": identity[0],
+                    "material_key": identity[1],
+                    "field_status": candidate.get("status"),
+                    "fact_status": canonical.get("status"),
+                },
+            )
+        contract_keys = ("value_type", "unit", "currency")
+        mismatched_contract = {
+            key: {"field": candidate.get(key), "fact": canonical.get(key)}
+            for key in contract_keys
+            if candidate.get(key) != canonical.get(key)
+        }
+        if mismatched_contract:
+            raise BusinessError(
+                "TASK_FACT_FIELD_CONTRACT_MISMATCH",
+                "统一事实的类型、单位或币种与任务字段契约不一致",
+                status_code=500,
+                details={
+                    "field_key": identity[0],
+                    "material_key": identity[1],
+                    "mismatches": mismatched_contract,
+                },
+            )
+        if canonical.get("status") in {"PRESENT", "REVIEWED"} and canonical.get("normalized_value") is None:
+            raise BusinessError(
+                "TASK_FACT_VALUE_MISSING",
+                "统一事实已标记为有效，但没有可执行值",
+                status_code=500,
+                details={"field_key": identity[0], "material_key": identity[1]},
+            )
+        if (
+            canonical.get("status") in {"PRESENT", "REVIEWED"}
+            and fact_snapshot.canonical_field_value(
+                canonical.get("normalized_value"), field_definitions[identity[0]]
+            )
+            != fact_snapshot.canonical_field_value(
+                candidate.get("normalized_value"), field_definitions[identity[0]]
+            )
+        ):
+            raise BusinessError(
+                "TASK_FACT_FIELD_VALUE_MISMATCH",
+                "当前字段候选值与统一事实的有效值不一致，不能冻结规则输入",
+                status_code=500,
+                details={"field_key": identity[0], "material_key": identity[1]},
+            )
+        facts.append(
+            {
+                **canonical,
+                "raw_value": candidate.get("raw_value"),
+                "evidence_id": candidate.get("evidence_id"),
+                "evidence_ids": list(candidate.get("evidence_ids") or []),
+            }
         )
-    )
-    facts.extend(
-        fact_snapshot.facts_of_field_value_rows(
-            list(
-                db.scalars(
-                    select(TaskFieldValue).where(
-                        TaskFieldValue.audit_task_id == task.id,
-                        TaskFieldValue.is_current.is_(True),
-                    )
-                ).all()
-            ),
-            material_states=material_states,
+    if extracted_by_identity:
+        identity = next(iter(extracted_by_identity))
+        raise BusinessError(
+            "TASK_FIELD_VALUE_MISSING_FOR_FACT",
+            "当前统一事实没有对应的当前字段版本，无法补齐原文与证据",
+            status_code=500,
+            details={"field_key": identity[0], "material_key": identity[1]},
         )
-    )
     return facts
 
 
@@ -655,7 +792,7 @@ def freeze_snapshot(
     tool_policy_version = str(policy.get("tool_policy_version") or "")
     input_revision = int(task.input_revision or 0)
     materials = _task_materials(db, task)
-    facts = _task_facts(db, task, manifest, materials)
+    facts = _task_facts(db, task, materials)
     scope = fact_snapshot.scope_of(
         evaluation_id=evaluation_id,
         rule_instance_id=rule_instance_id,
@@ -1051,6 +1188,38 @@ def execution_context(
     )
 
 
+def published_tool_parameters(
+    rule: dict[str, Any],
+    manifest: dict[str, Any],
+    tool_id: str | None,
+) -> dict[str, Any]:
+    spec = tool_catalog.tool_spec(tool_id)
+    if spec is None:
+        raise BusinessError(
+            "TOOL_NOT_REGISTERED",
+            "已发布规则引用的执行能力不在工具目录中",
+            status_code=500,
+            details={"rule_key": rule.get("rule_key"), "tool_id": tool_id},
+        )
+    rule_parameters = rule.get("parameters")
+    if not isinstance(rule_parameters, dict):
+        raise BusinessError(
+            "TOOL_RULE_PARAMETERS_MISSING",
+            "已发布规则缺少参数对象，本次工具调用未执行",
+            status_code=500,
+            details={"rule_key": rule.get("rule_key")},
+        )
+    accepted = spec.input_schema["properties"]["parameters"]["properties"]
+    published = {key: value for key, value in rule_parameters.items() if key in accepted}
+    if "material_refs" in accepted:
+        published["material_refs"] = list(rule.get("materials") or [])
+    if "source_rule_codes" in accepted:
+        from .rules import _risk_source_result_keys
+
+        published["source_rule_codes"] = _risk_source_result_keys(rule, manifest)
+    return published
+
+
 def invoke_tool(
     db: Session,
     *,
@@ -1058,6 +1227,8 @@ def invoke_tool(
     inputs: list[dict[str, Any]],
     context: ToolExecutionContext,
     runtime: dict[str, Any] | None,
+    rule: dict[str, Any],
+    manifest: dict[str, Any],
 ) -> tuple[dict[str, Any], AgentToolCall]:
     """经账本执行一次工具调用：登记 → 判定恢复情形 →（必要时）执行 → 记录结果。
 
@@ -1087,12 +1258,16 @@ def invoke_tool(
     # 留下的 RUNNING 正是「状态未知、必须核查」的真实表达。提交后即释放行锁。
     db.commit()
     try:
+        published_tool_id = capabilities.capability_id_of_rule(rule)
+        published_parameters = published_tool_parameters(rule, manifest, published_tool_id)
         result = tool_service.invoke(
             call["tool_name"],
             call.get("arguments"),
             inputs=inputs,
             runtime=runtime,
             context=context,
+            published_parameters=published_parameters,
+            published_tool_id=published_tool_id,
         )
     except BusinessError as exc:
         ledger.mark_failed(db, record, exc)

@@ -7,23 +7,24 @@
 
 裁决后按「事实变化」的范围重算，不做无差别重跑：
 
-- 字段事实变化 → 重算抽取规则结果，并失效内部校验及其后的结果与待办，退回重判；
+- 字段事实变化 → 重算抽取规则结果，只失效引用该字段的节点及其 DAG 后继，退回重判；
 - 材料类型定案 → 只就地重算文件质量结论（判定依据变了），**不**退回校验链路、
   不作废排队中的复核。
 
 失效一律保留历史：旧批次标 INVALIDATED，旧事实与旧复核仍可追溯，不原地清空。"""
 
 import hashlib
+from ...domain import fact_snapshot, workflow_dag
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
 from ...errors import BusinessError
-from ...models import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
+from ...models import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
 from ...schemas import ManualReviewRequest
 from ..operation_types import OBJECT_AUDIT_TASK
 from ..task_lookup import task_or_404
-from .facts import _refresh_extraction_rule_results, _write_human_field_fact
+from .facts import _current_field_fact_pairs, _refresh_extraction_rule_results, _write_human_field_fact
 from .quality import _execute_file_quality_rules, _sync_type_review_pending
 from .shared import REVIEW_DECISION_LABELS, _normalize_field_value, _task_field_definitions, _task_manifest
-from .state import _save_flow_checkpoint, _set_task_checkpoint, _single_node_code_of_type, _task_field_value_of_current_upload, _validate_graph_namespace
+from .state import _node_codes_of_type, _save_flow_checkpoint, _set_task_checkpoint, _single_node_code_of_type, _task_field_value_of_current_upload, _validate_graph_namespace
 from datetime import UTC, datetime
 from decimal import InvalidOperation
 from sqlalchemy import func, select, update
@@ -57,6 +58,35 @@ def _current_review_batch(db: Session, task: AuditTask) -> list[ManualReview]:
             .order_by(ManualReview.id)
         ).all()
     )
+    targets: dict[tuple[str, int], str] = {}
+    for review in pending:
+        linked = [
+            ("FIELD", review.field_value_id),
+            ("RULE", review.rule_result_id),
+            ("DOCUMENT", review.document_upload_id),
+        ]
+        actual = [(kind, int(target_id)) for kind, target_id in linked if target_id is not None]
+        if len(actual) != 1:
+            raise BusinessError(
+                "REVIEW_TARGET_INVALID",
+                "待复核项没有关联唯一的业务对象，无法形成提交批次",
+                status_code=500,
+                details={"review_no": review.review_no},
+            )
+        target = actual[0]
+        previous = targets.get(target)
+        if previous is not None:
+            raise BusinessError(
+                "REVIEW_TARGET_DUPLICATE",
+                "同一业务对象存在多条待处理复核，无法确定应提交哪一条",
+                status_code=500,
+                details={
+                    "target_type": target[0],
+                    "target_id": target[1],
+                    "review_nos": [previous, review.review_no],
+                },
+            )
+        targets[target] = review.review_no
     if any(item.review_type == "FIELD_CONFIRMATION" for item in pending):
         return [item for item in pending if item.review_type == "FIELD_CONFIRMATION"]
     return pending
@@ -80,7 +110,7 @@ def _decision_command_no(db: Session, task: AuditTask) -> str | None:
 
 def _allowed_review_decisions(review_type: str) -> set[str]:
     if review_type == "FIELD_CONFIRMATION":
-        return {"CONFIRM_FIELD", "MODIFY_FIELD", "EVIDENCE_INSUFFICIENT"}
+        return {"CONFIRM_FIELD", "MODIFY_FIELD", "MARK_NOT_PRESENT", "EVIDENCE_INSUFFICIENT"}
     if review_type in {"RULE_RESULT", "MATERIAL_TYPE_MISMATCH"}:
         return {"CONFIRM_ABNORMAL", "MARK_NORMAL", "EVIDENCE_INSUFFICIENT"}
     raise BusinessError("REVIEW_TYPE_INVALID", "人工复核类型不受支持", details={"review_type": review_type})
@@ -90,9 +120,10 @@ def _validate_review_payloads(
     task: AuditTask,
     reviews: list[ManualReview],
     requested: dict[str, Any],
-) -> dict[int, tuple[str, str | bool]]:
+) -> dict[int, tuple[str, Any]]:
     field_definitions = _task_field_definitions(task)
-    normalized_values: dict[int, tuple[str, str | bool]] = {}
+    current_field_pairs = _current_field_fact_pairs(db, task)
+    normalized_values: dict[int, tuple[str, Any]] = {}
     for review in reviews:
         decision = requested[review.review_no]
         if decision.decision not in _allowed_review_decisions(review.review_type):
@@ -109,6 +140,14 @@ def _validate_review_payloads(
             fact = _task_field_value_of_current_upload(db, task, review.field_value_id)
             if not fact:
                 raise BusinessError("REVIEW_FIELD_MISSING", "复核关联字段不存在", status_code=500)
+            current_pair = current_field_pairs.get((fact.field_key, fact.material_key))
+            if current_pair is None or current_pair[0].id != fact.id:
+                raise BusinessError(
+                    "REVIEW_FIELD_FACT_STALE",
+                    "复核关联字段不是当前成对生成的字段版本与统一事实，不能提交裁决",
+                    status_code=409,
+                    details={"review_no": review.review_no, "field_value_id": review.field_value_id},
+                )
             field = field_definitions.get(fact.field_key)
             if not field or field["material_key"] != fact.material_key:
                 raise BusinessError("REVIEW_FIELD_SCHEMA_MISSING", "复核字段不在任务字段清单中", status_code=500)
@@ -117,14 +156,13 @@ def _validate_review_payloads(
                     raise BusinessError("REVIEW_FIELD_VALUE_REQUIRED", "确认或修改字段时必须填写确认后的字段值")
                 try:
                     # 与自动抽取同一套口径：金额按字段声明的单位与币种校验原文写法。
-                    normalized_values[review.id] = (
-                        decision.field_value.strip(),
-                        _normalize_field_value(
-                            field["value_type"],
-                            decision.field_value,
-                            unit=field.get("unit"),
-                            currency=field.get("currency"),
-                        ),
+                    submitted_normalized = _normalize_field_value(
+                        field["value_type"],
+                        decision.field_value,
+                        unit=field.get("unit"),
+                        currency=field.get("currency"),
+                        extraction_strategy=field.get("extraction_strategy"),
+                        structure_schema=field.get("structure_schema"),
                     )
                 except (InvalidOperation, ValueError) as exc:
                     raise BusinessError(
@@ -137,8 +175,28 @@ def _validate_review_payloads(
                             "currency": field.get("currency"),
                         },
                     ) from exc
+                if decision.decision == "CONFIRM_FIELD":
+                    if fact.raw_value is None or fact.normalized_value_json is None:
+                        raise BusinessError(
+                            "REVIEW_FIELD_CONFIRM_VALUE_MISSING",
+                            "当前候选没有可直接确认的有效值，请选择修改字段并填写正确值",
+                            status_code=409,
+                            details={"review_no": review.review_no, "field_key": fact.field_key},
+                        )
+                    if fact_snapshot.canonical_field_value(
+                        submitted_normalized, field
+                    ) != fact_snapshot.canonical_field_value(fact.normalized_value_json, field):
+                        raise BusinessError(
+                            "REVIEW_FIELD_CONFIRM_VALUE_CHANGED",
+                            "确认字段不能改变当前候选值；如需改值请选择修改字段",
+                            status_code=409,
+                            details={"review_no": review.review_no, "field_key": fact.field_key},
+                        )
+                    normalized_values[review.id] = (fact.raw_value, fact.normalized_value_json)
+                else:
+                    normalized_values[review.id] = (decision.field_value.strip(), submitted_normalized)
             elif decision.field_value is not None:
-                raise BusinessError("REVIEW_FIELD_VALUE_UNEXPECTED", "证据不足结论不能填写字段值")
+                raise BusinessError("REVIEW_FIELD_VALUE_UNEXPECTED", "当前字段复核结论不能填写字段值")
         if review.rule_result_id:
             result = db.get(RuleResult, review.rule_result_id)
             if not result or result.audit_task_id != task.id:
@@ -152,27 +210,39 @@ def _validate_review_payloads(
 
 def _invalidate_file_quality_results(
     db: Session, task: AuditTask, manifest: dict[str, Any]
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """材料类型经人工确认变化后，失效文件质量检查的旧结论与待办。
 
     质量检查的判定依赖材料类型（类型待复核时它会明确记“缺少有效依据”）；
     类型一旦定案，旧结论的依据已经不再成立，必须重算，不能沿用到新批次。
-    只失效这一节点的结果：材料识别与正文抽取的产物仍然有效，不重调供应商。
+    失效已执行的文件处理实例的旧结果：材料识别与正文抽取产物仍有效，不重调供应商。
     重算由 `_recompute_file_quality_results` 在同一事务里紧接着完成——只失效不重算，
     下游报告与风险就会拿到“依据已不成立”的旧结论。
     """
-    counts = {"invalidated_executions": 0, "invalidated_rule_results": 0, "invalidated_reviews": 0}
-    execution_ids = list(
+    counts: dict[str, Any] = {
+        "invalidated_executions": 0,
+        "invalidated_rule_results": 0,
+        "invalidated_reviews": 0,
+        "node_codes": [],
+    }
+    executions = list(
         db.scalars(
-            select(NodeExecution.id).where(
+            select(NodeExecution).where(
                 NodeExecution.audit_task_id == task.id,
                 NodeExecution.node_code.in_(_node_codes_of_type(manifest, "DOCUMENT_PREPARE")),
                 NodeExecution.status != "INVALIDATED",
             )
         ).all()
     )
-    if not execution_ids:
+    if not executions:
         return counts
+    execution_ids = [item.id for item in executions]
+    executed_codes = {item.node_code for item in executions}
+    counts["node_codes"] = [
+        item["node_code"]
+        for item in sorted(manifest["nodes"], key=lambda node: node["sequence_no"])
+        if item["node_code"] in executed_codes
+    ]
     rule_result_ids = list(
         db.scalars(select(RuleResult.id).where(RuleResult.node_execution_id.in_(execution_ids))).all()
     )
@@ -191,70 +261,80 @@ def _invalidate_file_quality_results(
     db.flush()
     return counts
 
-def _recompute_file_quality_results(db: Session, task: AuditTask, manifest: dict[str, Any]) -> dict[str, Any]:
+def _recompute_file_quality_results(
+    db: Session, task: AuditTask, manifest: dict[str, Any], node_codes: list[str]
+) -> dict[str, Any]:
     """按当前材料状态就地重算文件质量检查结论，产出新的有效结果批次。
 
     只重算质量规则本身：8018/8010/印章/OCR 的产物已按上传身份持久化为 READY，
     本函数不重新识别、不重新提交 OCR，也不接触任何外部服务。
     旧批次由 `_invalidate_file_quality_results` 标为 INVALIDATED 保留为历史；
-    新批次挂在新的执行记录上（rule_result 的唯一键是「执行批次 + 规则键」，
-    不能复用已失效批次的执行行），报告与风险据此取到当前有效的质量结论。
+    每个已执行实例各建一条新执行记录（rule_result 的唯一键是「执行批次 + 规则键」，
+    不能复用已失效批次的执行行），规则仍只挂在自身归属实例，供报告与风险读取。
     """
-    sequence_no = (db.scalar(select(func.max(NodeExecution.sequence_no)).where(NodeExecution.audit_task_id == task.id)) or 0) + 1
-    now = datetime.now(UTC)
-    prepare_codes = _node_codes_of_type(manifest, "DOCUMENT_PREPARE")
-    if not prepare_codes:
-        raise BusinessError(
-            "AUDIT_NODE_UNKNOWN",
-            "本任务绑定的场景没有配置文件处理节点，无法重算文件质量结论",
-            status_code=500,
-            details={"task_no": task.task_no},
+    sequence_no = db.scalar(select(func.max(NodeExecution.sequence_no)).where(NodeExecution.audit_task_id == task.id)) or 0
+    status_counts: dict[str, int] = {}
+    per_node: list[dict[str, Any]] = []
+    for node_code in node_codes:
+        sequence_no += 1
+        now = datetime.now(UTC)
+        execution = NodeExecution(
+            audit_task_id=task.id,
+            scenario_version_id=task.scenario_version_id,
+            node_code=node_code,
+            sequence_no=sequence_no,
+            status="SUCCEEDED",
+            started_at=now,
+            finished_at=now,
+            # 本批次只重算质量结论，已经持久化的外部产物不重新请求。
+            result_json={
+                "recomputed": True,
+                "recompute_reason": "材料类型经人工复核确认，文件质量检查的判定依据已改变，本次按当前材料状态重算质量结论",
+                "recompute_scope": "FILE_QUALITY_CHECK",
+                "external_services_called": False,
+            },
         )
-    execution = NodeExecution(
-        audit_task_id=task.id,
-        scenario_version_id=task.scenario_version_id,
-        node_code=prepare_codes[0],
-        sequence_no=sequence_no,
-        status="SUCCEEDED",
-        started_at=now,
-        finished_at=now,
-        # 本批次不处理文件：如实写明只做了质量结论重算，且没有调用外部服务。
-        # 不写 processed_documents，避免把「本批次处理了 0 份」伪装成文件处理结果。
-        result_json={
-            "recomputed": True,
-            "recompute_reason": "材料类型经人工复核确认，文件质量检查的判定依据已改变，本次按当前材料状态重算质量结论",
-            "recompute_scope": "FILE_QUALITY_CHECK",
-            "external_services_called": False,
-        },
-    )
-    db.add(execution)
-    # 会话未启用 autoflush：必须先落盘（含调用方刚写入的材料类型状态），
-    # 否则下面的质量判定读到的仍是旧材料状态，重算会得出与人工结论不符的结果。
+        db.add(execution)
+        # 会话未启用 autoflush：先落盘调用方刚写入的材料状态与本次执行标识。
+        db.flush()
+        summary = _execute_file_quality_rules(db, task, manifest, execution)
+        execution.result_json = {**(execution.result_json or {}), **summary}
+        per_node.append({"node_code": node_code, "sequence_no": sequence_no, **summary})
+        for status, count in summary["file_quality_status_counts"].items():
+            status_counts[status] = status_counts.get(status, 0) + count
     db.flush()
-    summary = _execute_file_quality_rules(db, task, manifest, execution)
-    execution.result_json = {**(execution.result_json or {}), **summary}
-    db.flush()
-    return {**summary, "sequence_no": execution.sequence_no}
+    return {
+        "file_quality_rule_count": sum(item["file_quality_rule_count"] for item in per_node),
+        "file_quality_status_counts": status_counts,
+        "nodes": per_node,
+    }
 
 def _invalidate_validation_results(
-    db: Session, task: AuditTask, manifest: dict[str, Any]
-) -> dict[str, int]:
-    """字段有效值或材料依据改变后失效内部校验、交叉校验、风险与报告。
+    db: Session,
+    task: AuditTask,
+    manifest: dict[str, Any],
+    changed_field_keys: set[str],
+) -> dict[str, Any]:
+    """字段事实改变后只失效实际引用它的节点及 DAG 后继，并撤销派生事实。
 
     旧批次的待复核项同时失效：新结果批次是否需要人工判断由新结果自己决定，
     旧复核项不能继续挂在待办里，也不能自动贴到新结果上。
     返回真实失效数量，供纠错接口如实回报影响范围。
 
-    受影响节点按**能力类型**解析成实例码集合：节点实例码由用户配置，
-    写死能力类型当实例码会让用户改了实例码之后一条执行记录都失效不掉，
-    下游继续拿旧结论。
+    普通规则按 field_key 建立引用，计算规则按字段 source_ref 建立引用；报告会展示
+    任务字段，因此启用了报告规则时也是字段的直接消费者。之后只沿 DAG 向后传播。
     """
-    counts = {"invalidated_executions": 0, "invalidated_rule_results": 0, "invalidated_reviews": 0}
-    affected_codes = [
-        code
-        for node_type in ("INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK_RATING", "REPORT_OUTPUT")
-        for code in _node_codes_of_type(manifest, node_type)
-    ]
+    affected_codes = _field_change_affected_node_codes(
+        manifest,
+        changed_field_keys,
+        set(task.task_schema_json["enabled_rule_keys"]),
+    )
+    counts: dict[str, Any] = {
+        "invalidated_executions": 0,
+        "invalidated_rule_results": 0,
+        "invalidated_reviews": 0,
+        "affected_node_codes": sorted(affected_codes),
+    }
     if not affected_codes:
         return counts
     execution_ids = list(
@@ -268,6 +348,19 @@ def _invalidate_validation_results(
     )
     if not execution_ids:
         return counts
+    counts.update(_invalidate_execution_records(db, task, execution_ids))
+    return counts
+
+
+def _invalidate_execution_records(
+    db: Session,
+    task: AuditTask,
+    execution_ids: list[int],
+) -> dict[str, int]:
+    """失效指定执行及其规则、字段待办和该批次产生的全部当前事实。"""
+    counts = {"invalidated_executions": 0, "invalidated_rule_results": 0, "invalidated_reviews": 0}
+    if not execution_ids:
+        return counts
     rule_result_ids = list(
         db.scalars(select(RuleResult.id).where(RuleResult.node_execution_id.in_(execution_ids))).all()
     )
@@ -278,13 +371,152 @@ def _invalidate_validation_results(
             .values(status="INVALIDATED")
         ).rowcount or 0
     counts["invalidated_rule_results"] = len(rule_result_ids)
+    field_value_ids = list(
+        db.scalars(
+            select(TaskFieldValue.id).where(
+                TaskFieldValue.audit_task_id == task.id,
+                TaskFieldValue.extraction_execution_id.in_(execution_ids),
+                TaskFieldValue.is_current.is_(True),
+            )
+        ).all()
+    )
+    if field_value_ids:
+        counts["invalidated_reviews"] += db.execute(
+            update(ManualReview)
+            .where(ManualReview.field_value_id.in_(field_value_ids), ManualReview.status == "PENDING")
+            .values(status="INVALIDATED")
+        ).rowcount or 0
+        db.execute(
+            update(TaskFieldValue)
+            .where(TaskFieldValue.id.in_(field_value_ids), TaskFieldValue.is_current.is_(True))
+            .values(is_current=False)
+        )
+    # 执行批次既可能产生计算派生事实，也可能产生抽取统一事实。只撤销 DERIVED 会让
+    # 已失效抽取节点的旧字段继续留在 TaskFact 当前位，后续规则仍能读取到它。
+    db.execute(
+        update(TaskFact)
+        .where(
+            TaskFact.audit_task_id == task.id,
+            TaskFact.source_execution_id.in_(execution_ids),
+            TaskFact.is_current.is_(True),
+        )
+        .values(is_current=False)
+    )
     counts["invalidated_executions"] = db.execute(
         update(NodeExecution)
-
         .where(NodeExecution.id.in_(execution_ids))
         .values(status="INVALIDATED")
     ).rowcount or 0
     return counts
+
+
+def _field_change_affected_node_codes(
+    manifest: dict[str, Any],
+    changed_field_keys: set[str],
+    enabled_rule_keys: set[str],
+) -> set[str]:
+    """解析字段的真实消费者，再沿节点依赖图取得全部下游节点。"""
+    if not changed_field_keys:
+        return set()
+    plans = workflow_dag.plans_of(manifest)
+    enabled_node_codes = {plan.node_instance_code for plan in plans if plan.enabled}
+    affected: set[str] = set()
+
+    for rule in manifest.get("rules") or []:
+        if (
+            not rule.get("enabled", True)
+            or rule.get("rule_key") not in enabled_rule_keys
+            or rule.get("node") not in enabled_node_codes
+        ):
+            continue
+        referenced_fields = {
+            str(item.get("field_key"))
+            for item in (rule.get("inputs") or [])
+            if isinstance(item, dict) and item.get("field_key")
+        }
+        if referenced_fields & changed_field_keys or rule.get("operator") == "REPORT_RENDER":
+            affected.add(str(rule["node"]))
+
+    changed_field_codes = {
+        str(field.get("source_ref"))
+        for field in (manifest.get("fields") or [])
+        if field.get("field_key") in changed_field_keys and field.get("source_ref")
+    }
+    for calculation in manifest.get("calculations") or []:
+        node_code = str(calculation.get("node_instance_code") or "")
+        if (
+            calculation.get("status") != "DISABLED"
+            and node_code in enabled_node_codes
+            and changed_field_codes
+            & {str(code) for code in (calculation.get("depends_on_field_codes") or [])}
+        ):
+            affected.add(node_code)
+
+    while True:
+        descendants = {
+            plan.node_instance_code
+            for plan in plans
+            if plan.enabled and any(dependency in affected for dependency in plan.depends_on)
+        }
+        expanded = affected | descendants
+        if expanded == affected:
+            return affected
+        affected = expanded
+
+
+def _next_node_for_recalculation(
+    db: Session,
+    task: AuditTask,
+    manifest: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    *,
+    completed_node_code: str | None = None,
+) -> dict[str, Any] | None:
+    """按失效后的有效执行记录和 DAG 选择重算起点。"""
+    plans = workflow_dag.plans_of(manifest)
+    # 会话关闭 autoflush；本事务内刚失效的执行记录不能继续算作已完成。
+    db.flush()
+    completed = set(
+        db.scalars(
+            select(NodeExecution.node_code).where(
+                NodeExecution.audit_task_id == task.id,
+                NodeExecution.status.in_(("SUCCEEDED", "SKIPPED")),
+            )
+        ).all()
+    )
+    if completed_node_code is not None:
+        completed.add(completed_node_code)
+    pending_reviews = list(
+        db.scalars(
+            select(ManualReview.review_no).where(
+                ManualReview.audit_task_id == task.id,
+                ManualReview.status == "PENDING",
+            )
+        ).all()
+    )
+    ready = (
+        workflow_dag.ready_node_for_pending_review(plans, completed=completed)
+        if pending_reviews
+        else workflow_dag.ready_node(plans, completed=completed)
+    )
+    if pending_reviews and ready is None:
+        raise BusinessError(
+            "AUDIT_REVIEW_NODE_UNAVAILABLE",
+            "仍有待人工复核项，但当前流程无法到达人工复核节点",
+            status_code=409,
+            details={"review_nos": pending_reviews},
+        )
+    if ready is not None:
+        return next(item for item in nodes if item["node_code"] == ready.node_instance_code)
+    blocked = workflow_dag.blocked_nodes(plans, completed=completed)
+    if blocked:
+        raise BusinessError(
+            "AUDIT_WORKFLOW_BLOCKED",
+            "字段更正后，审核流程的节点依赖未满足",
+            status_code=409,
+            details={"blocked_nodes": [item.node_instance_code for item in blocked]},
+        )
+    return None
 
 def _invalidate_retry_results(
     db: Session,
@@ -293,7 +525,19 @@ def _invalidate_retry_results(
     current_index: int,
 ) -> None:
     """重试前只失效被重试节点及其逻辑后继，不动更早的节点。"""
-    affected_nodes = {item["node_code"] for item in nodes[current_index:]}
+    manifest = _task_manifest(task)
+    plans = workflow_dag.plans_of(manifest)
+    affected_nodes = {nodes[current_index]["node_code"]}
+    while True:
+        descendants = {
+            plan.node_instance_code
+            for plan in plans
+            if any(dependency in affected_nodes for dependency in plan.depends_on)
+        }
+        expanded = affected_nodes | descendants
+        if expanded == affected_nodes:
+            break
+        affected_nodes = expanded
     execution_ids = list(
         db.scalars(
             select(NodeExecution.id).where(
@@ -318,48 +562,107 @@ def _invalidate_retry_results(
             .where(NodeExecution.id.in_(execution_ids))
             .values(status="INVALIDATED")
         )
+        db.execute(
+            update(TaskFact)
+            .where(
+                TaskFact.audit_task_id == task.id,
+                TaskFact.fact_kind == "DERIVED",
+                TaskFact.source_execution_id.in_(execution_ids),
+                TaskFact.is_current.is_(True),
+            )
+            .values(is_current=False)
+        )
 
-    # 「失效范围里有没有字段抽取节点」按**能力类型**判断：`affected_nodes` 是
-    # 节点**实例码**集合（用户配置的，如 EXTRACT1），拿它与能力类型字符串比较
-    # 恒为真，这段字段事实失效逻辑永远不会执行。
-    extraction_codes = {
-        str(item["node_code"])
-        for item in nodes
-        if str(item.get("node_type") or item["node_code"]) == "FIELD_EXTRACTION"
-    }
-    if not (extraction_codes & affected_nodes):
+    # 节点重试已经改变了当前执行/待办集合，旧批次哈希无论重试的是哪类节点都不再有效。
+    # 这一步不能放在字段抽取分支末尾，否则普通规则节点和无字段归属的历史节点会提前返回，
+    # 页面继续携带旧哈希提交复核时只能得到过期批次冲突。
+    task.pending_review_hash = None
+
+    # `affected_nodes` 保存用户配置的节点实例码（如 EXTRACT1），先从 manifest
+    # 解析 FIELD_EXTRACTION 对应的实例码，再判断本次重试是否影响抽取字段。
+    extraction_codes = set(_node_codes_of_type(manifest, "FIELD_EXTRACTION"))
+    affected_extraction_codes = extraction_codes & affected_nodes
+    if not affected_extraction_codes:
+        return
+    affected_field_keys: set[str] = set()
+    for node in manifest.get("nodes") or []:
+        if str(node.get("node_code") or "") not in affected_extraction_codes:
+            continue
+        contract = node.get("execution_contract")
+        if isinstance(contract, dict) and isinstance(contract.get("field_keys"), list):
+            affected_field_keys.update(
+                str(field_key) for field_key in contract["field_keys"] if field_key
+            )
+    # 历史 manifest 没有节点执行契约，字段归属由抽取规则的 outputs 表达。
+    for rule in manifest.get("rules") or []:
+        if (
+            str(rule.get("node") or "") in affected_extraction_codes
+            and rule.get("operator") == "LLM_EXTRACT"
+        ):
+            affected_field_keys.update(
+                str(field_key) for field_key in (rule.get("outputs") or []) if field_key
+            )
+    if not affected_field_keys:
         return
     current_upload_ids = [
         document.current_upload_id
         for document in db.scalars(select(TaskDocument).where(TaskDocument.audit_task_id == task.id)).all()
         if document.current_upload_id is not None
     ]
-    if not current_upload_ids:
-        return
-    field_value_ids = list(
-        db.scalars(
-            select(TaskFieldValue.id).where(
-                TaskFieldValue.audit_task_id == task.id,
-                TaskFieldValue.scenario_version_id == task.scenario_version_id,
-                TaskFieldValue.document_upload_id.in_(current_upload_ids),
-            )
-        ).all()
+    field_value_ids = (
+        list(
+            db.scalars(
+                select(TaskFieldValue.id).where(
+                    TaskFieldValue.audit_task_id == task.id,
+                    TaskFieldValue.scenario_version_id == task.scenario_version_id,
+                    TaskFieldValue.field_key.in_(affected_field_keys),
+                    TaskFieldValue.document_upload_id.in_(current_upload_ids),
+                    TaskFieldValue.is_current.is_(True),
+                )
+            ).all()
+        )
+        if current_upload_ids
+        else []
     )
     if field_value_ids:
-        # 重跑会新增事实版本；历史事实与历史证据不原地清空，只失效依据旧事实的待复核项。
+        # 重跑会新增事实版本；历史事实与历史证据不原地清空，当前候选和依据它的待复核项
+        # 必须一起退出当前位。否则重试失败时，旧候选仍会被任务视图或后续节点读到。
         db.execute(
             update(ManualReview)
             .where(ManualReview.field_value_id.in_(field_value_ids), ManualReview.status == "PENDING")
             .values(status="INVALIDATED")
         )
-    task.pending_review_hash = None
+        db.execute(
+            update(TaskFieldValue)
+            .where(TaskFieldValue.id.in_(field_value_ids), TaskFieldValue.is_current.is_(True))
+            .values(is_current=False)
+        )
+    # 抽取型统一事实没有直接保存 TaskFieldValue 外键，因此按任务冻结字段定义把
+    # 本次重试节点拥有的 field_key 转成 fact_code。两张事实表要独立失效：即使某张表
+    # 因历史异常缺了当前行，另一张表里的旧值也不能继续作为规则或计算输入。
+    affected_fact_codes = {
+        str(field.get("source_ref") or field["field_key"])
+        for field in (task.task_schema_json.get("fields") or [])
+        if str(field.get("field_key") or "") in affected_field_keys
+    }
+    if affected_fact_codes:
+        db.execute(
+            update(TaskFact)
+            .where(
+                TaskFact.audit_task_id == task.id,
+                TaskFact.fact_kind == "EXTRACTED",
+                TaskFact.fact_code.in_(affected_fact_codes),
+                TaskFact.is_current.is_(True),
+            )
+            .values(is_current=False)
+        )
 
 def _apply_review_decisions(
     db: Session,
     task: AuditTask,
     reviews: list[ManualReview],
     requested: dict[str, Any],
-    normalized_values: dict[int, tuple[str, str | bool]],
+    normalized_values: dict[int, tuple[str, Any]],
     command_no: str | None,
 ) -> tuple[bool, bool, list[dict[str, Any]]]:
     """把一批裁决写到各自的业务对象上，返回（字段事实是否变化, 材料状态是否变化, 字段变化清单）。
@@ -386,6 +689,11 @@ def _apply_review_decisions(
                 raw_text, normalized_value = normalized_values[review.id]
                 new_status, raw_value, normalized_json = "REVIEWED", raw_text, normalized_value
                 field_values_confirmed = True
+            elif decision.decision == "MARK_NOT_PRESENT":
+                # 人工确认字段确实不存在：保留 NOT_PRESENT 作为业务事实，
+                # 但待办已解决；报告据此可以说明“已核实缺失”，而规则仍不会把它当成有效输入。
+                new_status, raw_value, normalized_json = "NOT_PRESENT", None, None
+                field_values_confirmed = True
             else:
                 # 证据不足：标准化的原文原样保留（原文是事实本身，不因裁决被改写），
                 # 但事实状态改为「证据不足」——这条取值当前不足以支撑下游判定。
@@ -394,7 +702,7 @@ def _apply_review_decisions(
                 # 否则规则会继续沿用一条已被判为证据不足的取值得出结论。
                 field_values_confirmed = True
             # 人工写出新值必须新建事实版本，不原地改写抽取事实。
-            new_fact, _ = _write_human_field_fact(
+            new_fact, _, _ = _write_human_field_fact(
                 db,
                 task,
                 field_key=fact.field_key,
@@ -403,6 +711,12 @@ def _apply_review_decisions(
                 status=new_status,
                 raw_value=raw_value,
                 normalized_value=normalized_json,
+                preserved_review_ids={review.id},
+                inherit_evidence_from_id=(
+                    fact.id
+                    if decision.decision in {"CONFIRM_FIELD", "EVIDENCE_INSUFFICIENT"}
+                    else None
+                ),
             )
             review.field_value_id = new_fact.id
             review.before_value = fact.raw_value
@@ -459,6 +773,10 @@ def _apply_review_decisions(
             # 字段比较、条款语义）按材料中的真实原文判定，不受类型结论影响，因此不必重跑。
             # 因此这里不再把整条校验链路退回内部校验：见下面 validation_reexecution_required。
             material_state_changed = True
+    # 字段事实或材料类型任一变化都会改变本任务的有效输入。两类变化共用同一个
+    # input_revision，报告新鲜度、Agent 快照和并发提交据此识别旧输入。
+    if field_values_confirmed or material_state_changed:
+        task.input_revision += 1
     return field_values_confirmed, material_state_changed, field_changes
 
 
@@ -502,6 +820,7 @@ def _apply_manual_reviews_direct(
         normalized_values,
         command_no,
     )
+    db.flush()
     manifest = _task_manifest(task)
     nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
     review_node_code = _single_node_code_of_type(manifest, "MANUAL_REVIEW", purpose="人工复核等待点")
@@ -521,35 +840,36 @@ def _apply_manual_reviews_direct(
         # 因此只重算质量结论：旧批次标 INVALIDATED 保留为历史，新批次挂在新执行记录上。
         # 人工结论不会被改回去：该节点现在只按 MATERIAL_CLASSIFY 产物**记录**识别结论，
         # 不再据它写材料状态或挂待办。
-        invalidated_reviews += _invalidate_file_quality_results(db, task, manifest)["invalidated_reviews"]
-        file_quality_recompute = _recompute_file_quality_results(db, task, manifest)
+        invalidated_quality = _invalidate_file_quality_results(db, task, manifest)
+        invalidated_reviews += invalidated_quality["invalidated_reviews"]
+        file_quality_recompute = _recompute_file_quality_results(
+            db, task, manifest, invalidated_quality["node_codes"]
+        )
     if validation_reexecution_required:
         _refresh_extraction_rule_results(db, task, manifest)
-        # 字段有效值已改变：失效内部校验及之后的结论与待办，回到内部校验重新判定。
-        invalidated_reviews += _invalidate_validation_results(db, task, manifest)["invalidated_reviews"]
-        next_node_code = _single_node_code_of_type(manifest, "INTERNAL_VALIDATE", purpose="字段事实变化后的重判起点")
-        next_node = next(item for item in nodes if item["node_code"] == next_node_code)
-        next_node_index = next(index for index, item in enumerate(nodes) if item["node_code"] == next_node["node_code"])
+        # 字段有效值已改变：计算与校验的旧结果、派生事实及其后继一并失效。
+        changed_field_keys = {str(item["field_key"]) for item in field_changes}
+        invalidation = _invalidate_validation_results(db, task, manifest, changed_field_keys)
+        invalidated_reviews += invalidation["invalidated_reviews"]
+        review_still_valid = review_node_code not in set(invalidation["affected_node_codes"])
     else:
-        next_node = nodes[current_index + 1] if current_index + 1 < len(nodes) else None
-        next_node_index = current_index + 1 if next_node else current_index
-    # 本批提交后仍有**有效的**待办时不能直接推进：本批先解决的是字段事实，
-    # 规则结论待办（RULE_RESULT）此时仍是 PENDING，跳过它去风险评定会让规则复核被静默丢掉。
-    # 剩余待办按同一口径（`_current_review_batch`）重新取，留在本节点形成下一批。
-    #
-    # 事实发生改变时仍按原语义退回内部校验重判：`_invalidate_validation_results` 会失效
-    # 校验节点及之后的规则结果与它们的待办；活下来的待办挂在字段抽取结果上，
-    # 任务重新走到人工复核节点时会被同一口径重新取到，不会丢失。
-    #
-    # 补挂材料类型待办放在这里**之前**会更自然，但那会把「类型待复核」这条独立事项插进
-    # 正在排队的批里。`_sync_type_review_pending` 只在当前一条待办都没有时才补挂，
-    # 因此这里的调用不会改变本批之后要处理的集合。
+        review_still_valid = True
+    # 字段更正可能失效规则待办，材料类型待办也可能在本批裁决后新建。
+    # 先确定真正剩余的集合，再决定继续复核或沿 DAG 重算。
     _sync_type_review_pending(db, task)
     remaining = _current_review_batch(db, task)
-    stay_in_review = bool(remaining) and not validation_reexecution_required
-    if stay_in_review:
-        next_node = None
-        next_node_index = current_index
+    stay_in_review = bool(remaining) and review_still_valid
+    next_node = None if stay_in_review else _next_node_for_recalculation(
+        db,
+        task,
+        manifest,
+        nodes,
+        completed_node_code=review_node_code if review_still_valid else None,
+    )
+    next_node_index = (
+        next(index for index, item in enumerate(nodes) if item["node_code"] == next_node["node_code"])
+        if next_node else current_index
+    )
     next_hash = _review_hash(remaining) if stay_in_review else None
     sequence_no = (db.scalar(select(func.max(NodeExecution.sequence_no)).where(NodeExecution.audit_task_id == task.id)) or 0) + 1
     db.add(
@@ -558,7 +878,7 @@ def _apply_manual_reviews_direct(
             scenario_version_id=task.scenario_version_id,
             node_code=review_node_code,
             sequence_no=sequence_no,
-            status="SUCCEEDED",
+            status="INVALIDATED" if validation_reexecution_required and not review_still_valid else "SUCCEEDED",
             started_at=datetime.now(UTC),
             finished_at=datetime.now(UTC),
             result_json={

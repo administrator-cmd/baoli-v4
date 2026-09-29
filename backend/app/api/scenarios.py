@@ -207,7 +207,7 @@ def export_scenarios(
 @router.post("", response_model=ScenarioDetailResponse, status_code=201)
 def create_scenario_endpoint(payload: ScenarioCreateRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDetailResponse:
     """新建场景（页面配置）：没有 Excel 作业与工作表行号，不伪造导入来源。"""
-    template = create_scenario(db, payload.model_dump())
+    template = create_scenario(db, payload.model_dump(by_alias=True))
     return ScenarioDetailResponse.model_validate({**scenario_detail(db, template.scenario_code), "request_id": request.state.request_id})
 
 
@@ -222,7 +222,7 @@ def update_scenario_endpoint(
     scenario_code: str, payload: ScenarioUpdateRequest, request: Request, db: Session = Depends(get_db)
 ) -> ScenarioDetailResponse:
     """编辑场景基本资料（名称、业务类型、说明）。"""
-    update_scenario(db, scenario_code, payload.model_dump(exclude_unset=True))
+    update_scenario(db, scenario_code, payload.model_dump(exclude_unset=True, by_alias=True))
     return ScenarioDetailResponse.model_validate({**scenario_detail(db, scenario_code), "request_id": request.state.request_id})
 
 

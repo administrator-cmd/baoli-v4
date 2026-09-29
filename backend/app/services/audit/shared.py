@@ -10,9 +10,10 @@
 
 这些函数只读取任务与场景的当前状态，不写库、不提交事务。"""
 
+import json
 import re
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, read_material_type_status
-from ...domain import quality_judgement
+from ...domain import currency, field_strategy, quality_judgement
 from ...domain.manifest import EVIDENCE_SEAL_SUBJECT, applicability_view
 from ...errors import BusinessError
 from ...models import AuditTask, DocumentUpload, ScenarioVersion, TaskDocument
@@ -46,6 +47,7 @@ LOCATOR_STATUS_LABELS = {
 
 QUOTE_CHECK_LABELS = {
     "FOUND": "已在所属材料中找到该原文",
+    "VALUE_FOUND": "已在处理产物中找到字段值，但引文原文无法直接定位",
     "NOT_FOUND": "在所属材料中找不到该原文，字段内容缺少原文依据",
     "NOT_CHECKABLE": "该产物没有可核对的原文文本，未能核对内容依据",
     "PENDING": "该证据写入时尚未按当前口径核对内容依据",
@@ -58,25 +60,63 @@ _DATE_TEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _CURRENCY_TOKENS: tuple[tuple[str, str], ...] = (
     ("人民币", "人民币"),
+    ("CNY", "人民币"),
     ("RMB", "人民币"),
     ("￥", "人民币"),
     ("¥", "人民币"),
     ("美元", "美元"),
     ("USD", "美元"),
+    ("欧元", "欧元"),
     ("€", "欧元"),
     ("EUR", "欧元"),
+    ("英镑", "英镑"),
     ("£", "英镑"),
     ("GBP", "英镑"),
 )
 
 _AMOUNT_UNITS: tuple[str, ...] = ("亿元", "万元", "千元", "元")
 
+# 字段原值与引文的关系不能只靠整段连续子串判断：同一组主体可能在模型原值里用“、”
+# 分隔，在 OCR 引文里用“；”分隔。只对明确的列表分隔符拆分，并要求每个非空成员都
+# 在引文中出现；普通句子仍按完整连续文本核对，避免把相似文本误当成证据。
+_VALUE_LIST_SEPARATOR = re.compile(r"[、;；\n\r]+|(?<!\d)[,，](?!\d)")
+
 def _fullwidth_digits(value: str) -> str:
     """全角数字与全角句点转半角：这是字符编码差异，不改变数值含义。"""
     table = {ord("０") + index: str(index) for index in range(10)}
     table[ord("．")] = "."
+    table[ord("，")] = ","
     table[ord("　")] = " "
     return value.translate(table)
+
+
+def _remove_token(value: str, token: str) -> tuple[str, bool]:
+    """移除金额标记；ASCII 币种缩写不区分大小写。"""
+    flags = re.IGNORECASE if token.isascii() else 0
+    replaced, count = re.subn(re.escape(token), "", value, flags=flags)
+    return replaced, count > 0
+
+
+def _amount_marker_details(value: Any) -> tuple[str, set[str], set[str]]:
+    """返回去除标记后的文本，以及原文明确写出的币种和单位。"""
+    text = _fullwidth_digits(str(value))
+    currencies: set[str] = set()
+    for token, name in _CURRENCY_TOKENS:
+        text, found = _remove_token(text, token)
+        if found:
+            currencies.add(currency.canonical_currency(name))
+    units: set[str] = set()
+    # 长单位先移除，避免“万元”又被识别成“元”。
+    for token in _AMOUNT_UNITS:
+        text, found = _remove_token(text, token)
+        if found:
+            units.add(token)
+    return text, currencies, units
+
+
+def _canonical_currency(value: str | None) -> str:
+    """把系统明确支持的币种别名归一；未知写法保持原值，不猜测币种。"""
+    return currency.canonical_currency(value)
 
 def _parse_amount_text(value: Any, unit: str | None, currency: str | None) -> str:
     """把金额原文的明确写法解析成数值文本，口径不符时给出具体原因。
@@ -90,25 +130,29 @@ def _parse_amount_text(value: Any, unit: str | None, currency: str | None) -> st
     text = _fullwidth_digits(str(value)).strip()
     if not text:
         raise ValueError("金额原文为空，无法标准化")
-    declared_currency = (currency or "").strip()
-    for token, name in _CURRENCY_TOKENS:
-        if token in text:
-            if declared_currency and declared_currency != name:
-                raise ValueError(
-                    f"原文写明的币种为“{name}”，字段声明的币种为“{declared_currency}”，"
-                    "系统不做汇率换算，无法按同一口径标准化"
-                )
-            text = text.replace(token, "")
+    text, explicit_currencies, explicit_units = _amount_marker_details(text)
+    declared_currency = _canonical_currency(currency)
+    if explicit_currencies and not declared_currency:
+        raise ValueError(
+            f"原文写明币种“{'、'.join(sorted(explicit_currencies))}”，但字段没有声明币种，"
+            "系统不能丢弃币种后保存数值"
+        )
+    if explicit_currencies and explicit_currencies != {declared_currency}:
+        raise ValueError(
+            f"原文写明的币种为“{'、'.join(sorted(explicit_currencies))}”，字段声明的币种为“{declared_currency}”，"
+            "系统不做汇率换算，无法按同一口径标准化"
+        )
     declared_unit = (unit or "").strip()
-    for token in _AMOUNT_UNITS:
-        if token not in text:
-            continue
-        if declared_unit and declared_unit != token:
-            raise ValueError(
-                f"原文写明的单位为“{token}”，字段声明的单位为“{declared_unit}”，"
-                "系统不做单位换算，无法按同一口径标准化"
-            )
-        text = text.replace(token, "")
+    if explicit_units and not declared_unit:
+        raise ValueError(
+            f"原文写明单位“{'、'.join(sorted(explicit_units))}”，但字段没有声明单位，"
+            "系统不能丢弃单位后保存数值"
+        )
+    if explicit_units and explicit_units != {declared_unit}:
+        raise ValueError(
+            f"原文写明的单位为“{'、'.join(sorted(explicit_units))}”，字段声明的单位为“{declared_unit}”，"
+            "系统不做单位换算，无法按同一口径标准化"
+        )
     text = text.replace(",", "").replace(" ", "").strip()
     if text.startswith("+"):
         text = text[1:]
@@ -145,7 +189,9 @@ def _normalize_field_value(
     *,
     unit: str | None = None,
     currency: str | None = None,
-) -> str | bool:
+    extraction_strategy: str | None = None,
+    structure_schema: dict[str, Any] | None = None,
+) -> Any:
     """按字段声明的类型（金额另加声明的单位与币种）把原文标准化成可执行的值。
 
     原文保持原样另行保存；这里只做确定性转换，并在口径冲突时抛出带原因的
@@ -153,6 +199,10 @@ def _normalize_field_value(
     """
     if value is None:
         raise ValueError("字段缺少可标准化的值")
+    if extraction_strategy == field_strategy.STRUCTURED:
+        if not isinstance(structure_schema, dict):
+            raise ValueError("结构化字段缺少结构 Schema")
+        return field_strategy.normalize_structured_value(value, structure_schema)
     if value_type in {"STRING", "CLAUSE"}:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("文本字段必须提供非空文本")
@@ -177,42 +227,61 @@ def _normalize_field_value(
         raise ValueError("布尔字段必须是 true、false、是或否")
     raise ValueError("字段类型不受支持")
 
-def _normalization_conflict(
-    field: dict[str, Any],
-    model_value: Any,
-    server_value: Any,
-) -> bool:
-    """模型的规范值与“对原文重新规范化”的结果是否冲突。
-
-    模型给出的 normalized_value 只作建议；这里用**同一套**服务端口径重新规范化后比较
-    （金额按数值比较，1.0 与 1.00 不算冲突）。
-    """
-    try:
-        model_normalized = _normalize_field_value(
-            field["value_type"],
-            model_value,
-            unit=field.get("unit"),
-            currency=field.get("currency"),
-        )
-    except (InvalidOperation, ValueError):
-        return True
-    if field["value_type"] == "DECIMAL":
-        return Decimal(str(model_normalized)) != Decimal(str(server_value))
-    return model_normalized != server_value
+def _has_complete_extraction_candidate(field: dict[str, Any], result: Any) -> bool:
+    """模型是否给出了足够让后端独立定型的候选值和证据。"""
+    strategy = field_strategy.strategy_of(field)
+    if strategy == field_strategy.STRUCTURED:
+        if result.normalized_value is None:
+            return False
+        try:
+            normalized = field_strategy.normalize_structured_value(
+                result.normalized_value,
+                field["structure_schema"],
+            )
+        except ValueError:
+            return False
+        expected_paths = field_strategy.structured_property_keys(normalized)
+        return bool(expected_paths) and expected_paths == set(result.property_evidence)
+    return bool(result.raw_value and str(result.raw_value).strip() and result.evidence is not None)
 
 def _extraction_fact_value(field: dict[str, Any], result: Any) -> tuple[str, str | None, Any, str | None]:
     """按服务端口径判定一次抽取事实的状态、原文、规范值与不通过原因。
 
     PRESENT 必须同时具备符合类型的原文与通过核对的证据（证据核对在调用方完成）；
-    规范值一律由服务端对原文重新计算——**原文是事实，模型给的规范值只作建议**，
-    两者不一致时按 NORMALIZATION_FAILED 进入人工确认，绝不采用模型值。
-    原文缺失或写法无法确定时同样不静默通过，并返回具体原因供人工判断。
+    规范值由字段策略决定：文本类字段直接采用清理后的原文，数值、日期、布尔
+    字段由服务端对原文重新计算。模型给的规范值只作抽取候选，不参与最终状态判定。
+    即使模型把完整候选标成 EVIDENCE_UNCLEAR / NORMALIZATION_FAILED，后端仍会按同一套
+    类型和证据规则重新定型；原文缺失或写法无法确定时才进入人工确认。
     """
     status = result.status
     raw_value = result.raw_value
-    if status != "PRESENT":
-        # 非 PRESENT 不采用模型给出的规范值；“未抽取到”本身就是无值，原文一并置空。
-        return status, (None if status == "NOT_PRESENT" else raw_value), None, None
+    strategy = field_strategy.strategy_of(field)
+    if status == "NOT_PRESENT":
+        return status, None, None, "材料中没有抽取到该字段"
+    if status == "EXTRACTION_FAILED":
+        return status, raw_value, None, "字段抽取服务未能完成该字段的抽取"
+    if not _has_complete_extraction_candidate(field, result):
+        reason = (
+            "模型没有返回可由完整属性证据支持的结构化候选值"
+            if strategy == field_strategy.STRUCTURED
+            else "模型没有同时返回可核对的候选原文和证据"
+        )
+        # 模型即使把结果标成 PRESENT，也不能绕过后端的证据门槛。
+        # 缺少证据时保留原文供人工核对，但不形成可执行规范值。
+        return ("EVIDENCE_UNCLEAR" if status == "PRESENT" else status), raw_value, None, reason
+    if strategy == field_strategy.STRUCTURED:
+        if result.normalized_value is None:
+            return "NORMALIZATION_FAILED", raw_value, None, "结构化抽取结果没有返回业务 JSON"
+        try:
+            normalized_value = _normalize_field_value(
+                field["value_type"],
+                result.normalized_value,
+                extraction_strategy=strategy,
+                structure_schema=field.get("structure_schema"),
+            )
+        except ValueError as exc:
+            return "NORMALIZATION_FAILED", raw_value, None, f"结构化结果不符合字段 Schema：{exc}"
+        return "PRESENT", json.dumps(normalized_value, ensure_ascii=False, sort_keys=True), normalized_value, None
     if raw_value is None or not str(raw_value).strip():
         return "EVIDENCE_UNCLEAR", None, None, "抽取结果未给出原文，无法形成可核对的事实"
     try:
@@ -221,17 +290,13 @@ def _extraction_fact_value(field: dict[str, Any], result: Any) -> tuple[str, str
             raw_value,
             unit=field.get("unit"),
             currency=field.get("currency"),
+            extraction_strategy=strategy,
+            structure_schema=field.get("structure_schema"),
         )
     except (InvalidOperation, ValueError) as exc:
         return "NORMALIZATION_FAILED", raw_value, None, f"原文无法按字段类型确定性标准化：{exc}"
-    if result.normalized_value is not None and _normalization_conflict(field, result.normalized_value, normalized_value):
-        return (
-            "NORMALIZATION_FAILED",
-            raw_value,
-            normalized_value,
-            f"模型给出的规范值“{result.normalized_value}”与按原文重新规范化的结果“{normalized_value}”不一致，"
-            "以原文为准并要求人工确认",
-        )
+    # 模型的 normalized_value 可能是摘要、格式变体或错误换算。有效值只取服务端按
+    # 原文和字段声明计算出的 normalized_value，模型建议值不反向改变字段状态。
     return "PRESENT", raw_value, normalized_value, None
 
 _OCR_LATEX_WRAP = re.compile(
@@ -273,6 +338,108 @@ def _locatable_text(value: str) -> str:
     引文与页文本的空白分布因此不同。定位核对不声称逐字相等，只说明能在该页找到该内容。
     """
     return "".join(_verification_text(value).split())
+
+
+def _date_candidates(value: str) -> list[date]:
+    """取引文中明确写出的日期；只识别与字段标准化相同的几种确定格式。"""
+    text = _fullwidth_digits(value)
+    tokens = re.findall(
+        r"(?<!\d)\d{4}(?:[-/.]\d{1,2}[-/.]\d{1,2}|年\d{1,2}月\d{1,2}日?)(?!\d)",
+        text,
+    )
+    values: list[date] = []
+    for token in tokens:
+        try:
+            values.append(date.fromisoformat(_parse_date_text(token)))
+        except ValueError:
+            continue
+    return values
+
+
+def _evidence_supports_value(
+    raw_value: Any,
+    quote_text: str | None,
+    *,
+    value_type: str | None = None,
+    unit: str | None = None,
+    currency: str | None = None,
+) -> bool:
+    """判断一个字段值是否被**这段引文自身**支持。
+
+    金额、日期按字段类型做确定性等值核对，抵消千分位和日期分隔符差异；结构化属性
+    中的数组或对象逐个核对有值叶子。文本仍要求连续子串或明确列表成员全部出现，
+    不做相似度、同义词替换或跨引文拼接。
+    """
+    if raw_value is None or not isinstance(quote_text, str) or not quote_text.strip():
+        return False
+    if isinstance(raw_value, dict):
+        values = [item for item in raw_value.values() if item not in (None, "", [], {})]
+        return bool(values) and all(
+            _evidence_supports_value(item, quote_text, value_type=None) for item in values
+        )
+    if isinstance(raw_value, (list, tuple)):
+        values = [item for item in raw_value if item not in (None, "", [], {})]
+        return bool(values) and all(
+            _evidence_supports_value(item, quote_text, value_type=None) for item in values
+        )
+    normalized_type = str(value_type or "").upper()
+    if normalized_type in {"DECIMAL", "NUMBER", "INTEGER"} or (
+        isinstance(raw_value, (int, float, Decimal)) and not isinstance(raw_value, bool)
+    ):
+        try:
+            expected = Decimal(_parse_amount_text(raw_value, unit, currency))
+        except (InvalidOperation, ValueError):
+            try:
+                expected = Decimal(str(raw_value))
+            except (InvalidOperation, ValueError):
+                return False
+        declared_unit = (unit or "").strip()
+        declared_currency = _canonical_currency(currency)
+        normalized_quote = _fullwidth_digits(quote_text)
+        for matched in re.finditer(
+            r"(?<![\d.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])",
+            normalized_quote,
+        ):
+            try:
+                candidate = Decimal(matched.group(0).replace(",", ""))
+            except InvalidOperation:
+                continue
+            if not candidate.is_finite() or candidate != expected:
+                continue
+            # 只看该数字附近明确写出的口径。未写标记时使用字段声明；写出了标记时
+            # 必须与字段声明完全一致，不能把 100 元当成 100 万元的证据。
+            context = normalized_quote[
+                max(0, matched.start() - 8): min(len(normalized_quote), matched.end() + 6)
+            ]
+            _, explicit_currencies, explicit_units = _amount_marker_details(context)
+            if explicit_units and explicit_units != ({declared_unit} if declared_unit else set()):
+                continue
+            if explicit_currencies and explicit_currencies != ({declared_currency} if declared_currency else set()):
+                continue
+            return True
+        return False
+    if normalized_type == "DATE":
+        try:
+            expected_date = date.fromisoformat(_parse_date_text(raw_value))
+        except ValueError:
+            return False
+        return expected_date in _date_candidates(quote_text)
+    if normalized_type == "BOOLEAN" or isinstance(raw_value, bool):
+        expected = raw_value if isinstance(raw_value, bool) else str(raw_value).strip().lower() in {"true", "是"}
+        tokens = {item.lower() for item in re.findall(r"(?i)\btrue\b|\bfalse\b", quote_text)}
+        tokens.update(item for item in re.findall(r"(?<![\u4e00-\u9fff])[是否](?![\u4e00-\u9fff])", quote_text))
+        # “结果为是 / 字段为否”是明确取值；“是否含税”只是问题描述，不能据此判 true。
+        tokens.update(item for item in re.findall(r"(?:为|系)\s*([是否])", quote_text))
+        return ("true" in tokens or "是" in tokens) if expected else ("false" in tokens or "否" in tokens)
+    text_value = str(raw_value).strip()
+    if not text_value:
+        return False
+    raw_locatable = _locatable_text(text_value)
+    quote_locatable = _locatable_text(quote_text)
+    if raw_locatable in quote_locatable:
+        return True
+    parts = [part.strip() for part in _VALUE_LIST_SEPARATOR.split(text_value) if part.strip()]
+    return len(parts) > 1 and all(_locatable_text(part) in quote_locatable for part in parts)
 
 def _task_field_definitions(task: AuditTask) -> dict[str, dict[str, Any]]:
     return {item["field_key"]: item for item in task.task_schema_json["fields"]}

@@ -14,7 +14,7 @@
     "no_config_status": "Excel 里**没有**「配置状态」列：业务在 Excel 里不表达「系统配没配好」，只表达「这一行参不参与审核」。",
     "blank_fields": "表头必须存在（列协议是确定的），但当前业务行不适用的字段允许留空。只有身份、引用或当前业务关系确实需要的参数缺失时才报错，系统不为空白字段补默认业务含义。",
     "unknown_columns": "未知列、重复列、缺少必填列都在导入时明确报错，不按列位置解释含义，也不静默丢弃。",
-    "calculation": "计算规则由「06_计算定义」「07_计算参数」「08_计算判定」三张表通过 CAL- 规则编号关联，三张表须绑定同一计算节点；07/08 引用不存在的定义会报错。参数编号以 P 开头（如 P001），须能直接写进公式；条件编号以 C- 开头。公式只支持加、减、乘、除与括号；参数取值来源分为字段抽取事实、上游计算结果与常量三类。期间口径与报表口径由**来源自身**声明（字段看 03，上游结果看 06），参数表不再重复声明。系统不做单位换算、不做汇率换算，也不提供任何默认值。"
+    "calculation": "计算规则由「06_计算定义」「07_计算参数」「08_计算判定」三张表通过 CAL- 规则编号关联，三张表须绑定同一计算节点；07/08 引用不存在的定义会报错。参数编号以 P 开头（如 P001），须能直接写进公式；条件编号以 C- 开头。公式只支持加、减、乘、除与括号；参数取值来源分为字段抽取事实、上游计算结果与常量三类。08 表的每个判定区间必须明确填写结果状态（通过 / 异常 / 待人工复核），系统不根据“预警”“良好”等判定文本猜测状态。期间口径与报表口径由**来源自身**声明（字段看 03，上游结果看 06），参数表不再重复声明。系统不做单位换算、不做汇率换算，也不提供任何默认值。"
   },
   "node_types": [
     {
@@ -60,15 +60,17 @@
     {
       "node_type": "MANUAL_REVIEW",
       "display_name": "人工复核",
-      "depends_on_types": []
+      "depends_on_types": [
+        "INTERNAL_VALIDATE",
+        "CROSS_VALIDATE",
+        "CALCULATION"
+      ]
     },
     {
       "node_type": "RISK_RATING",
       "display_name": "风险评定",
       "depends_on_types": [
-        "INTERNAL_VALIDATE",
-        "CROSS_VALIDATE",
-        "CALCULATION"
+        "MANUAL_REVIEW"
       ]
     },
     {
@@ -1218,6 +1220,23 @@
           "required": true,
           "row_required": true,
           "data_type": "STRING"
+        },
+        {
+          "key": "result_status",
+          "name": "结果状态",
+          "required": true,
+          "row_required": true,
+          "data_type": "ENUM",
+          "allowed_values": [
+            "PASSED",
+            "ABNORMAL",
+            "PENDING_REVIEW"
+          ],
+          "value_labels": {
+            "PASSED": "通过",
+            "ABNORMAL": "异常",
+            "PENDING_REVIEW": "待人工复核"
+          }
         },
         {
           "key": "risk_level",

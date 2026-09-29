@@ -4,9 +4,8 @@
 不是最初上传的原始文件——用户此前的裁决（改过的字段类型、材料引用、说明等）
 都已经体现在 manifest 里。
 
-列协议来自**统一模板协议**（`backend/config/unified_profile.json`），
-系统只有这一份，因此导出不再需要按 manifest 的「格式版本」选一份 Profile：
-那种分派本身就是已删除的双轨 Profile 的产物。
+列协议以 manifest 冻结的场景 Schema 为入口，内部字段仍来自统一执行协议
+（`backend/config/unified_profile.json`）。这样场景级 Sheet 名和列别名在导出后仍可被原样识别。
 
 导出内容使用协议里声明的中文业务列，因此可以直接改一改再作为新模板重新导入。
 """
@@ -18,7 +17,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from ..domain import unified_profile
+from ..domain import scenario_schema, unified_profile
 from ..domain.manifest import DATE_COMPARISON_LABELS, DECIMAL_COMPARISON_LABELS, is_system_rule, rule_node_type_of
 from ..domain.rule_expression import LIST_SEPARATOR, SUM_OPERATOR
 from ..errors import BusinessError
@@ -195,7 +194,9 @@ def build_scenario_version_export(manifest: dict[str, Any]) -> bytes:
     因此先按 `selected_sheets` 的确定顺序建出全部工作表，再往里面填业务行：
     顺序来自冻结的清单，**不用无序集合**决定导出顺序。
     """
-    profile = unified_profile.load_unified_profile()
+    # 已发布版本必须按自身冻结的场景 Schema 导出；不能读取当前全局协议，
+    # 否则自定义 Sheet 名/列别名会在“导出再导入”时丢失。
+    profile = scenario_schema.effective_profile(manifest.get("scenario_schema"))
     index = unified_profile.sheet_index(profile)
     material_codes = {item["material_key"]: item.get("source_ref") for item in manifest["materials"]}
     material_names = {item["material_key"]: item["name"] for item in manifest["materials"]}
@@ -594,6 +595,9 @@ def build_scenario_version_export(manifest: dict[str, Any]) -> bytes:
                                 column_of(role, "comparison_basis"), band.get("comparison_basis") or "RESULT"
                             ),
                             "judgement": band.get("conclusion") or band.get("judgement"),
+                            "result_status": _label_of(
+                                column_of(role, "result_status"), band.get("result_status")
+                            ),
                             "risk_level": _label_of(column_of(role, "risk_level"), band.get("risk_level")),
                             "action": band.get("action") or "",
                             "remark": band.get("remark") or "",
@@ -657,6 +661,8 @@ def build_scenario_version_export(manifest: dict[str, Any]) -> bytes:
     instruction.append(["导出说明", "本文件来自已发布版本的有效配置，已包含已生效的人工裁决。"])
     instruction.append(["使用方式", "可直接修改后作为新模板重新导入；修改不会影响已发布版本和历史任务。"])
     instruction.append(["模板协议", str(profile.get("profile_version"))])
+    frozen_schema = scenario_schema.identity(manifest.get("scenario_schema"))
+    instruction.append(["场景 Schema", f"{frozen_schema['schema_key']}@{frozen_schema['schema_version']}"])
     instruction.append(["编号与名称", str((profile.get("notes") or {}).get("code_prefix") or "")])
     instruction.append(["字段引用", str((profile.get("notes") or {}).get("field_references") or "")])
     instruction.append(["多项清单", f"多个材料、风险或报告字段可用名称或编号，并用“{LIST_SEPARATOR}”分隔；字段加总用“{SUM_OPERATOR}”连接。"])

@@ -86,7 +86,12 @@ def _material_states(db: Session, task: AuditTask) -> dict[str, str | None]:
     return states
 
 def _task_field_value_of_current_upload(db: Session, task: AuditTask, field_value_id: int) -> TaskFieldValue | None:
-    """复核指向的字段事实：属于本任务当前上传版本即可（历史版本也允许，复核本就依据旧事实）。"""
+    """取当前上传版本的当前字段事实。
+
+    待复核项必须绑定当前事实版本。只校验上传版本而不校验 ``is_current``，
+    会让已经被重新抽取或人工纠错替换的旧事实仍可被提交，随后覆盖新事实。
+    历史事实仍保留给审计读取，但不能再作为待办裁决的写入目标。
+    """
     return db.scalar(
         select(TaskFieldValue)
         .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
@@ -95,6 +100,7 @@ def _task_field_value_of_current_upload(db: Session, task: AuditTask, field_valu
             TaskFieldValue.id == field_value_id,
             TaskFieldValue.audit_task_id == task.id,
             TaskFieldValue.scenario_version_id == task.scenario_version_id,
+            TaskFieldValue.is_current.is_(True),
             TaskDocument.audit_task_id == task.id,
             TaskDocument.material_key == TaskFieldValue.material_key,
             DocumentUpload.audit_task_id == task.id,

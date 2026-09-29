@@ -2,8 +2,8 @@
 
 两个结论必须分开表达，不能互相顶替：
 
-- `quote_check`：引文能否在**它所属的那个产物**里找到原文依据（FOUND / NOT_FOUND /
-  NOT_CHECKABLE）。它决定字段内容是否可用于审核。
+- `quote_check`：引文或字段值能否在**它所属的那个产物**里找到原文依据（FOUND /
+  VALUE_FOUND / NOT_FOUND / NOT_CHECKABLE）。它决定字段内容是否可用于审核。
 - `locator_status`：页码与坐标能否准确定位到该页（VERIFIED / UNVERIFIED / UNLOCATABLE）。
   它只是辅助信息，页码缺失或写错**不**否定字段内容。
 
@@ -15,7 +15,8 @@ from ...domain.identity import public_no
 from ...errors import BusinessError
 from ...models import AuditTask, Evidence, RuleResult, StoredArtifact, TaskFieldValue
 from .artifacts import _artifact_page_text, _artifact_payload
-from .shared import LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _locatable_text
+from .shared import LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _evidence_supports_value, _locatable_text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
 
@@ -23,13 +24,19 @@ from typing import Any
 def _verify_evidence_location(
     artifact: StoredArtifact,
     evidence: Any,
+    *,
+    raw_value: Any = None,
+    value_type: str | None = None,
+    unit: str | None = None,
+    currency: str | None = None,
 ) -> tuple[str, str | None, int | None, list[float] | None, str | None]:
     """按产物真实内容核对模型给出的证据位置。
 
     返回 (locator_status, locator_note, page_no, bbox, quote_check)。
     定位与内容依据是两件事（口径见模块说明）：页码缺失、页码错、坐标格式错误都只影响
-    定位结论，不单独否定字段内容；只有引文在其所在产物内确实找不到原文依据时，
-    内容才按证据不足处理。
+    定位结论，不单独否定字段内容；引文逐字定位失败时，如果字段原始值仍能在声明页或
+    产物中确定性核对，内容仍可用，只把 quote_check 标为 VALUE_FOUND。只有原始值也找不到
+    原文依据时，内容才按证据不足处理。
 
     坐标核对不通过时一律置空并在说明里写清原因，绝不伪造高亮。
     """
@@ -59,7 +66,38 @@ def _verify_evidence_location(
     located_pages: list[int] = []
     if quoted:
         located_pages = [number for number, text in pages.items() if quoted in _locatable_text(text)]
-    quote_check = "FOUND" if located_pages else ("NOT_FOUND" if quoted else "NOT_CHECKABLE")
+    value_pages: list[int] = []
+    if raw_value is not None:
+        value_pages = [
+            number
+            for number, text in pages.items()
+            if _evidence_supports_value(
+                raw_value,
+                text,
+                value_type=value_type,
+                unit=unit,
+                currency=currency,
+            )
+        ]
+        quote_supports_value = _evidence_supports_value(
+            raw_value,
+            evidence.quote_text,
+            value_type=value_type,
+            unit=unit,
+            currency=currency,
+        )
+        # 首先采用引文逐字命中。若模型引文带有 OCR 排版差异或引用范围不准确，
+        # 只要字段原始值仍能在声明页（没有页码时则在产物某页）被确定性核对，
+        # 记录 VALUE_FOUND：字段事实可以执行，但引文定位仍会在证据记录中显示为
+        # UNVERIFIED/UNLOCATABLE。只有原始值也找不到时才返回 NOT_FOUND，触发人工复核。
+        if located_pages and quote_supports_value:
+            quote_check = "FOUND"
+        elif quote_supports_value and value_pages:
+            quote_check = "VALUE_FOUND"
+        else:
+            quote_check = "NOT_FOUND"
+    else:
+        quote_check = "FOUND" if located_pages else ("NOT_FOUND" if quoted else "NOT_CHECKABLE")
     if bbox_note:
         return "UNLOCATABLE", bbox_note, page_no, None, quote_check
     if page_no is None:
@@ -117,6 +155,7 @@ def _evidence_snapshot(db: Session, evidence_id: int | None) -> dict[str, Any] |
     quote_check = _quote_check_of(db, evidence)
     return {
         "evidence_no": evidence.evidence_no,
+        "field_path": evidence.field_path,
         "page_no": evidence.page_no,
         "quote_text": evidence.quote_text,
         "bbox": evidence.bbox_json,
@@ -126,6 +165,30 @@ def _evidence_snapshot(db: Session, evidence_id: int | None) -> dict[str, Any] |
         "quote_check": quote_check,
         "quote_check_label": QUOTE_CHECK_LABELS.get(quote_check, "内容依据状态未知"),
     }
+
+
+def _evidence_snapshots(db: Session, field_value_id: int) -> list[dict[str, Any]]:
+    """字段事实的全部原始证据快照；规则复制出来的证据不重复计入。"""
+    rows = db.scalars(
+        select(Evidence)
+        .where(
+            Evidence.field_value_id == field_value_id,
+            Evidence.rule_result_id.is_(None),
+        )
+        .order_by(Evidence.id)
+    ).all()
+    return [snapshot for row in rows if (snapshot := _evidence_snapshot(db, row.id)) is not None]
+
+
+def _rule_evidence_snapshots(db: Session, rule_result_id: int) -> list[dict[str, Any]]:
+    """规则结果在形成复核待办时使用的全部证据快照。"""
+    rows = db.scalars(
+        select(Evidence)
+        .where(Evidence.rule_result_id == rule_result_id)
+        .order_by(Evidence.id)
+    ).all()
+    return [snapshot for row in rows if (snapshot := _evidence_snapshot(db, row.id)) is not None]
+
 
 def _copy_evidence_to_rule(db: Session, task: AuditTask, rule_result: RuleResult, evidence_ids: list[int]) -> list[str]:
     copied_numbers: list[str] = []
@@ -139,6 +202,7 @@ def _copy_evidence_to_rule(db: Session, task: AuditTask, rule_result: RuleResult
             document_upload_id=source.document_upload_id,
             rule_result_id=rule_result.id,
             field_value_id=source.field_value_id,
+            field_path=source.field_path,
             page_no=source.page_no,
             quote_text=source.quote_text,
             bbox_json=source.bbox_json,
@@ -183,12 +247,23 @@ def _copy_artifact_evidence_to_rule(
     return copied_numbers
 
 def _fact_evidence_suffix(evidence_by_id: dict[int, Evidence], fact: TaskFieldValue) -> str:
-    evidence = evidence_by_id.get(fact.evidence_id) if fact.evidence_id else None
-    if evidence is None:
+    evidences = sorted(
+        (
+            evidence
+            for evidence in evidence_by_id.values()
+            if evidence.field_value_id == fact.id and evidence.rule_result_id is None
+        ),
+        key=lambda item: item.id,
+    )
+    if not evidences:
         return "（未记录证据原文）"
-    page = f"第 {evidence.page_no} 页" if evidence.page_no else "未标注页码"
-    locator = LOCATOR_STATUS_LABELS.get(evidence.locator_status, "状态未知")
-    return f"（证据：{page}｜定位核对：{locator}｜原文：{evidence.quote_text}）"
+    parts = []
+    for evidence in evidences:
+        page = f"第 {evidence.page_no} 页" if evidence.page_no else "未标注页码"
+        locator = LOCATOR_STATUS_LABELS.get(evidence.locator_status, "状态未知")
+        path = f"属性 {evidence.field_path}｜" if evidence.field_path else ""
+        parts.append(f"{path}{page}｜定位核对：{locator}｜原文：{evidence.quote_text}")
+    return f"（证据：{'；'.join(parts)}）"
 
 def _quote_check_of(db: Session, evidence: Evidence) -> str:
     """一条证据的**内容依据**结论：引文能否在它所属的处理产物里找到原文。
@@ -206,4 +281,58 @@ def _quote_check_of(db: Session, evidence: Evidence) -> str:
     if pages is None:
         return "NOT_CHECKABLE"
     quoted = _locatable_text(evidence.quote_text)
-    return "FOUND" if any(quoted in _locatable_text(text) for text in pages.values()) else "NOT_FOUND"
+    located_pages = [number for number, text in pages.items() if quoted in _locatable_text(text)]
+    field_value = db.get(TaskFieldValue, evidence.field_value_id) if evidence.field_value_id else None
+    evidence_value = field_value.raw_value if field_value else None
+    value_type = unit = currency = None
+    if field_value is not None:
+        task = db.get(AuditTask, evidence.audit_task_id)
+        field = next(
+            (
+                item
+                for item in ((task.task_schema_json or {}).get("fields") or [])
+                if item.get("field_key") == field_value.field_key
+                and item.get("material_key") == field_value.material_key
+            ),
+            {},
+        ) if task is not None else {}
+        value_type = field.get("value_type")
+        unit = field.get("unit")
+        currency = field.get("currency")
+    if field_value and evidence.field_path and isinstance(field_value.normalized_value_json, dict):
+        evidence_value = field_value.normalized_value_json.get(evidence.field_path)
+        property_schema = ((field.get("structure_schema") or {}).get("properties") or {}).get(evidence.field_path)
+        value_type = property_schema.get("type") if isinstance(property_schema, dict) else None
+        unit = currency = None
+    if located_pages and (
+        field_value is None
+        or _evidence_supports_value(
+            evidence_value,
+            evidence.quote_text,
+            value_type=value_type,
+            unit=unit,
+            currency=currency,
+        )
+    ):
+        return "FOUND"
+    if (
+        field_value is not None
+        and _evidence_supports_value(
+            evidence_value,
+            evidence.quote_text,
+            value_type=value_type,
+            unit=unit,
+            currency=currency,
+        )
+        and not located_pages
+        and evidence.page_no in pages
+        and _evidence_supports_value(
+            evidence_value,
+            pages[evidence.page_no],
+            value_type=value_type,
+            unit=unit,
+            currency=currency,
+        )
+    ):
+        return "VALUE_FOUND"
+    return "NOT_FOUND"

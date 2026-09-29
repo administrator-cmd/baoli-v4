@@ -734,6 +734,7 @@ def _apply_source_cells(
             if flag is not None:
                 field.required = flag
             override_text(row_no, "unit", lambda text: setattr(field, "unit", text))
+            override_text(row_no, "currency", lambda text: setattr(field, "currency", text))
         return
     if role in {"INTERNAL_VALIDATE", "CROSS_VALIDATE"}:
         applicability_column = any(item["key"] == "applicability" for item in profile_role["columns"])
@@ -1330,6 +1331,7 @@ def _directory_entries(
             "material_name": material_names.get(item.material_ref, item.material_ref),
             "value_type": item.value_type,
             "unit": item.unit,
+            "currency": item.currency,
             "required": item.required,
         }
         for item in proposal.fields
@@ -1606,6 +1608,8 @@ def _convert_target(
 def convert_node_rulebook(
     ir: WorkbookIR,
     bindings: dict[str, dict[str, Any]],
+    *,
+    profile: dict[str, Any] | None = None,
 ) -> tuple[ProposalBundle, dict[str, Any]]:
     """节点版规则库的确定性转换入口。
 
@@ -1616,7 +1620,7 @@ def convert_node_rulebook(
     转换结果与模型路径共用 `ProposalBundle` 契约，因此下游的引用校验、裁决、编译、
     发布与页面展示不需要第二套代码；差别只在于这里的候选来自代码解析而非模型建议。
     """
-    payload = node_rulebook.build_convert_bundle(ir, bindings)
+    payload = node_rulebook.build_convert_bundle(ir, bindings, profile=profile)
     try:
         bundle = ProposalBundle.model_validate(
             {"sheets": payload["sheets"], "coverage": payload["coverage"]}
@@ -1635,23 +1639,26 @@ def convert_node_rulebook(
 def convert_workbook_with_notes(
     ir: WorkbookIR,
     bindings: dict[str, dict[str, Any]],
+    *,
+    profile: dict[str, Any] | None = None,
 ) -> tuple[ProposalBundle, dict[str, Any] | None]:
     """返回（候选集合，转换附加信息）。
 
     确定性路径返回含 `node_notes` / `coverage` / `bundle_hash` 的字典；
     模型路径返回 None。消费方必须按类型取 `node_notes`，不能把整份附加信息当成列表。
 
-    分派依据是**用户绑定的 Sheet 角色**，不是文件名、表名或表头：base Excel 是系统
-    唯一的模板，一份规则库用到哪些 Sheet 完全由用户的绑定决定。
+    分派依据是**用户绑定的 Sheet 角色**，不是文件名、表名或表头；
+    列名和别名由上传时冻结的场景有效 Profile 提供。
 
     **按 Sheet 独立转换，结果合并**：每张表由负责它的解析器转换（01/02/03/04/05/09/10
     走 `node_rulebook`，06/07/08 计算三表走 `financial_report`），绑定里出现哪几类表就
     转换哪几类，彼此互不干扰。此前是「按业务族二选一」，绑定里一旦混了，就必然有一条
     路径静默胜出、另一批表被丢掉；现在没有这条分支，也没有业务族这一层。
 
-    角色完全不在协议里时明确报错，不静默按模型路径处理。
+    角色完全不在当前有效协议里时明确报错，不静默按模型路径处理。
     """
-    profile = unified_profile.load_unified_profile()
+    if profile is None:
+        profile = unified_profile.load_unified_profile()
     index = unified_profile.sheet_index(profile)
     roles = sorted(
         {
@@ -1683,9 +1690,9 @@ def convert_workbook_with_notes(
 
     parts: list[tuple[ProposalBundle, dict[str, Any]]] = []
     if set(roles) & node_rulebook.OWNED_ROLES:
-        parts.append(convert_node_rulebook(ir, bindings))
+        parts.append(convert_node_rulebook(ir, bindings, profile=profile))
     if set(roles) & financial_report.OWNED_ROLES:
-        parts.append(convert_financial_report(ir, bindings))
+        parts.append(convert_financial_report(ir, bindings, profile=profile))
     if not parts:
         raise BusinessError(
             "SHEET_ROLE_UNSUPPORTED",
@@ -1748,6 +1755,8 @@ def _merge_bundles(
 def convert_financial_report(
     ir: WorkbookIR,
     bindings: dict[str, dict[str, Any]],
+    *,
+    profile: dict[str, Any] | None = None,
 ) -> tuple[ProposalBundle, dict[str, Any]]:
     """计算类规则库的确定性转换入口。
 
@@ -1755,11 +1764,12 @@ def convert_financial_report(
     引用校验、裁决、编译、发布与页面展示不需要第二套代码。差别在于这里的附加信息里
     多了 `calculations`（计算规则候选：定义 + 参数 + 判定区间）。
 
-    列协议来自**统一模板协议**——系统只有一份，不再按场景类型加载另一份 Profile。
+    列协议由导入链传入的场景有效 Profile 提供。
     """
     from ..domain import financial_report
 
-    profile = unified_profile.load_unified_profile()
+    if profile is None:
+        profile = unified_profile.load_unified_profile()
     payload = financial_report.build_convert_bundle(ir, bindings, profile)
     try:
         bundle = ProposalBundle.model_validate(
@@ -1982,7 +1992,7 @@ def _validate_bundle_references(bundle: ProposalBundle) -> None:
     }
     question_properties = {
         "MATERIAL": {"name", "required"},
-        "FIELD": {"name", "value_type", "unit", "material_ref", "required", "instruction"},
+        "FIELD": {"name", "value_type", "unit", "currency", "material_ref", "required", "instruction"},
         "RULE": {"name", "node", "operator", "parameters", "source_rule_ref", "material_refs"},
     }
     question_target_properties: set[tuple[str, str, str]] = set()
