@@ -1,6 +1,6 @@
 """规则库导入 API。
 
-- GET /import-jobs 仍是工作台使用的完整数组（兼容旧调用）；
+- GET /import-jobs 提供工作台作业选择所需的完整摘要数组；
   GET /import-jobs/page 提供真实分页、筛选与 total 的管理列表。
 - DELETE 仅允许删除未发布、无活跃转换、未产生场景版本的草稿作业。
 - POST /{job_no}/abort 中止未结束的后台转换操作，释放活跃占用；
@@ -8,28 +8,23 @@
 """
 
 from datetime import datetime
-from typing import Any
-
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
-from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..errors import BusinessError
-from ..schemas import (
+from ..dto import (
     ApplyImportDraftRequest,
+    DecisionDraftRequest,
     ImportDecisionsRequest,
-    ImportJobResponse,
-    ImportJobSummaryResponse,
-    OperationAcceptedResponse,
     OperationRequest,
-    PagedResponse,
     PublishRequest,
-    ScenarioVersionResponse,
     SheetBindingsRequest,
 )
+from ..query import validate_page_params
+from ..vo import OperationAcceptedResponse
+from ..vo.scenarios import ScenarioVersionResponse
 from ..services import admin_query_service, import_service
-from ..services.background_service import assert_no_active_operation, operation_view
+from ..services.background_service import operation_view
 from ..services.import_service import (
     create_import_job,
     get_import_job,
@@ -40,30 +35,17 @@ from ..services.import_service import (
     save_decisions,
     update_sheet_bindings,
 )
-from ..services.operation_gateway import OBJECT_IMPORT_JOB, submit_conversion
+from ..services.operation_gateway import submit_conversion
+from ..vo import ImportJobResponse, ImportJobSummaryResponse, PagedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 
 router = APIRouter(prefix="/import-jobs", tags=["规则库导入"])
 
 
-class DecisionDraftRequest(BaseModel):
-    """集中裁决草稿：按 issue_no 提交部分或全部作答，可反复保存后再提交最终裁决。"""
-
-    answers: dict[str, Any] = Field(default_factory=dict)
-
-
-def _page_params(page: int, page_size: int) -> tuple[int, int]:
-    if page < 1:
-        raise BusinessError("PAGE_INVALID", "页码必须是大于 0 的整数", status_code=400)
-    if page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_SIZE_INVALID", "每页条数必须在 1 到 200 之间", status_code=400)
-    return page, page_size
-
-
 @router.get("", response_model=list[ImportJobSummaryResponse])
 def list_jobs(request: Request, db: Session = Depends(get_db)) -> list[ImportJobSummaryResponse]:
-    """导入作业摘要列表（完整数组，兼容旧调用）；分页列表见 GET /import-jobs/page。"""
+    """工作台作业选择列表（完整摘要数组）；分页管理列表见 GET /import-jobs/page。"""
     return [
         ImportJobSummaryResponse.model_validate({**item, "request_id": request.state.request_id})
         for item in import_job_summaries(db)
@@ -83,7 +65,7 @@ def list_jobs_page(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """导入作业分页列表：可限定所属场景，total 与列表使用同一筛选范围。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = admin_query_service.list_import_jobs_page(
         db,
         scenario_code=scenario_code,
@@ -175,11 +157,7 @@ def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> Imp
 
 @router.put("/{job_no}/sheet-bindings", response_model=ImportJobResponse)
 def put_sheet_bindings(job_no: str, payload: SheetBindingsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
-    # 先锁再查：先取作业行锁，再检查活跃操作，最后才提交修改，消除「先查后锁」的 TOCTOU。
-    # update_sheet_bindings 内部尚未接管该检查，故在此保持锁后检查；服务层补上后这里可移除。
     """保存工作表用途与表头行绑定；与后台转换互斥（先锁作业行再检查活跃操作）。"""
-    import_service._job_or_404(db, job_no, lock=True)
-    assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
     job = update_sheet_bindings(db, job_no, payload)
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
@@ -209,11 +187,7 @@ def retry_job(
 
 @router.put("/{job_no}/decisions", response_model=ImportJobResponse)
 def put_decisions(job_no: str, payload: ImportDecisionsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
-    # 先锁再查：先取作业行锁，再检查活跃操作，最后才提交裁决，消除「先查后锁」的 TOCTOU。
-    # save_decisions 内部尚未接管该检查，故在此保持锁后检查；服务层补上后这里可移除。
     """提交裁决：必须一次处理全部待裁决问题，并带页面看到的草稿修订号，过期即 409。"""
-    import_service._job_or_404(db, job_no, lock=True)
-    assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
     job = save_decisions(db, job_no, payload)
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
@@ -235,7 +209,7 @@ def put_decision_draft(
 def apply_draft(
     job_no: str, payload: ApplyImportDraftRequest, request: Request, db: Session = Depends(get_db)
 ) -> ImportJobResponse:
-    """把已确认的导入结果写入场景配置；完整配置自动生效。"""
+    """把已确认的导入结果写入场景草稿；发布必须在场景页显式执行。"""
     job = apply_import_to_draft(
         db, job_no,
         expected_job_revision=payload.expected_job_revision,

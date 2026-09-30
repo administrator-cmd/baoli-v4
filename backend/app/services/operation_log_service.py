@@ -18,16 +18,10 @@ from typing import Any
 from sqlalchemy import and_, case, func, literal, or_, select, text, union_all
 from sqlalchemy.orm import Session
 
-from ..errors import BusinessError
-from ..models import AuditTask, BackgroundOperation, ImportJob, OperationLog
+from ..common.exceptions import BusinessError
+from ..entities import ImportJob
+from ..entities import AuditTask, BackgroundOperation, OperationLog
 from ..domain.identity import public_no
-from .operation_types import (
-    OBJECT_AUDIT_TASK,
-    OBJECT_IMPORT_JOB,
-    OBJECT_PLAN,
-    OBJECT_REPORT,
-    OBJECT_SCENARIO,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -130,17 +124,6 @@ def record_operation(
     )
     db.add(log)
     return log
-
-
-# 后台命令结果 → 统一展示口径。PENDING/RUNNING 是“已受理、执行中”，
-# 绝不是成功，也不能当作失败。
-_COMMAND_RESULT = {
-    "SUCCEEDED": "SUCCEEDED",
-    "FAILED": "FAILED",
-    "INTERRUPTED": "FAILED",
-    "PENDING": "ACCEPTED",
-    "RUNNING": "ACCEPTED",
-}
 
 
 def _business_entry_select():

@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # 大写金额（DECIMAL_CN）与金额（DECIMAL）分开：前者保留大写原文，
 # 只有业务确认了单位、币种与换算口径后才能得到可核验数值，不能按字符串比较。
 ValueType = Literal["STRING", "DECIMAL", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"]
-# 本轮只支持这两种适用条件；其他复杂条件必须明确指出未支持，不能由模型自行改变适用范围。
+# 当前只支持这两种适用条件；其他复杂条件必须明确指出未支持，不能由模型自行改变适用范围。
 ApplicabilityKind = Literal["ALWAYS", "MATERIALS_UPLOADED"]
 # 业务问题的作答形式：选择题 / 数值输入 / 文本输入。缺少阈值等参数时用输入控件，不编造选项。
 QuestionInputKind = Literal["SELECT", "DECIMAL", "TEXT"]
@@ -385,6 +385,3 @@ class ProposalBundle(StrictModel):
     coverage: CoverageReport = Field(default_factory=CoverageReport)
     # 计算规则候选：财报场景有，合同审核路径为空。
     calculations: list[CalculationCandidate] = Field(default_factory=list)
-
-
-ALLOWED_OPERATORS = set(AllowedOperator.__args__)

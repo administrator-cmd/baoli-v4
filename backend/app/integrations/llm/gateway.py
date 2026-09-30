@@ -7,12 +7,10 @@
 ------------
 - `call_json()`：只收发 JSON 文本。既有三条路径（规则转换、字段抽取、语义判断）
   继续用它，行为不变。
-- `call_chat()` / `call_with_tools()`：完整的 Chat Completions 契约，
-  支持 `tools` / `tool_choice` 与 `tool_calls` 解析，以及工具结果回填后的继续推理。
-  **两者不互相降级**：`call_with_tools` 拿不到工具调用时明确报错，
-  绝不退回把 tool call 当普通 JSON 文本解析。
+- `call_chat()`：完整的 Chat Completions 契约，支持 `tools` / `tool_choice`
+  与 `tool_calls` 解析；工具循环由审核图显式编排。
 
-供应商限制（不直观，改动前先读）：
+供应商限制：
 
 - 端点可能是 baseurl 本身（已带 `/chat/completions`），也可能是 baseurl 下的
   标准路径，两种写法都必须接受。
@@ -29,14 +27,14 @@
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
 from ...config import get_settings
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 
 
 logger = logging.getLogger(__name__)
@@ -89,11 +87,6 @@ class ModelTurn:
     responded_at: str
     raw_message: dict[str, Any]
     refusal: str | None = None
-
-    @property
-    def has_tool_calls(self) -> bool:
-        return bool(self.tool_calls)
-
 
 def _endpoint(baseurl: str) -> str:
     normalized = baseurl.rstrip("/")
@@ -231,7 +224,7 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
 
 def call_json(payload: dict[str, Any], system_prompt: str) -> dict[str, Any]:
     """要求模型以 JSON 对象作答的单轮调用（不带工具，也不做工具循环）。"""
-    baseurl, api_key, model = _require_settings()
+    _, _, model = _require_settings()
     request_body = {
         "model": model,
         "temperature": 0,
@@ -348,7 +341,7 @@ def call_chat(
     `LLM_TOOL_CALL_UNSUPPORTED`——**不退回**按普通文本解析，
     因为那会把「供应商不支持工具调用」伪装成「模型给了一段文字」。
     """
-    baseurl, api_key, model = _require_settings()
+    _, _, model = _require_settings()
     body: dict[str, Any] = {
         "model": model,
         "temperature": temperature,
@@ -448,122 +441,6 @@ def call_chat(
         requested_at=requested_at,
         responded_at=responded_at,
         raw_message=message,
-    )
-
-
-def tool_result_message(tool_call: ToolCall, result: dict[str, Any]) -> dict[str, Any]:
-    """一次工具结果的回填消息。
-
-    `tool_call_id` 与请求逐字对应：这是模型把结果对回它那次调用的唯一依据。
-    结果序列化成 JSON 文本（Chat Completions 的 tool 消息 content 是字符串）。
-    """
-    return {
-        "role": "tool",
-        "tool_call_id": tool_call.tool_call_id,
-        "content": json.dumps(result, ensure_ascii=False),
-    }
-
-
-@dataclass
-class ToolLoopResult:
-    """工具调用循环的最终结果。
-
-    `rounds` 与 `tool_call_log` 一并返回：调用方要能回答
-    「这次结论是哪几次工具调用得到的」，而不是只知道一个最终文本。
-    """
-
-    turn: ModelTurn
-    messages: list[dict[str, Any]]
-    rounds: int
-    tool_call_log: list[dict[str, Any]] = field(default_factory=list)
-
-
-def call_with_tools(
-    messages: list[dict[str, Any]],
-    *,
-    tools: list[dict[str, Any]],
-    invoke_tool: Callable[[ToolCall], dict[str, Any]],
-    max_rounds: int | None = None,
-    tool_choice: Any = "auto",
-    response_format: dict[str, Any] | None = None,
-) -> ToolLoopResult:
-    """工具调用循环：模型请求工具 → 执行 → 回填结果 → 继续推理。
-
-    `invoke_tool` 由调用方注入：它负责校验工具、参数与任务范围，并调真实 handler
-    （见 `services.tool_service`）。网关只负责协议层——发请求、解析 tool_calls、
-    回填结果，不做工具本身的校验。
-
-    **`max_rounds` 不是静默兜底**：达到上限时抛 `LLM_TOOL_LOOP_LIMIT` 并带上完整
-    的调用历史，绝不「跑到上限就当通过」。`None` 或 `0` 表示不设上限，
-    由调用方自行控制终止。
-
-    **轮次的定义与图路径完全一致：一次模型调用算一轮**（不是「一批工具算一轮」）。
-    一次模型调用可以请求多个工具，它们属于同一轮。因此：
-
-    - 额度用尽时不再发起新的模型调用；
-    - 某次模型调用是最后一轮、而它仍请求工具时，**这一批工具也不执行**，
-      直接按上限失败——图路径的 `graph_call_model` 用的是同一条规则，
-      两条路径不会对「还能不能再跑一批」给出不同答案。
-    """
-    if max_rounds is None:
-        max_rounds = get_settings().llm_tool_max_rounds
-    conversation = list(messages)
-    log: list[dict[str, Any]] = []
-    rounds = 0
-    while True:
-        if max_rounds and rounds >= max_rounds:
-            raise _loop_limit_error(max_rounds, rounds, [])
-        turn = call_chat(
-            conversation,
-            tools=tools,
-            tool_choice=tool_choice,
-            response_format=response_format,
-        )
-        rounds += 1
-        if turn.kind != TURN_TOOL_CALLS:
-            return ToolLoopResult(turn=turn, messages=conversation, rounds=rounds, tool_call_log=log)
-        if max_rounds and rounds >= max_rounds:
-            raise _loop_limit_error(max_rounds, rounds, [call.tool_name for call in turn.tool_calls])
-        # assistant 消息必须**原样**回填模型返回的 tool_calls：重新构造会让
-        # tool_call_id 与供应商记录的调用对不上。
-        conversation.append(
-            {
-                "role": "assistant",
-                "content": turn.content or "",
-                "tool_calls": turn.raw_message.get("tool_calls"),
-            }
-        )
-        for call in turn.tool_calls:
-            result = invoke_tool(call)
-            log.append(
-                {
-                    "round": rounds,
-                    "tool_call_id": call.tool_call_id,
-                    "tool_name": call.tool_name,
-                    "arguments": call.arguments,
-                    "result": result,
-                }
-            )
-            conversation.append(tool_result_message(call, result))
-
-
-def _loop_limit_error(max_rounds: int, rounds: int, pending: list[str]) -> BusinessError:
-    """到达轮次上限时的显式错误：带上已用轮次与**没有执行**的那批调用。
-
-    `pending` 为空表示额度在调用模型之前就用尽了；非空表示这一轮的模型调用
-    已经用掉最后一个额度，它请求的这批工具没有被执行。
-    """
-    return BusinessError(
-        "LLM_TOOL_LOOP_LIMIT",
-        f"工具调用达到上限（{max_rounds} 轮）仍未形成结论，本次未完成；"
-        "系统不会把「跑到上限」当作结论，也不再执行下一批工具",
-        status_code=502,
-        details={
-            "max_rounds": max_rounds,
-            "rounds": rounds,
-            "pending_tool_calls": list(pending),
-            "not_executed": bool(pending),
-        },
     )
 
 

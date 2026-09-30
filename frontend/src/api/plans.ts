@@ -8,7 +8,7 @@ import type {
   PlanSelection,
   TaskCreatedResult,
 } from "./contracts";
-import { apiFileUrl, request } from "./http";
+import { request } from "./http";
 import { toQuery } from "./query";
 
 export interface PlanQuery {
@@ -24,11 +24,6 @@ export interface PlanQuery {
 /** 审核方案分页列表。 */
 export function listPlans(query: PlanQuery): Promise<Paged<PlanListItem>> {
   return request<Paged<PlanListItem>>(`/plans${toQuery({ ...query })}`);
-}
-
-/** 方案列表导出地址；与当前筛选同一作用域。 */
-export function planExportUrl(query: Omit<PlanQuery, "page" | "page_size">): string {
-  return apiFileUrl(`/plans/export${toQuery({ ...query })}`);
 }
 
 export interface PlanOption {
@@ -88,11 +83,6 @@ export function setPlanEnabled(planCode: string, enabled: boolean): Promise<Plan
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
-}
-
-/** 逻辑删除方案。 */
-export function deletePlan(planCode: string): Promise<PlanSelection> {
-  return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`, { method: "DELETE" });
 }
 
 /** 恢复已逻辑删除的方案。 */

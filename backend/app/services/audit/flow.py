@@ -4,20 +4,19 @@
 会把任务退回更早的节点，此时图 state 里记录的仍是退回前的节点，按图 state 执行会被
 误判成「提交节点不一致」。
 
-分发方式：**查节点注册表**（domain.node_registry），不再写 if/elif。
+分发方式：**查节点注册表**（domain.node_registry）。
 注册发生在应用启动（`register_node_handlers`），因此 domain 层不必反向依赖 services。
 
 一次节点执行被拆成四步，同一规则实例只会由其中一条路径写结果：
 
     graph_execute_current_node     开始执行：建执行记录、按冻结配置确定执行模式
-    graph_run_deterministic_node   确定性路径：原节点实现（固定流程 + 按规则分发）
+    graph_run_deterministic_node   确定性路径（固定流程 + 按规则分发）
     （Agent 路径：load_evaluation → … → save_evaluation_result → advance_rule_cursor）
     graph_finalize_node_execution  收尾：写执行记录的终态与结果
     graph_advance_workflow         推进：按 DAG 选下一个节点、更新任务状态与检查点
 
-拆分的理由：Agent 评估期间任务仍停在**当前节点**上，`task.current_node` 不能被提前推进，
-否则 Agent 拿到的「当前节点」已经是下一个，且规则结果会被写两次。旧实现在执行完
-当前节点后才判断要不要进 Agent，那时 current_node 已经变了。
+Agent 评估期间任务仍停在**当前节点**上，`task.current_node` 不能被提前推进，
+否则 Agent 会读取下一个节点，并导致规则结果被重复写入。
 
 执行模式在执行**之前**由冻结 manifest 决定（`_execution_mode`），依据是：
 
@@ -42,9 +41,9 @@ from contextlib import contextmanager
 from ...domain import capabilities, node_registry, workflow_dag
 from ...domain.identity import public_no
 from ...domain.manifest import comparison_label
-from ...errors import BusinessError, exception_summary
-from ...models import AuditTask, Evidence, ManualReview, NodeExecution, RuleResult
-from ...schemas import ManualReviewRequest
+from ...common.exceptions import BusinessError, exception_summary
+from ...entities import AuditTask, Evidence, ManualReview, NodeExecution, RuleResult
+from ...dto import ManualReviewRequest
 from ..task_lookup import task_or_404
 from .facts import _field_extraction, _material_check, _refresh_extraction_rule_results
 from .evidence import _copy_evidence_to_rule, _rule_evidence_snapshots
@@ -67,7 +66,16 @@ from .reviews import (
 )
 from .rules import _execute_rules, _risk_source_result_keys
 from .shared import _material_names, _rule_applicability, _scenario, _task_manifest
-from .state import _current_execution_ids, _flow_checkpoint_state, _is_node_of_type, _node_codes_of_type, _save_flow_checkpoint, _scenario_nodes, _set_task_checkpoint, _single_node_code_of_type, _validate_graph_namespace
+from .state import (
+    _current_execution_ids,
+    _flow_checkpoint_state,
+    _is_node_of_type,
+    _save_flow_checkpoint,
+    _scenario_nodes,
+    _set_task_checkpoint,
+    _single_node_code_of_type,
+    _validate_graph_namespace,
+)
 from datetime import UTC, datetime
 from pydantic import ValidationError
 from sqlalchemy import func, select, update
@@ -211,7 +219,7 @@ def _running_execution(db: Session, task: AuditTask) -> NodeExecution | None:
     )
 
 
-def _execution_mode(db: Session, task: AuditTask, manifest: dict[str, Any]) -> str:
+def _execution_mode(task: AuditTask, manifest: dict[str, Any]) -> str:
     """本次节点执行的模式。**在执行之前**由冻结配置决定。
 
     依据只有两条，都是确定性事实，不看模型的任何输出：
@@ -221,20 +229,20 @@ def _execution_mode(db: Session, task: AuditTask, manifest: dict[str, Any]) -> s
     2. 该节点是否有启用规则、且这些规则引用了**可调用的 Agent 工具**
        （`manifest.allowed_tools` 由发布期按规则实际引用的能力算出）。
 
-    两者同时成立才走 Agent 路径；否则与改造前完全一致地走确定性路径。
+    两者同时成立才走 Agent 路径；否则走确定性路径。
     判定发生在执行之前，因此「当前节点」在执行期间不会被提前推进，
     同一条规则实例也只可能由其中一条路径写结果。
     """
     node_type = node_type_of(task, manifest)
     if node_type not in _AGENT_NODE_TYPES:
         return MODE_DETERMINISTIC
-    agent_rules, _ = _partition_rules(db, task, manifest, task.current_node)
+    agent_rules, _ = _partition_rules(task, manifest, task.current_node)
     # 没有任何规则引用了可调用的 Agent 工具：该节点没有工具可用，这是配置事实，
     # 不是错误。旧场景（没有工具目录的 manifest）因此完全不受影响。
     return MODE_AGENT if agent_rules else MODE_DETERMINISTIC
 
 
-def _enabled_rules(db: Session, task: AuditTask, manifest: dict[str, Any], node_code: str) -> list[dict[str, Any]]:
+def _enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) -> list[dict[str, Any]]:
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
     return [
         rule
@@ -244,7 +252,6 @@ def _enabled_rules(db: Session, task: AuditTask, manifest: dict[str, Any], node_
 
 
 def _partition_rules(
-    db: Session,
     task: AuditTask,
     manifest: dict[str, Any],
     node_code: str,
@@ -260,7 +267,7 @@ def _partition_rules(
     规则会被静默丢掉。
     """
     agent = _agent_module()
-    rules = _enabled_rules(db, task, manifest, node_code)
+    rules = _enabled_rules(task, manifest, node_code)
     agent_rules: list[dict[str, Any]] = []
     deterministic_rules: list[dict[str, Any]] = []
     for rule in rules:
@@ -324,7 +331,7 @@ def graph_execute_current_node(
                 "last_error": None,
             }
         execution = _begin_node_execution(db, task, manifest, nodes, current_index)
-        mode = _execution_mode(db, task, manifest)
+        mode = _execution_mode(task, manifest)
     except BusinessError as exc:
         db.rollback()
         return _graph_error_state(db, task_no, graph_namespace, current_node, exc)
@@ -351,10 +358,10 @@ def _begin_node_execution(
 ) -> NodeExecution:
     """建立本次节点执行记录并把任务置为执行中。
 
-    事务边界与改造前一致：执行记录与任务状态在节点真正开始之前就已提交，
+    执行记录与任务状态在节点真正开始之前就已提交，
     这样进程在节点执行中崩溃时，留下的 RUNNING 执行记录是「上次执行中断」的真实表达。
     """
-    # 同上：成员判断必须容错，否则没配复核节点的场景连普通节点都执行不了。
+    # 未配置人工复核节点时返回 False；普通节点仍须能够执行。
     if _is_node_of_type(manifest, task.current_node, "MANUAL_REVIEW"):
         raise BusinessError("AUDIT_GRAPH_MANUAL_ROUTE", "人工复核必须由审核流程图处理", status_code=500)
     if task.status == "RUNNING":
@@ -414,11 +421,10 @@ def graph_run_deterministic_node(
     graph_namespace: str,
     execution_id: int | None,
 ) -> dict[str, Any]:
-    """确定性路径：调节点原有的执行实现。
+    """确定性路径：按能力类型从注册表调度节点实现。
 
-    执行实现与改造前完全一致（`_dispatch` 按能力类型查注册表）。唯一的差别是
-    「推进到下一个节点」被移到 `graph_advance_workflow`：Agent 路径与确定性路径
-    必须共用同一处推进逻辑，否则两条路径的节点顺序会各写一套。
+    「推进到下一个节点」由 `graph_advance_workflow` 统一负责，使 Agent 路径与
+    确定性路径共用同一套节点推进逻辑。
     """
     task = task_or_404(db, task_no, lock=True)
     _validate_graph_namespace(task, graph_namespace)
@@ -549,8 +555,8 @@ def graph_advance_workflow(
 ) -> dict[str, Any]:
     """推进流程：按 DAG 选下一个就绪节点，更新任务状态与检查点。
 
-    与改造前 `_execute_current_node_direct` 尾部的语义完全一致：节点的完成与否
-    由执行记录的终态表达，DAG 据此选择下一个节点；全部完成则任务 COMPLETED。
+    节点的完成与否由执行记录的终态表达，DAG 据此选择下一个节点；
+    全部完成则任务进入 COMPLETED。
     """
     task = task_or_404(db, task_no, lock=True)
     checkpoint = _validate_graph_namespace(task, graph_namespace)
@@ -661,12 +667,8 @@ def _next_node_after(
 ) -> dict[str, Any] | None:
     """按 DAG 选出下一个可执行节点；没有就绪节点时返回 None。
 
-    与旧的 `nodes[current_index + 1]` 的差别：旧实现假设流程是线性表，
-    节点顺序就是执行顺序。这里按**依赖是否满足**选择，因此：
-
-    - 旧场景（依赖写成「依赖前一个节点」）得到的顺序与旧实现完全一致；
-    - 新场景（财报：字段抽取 → 计算 → 风险）按数据流推进，
-      即使 sequence_no 与依赖顺序不一致也不会执行错。
+    节点按**依赖是否满足**选择；`sequence_no` 只决定多个就绪节点之间的稳定顺序。
+    财报场景因此按字段抽取 → 计算 → 风险的数据流推进。
 
     没有就绪节点时区分两种情况：全部完成（返回 None，任务置 COMPLETED）与
     DAG 卡住（抛错，任务保持可诊断状态）。把卡住当成完成会让任务显示为已完成
@@ -895,8 +897,6 @@ def _agent_module() -> Any:
 
 
 def _evaluation_scope(
-    db: Session,
-    task: AuditTask,
     manifest: dict[str, Any],
     node_code: str,
 ) -> dict[str, Any]:
@@ -928,7 +928,6 @@ def _plan_entry(node_code: str, cursor: int, rule: dict[str, Any]) -> dict[str, 
 
 
 def _plan_rule(
-    db: Session,
     task: AuditTask,
     manifest: dict[str, Any],
     node_code: str,
@@ -939,7 +938,7 @@ def _plan_rule(
     取的是 `_partition_rules` 划分出的**Agent 规则**，不是本节点全部规则：
     没有授权工具的规则由确定性路径执行，指到它会得到一条永远评估不了的规则。
     """
-    agent_rules, _ = _partition_rules(db, task, manifest, node_code)
+    agent_rules, _ = _partition_rules(task, manifest, node_code)
     if rule_cursor < 0 or rule_cursor >= len(agent_rules):
         raise BusinessError(
             "AGENT_RULE_CURSOR_INVALID",
@@ -1094,13 +1093,13 @@ def graph_load_evaluation(
         _graph_namespace_or_fail(task, graph_namespace)
         manifest = _task_manifest(task)
         execution = _execution_in_progress(db, task, execution_id)
-        agent_rules, deterministic_rules = _partition_rules(db, task, manifest, node_code)
+        agent_rules, deterministic_rules = _partition_rules(task, manifest, node_code)
         deterministic_result: dict[str, Any] | None = None
         if deterministic_rules:
             with db.begin_nested():
                 deterministic_result = _execute_rules(db, task, manifest, execution, node_code, deterministic_rules)
             db.commit()
-        scope = _evaluation_scope(db, task, manifest, node_code)
+        scope = _evaluation_scope(manifest, node_code)
         return {
             "agent_mode": True,
             "evaluation_plan": [_plan_entry(node_code, index, rule) for index, rule in enumerate(agent_rules)],
@@ -1147,7 +1146,7 @@ def graph_load_rule_instance(
         _graph_namespace_or_fail(task, graph_namespace)
         manifest = _task_manifest(task)
         execution = _execution_in_progress(db, task, execution_id)
-        rule = _plan_rule(db, task, manifest, node_code, rule_cursor)
+        rule = _plan_rule(task, manifest, node_code, rule_cursor)
         rule_code = str(rule.get("rule_code") or rule.get("rule_key"))
         agent = _agent_module()
         allowed = agent.allowed_tools_of(
@@ -1162,7 +1161,6 @@ def graph_load_rule_instance(
             snapshot = agent.freeze_snapshot(
                 db,
                 task=task,
-                manifest=manifest,
                 node_code=node_code,
                 rule_instance_id=rule_instance_id,
                 evaluation_id=evaluation_id,
@@ -1274,8 +1272,7 @@ def graph_prepare_agent_context(
 def _loop_limit_reached(loop_count: int) -> int | None:
     """本节点这一轮是否已经到达工具循环上限；到达时返回上限值。
 
-    **轮次的定义全链路只有一种：一次模型调用算一轮**（与 `loop_count` 的计数口径、
-    与 `integrations.llm.gateway.call_with_tools` 的 `rounds` 完全一致）。
+    **轮次的定义全链路只有一种：一次模型调用算一轮**（与 `loop_count` 的计数口径一致）。
     批次不是轮次：一次模型调用可以请求多个工具，它们仍属于同一轮。
 
     `settings.llm_tool_max_rounds` 为 0 表示不设上限（由调用方自行控制终止），

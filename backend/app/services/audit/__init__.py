@@ -1,6 +1,6 @@
 """审核执行的分层实现。
 
-各模块的职责与依赖方向见 `docs/系统设计基线.md`；依赖顺序（只允许向下）：
+各模块的职责与依赖方向见 `docs/后端分层约定.md`；依赖顺序（只允许向下）：
 
     commands → flow → reviews → {reporting, views, quality, rules} → facts → state → evidence → artifacts → shared
 

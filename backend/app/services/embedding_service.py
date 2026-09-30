@@ -22,15 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from ..config import get_settings
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 logger = logging.getLogger(__name__)
-
-# 向量保存精度：30 位十进制足够稳定地区分余弦相似度的排序差异，
-# 又不会把一条向量写成几千字符。
-VECTOR_DECIMAL_PLACES = 30
-
 
 @dataclass(frozen=True)
 class EmbeddingRuntime:

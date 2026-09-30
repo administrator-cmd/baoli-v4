@@ -1,9 +1,4 @@
-/**
- * 管理端列表：材料、上传、证据、执行记录、复核记录与操作日志。
- *
- * 契约按业务域拆分：本文件只声明本域的载荷形状，跨域引用一律显式 import，
- * 不再让所有页面共同依赖一个不断扩大的中心文件。
- */
+/** 管理端列表：材料、上传、证据、执行记录、复核记录与操作日志。 */
 
 import type { ApiResponse, JsonValue } from "./common";
 import type { TaskReviewJudgment } from "./audits";

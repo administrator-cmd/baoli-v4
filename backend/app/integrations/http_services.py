@@ -14,7 +14,6 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 import requests
-from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import Settings, get_settings
 from ..domain.external_artifacts import (
@@ -23,7 +22,7 @@ from ..domain.external_artifacts import (
     ExternalServiceResult,
     OcrJobSubmission,
 )
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 logger = logging.getLogger(__name__)
@@ -436,7 +435,7 @@ def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmis
             submit_url,
             service_code="OCR",
             operation="SUBMIT",
-            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "OCR", "SUBMIT"),
+            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "SUBMIT"),
             headers={"Authorization": f"bearer {token}", "Content-Type": content_type},
             content=body,
         )
@@ -484,7 +483,7 @@ def poll_ocr_job(*, job_id: str, deadline_at: datetime) -> ExternalServiceResult
                 poll_url,
                 service_code="OCR",
                 operation="POLL",
-                timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "OCR", "POLL"),
+                timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "POLL"),
                 headers=headers,
             )
             poll_payload = _json_object(poll, "OCR", "POLL")
@@ -564,7 +563,7 @@ def poll_ocr_job(*, job_id: str, deadline_at: datetime) -> ExternalServiceResult
             _validate_download_url(json_url, "OCR", "DOWNLOAD"),
             service_code="OCR",
             operation="DOWNLOAD",
-            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "OCR", "DOWNLOAD"),
+            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "DOWNLOAD"),
             headers={"Accept-Encoding": "identity"},
         )
         try:
@@ -744,7 +743,7 @@ def _ocr_local_deadline_error(operation: str) -> BusinessError:
     )
 
 
-def _remaining_timeout(request_timeout: float, deadline: float, service_code: str, operation: str) -> float:
+def _remaining_timeout(request_timeout: float, deadline: float, operation: str) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise _ocr_local_deadline_error(operation)

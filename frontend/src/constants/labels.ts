@@ -24,8 +24,7 @@ const statusLabels: Record<string, string> = {
   PROPOSED: "已转换",
   PENDING_DECISION: "等待业务确认",
   CONFIRMED: "已确认",
-  // 历史状态：导入页已不再产生 PRECHECKED（发布前检查已移除，编译与发布状态机
-  // 只在场景页）。保留这条映射只为让历史作业列表能显示中文，不是可选状态。
+  // 仅用于历史作业展示，不是当前可写入状态。
   PRECHECKED: "检查完成（历史）",
   PUBLISHED: "已发布",
   APPLIED: "已写入场景草稿",
@@ -215,28 +214,6 @@ const statusTones: Record<string, StatusTone> = {
   // 索引状态色由 evidenceIndexStatusTone 提供（READY 在任务状态里另有所指）。
   BUILDING: "info",
 };
-
-/** 逐行处置的中文口径。 */
-const dispositionLabels: Record<string, string> = {
-  CANDIDATE: "已形成候选",
-  DISABLED: "已停用并保留",
-  EXCLUDED: "已明确排除",
-  QUESTION: "待处理问题",
-};
-
-export function dispositionLabel(disposition: string | null | undefined): string {
-  return disposition ? dispositionLabels[disposition] ?? "处置未知" : "处置未知";
-}
-
-export function dispositionTone(disposition: string | null | undefined): StatusTone {
-  if (disposition === "QUESTION") {
-    return "warning";
-  }
-  if (disposition === "CANDIDATE") {
-    return "info";
-  }
-  return "neutral";
-}
 
 /**
  * 证据定位核对状态的中文口径与颜色。
@@ -479,23 +456,6 @@ export function objectTypeLabel(objectType: string | null | undefined): string {
   return objectType ? objectTypeLabels[objectType] ?? objectType : "未知对象";
 }
 
-/** 素材/配置表单一类页面的作用域文案。 */
-export function draftSourceLabel(source: string | null | undefined): string {
-  const labels: Record<string, string> = {
-    FORM: "页面编辑",
-    EXCEL: "规则库导入",
-    COPY: "复制场景",
-    REVISION: "版本修订",
-    IMPORT: "规则库导入",
-  };
-  return source ? labels[source] ?? source : "未知来源";
-}
-
-/** 版本号是技术信息：页面只在次级区域显示，不进主标题。 */
-export function versionLabel(versionNo: number | null | undefined): string {
-  return typeof versionNo === "number" && versionNo > 0 ? `第 ${versionNo} 版` : "版本未知";
-}
-
 /** 业务节点中文名，用于节点编码兜底展示。 */
 const nodeLabels: Record<string, string> = {
   MATERIAL_CHECK: "材料检查",
@@ -510,64 +470,6 @@ const nodeLabels: Record<string, string> = {
 
 export function nodeLabel(nodeCode: string | null | undefined): string {
   return nodeCode ? nodeLabels[nodeCode] ?? "未知节点" : "未知节点";
-}
-
-/** 节点在业务上的用途，执行前让用户知道这一步在做什么。 */
-const nodePurposes: Record<string, string> = {
-  MATERIAL_CHECK: "核对必传材料是否齐全，缺件会在这里被指出。",
-  DOCUMENT_PREPARE: "对已上传材料做文件处理和文字识别，产出可供审核的处理结果。",
-  FIELD_EXTRACTION: "从材料中抽取模板定义的业务字段，并保留原文证据。",
-  INTERNAL_VALIDATE: "按模板配置对单份材料内部的信息做一致性检查。",
-  CROSS_VALIDATE: "按模板配置在多份材料之间做交叉核对。",
-  MANUAL_REVIEW: "对系统无法自动判定的项给出人工结论。",
-  RISK_RATING: "按模板配置的风险规则评定风险等级。",
-  REPORT_OUTPUT: "汇总本次执行的字段、规则和风险结果，生成审核报告。",
-};
-
-export function nodePurpose(nodeCode: string | null | undefined): string {
-  return nodeCode ? nodePurposes[nodeCode] ?? "按模板配置执行本节点。" : "按模板配置执行本节点。";
-}
-
-/**
- * 节点状态 → 中文口径。
- *
- * 「已跳过」「未执行」与「已完成」必须分开：跳过表示本模板没有配置这类检查，
- * 它是一次真实执行给出的结论，但绝不是通过。
- */
-const nodeStatusLabels: Record<string, string> = {
-  CURRENT: "当前节点",
-  PENDING: "未开始",
-  READY: "待执行",
-  RUNNING: "执行中",
-  SUCCEEDED: "已完成",
-  SKIPPED: "已跳过（本模板未配置此类检查）",
-  FAILED: "执行失败",
-  BLOCKED: "已阻断",
-  INVALIDATED: "已失效（需重新执行）",
-};
-
-export function nodeStatusLabel(status: string | null | undefined): string {
-  if (!status) {
-    return "未开始";
-  }
-  return nodeStatusLabels[status] ?? statusLabel(status);
-}
-
-/** 节点状态 → 语义色。跳过与失效是灰，不能与绿色的「已完成」同色。 */
-export function nodeStatusTone(status: string | null | undefined): StatusTone {
-  if (status === "SUCCEEDED") {
-    return "success";
-  }
-  if (status === "FAILED" || status === "BLOCKED") {
-    return "danger";
-  }
-  if (status === "SKIPPED" || status === "INVALIDATED") {
-    return "neutral";
-  }
-  if (status === "RUNNING" || status === "CURRENT" || status === "READY") {
-    return "info";
-  }
-  return "neutral";
 }
 
 /** 规则适用条件：空白代表「始终适用」，不是「未配置」。 */
@@ -592,13 +494,6 @@ export function progressPercent(done: number | null | undefined, total: number |
   }
   return Math.min(100, Math.round((Math.min(done, total) / total) * 100));
 }
-
-/** 规则节点分批：创建任务时按业务分组勾选规则，不直接暴露内部编码。 */
-export const ruleNodeOrder = [
-  "INTERNAL_VALIDATE",
-  "CROSS_VALIDATE",
-  "RISK_RATING",
-];
 
 /**
  * base Excel 的 10 个业务 Sheet 用途。
@@ -631,25 +526,6 @@ export const sheetRoleOptions = [
 const nonBusinessSheetRoleLabels: Record<string, string> = {
   INSTRUCTION: "填写说明（模板元数据，不参与本次导入）",
 };
-
-/** 工作表用途的业务说明，帮助用户判断这张表该绑成什么。 */
-const sheetRoleDescriptions: Record<string, string> = {
-  MATERIAL_LIST: "定义本次审核需要登记的材料位，以及哪些是必传。",
-  MATERIAL_QUALITY: "定义对材料文件本身的检查项目、合格要求与判定口径。",
-  FIELD_EXTRACTION: "定义需要从材料中抽取的业务字段、类型、单位、币种、取数期间与报表口径。",
-  INTERNAL_VALIDATE: "定义单份材料内部信息的一致性检查规则及允许差值。",
-  CROSS_VALIDATE: "定义两种材料之间的交叉核对规则及允许差值。",
-  CALC_DEFINITION: "定义计算规则：指标名称、类别、计算公式、结果期间与报表口径。",
-  CALC_PARAMETER: "定义公式里每个标识符的取值来源（字段 / 上游计算结果 / 常量）、单位与币种。",
-  CALC_JUDGEMENT: "定义计算结果的判定区间、业务结论及对应的通过、异常或待复核状态。",
-  RISK: "定义风险及其等级、成立条件（任一/全部关联检查不合格）；来源只在检查行的「关联风险」维护。",
-  REPORT_TEMPLATE: "定义报告编号、材料范围、输出格式与章节；同一报告编号的属性必须整组一致。",
-  INSTRUCTION: "模板自带的填写说明页，属于模板元数据，不参与本次导入。",
-};
-
-export function sheetRoleDescription(role: string | null | undefined): string {
-  return role ? sheetRoleDescriptions[role] ?? "该用途暂无业务说明。" : "尚未指定用途。请选择用途，或把本表设为不参与本次导入。";
-}
 
 /**
  * 风险疑点（06_风险疑点）的业务列名。
@@ -809,35 +685,6 @@ export function formatFileSize(bytes: number | null | undefined): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** 系统状态卡片：外部服务与配置项的中文名称。 */
-const externalServiceDescriptions: Record<string, string> = {
-  大模型: "用于规则转换、字段抽取和智能校验。",
-  材料识别: "用于核对上传材料是否符合模板要求。",
-  文件解析: "用于解析材料文件并产出可审核的处理结果。",
-  文字识别: "用于从扫描件中识别文字内容。",
-  印章识别: "用于识别合同印章。",
-};
-
-export function externalServiceDescription(name: string): string {
-  return externalServiceDescriptions[name] ?? "外部服务。";
-}
-
-const configurationItemLabels: Record<string, string> = {
-  BAOLI_LLM_BASEURL: "大模型接口地址",
-  BAOLI_LLM_APIKEY: "大模型访问密钥",
-  BAOLI_LLM_MODEL_NAME: "大模型名称",
-  BAOLI_SERVICE_8018_URL: "材料识别服务地址",
-  BAOLI_SERVICE_8010_URL: "文件解析服务地址",
-  BAOLI_OCR_SERVICE_URL: "文字识别服务地址",
-  BAOLI_OCR_TOKEN: "文字识别服务令牌",
-  BAOLI_OCR_MODEL: "文字识别模型名称",
-  BAOLI_SEAL_SERVICE_URL: "印章识别服务地址",
-};
-
-export function configurationItemLabel(item: string): string {
-  return configurationItemLabels[item] ?? item;
-}
-
 /** 业务节点的可选值，用于候选原地修正里选择「所属节点」。 */
 export const nodeOptions = Object.keys(nodeLabels).map((value) => ({ value, label: nodeLabels[value] }));
 
@@ -960,7 +807,7 @@ export const decimalCompareOperatorOptions = [
   { value: "ABS_DIFF_LTE", label: "差额不超过阈值" },
 ];
 
-/** 报告输出格式。生成 PDF/Word/Excel 文件本轮未实现，这里维护的是配置目标格式。 */
+/** 报告输出格式。当前尚未生成 PDF/Word/Excel 文件，这里维护的是配置目标格式。 */
 export const reportFormatOptions = [
   { value: "PDF", label: "PDF" },
   { value: "Word", label: "Word" },
@@ -1051,7 +898,7 @@ const failureNextSteps: Record<string, string> = {
   TASK_DOCUMENT_REPLACE_CONFIRMATION_REQUIRED: "该材料位已有文件，替换上传需要先明确确认替换。",
   TASK_DOCUMENT_LOCKED: "任务已结束，材料不可再替换；如需继续请新建审核任务。",
   AUDIT_TASK_RUNNING: "任务正在执行当前节点，等待执行结束后再替换材料。",
-  BLOCKED_BY_PRECHECK: "先处理发布检查中列出的阻断项，再重新执行发布检查。",
+  BLOCKED_BY_PRECHECK: "历史导入发布检查存在阻断项；新导入请写入场景草稿后，在场景页处理发布问题。",
 
   // 工作表绑定：未知工作表、用途缺失或表头行无效
   SHEET_ROLE_REQUIRED: "在「Sheet 绑定」步骤为这张工作表选择用途，或把它设为不参与本次导入。",
@@ -1076,13 +923,13 @@ const failureNextSteps: Record<string, string> = {
   RULE_CELL_FORMULA_UNSUPPORTED: "把公式单元格改成业务描述文字后重新上传规则库。",
   RULE_REQUIRED_CELL_EMPTY: "补齐该单元格内容后重新上传规则库。",
 
-  // 发布检查与发布
+  // 配置编译、场景发布与历史导入发布
   IMPORT_STATUS_NOT_READY: "当前作业还没有完成规则转换，请先确认工作表用途并提交解析。",
-  PROPOSALS_MISSING: "规则尚未转换，请先提交解析，再执行发布检查。",
-  ISSUES_UNRESOLVED: "先为每一项业务问题提交业务结论，再重新执行发布检查。",
-  MANIFEST_NO_MATERIAL: "在 01_材料清单里至少配置一个材料位，再重新执行发布检查。",
-  MANIFEST_NO_RULE: "至少配置一条检查规则（或确认本模板只需要字段抽取），再重新执行发布检查。",
-  MANIFEST_NODE_RULE_MISSING: "为缺失的必需节点补充规则，再重新执行发布检查。",
+  PROPOSALS_MISSING: "规则尚未转换，请先确认工作表用途并提交解析。",
+  ISSUES_UNRESOLVED: "先为每一项业务问题提交业务结论，再写入场景草稿。",
+  MANIFEST_NO_MATERIAL: "在 01_材料清单里至少配置一个材料位，再重新解析或发布。",
+  MANIFEST_NO_RULE: "至少配置一条检查规则（或确认本场景只需要字段抽取），再重新解析或发布。",
+  MANIFEST_NODE_RULE_MISSING: "为缺失的必需节点补充规则，再重新解析或发布。",
   MANIFEST_MATERIAL_REF_MISSING: "把 02～06 中引用的材料名称改成 01_材料清单里已有的材料，再重新解析。",
   MANIFEST_RULE_INPUT_MISSING: "补齐规则引用的材料和字段，使其与 01/03 中的定义一致，再重新解析。",
   MANIFEST_RULE_INPUT_COUNT_INVALID: "一条规则只比较左右各一个字段，请把多字段的关系拆成多条规则后重新解析。",
@@ -1142,17 +989,8 @@ const failureNextSteps: Record<string, string> = {
   TASK_RULE_UNKNOWN: "任务引用了当前场景版本中不存在的规则；请回到方案编辑页重新保存以对齐场景配置。",
   TASK_RULE_DISABLED: "任务引用了场景里已停用的规则；请在场景配置中启用该规则或从方案中移除。",
   TASK_SCHEMA_FIELD_MISSING: "规则引用的字段不在场景字段集合中；请补齐字段定义后重新发布。",
-  TASK_CREATE_REQUIRES_PLAN: "新审核任务必须从已启用的方案创建；请先基于已发布场景建立方案，再从方案创建任务。",
   TASK_DOCUMENT_NO_CURRENT_FILE: "该材料位还没有当前文件；请先上传文件再执行需要它的节点。",
 };
-
-/**
- * 方案未选到任何业务规则时的提示。
- *
- * 与后端 PLAN_RULE_EMPTY 的文案同口径（显式选择 / 业务规则），
- * 页面不得另造“显式规则”之类的说法。
- */
-export const planRuleEmptyHint = failureNextSteps.PLAN_RULE_EMPTY;
 
 export function failureNextStep(code: string | null | undefined): string {
   if (!code) {
@@ -1193,22 +1031,6 @@ export function evidenceIndexStatusTone(status: string | null | undefined): Stat
 }
 
 /**
- * 页号来源的中文口径。
- *
- * 产物没有真实页码时只能显示产物内位置；合成序号与图片序号都不等于原 PDF 页码，
- * 页面必须如实说明，不能让用户以为那是真实页码。
- */
-export function pageNoSourceLabel(source: string | null | undefined): string {
-  if (source === "PROVIDER") {
-    return "产物给出的真实页号";
-  }
-  if (source === "SYNTHETIC_SEQUENCE") {
-    return "产物内序号（原 PDF 页码未提供）";
-  }
-  return "没有页码信息";
-}
-
-/**
  * 主体核对结论的候选取值。
  *
  * 只有这三种：相似度不能代替审核结论，本系统不提供“采纳前几条候选”的入口。
@@ -1239,15 +1061,4 @@ export function evidenceRouteLabel(evidence: string | null | undefined): string 
 
 export function judgeRouteLabel(judge: string | null | undefined): string {
   return judge ? judgeRouteLabels[judge] ?? "判定方式未知" : "判定方式未记录";
-}
-
-export function reportContentTypeLabel(contentType: string | null | undefined): string {
-  const labels: Record<string, string> = {
-    FIELD_DETAIL: "字段明细",
-    AUDIT_RESULT: "审核结果",
-    FIELD_AND_RESULT: "字段及审核结果",
-    RISK_LIST: "风险清单",
-    CONCLUSION: "审核结论",
-  };
-  return contentType ? labels[contentType] ?? "内容类型未知" : "内容类型未知";
 }

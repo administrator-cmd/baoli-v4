@@ -15,9 +15,9 @@ from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, 
 from ...domain.file_quality import CHECK_FILE_DUPLICATE, CHECK_FILE_FORMAT, CHECK_FILE_SIZE
 from ...domain.identity import public_no
 from ...domain.manifest import OPERATOR_LABELS, rule_node_type_of
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 from .document_ports import document_service
-from ...models import AuditTask, DocumentUpload, ManualReview, NodeExecution, RuleResult, StoredArtifact
+from ...entities import AuditTask, DocumentUpload, ManualReview, NodeExecution, RuleResult, StoredArtifact
 from ..storage_service import resolve_storage_path
 from .artifacts import _complete_ocr_job, _ensure_external_artifact, _material_classify_content, _submit_ocr_job
 from .evidence import _copy_artifact_evidence_to_rule
@@ -122,9 +122,8 @@ def _type_review_recorded(db: Session, task: AuditTask, upload: DocumentUpload) 
 def _sync_type_review_pending(db: Session, task: AuditTask) -> dict[str, Any]:
     """保证「类型待复核」的材料位都有可提交的人工复核待办。
 
-    材料类型的识别结论来自已下线为“仅供参考”的自动识别：它不再阻断审核（真实原文照常
-    参与判定），但类型本身仍需由人定案。历史任务 TASK_803095ea91f6966c 的主合同就是
-    这种状态：识别结论留在产物里，却没有任何可提交的裁决入口。
+    材料类型的自动识别只供参考，不阻断审核（真实原文照常参与判定），但类型本身仍需
+    由人定案。部分历史任务只保留了识别产物，没有可提交的裁决入口。
 
     这里按当前有效的 MATERIAL_CLASSIFY 产物把识别结论与命中关键词快照进待办，供人据实裁决；
     已裁决过的材料位不再重复挂。**不替人下结论、也不改材料状态**：材料状态只在人工提交
@@ -150,7 +149,7 @@ def _sync_type_review_pending(db: Session, task: AuditTask) -> dict[str, Any]:
             continue
         if _type_review_recorded(db, task, upload):
             continue
-        service_result = _material_classify_result(_material_classify_content(db, task, upload))
+        service_result = _material_classify_result(_material_classify_content(db, upload))
         # 类型复核是**待确认事项**，不是「依据不可用」：真实原文照常参与判定，
         # 因此文案不能说成「依赖它的检查缺少有效依据」——那会把待确认说成阻断。
         pending_note = (
@@ -224,7 +223,7 @@ def _document_prepare(db: Session, task: AuditTask, manifest: dict[str, Any], ex
             ),
         )
         # 8018 的识别结论只记录不判定：不改材料状态、不挂人工复核，后续节点照常执行。
-        material_classify_by_key[document.material_key] = _material_classify_content(db, task, upload)
+        material_classify_by_key[document.material_key] = _material_classify_content(db, upload)
         # 正文抽取依赖的 8010 处理链路必须真实执行，不因本模板没有质量规则而跳过。
         parsed_artifact = _ensure_external_artifact(
             db,
@@ -564,10 +563,9 @@ def _execute_file_quality_rules(
                         }
                     )
                     continue
-                verdict = self_check = None
                 # 判定走共享领域服务：Agent 工具调的是同一个函数，
                 # 节点与工具不可能对同一份文件得出不同结论。
-                verdict = quality_judgement.judge_quality_item(
+                recorded = quality_judgement.judge_quality_item(
                     check_item,
                     upload=upload,
                     standard_value=standard_value,
@@ -575,7 +573,6 @@ def _execute_file_quality_rules(
                     peers=peers,
                     gap=gap_by_rule_key.get(rule["rule_key"]) or {},
                 )
-                recorded = verdict
                 per_material.append(
                     {
                         "material_key": material_key,

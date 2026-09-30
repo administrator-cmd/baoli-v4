@@ -11,9 +11,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..errors import BusinessError
-from ..models import AuditTask, ImportJob, ImportSheet
-from ..schemas import ExecuteNodeRequest, ManualReviewRequest
+from ..common.exceptions import BusinessError
+from ..entities import ImportJob, ImportSheet
+from ..entities import AuditTask
+from ..dto import ExecuteNodeRequest, ManualReviewRequest
 from . import background_service
 from .audit.state import _single_node_code_of_type
 from .background_service import (
@@ -24,7 +25,7 @@ from .background_service import (
 from .operation_types import OBJECT_AUDIT_TASK, OBJECT_IMPORT_JOB
 
 
-def _manifest_of_task(db: Session, task: AuditTask) -> dict[str, Any]:
+def _manifest_of_task(task: AuditTask) -> dict[str, Any]:
     """任务创建时冻结的方案 manifest。
 
     节点归属必须按它解析：`task.current_node` 是**节点实例码**（用户配置的），
@@ -220,7 +221,7 @@ def submit_manual_reviews(
         # 人工复核等待点按**能力类型**解析实例码：`task.current_node` 是实例码，
         # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
         review_node_code = _single_node_code_of_type(
-            _manifest_of_task(db, task), "MANUAL_REVIEW", purpose="人工复核等待点"
+            _manifest_of_task(task), "MANUAL_REVIEW", purpose="人工复核等待点"
         )
         if task.status != "WAITING_REVIEW" or task.current_node != review_node_code:
             raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
@@ -248,7 +249,7 @@ def submit_manual_reviews(
         # 目标节点记**实例码**：它是本次命令真实落在哪个节点上的执行事实，
         # 能力类型在不同场景里对应不同的实例码。
         target_node=_single_node_code_of_type(
-            _manifest_of_task(db, task), "MANUAL_REVIEW", purpose="人工复核等待点"
+            _manifest_of_task(task), "MANUAL_REVIEW", purpose="人工复核等待点"
         ),
         input_version=str(task.input_revision),
         validate=validate,

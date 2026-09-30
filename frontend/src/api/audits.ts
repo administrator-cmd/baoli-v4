@@ -18,7 +18,6 @@ import type {
   ReviewDraftResult,
   RetrievalDecision,
   RetrievalDecisionResult,
-  RetrievalHistoryItem,
   RetrievalResult,
   RiskList,
   TaskEvidenceIndex,
@@ -59,7 +58,6 @@ export interface OcrReconcileRequest {
   reason: string;
   idempotency_key: string;
 }
-
 /** 只读 OCR 状态查询结果。 */
 export interface DocumentOcrStatus {
   document_no: string;
@@ -69,7 +67,6 @@ export interface DocumentOcrStatus {
   deadline_at: string | null;
   message: string;
 }
-
 /** 当前上传文件的同步处理产物状态。 */
 export interface DocumentArtifactStatus {
   document_no: string;
@@ -191,16 +188,6 @@ export interface TaskQuery {
 /** 审核任务分页列表（后端筛选 / 排序 / 分页）。 */
 export function listAuditTasksPage(query: TaskQuery): Promise<Paged<AuditTaskRow>> {
   return request<Paged<AuditTaskRow>>(`/audit-tasks${toQuery({ ...query })}`);
-}
-
-/** 按当前筛选的任务列表导出地址；与列表页同一作用域，不做静默截断。 */
-export function taskExportUrl(query: Omit<TaskQuery, "page" | "page_size">): string {
-  return apiFileUrl(`/audit-tasks/export${toQuery({ ...query })}`);
-}
-
-/** 任务下拉选项：按名称或编号模糊匹配。 */
-export function listTaskOptions(keyword?: string): Promise<{ request_id: string; items: Array<{ task_no: string; task_name: string; scenario_name: string; status: string }> }> {
-  return request(`/audit-tasks/options${toQuery({ keyword })}`);
 }
 
 /** 编辑任务基本资料（名称、备注）；执行快照不随重命名变化。 */
@@ -493,11 +480,4 @@ export function listAgentToolCalls(
   return request(
     `/audit-tasks/${encodeURIComponent(taskNo)}/agent-tool-calls${toQuery({ evaluation_id: evaluationId })}`,
   );
-}
-
-/** 本任务的检索记录：查询内容、限定范围、模型与索引版本、候选与采用结果。 */
-export function listTaskRetrievals(
-  taskNo: string,
-): Promise<{ request_id: string; task_no: string; items: RetrievalHistoryItem[] }> {
-  return request(`/audit-tasks/${encodeURIComponent(taskNo)}/retrievals`);
 }

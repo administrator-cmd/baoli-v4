@@ -33,33 +33,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from openpyxl.utils import get_column_letter
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from .manifest import label_resolver
 from . import calculation as calc
 from . import unified_profile
 from .proposals import coverage_totals
 from .workbook import WorkbookIR, WorkbookRow, WorkbookSheet
 
-
-# 07「触发条件」列里的规则编号。只做编号抽取，不解释自然语言条件语义。
-# 不能用 \b 词边界：中文与字母之间不构成词边界（`FSCV-007命中` 的 `7` 与 `命`
-# 都是 \w），加边界会让紧邻中文的编号抽不出来。改用显式的前后视断言：
-# 左侧不能是字母数字或连字符（避免从长编号中间截取），右侧不能是数字或连字符。
-_RULE_CODE = re.compile(r"(?<![A-Za-z0-9-])([A-Z]{2,6}-[A-Z0-9]{1,8}-\d{1,4}|[A-Z]{2,6}-\d{1,4})(?![\d-])")
-
-# 05/06「结果区间定义」列：`<1：预警；1~1.5：一般；1.5~2：良好；>2：优秀`
-_BAND_SEPARATOR = "；"
-_BAND_ITEM = re.compile(
-    r"^(?P<prefix>[<>≤≥])?\s*(?P<first>-?\d+(?:\.\d+)?)\s*(?P<percent>%?)\s*"
-    r"(?:(?P<range>[~～\-])\s*(?P<second>-?\d+(?:\.\d+)?)\s*(?P<percent2>%?))?$"
-)
 
 # 指标类别 → 结果类型。类别是业务在 06 里选的枚举，结果类型是执行契约里的值类型。
 # 映射是**显式**的：比率与增长率产出无量纲比率，金额与差额产出金额。
@@ -513,7 +499,7 @@ class FinancialReportConverter:
         bound = self.read(sheet_role, required=False)
         if bound is None:
             return None
-        sheet, _header_row, rows = bound
+        sheet, _, rows = bound
         conversion = self._begin(sheet)
         for row in rows:
             rule_code = _text(row, "rule_code")
@@ -557,10 +543,8 @@ class FinancialReportConverter:
         - `CALC_PARAMETER`：参数声明（取值来源、期间/主体/报表口径、单位币种）；
         - `CALC_JUDGEMENT`：判定区间（上下界与是否含边界、比较基准、判定结论）。
 
-        三张表都必须真实读取：以前参数由公式标识符推断、判定由「结果区间定义」
-        文本列解析，那两个 Sheet 声明了却没人读——业务在表里填的内容不起作用，
-        而页面上看不出任何异常。现在参数与判定**只能来自对应 Sheet**，
-        定义表里的同名文本列不再作为取值来源。
+        三张表都必须真实读取；参数与判定只能来自对应 Sheet，定义表里的同名文本列
+        不作为取值来源。
 
         公式里的标识符仍要解析：它是「这条公式引用了哪些参数」的依据，
         解析结果与参数表逐条核对；缺少参数声明时记录来源和缺口，由发布编译阻断。
@@ -568,7 +552,7 @@ class FinancialReportConverter:
         bound = self.read(sheet_role, required=False)
         if bound is None:
             return None
-        sheet, header_row, rows = bound
+        sheet, _, rows = bound
         conversion = self._begin(sheet)
         seen_rule_codes: set[str] = set()
         for row in rows:
@@ -664,9 +648,7 @@ class FinancialReportConverter:
                 for item in parameters
                 if item["source_type"] == "CALC_RESULT" and item.get("source_code")
             ]
-            bands = self._bands_of_sheet(
-                rule_code=rule_code, rule_name=rule_name, sheet=sheet, row_no=row_no, conversion=conversion
-            )
+            bands = self._bands_of_sheet(rule_code=rule_code, rule_name=rule_name)
             # 「指标类别」是**枚举列**：内部取值决定结果类型，原文用于展示。
             # 直接读原文会让下面按内部取值查表查不到，报出一个与真实原因无关的错。
             category = self._enum_of(
@@ -720,9 +702,7 @@ class FinancialReportConverter:
                     row_no=row_no,
                     rule_name=rule_name,
                 ),
-                "status": self._config_status_of(
-                    row, sheet=sheet, row_no=row_no, rule_name=rule_name, rule_code=rule_code
-                ),
+                "status": self._config_status_of(row, sheet=sheet, row_no=row_no, rule_name=rule_name),
                 "remark": _text(row, "remark"),
                 "parameters": parameters,
                 "bands": bands,
@@ -1009,9 +989,7 @@ class FinancialReportConverter:
             grouped.setdefault(rule_code, []).append(row)
         return grouped
 
-    def _bands_of_sheet(
-        self, *, rule_code: str, rule_name: str, sheet: Any, row_no: int, conversion: SheetConversion
-    ) -> list[dict[str, Any]]:
+    def _bands_of_sheet(self, *, rule_code: str, rule_name: str) -> list[dict[str, Any]]:
         """判定区间**只来自 `CALC_JUDGEMENT`**，不解析定义表的文本列。
 
         上下界是可空的：只写下界表示「≥下界」，只写上界表示「≤上界」，
@@ -1216,9 +1194,7 @@ class FinancialReportConverter:
             }
         )
 
-    def _config_status_of(
-        self, row: dict[str, Any], *, sheet: Any, row_no: int, rule_name: str, rule_code: str
-    ) -> str:
+    def _config_status_of(self, row: dict[str, Any], *, sheet: Any, row_no: int, rule_name: str) -> str:
         """该行「是否生效」→ 内部配置状态（已明确 / 停用）。
 
         base Excel 里只有「是否生效」一列（是 / 否），**没有**「状态」列：业务在表里

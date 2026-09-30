@@ -90,8 +90,3 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
 
   return { filters, page, pageSize, total, items, loading, error, lastResponse, load, search, reset, setPage, setPageSize };
 }
-
-/** 清空某个列表页键下记忆的筛选与页码；再次进入该列表时按初始筛选重新开始。 */
-export function clearListState(key: string): void {
-  listStateStore.delete(key);
-}

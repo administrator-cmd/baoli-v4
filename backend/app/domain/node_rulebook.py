@@ -24,11 +24,10 @@ from typing import Any
 
 from openpyxl.utils.cell import coordinate_from_string, get_column_letter
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from . import file_quality, unified_profile
 from .audit_vocab import SCOPE_NOT_APPLICABLE
 from .manifest import (
-    APPLICABILITY_LABELS,
     label_resolver,
     validate_rule_parameters,
 )
@@ -51,23 +50,10 @@ from .workbook import WorkbookIR
 STATUS_CLEAR = "CLEAR"
 STATUS_DISABLED = "DISABLED"
 
-# 01_材料位 只声明材料位本身：材料编号、材料名称、是否必传、是否生效、备注。
-# 8018 的材料类型**不在这里声明**：用户在界面上看不到 8018 的类型目录，让他在配置表里
-# 预先声明一件他不可能知道答案的事没有意义。类型改为上传文件时从真实目录中选择，
-# 随本次上传保存（见 services/task_service._verified_material_type）。
-CHECK_VALUES = ("是", "否")
-
 # 04/05 的检查方式分组。
 TEXT_COMPARISON_OPERATORS = {"FIELD_EQUAL", "DECIMAL_CN_EQUAL"}
 DATE_COMPARISON_OPERATORS = {"DATE_LTE", "DATE_GTE"}
 DECIMAL_COMPARISON_OPERATORS = {"DECIMAL_EQ", "DECIMAL_LTE", "DECIMAL_GTE"}
-EXISTENCE_OPERATORS = {"NOT_EMPTY", "CLAUSE_ABSENT"}
-COMPARISON_OPERATORS = (
-    TEXT_COMPARISON_OPERATORS
-    | DATE_COMPARISON_OPERATORS
-    | DECIMAL_COMPARISON_OPERATORS
-    | EXISTENCE_OPERATORS
-)
 
 # 检查方式 → 规则算子。比较方向进入 parameters.operator，与既有执行端契约一致：
 # DATE_COMPARE 用 EQ/GTE/LTE/GT/LT；DECIMAL_COMPARE 用 EQ/GTE/LTE/ABS_DIFF_LTE。
@@ -136,20 +122,10 @@ CONTENT_TYPE_LABELS = {
     "CONCLUSION": "审核结论",
 }
 FIELD_LIST_CONTENT_TYPES = {"FIELD_DETAIL", "FIELD_AND_RESULT"}
-RESULT_CONTENT_TYPES = {"AUDIT_RESULT", "FIELD_AND_RESULT", "CONCLUSION"}
-RESULT_SORT_LABELS = {
-    "RISK_LEVEL_DESC": "风险等级降序",
-    "MATERIAL_ORDER": "材料顺序",
-    "MATERIAL_ORDER_RISK_LEVEL_DESC": "材料顺序；风险等级降序",
-}
 
 # 风险成立条件。
 RISK_CONDITION_ANY = "ANY_ABNORMAL"
 RISK_CONDITION_ALL = "ALL_ABNORMAL"
-RISK_CONDITION_LABELS = {
-    RISK_CONDITION_ANY: "任一关联检查不合格",
-    RISK_CONDITION_ALL: "全部关联检查不合格",
-}
 
 # 取值校对：既有 manifest 的风险等级集合只有「高/中/低/待确认」，本格式的检查等级与
 # 风险等级使用「最高/一级/二级/三级」。PM 原「高/低」没有明确映射，因此不能凭代码
@@ -377,7 +353,7 @@ def _candidate_ref(prefix: str, sheet_key: str, row_no: int) -> str:
 
 def _source_ref(reader: SheetReader, row: dict[str, Any]) -> dict[str, Any]:
     texts: dict[str, str] = {}
-    for key, header in reader.column_keys.items():
+    for header in reader.column_keys.values():
         column, _ = coordinate_from_string(header)
         address = f"{column}{row['row_no']}"
         raw = row["cells"].get(address)
@@ -949,7 +925,6 @@ def _field_for_reference(
 
 def _comparison_parameters(
     *,
-    operator: str,
     direction: str | None,
     threshold: Decimal | None,
     threshold_unit: str | None,
@@ -1299,7 +1274,6 @@ def _convert_comparison_sheet(
                         inputs=inputs,
                         materials=[material["candidate_ref"]],
                         parameters=_comparison_parameters(
-                            operator=operator,
                             direction=direction,
                             threshold=threshold,
                             threshold_unit=threshold_unit,
@@ -1307,7 +1281,6 @@ def _convert_comparison_sheet(
                         requirement=reader.text(row, "remark") or "",
                         operator_cell=operator,
                         left_field=left_field,
-                        check_level=check_level,
                         check_level_value=check_level,
                         risk_names=risk_names,
                         status=status,
@@ -1404,7 +1377,6 @@ def _convert_comparison_sheet(
                 inputs=inputs,
                 materials=[left_material["candidate_ref"], right_material["candidate_ref"]],
                 parameters=_comparison_parameters(
-                    operator=operator,
                     direction=direction,
                     threshold=threshold,
                     threshold_unit=threshold_unit,
@@ -1418,7 +1390,6 @@ def _convert_comparison_sheet(
                     _field_for_reference(code, material=right_material, field_by_code=field_by_code, field_catalog=field_catalog)
                     for code in right_codes
                 ],
-                check_level=check_level,
                 check_level_value=check_level,
                 risk_names=risk_names,
                 status=status,
@@ -1509,7 +1480,6 @@ def _build_rule(
     requirement: str,
     operator_cell: str,
     left_field: dict[str, Any],
-    check_level: str | None,
     check_level_value: str | None,
     risk_names: list[str],
     status: str,
@@ -2369,14 +2339,6 @@ def _optional_reader(readers: dict[str, SheetReader], role: str) -> SheetReader 
     仍由 `SheetReader` 与各转换函数照常明确报错。
     """
     return readers.get(role)
-
-
-@dataclass
-class NodeSheets:
-    """一份节点版规则库的全部工作表读取器。"""
-
-    by_role: dict[str, SheetReader]
-    order: list[str]
 
 
 def build_convert_bundle(

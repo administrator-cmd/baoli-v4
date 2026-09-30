@@ -4,10 +4,8 @@ import type {
   JsonValue,
   OperationAccepted,
   Paged,
-  ProposalCalculation,
-  ProposalRule,
-  ProposalSheet,
-  RuleComparison,
+  ProfileSheet,
+  ProfileSummary,
 } from "./contracts";
 import { apiFileUrl, request, type OperationView } from "./http";
 import { toQuery } from "./query";
@@ -21,44 +19,7 @@ export interface ImportDecision {
   value: Record<string, JsonValue>;
 }
 
-/**
- * 规则预览视图。contracts.ts 的 RuleComparison 需要补齐后端已返回的
- * requirement（审核要求原文）、applicability / applicability_label（适用条件）、
- * source_texts（规则所在行的原始单元格文本）、方向/阈值/单位与支持状态。
- * 在补齐之前先用这里的扩展类型，字段名与后端 rule_comparison_view 一致。
- */
-export type RuleComparisonView = RuleComparison & {
-  requirement?: string | null;
-  applicability?: { kind: string; material_keys: string[] } | null;
-  applicability_label?: string | null;
-  /** 规则所在行的原始单元格文本（列名 → 原文），供预览逐项对照 Excel。 */
-  source_texts?: Record<string, string> | null;
-  direction_label?: string | null;
-  threshold?: JsonValue;
-  /** 支持状态：SUPPORTED / UNSUPPORTED / UNIT_MISMATCH；不能把不支持显示成可执行。 */
-  support_status?: string | null;
-  support_message?: string | null;
-  input_units?: Array<string | null>;
-};
-
-export type ProposalRuleView = Omit<ProposalRule, "comparison"> & { comparison: RuleComparisonView };
-
-export type ProposalSheetView = Omit<ProposalSheet, "rules"> & { rules: ProposalRuleView[] };
-
-/**
- * 作业视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
- * - latest_operation：页面刷新后要凭它继续查询该作业正在进行/刚结束的后台操作；
- * - profile_display_name 由 ImportJob 声明，页面优先使用服务端给出的中文格式名；
- * - profile：作业所属场景 + 统一模板协议摘要（Sheet 数量、名称与可绑定的节点类型）。
- *   页面据此显示真实的表数量与用途说明，不再硬编码「7 类工作表」。
- */
-export type ImportJobView = Omit<ImportJob, "proposals"> & {
-  proposals: { sheets: ProposalSheetView[]; calculations: ProposalCalculation[] } | null;
-  latest_operation?: OperationView | null;
-  profile?: ProfileSummary | null;
-};
-
-/** 导入作业摘要列表（完整数组，兼容旧调用）。 */
+/** 工作台作业选择列表（完整摘要数组）。 */
 export function listImportJobs(): Promise<ImportJobSummary[]> {
   return request<ImportJobSummary[]>("/import-jobs");
 }
@@ -100,11 +61,6 @@ export function listImportJobsPage(query: ImportJobQuery): Promise<Paged<ImportJ
   return request<Paged<ImportJobRow>>(`/import-jobs/page${toQuery({ ...query })}`);
 }
 
-/** 导入作业列表导出地址；与当前筛选同一作用域。 */
-export function importJobsExportUrl(query: Omit<ImportJobQuery, "page" | "page_size">): string {
-  return apiFileUrl(`/import-jobs/export${toQuery({ ...query })}`);
-}
-
 /** 删除仅允许未发布的草稿作业；已发布作业由服务端拒绝并说明原因。 */
 export function deleteImportJob(jobNo: string): Promise<void> {
   return request<void>(`/import-jobs/${encodeURIComponent(jobNo)}`, { method: "DELETE" });
@@ -116,39 +72,6 @@ export function deleteImportJob(jobNo: string): Promise<void> {
  */
 export function abortImportJob(jobNo: string): Promise<OperationView> {
   return request<OperationView>(`/import-jobs/${encodeURIComponent(jobNo)}/abort`, { method: "POST" });
-}
-
-/**
- * 统一模板协议摘要：系统支持的全部 Sheet 与可绑定的节点类型。
- *
- * 统一协议是内部执行格式；场景 Schema 决定其 Excel 的 Sheet 展示名与列别名。
- */
-export interface ProfileSheet {
-  sheet_role: string;
-  /** 编号前缀（例如 RSK-）：跨表引用靠它判断指向。 */
-  code_prefix?: string;
-  display_name: string;
-  /** 这张 Sheet 可以绑定的节点类型（绑定由用户确认，系统只给建议）。 */
-  node_types: string[];
-  column_count: number;
-}
-
-export interface ProfileSummary {
-  profile_version: string | null;
-  display_name: string | null;
-  /** 业务场景冻结的 Schema 身份；与统一执行协议版本分开。 */
-  scenario_schema_key?: string | null;
-  scenario_schema_version?: string | null;
-  /** 内部统一协议版本；导入作业顶层 schema_version 是业务场景版本。 */
-  schema_version: string | null;
-  /** 模板说明页名称：模板生成、导出与导入读同一声明。 */
-  instruction_sheet?: string;
-  sheet_count: number;
-  node_types: Array<{ node_type: string; display_name: string; depends_on_types: string[] }>;
-  sheets: ProfileSheet[];
-  /** 作业所属场景（上传时指定）；历史作业为 null。 */
-  scenario_code?: string | null;
-  scenario_name?: string | null;
 }
 
 /**
@@ -188,8 +111,6 @@ export function getProfileSheets(scenarioCode?: string): Promise<{
   return request(`/rulebook-templates/sheets${query}`);
 }
 
-
-
 /** 「更新已有模板」下拉用：未删除的场景及最新版本号（不含已发布状态字段）。 */
 export interface TemplateOption {
   scenario_code: string;
@@ -210,7 +131,6 @@ export function listTemplates(): Promise<TemplateOption[]> {
   return request<{ request_id: string; items: TemplateOption[] }>("/scenarios/admin-options").then((payload) => payload.items);
 }
 
-/** 上传规则库 Excel 并读取为工作簿 IR；此时还没有规则候选。 */
 /**
  * 在**指定场景**下上传规则库 Excel，读取为工作簿 IR；此时还没有规则候选。
  *
@@ -218,19 +138,18 @@ export function listTemplates(): Promise<TemplateOption[]> {
  * 场景不由 Excel 表头推断。此时也没有绑定关系——Sheet 与业务节点的对应关系
  * 由用户在绑定步骤确认。
  */
-export function createImportJob(file: File, scenarioCode: string): Promise<ImportJobView> {
+export function createImportJob(file: File, scenarioCode: string): Promise<ImportJob> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("scenario_code", scenarioCode);
-  return request<ImportJobView>("/import-jobs", { method: "POST", body: formData });
+  return request<ImportJob>("/import-jobs", { method: "POST", body: formData });
 }
 
 /** 导入作业详情：工作表、问题、候选与草稿修订号。 */
-export function getImportJob(jobNo: string): Promise<ImportJobView> {
-  return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}`);
+export function getImportJob(jobNo: string): Promise<ImportJob> {
+  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}`);
 }
 
-/** 保存工作表用途与表头行绑定。 */
 /**
  * 保存 Sheet → 节点实例的绑定。
  *
@@ -246,8 +165,8 @@ export function updateSheetBindings(
     header_row: number | null;
     excluded: boolean;
   }>,
-): Promise<ImportJobView> {
-  return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}/sheet-bindings`, {
+): Promise<ImportJob> {
+  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/sheet-bindings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bindings }),
@@ -274,8 +193,8 @@ export function saveImportDecisions(
   jobNo: string,
   decisions: ImportDecision[],
   expectedRevision: number,
-): Promise<ImportJobView> {
-  return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}/decisions`, {
+): Promise<ImportJob> {
+  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/decisions`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ decisions, expected_revision: expectedRevision }),
@@ -285,8 +204,8 @@ export function saveImportDecisions(
 /**
  * 暂存问题答案（不改变候选与问题状态）。用户刷新后从 job.issues[].decision 恢复。
  */
-export function saveDecisionDraft(jobNo: string, answers: Record<string, JsonValue>): Promise<ImportJobView> {
-  return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}/decision-draft`, {
+export function saveDecisionDraft(jobNo: string, answers: Record<string, JsonValue>): Promise<ImportJob> {
+  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/decision-draft`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ answers }),
@@ -299,8 +218,8 @@ export function saveDecisionDraft(jobNo: string, answers: Record<string, JsonVal
  */
 export function applyImportToDraft(
   jobNo: string, expectedJobRevision: number, expectedSceneRevision: number,
-): Promise<ImportJobView> {
-  return request<ImportJobView>(`/import-jobs/${encodeURIComponent(jobNo)}/apply-draft`, {
+): Promise<ImportJob> {
+  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/apply-draft`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

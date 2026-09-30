@@ -13,14 +13,12 @@ from . import calculation as calc
 from . import capabilities, field_strategy, file_quality, node_registry, scenario_schema, workflow_dag
 from .currency import canonical_currency
 from .audit_vocab import SCOPE_NOT_APPLICABLE
-from .node_registry import LEGACY_NODE_SEQUENCE  # noqa: F401 - 旧 manifest 的节点序列仍按它读取
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from .identity import stable_key
 from . import tool_catalog
 # 参数契约常量定义在**叶子模块** `parameter_contract`：工具目录要据此生成参数
 # JSON Schema，而工具目录不能反向导入本模块（会形成
 # manifest → capabilities → tool_catalog → manifest 的环）。
-# 这里导入后转发，既有 `from .manifest import DATE_COMPARE_OPERATORS` 一类引用不受影响。
 from .parameter_contract import (
     CONFIG_STATUS_DISABLED,
     CONFIG_STATUS_PENDING,
@@ -29,10 +27,6 @@ from .parameter_contract import (
     DECIMAL_COMPARE_OPERATORS,
     DECIMAL_SUM_COMPARE_OPERATORS,
     DOCUMENT_ARTIFACT_TYPES,
-    LEGACY_RISK_LEVELS,
-    LEGACY_RISK_LEVEL_ORDER,
-    NODE_RISK_LEVELS,
-    NODE_RISK_LEVEL_ORDER,
     RISK_LEVELS,
 )
 
@@ -64,20 +58,6 @@ NODE_TYPE_REPORT_OUTPUT = node_registry.NODE_TYPE_REPORT_OUTPUT
 OPERATOR_NODE_CONSTRAINTS: dict[str, frozenset[str]] = capabilities.NODE_CONSTRAINTS
 
 # 参数契约常量见文件顶部从 `parameter_contract` 的导入（叶子模块，避免成环）。
-
-
-def risk_level_rank(value: Any) -> int | None:
-    """风险等级在同等级体系内的排序位次；未识别时返回 None（不当作最低等级）。
-
-    两套标签各自排序：旧「高/中/低/待确认」与节点版「最高/一级/二级/三级」。
-    未知取值不给默认位次，排序时排到已识别等级之后并保持原有顺序。
-    """
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    if normalized in NODE_RISK_LEVEL_ORDER:
-        return NODE_RISK_LEVEL_ORDER[normalized]
-    return LEGACY_RISK_LEVEL_ORDER.get(normalized)
 # 风险成立条件：任一关联检查不合格 / 全部关联检查不合格。它由检查行的「关联风险」
 # 反向确定，不允许在风险表重复维护第二份来源列表。
 RISK_CONDITIONS = {"ANY_ABNORMAL", "ALL_ABNORMAL"}
@@ -101,10 +81,6 @@ SOURCE_NODE_RULE_NODES: dict[str, frozenset[str]] = {
     "INTERNAL_VALIDATE": frozenset({"INTERNAL_VALIDATE"}),
     "CROSS_VALIDATE": frozenset({"CROSS_VALIDATE"}),
 }
-# 结构上必须存在的节点：报告输出决定任务能否产出结果。
-# 其余节点由模板内容决定：单合同场景可以没有交叉校验，也可以不配风险评级，
-# 未配置的节点在执行时显式记为 SKIPPED，并说明"本模板未配置此类检查"，绝不写成通过。
-REQUIRED_RULE_NODES = {"REPORT_OUTPUT"}
 # 允许为空、需要显式跳过并说明原因的业务校验节点。
 OPTIONAL_CHECK_NODES = ("INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK_RATING")
 
@@ -254,32 +230,22 @@ def detect_unsupported_capability_for_operator(
 _ADDEND_OPERATOR_EXEMPT_CODES = frozenset({"SUM_ALL_FILES", "CROSS_PERIOD_TOTAL"})
 
 
-# 取证方式：按材料与字段直接读取结构化事实，或在材料文本中检索相关证据。
-EVIDENCE_DIRECT = capabilities.EVIDENCE_DIRECT
 EVIDENCE_RETRIEVAL = capabilities.EVIDENCE_RETRIEVAL
 # 主体检索：只对印章识别产物中的**主体名称**建向量，用待核对主体查相似印章主体。
 # 它不是全文检索：不检索合同正文，也不检索条款。
 EVIDENCE_SEAL_SUBJECT = capabilities.EVIDENCE_SEAL_SUBJECT
-# 判定方式：确定性程序 / 大模型语义判断 / 需要人工裁决。
-JUDGE_PROGRAM = capabilities.JUDGE_PROGRAM
-JUDGE_LLM = capabilities.JUDGE_LLM
+# 判定方式：需要人工裁决。
 JUDGE_HUMAN = capabilities.JUDGE_HUMAN
 
 # 取证与判定的固定路由：从能力目录（domain.capabilities）派生，由规则算子确定性派生，
 # 业务人员不填写 RAG/LLM 技术选项，大模型也不在运行时自行路由或扩大材料范围。
 ROUTE_BY_OPERATOR: dict[str, tuple[str, str]] = capabilities.ROUTE_BY_OPERATOR
 
-# 主体/签章一致性一类需要核对印鉴与合同主体一致性的规则：即使证据由程序读取，
-# 识别冲突或归属不明时也必须交人工，不能仅因原始字符串不同就宣告已证实违规。
-HUMAN_REVIEW_ON_CONFLICT = capabilities.HUMAN_REVIEW_ON_CONFLICT
-
-
 def execution_route(rule: dict[str, Any]) -> dict[str, Any]:
     """规则的取证方式与判定方式；无法归入已支持流程时明确列为未支持。
 
     路由由能力目录（domain.capabilities）派生：算子存在、但当前 `implemented=false` 时
-    同样记为 `supported=false` 并带上真实原因。这样「配置合法但能力未实现」不会在预览里
-    显示成一条可执行规则——此前只有文件检查与大小写金额两处硬编码做了这件事。
+    同样记为 `supported=false` 并带上真实原因，避免把未实现能力显示成可执行规则。
     """
     operator = rule.get("operator")
     capability = capabilities.capability_of(operator)
@@ -384,7 +350,6 @@ REPORT_CONTENT_TYPES = {"FIELD_DETAIL", "AUDIT_RESULT", "FIELD_AND_RESULT", "RIS
 # 不等于系统已经能产出这三种文件；声明与实现必须分开记录，不能混为一谈。
 IMPLEMENTED_REPORT_FORMATS = frozenset({"Markdown"})
 REPORT_FIELD_CONTENT_TYPES = {"FIELD_DETAIL", "FIELD_AND_RESULT"}
-REPORT_RESULT_CONTENT_TYPES = {"AUDIT_RESULT", "FIELD_AND_RESULT", "CONCLUSION"}
 REPORT_RESULT_SORTS = {"RISK_LEVEL_DESC", "MATERIAL_ORDER", "MATERIAL_ORDER_RISK_LEVEL_DESC"}
 
 
@@ -700,10 +665,8 @@ def capability_gaps(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     （domain.capabilities）派生：一条规则引用的能力（算子，或文件检查的检查子项）
     implemented=false 时即为缺口，不再只有文件检查参与判定。
 
-    文件格式、文件大小、文件内容三项已有真实处理器并按真实数据判定，不能列为缺口——
-    把它们报成缺口会让发布预览与页面对业务谎称“这项做不了”，也会让执行端误以为
-    该走不可判定分支。反过来，大小写金额一致性（DECIMAL_CN_EQUAL）此前不在任何缺口里，
-    只能在运行时才发现做不了，现在同样在发布前暴露。
+    文件格式、文件大小、文件内容三项已有真实处理器并按真实数据判定，不能列为缺口；
+    大小写金额一致性（DECIMAL_CN_EQUAL）等未实现能力则必须在发布前暴露。
 
     这里如实记录缺口，让发布预览可见；运行时遇到该缺口明确报不可判定，
     既不默认通过，也不在发布时承诺一个永远执行不了的支持能力。
@@ -1158,13 +1121,6 @@ def label_resolver(column: dict[str, Any]) -> dict[str, str]:
             # 「标签 → 契约值」写法：键是显示文本，值是契约取值。
             resolved[canonical_text] = label_text
     return {key: value for key, value in resolved.items() if key}
-
-
-def resolve_label(column: dict[str, Any], text: str) -> str | None:
-    """把单元格原文解析成契约值；无法解析时返回 None。"""
-    return label_resolver(column).get(str(text).strip())
-
-
 def _ensure_unique_materials(materials: list[dict[str, Any]]) -> None:
     seen: dict[str, dict[str, Any]] = {}
     for material in materials:
@@ -1508,7 +1464,6 @@ def _risk_source_node(rule_name: str, value: Any) -> str:
 
 def _ensure_manifest_node_coverage(
     rules: list[dict[str, Any]],
-    report_template: list[dict[str, Any]],
     node_instances: list[dict[str, Any]],
     *,
     require_report_rule: bool = True,
@@ -2289,12 +2244,12 @@ def required_field_scope(
 def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str, Any]:
     """已发布 manifest → 可编辑配置行的**唯一映射口径**。
 
-    两个调用方都从这里取：场景「基于此版创建修订」把已发布版本灌回草稿、
+    两个调用方都从这里取：场景缺少草稿时用最新已发布版本初始化、
     创建方案时把场景版本复制成方案自己的配置。**只允许有一处口径** —— 各写一份必然漂移，
     表现是「同一个版本经两条路径回来的配置不一样」，而且不报错。
 
-    新版本保留 manifest 中的 `section_key`；历史版本没有该字段时，仍按原有的
-    名称、序号与 `namespace` 派生，避免旧版本无法创建修订或方案。
+    manifest 有 `section_key` 时直接保留；历史版本没有该字段时，按名称、序号与
+    `namespace` 派生，避免旧版本无法初始化草稿或创建方案。
 
     返回的每项都是**不含归属 id** 的字典，调用方据此构造自己的行；
     `rules` **不跳过系统派生规则** —— 是否保留由调用方决定（方案要保留，草稿不要）。
@@ -2899,9 +2854,7 @@ def build_node_plan(
 ) -> list[dict[str, Any]]:
     """把**用户配置的节点实例**编译成 manifest 的节点计划。
 
-    节点不再由系统生成：以前按规则内容或 `LEGACY_NODE_SEQUENCE` 自动推导节点，
-    结果是「用户在页面上配的流程」与「实际执行的流程」可能不一致，而两边看起来都正常。
-    现在节点的存在、顺序与依赖**完全来自用户保存的节点实例**：
+    节点的存在、顺序与依赖完全来自用户保存的节点实例：
 
     - `node_code` 是实例码（同一场景可以有两个同类节点），`node_type` 才是能力类型；
     - `sequence_no` 是用户配置的顺序，只用于展示；`depends_on` 是执行依据；
@@ -3209,8 +3162,7 @@ def build_task_schema(
     两者不能混：把 [] 当成 None 会让用户取消掉的规则重新生效。
 
     **系统不替用户补入任何规则。** 方案与任务是用户自己的范围选择：勾了什么就跑什么，
-    没勾的就不跑。原先的三类补入——报告生成/材料检查的无条件补入、风险来源依赖闭包、
-    字段依赖闭包——都已移除；缺规则造成的后果由各节点如实表达（拿不到输入就报
+    没勾的就不跑。缺规则造成的后果由各节点如实表达（拿不到输入就报
     「无法判断」，没有规则就记 SKIPPED 并写明原因），绝不写成通过。
     """
     known_rules = {item["rule_key"]: item for item in manifest["rules"]}
@@ -3741,7 +3693,7 @@ def compile_form_manifest(
                 )
         if operator == "LLM_VALIDATE" and not inputs:
             raise BusinessError("MANIFEST_RULE_INPUT_COUNT_INVALID", "智能校验规则必须声明输入字段", details={"rule": name})
-        # 同上：节点专属约束一律按能力类型判断，不拿实例码与能力类型比较。
+        # 节点专属约束按能力类型判断，不能拿用户可配置的实例码参与比较。
         if node_type == "INTERNAL_VALIDATE" and operator == "LLM_VALIDATE" and len(inputs) > 1:
             raise BusinessError(
                 "MANIFEST_RULE_INPUT_COUNT_INVALID",
@@ -3768,7 +3720,7 @@ def compile_form_manifest(
             {
                 "rule_key": key,
                 # 业务规则编号：页面表单维护的「规则编号」列（`source_ref`）。
-                # 它是新版本的规则身份（需求 6/19），导出时要写回 Excel 的「规则编号」列——
+                # 它是规则的业务身份，导出时写回 Excel 的「规则编号」列。
                 # 不填这一列，导出的文件在该列上是空的，而它是**行必填列**，
                 # 重新导入会直接报 RULE_CELL_EMPTY。页面新建且未填编号的规则保持 None，
                 # 不用派生值冒充业务编号。
@@ -4075,7 +4027,6 @@ def compile_form_manifest(
     ensure_unique_rule_codes(compiled_rules)
     _ensure_manifest_node_coverage(
         compiled_rules,
-        report_template,
         node_instances,
         require_report_rule=(system_rule_enabled or {}).get("SYS-REPORT-RENDER", True),
     )

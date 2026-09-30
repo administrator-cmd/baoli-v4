@@ -11,7 +11,7 @@ import type {
   ScenarioListItem,
   ScenarioPublishResult,
 } from "./contracts";
-import { apiFileUrl, request } from "./http";
+import { request } from "./http";
 import { toQuery } from "./query";
 
 /** 场景列表查询：参数与后端筛选一一对应；导出使用同一套查询参数。 */
@@ -41,16 +41,10 @@ export function listScenes(query: ScenarioQuery): Promise<Paged<ScenarioListItem
   return request<Paged<ScenarioListItem>>(`/scenarios${toQuery({ ...query })}`);
 }
 
-/** 场景列表导出地址；与当前筛选同一作用域。 */
-export function sceneExportUrl(query: Omit<ScenarioQuery, "page" | "page_size">): string {
-  return apiFileUrl(`/scenarios/export${toQuery({ ...query })}`);
-}
-
-/** 场景下拉选项。 */
 /**
  * **业务用户可用**的场景下拉：只含已启用且已有已发布版本的场景。
  *
- * 方案与任务的场景选择器用它（需求 41）：草稿、未发布、停用或已删除的场景不出现。
+ * 方案与任务的场景选择器用它：草稿、未发布、停用或已删除的场景不出现。
  */
 export function listSceneOptions(): Promise<{ request_id: string; items: ScenarioOption[] }> {
   return request<{ request_id: string; items: ScenarioOption[] }>("/scenarios/options");
@@ -59,7 +53,7 @@ export function listSceneOptions(): Promise<{ request_id: string; items: Scenari
 /**
  * **管理员用**的场景下拉：未删除的全部场景及其实时状态。
  *
- * 场景管理页与导入页在场景发布之前就要选中它，因此不能走上面的业务接口。
+ * 场景管理页与导入页在发布前就要选中场景，因此不能使用只返回已发布场景的业务接口。
  */
 export function listAdminSceneOptions(): Promise<{ request_id: string; items: ScenarioOption[] }> {
   return request<{ request_id: string; items: ScenarioOption[] }>("/scenarios/admin-options");
@@ -176,15 +170,6 @@ export interface DraftNodePayload {
   depends_on?: string[];
   config_json?: Record<string, unknown> | null;
   enabled?: boolean;
-}
-
-/** 在草稿中新增节点实例。 */
-export function createDraftNode(scenarioCode: string, payload: DraftNodePayload): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/nodes`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
 }
 
 /** 修改草稿中的节点实例（只覆盖提交的字段）。 */
@@ -401,16 +386,9 @@ export function publishSceneDraft(
   });
 }
 
-/** 当前草稿有效配置的导出地址（与发布使用同一编译结果）。 */
-export function sceneDraftExportUrl(scenarioCode: string): string {
-  return apiFileUrl(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/export`);
-}
-
-/* 版本 */
-
 /**
- * 场景配置只有一份：页面不再有“场景版本”概念（编辑即生效，无版本列表、
- * 无版本对比、无基于版本创建修订）。因此这里不提供任何版本查询入口。
+ * 页面只维护当前草稿，不提供版本列表、版本对比或指定版本回填入口；
+ * 草稿发布后生成不可变的执行快照。
  */
 
 export type { DraftFieldItem, DraftMaterialItem, DraftRuleItem, DraftSectionItem };

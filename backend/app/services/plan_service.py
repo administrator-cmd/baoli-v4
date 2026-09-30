@@ -22,10 +22,9 @@ from sqlalchemy.orm import Session
 from ..domain import field_strategy, manifest as manifest_module
 from ..domain import unified_profile
 from ..domain.manifest import FORM_VALUE_TYPES, build_task_schema, compile_form_manifest
-from ..errors import BusinessError
-from ..models import (
+from ..common.exceptions import BusinessError
+from ..entities import (
     AuditPlan,
-    AuditTask,
     PlanField,
     PlanMaterial,
     PlanRule,
@@ -34,7 +33,8 @@ from ..models import (
     ScenarioVersion,
 )
 from ..domain.identity import public_no, stable_key
-from .operation_log_service import OBJECT_PLAN, record_operation
+from .operation_log_service import record_operation
+from .operation_types import OBJECT_PLAN
 from . import operation_log_service
 # 计算配置的解析口径只有一处（草稿与方案共用）：它区分「候选列表」与「历史版本留下的
 # 已编译结果」，各写一份会让同一份 calculation_json 在两个入口解释成不同的东西。
@@ -81,7 +81,7 @@ def _scenario_or_404(db: Session, scenario_code: str, *, allow_deleted: bool = F
 def _published_scenario_or_fail(db: Session, scenario_code: str) -> ScenarioVersion:
     """业务用户可用的场景版本：场景必须**未删除、已启用、且已有已发布版本**。
 
-    业务用户只能从「已发布且启用」的场景建方案（需求 41）。三种不可用状态
+    业务用户只能从「已发布且启用」的场景建方案。三种不可用状态
     分别明确报出，不合并成一个「场景不可用」——它们对管理员的处理动作不同：
     草稿还没发布要去发布，场景停用要去启用，场景删除是另一回事。
 
@@ -155,33 +155,6 @@ def _latest_published_version_of(db: Session, scenario_code: str) -> ScenarioVer
     )
 
 
-def _scenario_version_of(db: Session, scenario_code: str, version_no: int | None = None) -> ScenarioVersion:
-    """按明确的版本号读取已发布场景版本。
-
-    缺省版本号时直接失败。按场景编码改取最新版本会让既有方案在发布 v2 后
-    预览到另一份配置。
-    """
-    if version_no is None:
-        raise BusinessError(
-            "PLAN_VERSION_REQUIRED",
-            "读取方案范围必须指定已经固定的场景版本号，不能按场景编码改取最新版本",
-            status_code=409,
-            details={"scenario_code": scenario_code},
-        )
-    statement = select(ScenarioVersion).where(
-        ScenarioVersion.scenario_code == scenario_code,
-        ScenarioVersion.status == "PUBLISHED",
-        ScenarioVersion.version_no == version_no,
-    )
-    version = db.scalar(statement)
-    if not version:
-        raise BusinessError(
-            "SCENARIO_VERSION_NOT_FOUND",
-            "该场景还没有可用的配置：请先在场景配置中完成材料、字段与规则并保存",
-            status_code=404,
-            details={"scenario_code": scenario_code, "version_no": version_no},
-        )
-    return version
 
 
 def _selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
@@ -327,7 +300,6 @@ def list_plans_page(
     items = []
     for plan in plans:
         scope = plan.scope_json if isinstance(plan.scope_json, dict) else {}
-        manifest = plan.manifest_json if isinstance(plan.manifest_json, dict) else {}
         context = plan.context_json if isinstance(plan.context_json, dict) else {}
         _, _, calculation_enabled = _plan_calculation_config(context)
         base_version = db.get(ScenarioVersion, plan.scenario_version_id) if plan.scenario_version_id else None
@@ -419,7 +391,7 @@ def create_plan(db: Session, payload: dict[str, Any]) -> AuditPlan:
     )
     db.add(plan)
     db.flush()
-    # 场景版本 → 方案配置：与「基于此版创建修订」同一份映射口径。
+    # 场景版本 → 方案配置：与缺少草稿时从最新发布版本初始化共用映射口径。
     _load_manifest_into_plan(db, plan, published.manifest_json)
     db.flush()
     # 立即编译一次：方案的 manifest 与范围在同一次提交里产生，页面直接可用。
@@ -664,7 +636,7 @@ def _plan_config_rows(
 def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, Any]) -> None:
     """把钉住的场景版本整份复制成方案自己的配置。
 
-    与「基于此版创建修订」走**同一份映射口径**（`editable_config_of`）。
+    与草稿初始化走**同一份映射口径**（`editable_config_of`）。
     系统派生规则也进入方案，供用户逐条启停；保存时仅使用其启停值，规则定义由编译器重建。
     """
     config = manifest_module.editable_config_of(manifest, namespace=plan.plan_code)
@@ -1303,7 +1275,7 @@ def _required_key(item: dict[str, Any], key: str, where: str) -> str:
     return value
 
 
-def save_task_range_as_plan(db: Session, payload: dict[str, Any]) -> AuditPlan:
+def save_task_range_as_plan(payload: dict[str, Any]) -> AuditPlan:
     """任务不能反向生成方案。
 
     方案必须先基于已发布场景版本建立，任务再从方案创建。

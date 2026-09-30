@@ -13,7 +13,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from . import unified_profile
 
 

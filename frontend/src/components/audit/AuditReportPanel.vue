@@ -69,17 +69,6 @@ const riskSummary = computed(() => {
 });
 
 /**
- * 服务端是否提供了结构化的总体审核结论。
- *
- * `ReportConclusion` 目前只有「是否生成 / 范围是否完整 / 风险是否可判定 / 未实现格式 /
- * 能力缺口」五项，没有「本次审核总体是否通过」这一业务结论 —— 这是**当前接口的固定缺口**，
- * 不是某份报告的特例，因此这里是一个常量而不是按报告判定的开关。
- * 缺口存在时如实提示并列为后端接口支持项，不从正文里提取，也不把「报告已生成」当成「审核通过」。
- * 后端在 `ReportConclusion` 里补上总体结论字段后，把它改成读该字段即可。
- */
-const overallConclusionMissing = true;
-
-/**
  * 用户在报告页的下一步动作。
  * 只给真实可执行的动作：重新执行报告节点、补材料、处理复核、查看逐条结论。
  */
@@ -187,7 +176,7 @@ const businessSectionCount = computed(() => props.report?.business_section_count
     </el-alert>
 
     <el-alert
-      v-if="overallConclusionMissing && generated"
+      v-if="generated"
       type="warning"
       show-icon
       :closable="false"

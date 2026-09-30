@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { FileSpreadsheet } from "lucide-vue-next";
 
 import type { ImportSheet, JsonValue } from "@/api/contracts";
-import type { ProfileSheet } from "@/api/imports";
+import type { ProfileSheet } from "@/api/contracts";
 import { formatBusinessValue } from "@/constants/labels";
 import {
   DEFAULT_HEADER_ROW,

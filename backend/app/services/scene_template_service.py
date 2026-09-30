@@ -24,13 +24,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from ..domain import unified_profile
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 HEADER_FILL = PatternFill("solid", fgColor="174A5B")
 REQUIRED_FILL = PatternFill("solid", fgColor="FFF0C2")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
-NOTE_FILL = PatternFill("solid", fgColor="F2F2F2")
 
 # 允许在下拉里出现的取值上限。超过上限时不下拉：几千个选项的 DataValidation
 # 会让 Excel 打开变慢，而且业务根本选不过来。

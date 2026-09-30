@@ -12,8 +12,8 @@
 
 import math
 from ...domain.identity import public_no
-from ...errors import BusinessError
-from ...models import AuditTask, Evidence, RuleResult, StoredArtifact, TaskFieldValue
+from ...common.exceptions import BusinessError
+from ...entities import AuditTask, Evidence, RuleResult, StoredArtifact, TaskFieldValue
 from .artifacts import _artifact_page_text, _artifact_payload
 from .shared import LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _evidence_supports_value, _locatable_text
 from sqlalchemy import select

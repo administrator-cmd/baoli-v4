@@ -9,28 +9,20 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..errors import BusinessError
-from ..models import AuditPlan, AuditTask, ScenarioTemplate, ScenarioVersion
-from ..schemas import (
-    PagedResponse,
+from ..dto.plans import (
+    PlanConfigUpdateRequest,
     PlanCopyRequest,
     PlanCreateRequest,
     PlanEnabledRequest,
     PlanFromTaskRequest,
-    PlanConfigUpdateRequest,
-    PlanSelectionResponse,
     PlanUpdateRequest,
-    TaskCreatedResponse,
     TaskFromPlanRequest,
 )
-from ..services import plan_service
-from ..domain.identity import public_no
-from ..services.audit.interrupt import start_audit_interrupt
-from ..services.operation_log_service import OBJECT_PLAN, require_idempotent_replay
+from ..query import validate_page_params
+from ..services import plan_service, plan_task_service
 from ..services.plan_service import (
     copy_plan,
     create_plan,
@@ -46,25 +38,10 @@ from ..services.plan_service import (
     update_plan,
     update_plan_config,
 )
-from ..services.task_service import (
-    claim_task_command,
-    create_task_from_plan,
-    finish_task_command,
-    record_failed_task_command,
-    task_of_command,
-)
-from ..services.audit.interrupt import resume_task_creation_interrupt
+from ..vo import PagedResponse, PlanSelectionResponse, TaskCreatedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])
-
-
-def _page_params(page: int, page_size: int) -> tuple[int, int]:
-    if page < 1:
-        raise BusinessError("PAGE_INVALID", "页码必须是大于 0 的整数", status_code=400)
-    if page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_SIZE_INVALID", "每页条数必须在 1 到 200 之间", status_code=400)
-    return page, page_size
 
 
 def _selection_response(request: Request, payload: dict[str, Any]) -> PlanSelectionResponse:
@@ -87,7 +64,7 @@ def list_plans(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """审核方案分页列表：按名称、场景、启用状态与是否已生效筛选。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = list_plans_page(
         db,
         name=name,
@@ -192,7 +169,7 @@ def put_plan_config(
 @router.post("/from-task", response_model=PlanSelectionResponse, status_code=201)
 def plan_from_task(payload: PlanFromTaskRequest, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """拒绝用任务反向生成方案。"""
-    plan = save_task_range_as_plan(db, payload.model_dump())
+    plan = save_task_range_as_plan(payload.model_dump())
     return _selection_response(request, plan_service._selection_view(db, plan))
 
 
@@ -261,212 +238,5 @@ def create_task_from_plan_endpoint(
 
     命令占位与任务在首次提交时一起落库；等待点确认后追加成功操作日志。
     """
-    # 顺序很重要：历史命令优先于一切状态校验。成功创建任务后方案/场景可能已被停用或删除，
-    # 此时同幂等标识的重发仍必须返回原任务或原失败，而不是被门禁挡成 409/404。
-    request_payload = {
-        "plan_code": plan_code,
-        "task_name": payload.task_name,
-        "remark": payload.remark,
-        "expected_scope_hash": payload.expected_scope_hash,
-    }
-    existing, request_hash = require_idempotent_replay(
-        db,
-        object_type=OBJECT_PLAN,
-        operation_type="TASK_CREATE",
-        idempotency_key=payload.idempotency_key,
-        request=request_payload,
-    )
-    if existing is not None:
-        return _replay_task_created(request, db, existing)
-
-    task_no = public_no("TASK")
-    command, reused = claim_task_command(
-        db,
-        object_type=OBJECT_PLAN,
-        operation_type="TASK_CREATE",
-        idempotency_key=payload.idempotency_key,
-        request=request_payload,
-        request_hash=request_hash,
-        task_no=task_no,
-    )
-    if reused:
-        task = task_of_command(db, command)
-        detail = {"task_no": task.task_no, "plan_code": plan_code}
-        if command.status == "FAILED":
-            record_failed_task_command(
-                db, command, object_no=plan_code, object_name=task.task_schema_json["plan_name"], detail=detail
-            )
-            raise BusinessError(
-                "TASK_CREATE_PREVIOUSLY_FAILED",
-                f"该幂等标识对应的创建任务命令此前执行失败：{command.failure_message or '原因未记录'}。",
-                status_code=409,
-                details={"operation_no": command.operation_no, "task_no": task.task_no, "failure_code": command.failure_code},
-            )
-        if command.status == "PENDING":
-            try:
-                resume_task_creation_interrupt(db, task, command.id)
-            except BusinessError:
-                record_failed_task_command(
-                    db, command, object_no=plan_code, object_name=task.task_schema_json["plan_name"], detail=detail
-                )
-                raise
-            detail.update({
-                "plan_scope_hash": task.task_schema_json.get("plan_scope_hash"),
-                "scenario_version_no": task.task_schema_json.get("scenario_version_no"),
-            })
-            finish_task_command(
-                db, command, object_no=plan_code, object_name=task.task_schema_json["plan_name"], detail=detail
-            )
-        elif command.status != "SUCCEEDED":
-            raise BusinessError("TASK_COMMAND_STATE_INVALID", "任务创建命令状态无效", status_code=500)
-        return _frozen_task_created_response(request, db, task, reused=True)
-
-    # 到这里才是真正的新命令：此时才校验方案/场景是否可用于新建任务。
-    plan = plan_or_404(db, plan_code)
-    scenario_template = db.scalar(
-        select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == plan.scenario_code)
-    )
-    if scenario_template is None or scenario_template.deleted_at is not None:
-        raise BusinessError("SCENARIO_NOT_FOUND", "方案所属场景不存在或已被删除", status_code=409, details={"scenario_code": plan.scenario_code})
-    if not plan.enabled:
-        raise BusinessError("PLAN_DISABLED", "该方案已停用，不能用于创建任务", status_code=409, details={"plan_code": plan_code})
-    if not scenario_template.enabled:
-        raise BusinessError("SCENARIO_DISABLED", "该场景已停用，不能用于创建任务", status_code=409, details={"scenario_code": plan.scenario_code})
-
-    # 任务编号已在命令占位里冻结；等待点第一次提交会同时保存两者。
-    task = create_task_from_plan(
-        db,
-        plan,
-        task_name=payload.task_name,
-        remark=payload.remark,
-        task_no=task_no,
-        expected_scope_hash=payload.expected_scope_hash,
-    )
-    try:
-        # 等待点建立失败会把任务显式标为 FAILED 并提交；此时记一条失败记录，
-        # 让同幂等标识的重放返回这次失败，而不是「什么都没发生」地重试成假成功。
-        start_audit_interrupt(db, task, creation_operation_id=command.id)
-    except BusinessError:
-        db.rollback()
-        failed = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no))
-        if failed is not None and failed.status == "FAILED":
-            record_failed_task_command(
-                db, command, object_no=plan_code, object_name=plan.plan_name,
-                detail={"task_no": task_no, "plan_code": plan_code},
-            )
-        raise
-    was_reused = finish_task_command(
-        db, command, object_no=plan_code, object_name=plan.plan_name,
-        detail={
-            "task_no": task_no,
-            "plan_code": plan_code,
-            # 冻结的范围指纹随记录留痕：事后能确认这个任务冻结的是哪一版方案范围。
-            "plan_scope_hash": plan.scope_hash,
-            "scenario_version_no": task.task_schema_json.get("scenario_version_no"),
-        },
-    )
-    task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no)) or task
-    return _frozen_task_created_response(request, db, task, reused=was_reused)
-
-
-def _replay_task_created(
-    request: Request,
-    db: Session,
-    log: Any,
-) -> TaskCreatedResponse:
-    """幂等重放：只读原记录与原任务快照，不读方案当前状态。"""
-    if str(log.result or "") != "SUCCEEDED":
-        raise BusinessError(
-            "TASK_CREATE_PREVIOUSLY_FAILED",
-            f"该幂等标识对应的创建任务命令此前执行失败：{log.failure_message or '原因未记录'}。"
-            "请更换幂等标识后重新创建",
-            status_code=409,
-            details={"log_no": log.log_no, "failure_code": log.failure_code},
-        )
-    detail = log.detail_json if isinstance(log.detail_json, dict) else {}
-    task_no = detail.get("task_no")
-    task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no)) if task_no else None
-    if task is None:
-        raise BusinessError(
-            "TASK_CREATE_REPLAY_UNAVAILABLE",
-            "该幂等标识对应的任务记录不存在，请更换标识后重新创建",
-            status_code=409,
-            details={"log_no": log.log_no},
-        )
-    return _frozen_task_created_response(request, db, task, reused=True)
-
-
-def _frozen_task_created_response(
-    request: Request,
-    db: Session,
-    task: AuditTask,
-    *,
-    reused: bool,
-) -> TaskCreatedResponse:
-    """用任务自己的 task_schema_json 组装响应。
-
-    只读任务冻结的快照：不读方案后来重算过的 scope_json，也不读方案当前的名称与版本。
-    历史任务缺少冻结字段时只做**确定性**恢复（场景版本与场景名来自任务所钉的那个版本）；
-    连冻结的规则范围都取不到时明确返回 `LEGACY_TASK_SCHEMA_INCOMPLETE`，
-    不用「默认全选」或当前方案补一份看起来正常的快照。
-    """
-    schema = task.task_schema_json if isinstance(task.task_schema_json, dict) else {}
-    frozen = db.get(ScenarioVersion, task.scenario_version_id) if task.scenario_version_id else None
-    if not isinstance(schema.get("enabled_rule_keys"), list) or not isinstance(schema.get("fields"), list):
-        raise BusinessError(
-            "LEGACY_TASK_SCHEMA_INCOMPLETE",
-            "该历史任务没有冻结的规则范围，无法确认它当时执行的是哪些检查；请从已发布的方案重新创建任务",
-            status_code=409,
-            details={"task_no": task.task_no},
-        )
-    version_no = schema.get("scenario_version_no")
-    if not isinstance(version_no, int):
-        version_no = frozen.version_no if frozen is not None else None
-    if not isinstance(version_no, int):
-        raise BusinessError(
-            "LEGACY_TASK_SCHEMA_INCOMPLETE",
-            "该历史任务没有记录冻结的场景版本号，无法确认它的执行依据",
-            status_code=409,
-            details={"task_no": task.task_no},
-        )
-    scenario_code = schema.get("scenario_code")
-    if not isinstance(scenario_code, str) or not scenario_code:
-        scenario_code = frozen.scenario_code if frozen is not None else None
-    if not isinstance(scenario_code, str) or not scenario_code:
-        raise BusinessError(
-            "LEGACY_TASK_SCHEMA_INCOMPLETE",
-            "该历史任务没有记录所属场景，无法确认它的执行依据",
-            status_code=409,
-            details={"task_no": task.task_no},
-        )
-    scenario_name = schema.get("scenario_name")
-    if not isinstance(scenario_name, str) or not scenario_name:
-        scenario_name = frozen.scenario_name if frozen is not None else scenario_code
-    # 方案名称以任务冻结的快照为准；历史任务没有该键时按它自己关联的方案读取，
-    # 都取不到时如实说明为「历史任务配置」，不编一个名字。
-    plan_name = schema.get("plan_name")
-    if not isinstance(plan_name, str) or not plan_name:
-        plan = db.get(AuditPlan, task.plan_id) if task.plan_id else None
-        plan_name = plan.plan_name if plan is not None else "历史任务配置"
-    material_count = schema.get("material_count")
-    if not isinstance(material_count, int):
-        materials = schema.get("materials")
-        material_count = len(materials) if isinstance(materials, list) else 0
-    field_count = schema.get("field_count")
-    if not isinstance(field_count, int):
-        fields = schema.get("fields")
-        field_count = len(fields) if isinstance(fields, list) else 0
-    return TaskCreatedResponse(
-        request_id=request.state.request_id,
-        task_no=task.task_no,
-        task_name=task.task_name,
-        task_status=task.status,
-        scenario_code=scenario_code,
-        scenario_name=scenario_name,
-        scenario_version_no=version_no,
-        plan_name=plan_name,
-        current_node_name=task.current_node,
-        material_count=material_count,
-        field_count=field_count,
-        reused=reused,
-    )
+    result = plan_task_service.create_from_plan(db, plan_code, payload.model_dump())
+    return TaskCreatedResponse.model_validate({**result, "request_id": request.state.request_id})

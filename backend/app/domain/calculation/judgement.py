@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from .schema import ComparisonBasis, JudgementBand
+from .schema import JudgementBand
 
 
 # 判定结果状态。它们是**业务判定结论**，与计算是否算得出来是两件事。
@@ -78,7 +78,7 @@ def judge(value: Decimal, bands: list[JudgementBand]) -> JudgementResult:
             ),
         )
     if len(matched) > 1:
-        from ...errors import BusinessError
+        from ...common.exceptions import BusinessError
 
         raise BusinessError(
             "CALC_JUDGEMENT_BAND_AMBIGUOUS",
@@ -89,10 +89,3 @@ def judge(value: Decimal, bands: list[JudgementBand]) -> JudgementResult:
         )
     band, compared = matched[0]
     return JudgementResult(status=JUDGEMENT_MATCHED, band=band, compared_value=compared)
-
-
-def basis_label(basis: ComparisonBasis | str) -> str:
-    """判定比较基准的中文名；未知取值原样返回编码。"""
-    from .schema import COMPARISON_BASIS_LABELS
-
-    return COMPARISON_BASIS_LABELS.get(str(basis), str(basis))

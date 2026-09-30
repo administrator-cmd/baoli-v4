@@ -21,7 +21,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 # 检查项目。与 02_文件处理规则 的「检查项目」下拉取值一一对应。

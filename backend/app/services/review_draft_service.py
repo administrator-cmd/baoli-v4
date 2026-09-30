@@ -14,8 +14,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..errors import BusinessError
-from ..models import ReviewDraft
+from ..common.exceptions import BusinessError
+from ..entities import ReviewDraft
 from .task_lookup import task_or_404
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def save_drafts(db: Session, task_no: str, items: list[dict[str, Any]]) -> dict[
             status_code=409,
             details={"task_no": task_no, "status": task.status},
         )
-    from ..models import ManualReview
+    from ..entities import ManualReview
 
     pending_nos = {
         row.review_no

@@ -12,8 +12,7 @@
 ------------------------------------------
 `database_session` 是运行期依赖，和 `graphs/audit_graph.py` 的
 `AuditGraphContext["db"]` 同一性质：它随一次调用存在，**绝不写入图 state、
-checkpoint 或任何持久化记录**。本模块用 `to_record()` 划出这条界线——
-持久化只能存 `to_record()` 的结果，那里没有会话。
+checkpoint 或任何持久化记录**。
 
 同理，`HTTP client`、密钥与不可序列化的业务对象都不进本结构。
 
@@ -91,31 +90,3 @@ class ToolExecutionContext:
     def scoped_materials(self) -> frozenset[str]:
         """本次限定的材料范围。空集表示未限定。"""
         return frozenset(item for item in self.material_refs if item)
-
-    def to_record(self) -> dict[str, Any]:
-        """可持久化的子集：**不含数据库会话**。
-
-        持久化工具调用时只能存这个结果。把整个 context 存进去会把会话对象
-        带进 checkpoint，那是不可序列化且与业务无关的运行期句柄。
-        """
-        return {
-            "task_id": self.task_id,
-            "evaluation_id": self.evaluation_id,
-            "rule_instance_id": self.rule_instance_id,
-            "scene_code": self.scene_code,
-            "node_code": self.node_code,
-            "material_refs": list(self.material_refs),
-            "fact_snapshot_ref": self.fact_snapshot_ref,
-            "fact_snapshot_hash": self.fact_snapshot_hash,
-            "tool_catalog_version": self.tool_catalog_version,
-            "tool_catalog_hash": self.tool_catalog_hash,
-            "tool_policy_version": self.tool_policy_version,
-            "caller_identity": self.caller_identity,
-        }
-
-    def snapshot_identity(self) -> dict[str, Any]:
-        """事实快照身份：随工具结果一起留存的那两个字段。"""
-        return {
-            "fact_snapshot_ref": self.fact_snapshot_ref,
-            "fact_snapshot_hash": self.fact_snapshot_hash,
-        }

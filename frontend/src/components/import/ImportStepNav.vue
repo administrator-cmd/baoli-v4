@@ -5,7 +5,7 @@ import type { ImportStep } from "@/constants/importSteps";
  * 导入流程步骤条。
  *
  * 每一步的状态来自服务端真实数据（是否已上传、是否已转换、是否还有未处理问题、
- * 发布检查是否通过）；被阻断的步骤在说明里写出中文原因，并禁止点击进入。
+ * 是否已写入场景草稿）；被阻断的步骤在说明里写出中文原因，并禁止点击进入。
  */
 const props = defineProps<{ steps: ImportStep[]; active: number; clickable?: boolean }>();
 

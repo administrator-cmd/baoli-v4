@@ -1,22 +1,18 @@
-import { computed, onUnmounted, ref, type ComputedRef, type Ref } from "vue";
+import { computed, onUnmounted, ref, type Ref } from "vue";
 import { ElMessage } from "element-plus";
 
-import type { ImportIssue, ImportJob, JsonValue } from "@/api/contracts";
-import type { ImportJobView } from "@/api/imports";
+import type { ImportJob, JsonValue } from "@/api/contracts";
 import { saveDecisionDraft, saveImportDecisions } from "@/api/imports";
 
 export interface DecisionAnswersState {
   /** 逐条问题的作答值（按 issue_no）。 */
   selectedOptions: Ref<Record<string, JsonValue>>;
-  /** 已作答但取值不可用的问题：缺少阈值时必须填真实数值，不能留空。 */
-  unresolved: ComputedRef<ImportIssue[]>;
-  initialise: (job: ImportJobView, preserveAnswers?: boolean) => void;
+  initialise: (job: ImportJob, preserveAnswers?: boolean) => void;
   /** 草稿值 → 展示值：服务端存 `{ selected: ... }`，页面按 `selected` 取值。 */
   readDecisionValue: (decision: JsonValue) => JsonValue;
   update: (issueNo: string, value: JsonValue) => void;
   /** 立即落一次暂存（提交裁决、离开步骤前必须执行）。 */
   flush: () => Promise<void>;
-  /** 提交全部业务结论；未答完时不提交并给出原因。 */
   /**
    * 提交全部业务结论。`onAccepted` 收到服务端返回的最新作业视图。
    *
@@ -39,7 +35,7 @@ export interface DecisionAnswersState {
  */
 export function useDecisionAnswers(options: {
   /** 当前导入作业；未加载时为 null。 */
-  job: Ref<ImportJobView | null>;
+  job: Ref<ImportJob | null>;
   /** 暂存只回写修订号与问题状态，不打断用户当前编辑。 */
   applyRevision: (updated: ImportJob) => void;
   run: (action: () => Promise<void>) => Promise<void>;
@@ -77,7 +73,7 @@ export function useDecisionAnswers(options: {
    *
    * 本地已填但服务端没有的值由调用方（`preserveAnswers`）另行保留。
    */
-  function initialise(job: ImportJobView, preserveAnswers = false): void {
+  function initialise(job: ImportJob, preserveAnswers = false): void {
     const saved: Record<string, JsonValue> = Object.fromEntries(
       job.issues.map((issue) => [issue.issue_no, readDecisionValue(issue.decision)]),
     );
@@ -160,5 +156,5 @@ export function useDecisionAnswers(options: {
     }
   });
 
-  return { selectedOptions, unresolved, initialise, readDecisionValue, update, flush, submit, reset };
+  return { selectedOptions, initialise, readDecisionValue, update, flush, submit, reset };
 }

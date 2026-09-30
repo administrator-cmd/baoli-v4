@@ -18,7 +18,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from ..config import get_settings, validated_database_url
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 def _connection_kwargs() -> dict[str, object]:
@@ -85,10 +85,6 @@ REQUIRED_CHECKPOINT_TABLES = (
 # 再同步更新本常量与 backend/database/schema.sql 中写入的版本行。
 EXPECTED_CHECKPOINT_MIGRATION_VERSION = 21
 
-# classify_checkpoint_storage() 在“存储可达且结构存在”时返回的状态值。
-CHECKPOINT_STORAGE_READY = "READY"
-
-
 def _open_checkpoint_connection() -> "pymysql.connections.Connection":
     """打开 checkpoint 存储连接；连接失败统一抛 CHECKPOINT_CONNECT_FAILED（临时不可达，可重试）。"""
     try:
@@ -151,31 +147,6 @@ def _applied_checkpoint_migration_version(connection: "pymysql.connections.Conne
     return int(value)
 
 
-def classify_checkpoint_storage() -> str:
-    """读取探测：区分 checkpoint 存储的三种状态，供审核图与审核命令层判断后续动作。
-
-    三种结果：
-      1. 存储暂不可达（连接或查询异常）→ 抛 BusinessError(CHECKPOINT_CONNECT_FAILED)。
-         **这是临时状态，调用方不得据此把任务标记为永久失败**，应提示稍后重试。
-      2. 存储可达但 checkpoint 表缺失 → 抛 BusinessError(CHECKPOINT_TABLES_MISSING)，属建表/配置问题。
-      3. 存储可达且结构存在 → 返回 CHECKPOINT_STORAGE_READY。
-
-    本函数只读：不执行任何 DDL，不改动 saver 配置（autocommit 契约保持 _connection_kwargs 不变）。
-    """
-    connection = _open_checkpoint_connection()
-    try:
-        existing = _existing_checkpoint_tables(connection)
-    finally:
-        connection.close()
-    missing = [name for name in REQUIRED_CHECKPOINT_TABLES if name not in existing]
-    if missing:
-        raise BusinessError(
-            "CHECKPOINT_TABLES_MISSING",
-            f"checkpoint 存储缺少数据表：{'、'.join(missing)}。请执行 backend/database/schema.sql。",
-            status_code=500,
-            details={"missing_tables": missing, "script": "backend/database/schema.sql"},
-        )
-    return CHECKPOINT_STORAGE_READY
 
 
 def check_checkpoint_tables() -> None:

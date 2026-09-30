@@ -3,7 +3,7 @@ import type { ApiFailure, OperationAccepted, OperationStatus } from "./contracts
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const REQUEST_TIMEOUT_MS = 60_000;
 
-/** 后台操作状态查询间隔。长操作已改为「提交并返回 → 后台执行 → 查询状态」。 */
+/** 后台操作状态查询间隔。 */
 export const OPERATION_POLL_INTERVAL_MS = 2_000;
 
 export class ApiError extends Error {
@@ -186,18 +186,7 @@ export function uploadWithProgress<T>(
   });
 }
 
-/**
- * 后台操作的完整视图。contracts.ts 的 OperationAccepted 是权威契约；
- * 这里额外声明服务端已持久化、但当前响应模型尚未输出的时间与目标节点字段：
- * 页面只读它们，缺省时只显示状态本身，不猜进度。
- */
-export type OperationView = OperationAccepted & {
-  target_node?: string | null;
-  input_version?: string | null;
-  created_at?: string | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-};
+export type OperationView = OperationAccepted;
 
 const TERMINAL_OPERATION_STATUSES: OperationStatus[] = ["SUCCEEDED", "FAILED", "INTERRUPTED"];
 

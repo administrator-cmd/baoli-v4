@@ -20,8 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
 from typing import Any
 
-from ...errors import BusinessError
-from .expression import Binary, Identifier, NumberLiteral, Unary
+from ...common.exceptions import BusinessError
 from .schema import (
     CALC_STATUS_COMPUTED,
     CALC_STATUS_DIVISION_BY_ZERO,
@@ -29,7 +28,6 @@ from .schema import (
     CALC_STATUS_UNDECIDABLE,
     CalculationRule,
     CalculationParameter,
-    PeriodScope,
 )
 
 
@@ -342,35 +340,3 @@ def fact_key(
 ) -> tuple[str, str, str, str]:
     """事实定位键。计算参数与事实两侧必须用同一个函数构造，避免口径不一致。"""
     return (source_type, source_code, period_scope, statement_scope)
-
-
-def period_scopes_of(rule: CalculationRule) -> set[str]:
-    """这条计算规则用到的全部期间口径（由来源自身声明，编译期冻结）。"""
-    return {
-        str(scope.get("period_scope"))
-        for scope in rule.parameter_scopes.values()
-        if scope.get("period_scope")
-    }
-
-
-def statement_scopes_of(rule: CalculationRule) -> set[str]:
-    """这条计算规则用到的全部报表口径（合并 / 母公司）。"""
-    return {
-        str(scope.get("statement_scope"))
-        for scope in rule.parameter_scopes.values()
-        if scope.get("statement_scope")
-    }
-
-
-def required_field_codes(rule: CalculationRule) -> set[str]:
-    """这条计算规则需要的全部字段事实编号（不含上游计算结果）。"""
-    return {
-        item.source_code
-        for item in rule.parameters
-        if item.source_type == "FIELD" and item.source_code
-    }
-
-
-def period_scope_label(scope: str) -> str:
-    """期间口径的中文名（本期 / 上期 / 期初 / 期末 / 期初期末平均）。"""
-    return _scope_label(scope)

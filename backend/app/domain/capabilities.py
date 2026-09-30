@@ -135,16 +135,6 @@ STATUS_NOTES: dict[str, str] = {
     "NOT_APPLICABLE": "适用条件明确不成立，本次不该执行这条检查；不适用不等于通过。",
 }
 
-# 风险来源结果可用的状态：除此之外（含 None）都表示来源无法判断。
-# 与 operators.registry.KNOWN_SOURCE_STATUSES 同一份口径。
-KNOWN_SOURCE_STATUSES = frozenset(
-    {"PASSED", "ABNORMAL", "NOT_APPLICABLE", "EVIDENCE_INSUFFICIENT", "NOT_EXECUTED", "PENDING_REVIEW"}
-)
-
-# 主体/签章一致性一类需要核对印鉴与业务主体一致性的规则：即使证据由程序读取，
-# 识别冲突或归属不明时也必须交人工，不能仅因原始字符串不同就宣告已证实违规。
-HUMAN_REVIEW_ON_CONFLICT = frozenset({"SEAL_SUBJECT"})
-
 # 结果里能力专用扩展数据的命名空间。能力自有的键（actual_bytes、per_material、
 # duplicates 等）只能放在这里，不能混进所有规则共有的公共结构。
 EXTENSION_NAMESPACE_QUALITY = "file_quality"
@@ -583,20 +573,15 @@ CAPABILITIES: dict[str, Capability] = {
     item.capability_id: item for item in (*_OPERATOR_CAPABILITIES, *_QUALITY_CAPABILITIES)
 }
 
-# 算子级能力的标识集合：其余模块据此校验「配置引用的能力是否存在」。
-OPERATOR_CAPABILITY_IDS: frozenset[str] = frozenset(item.capability_id for item in _OPERATOR_CAPABILITIES)
 QUALITY_CAPABILITY_IDS: frozenset[str] = frozenset(item.capability_id for item in _QUALITY_CAPABILITIES)
 
-# 从目录派生的旧口径别名：既有模块继续按这些名字引用，不再各维护一份名单。
+# 从目录派生的查询视图，供规则编译与执行共用。
 NODE_CONSTRAINTS: dict[str, frozenset[str]] = {
     item.capability_id: item.nodes for item in _OPERATOR_CAPABILITIES
 }
 OPERATOR_LABELS: dict[str, str] = {item.capability_id: item.label for item in _OPERATOR_CAPABILITIES}
 ROUTE_BY_OPERATOR: dict[str, tuple[str, str]] = {
     item.capability_id: (item.evidence, item.judge) for item in _OPERATOR_CAPABILITIES
-}
-EXECUTION_BY_OPERATOR: dict[str, str] = {
-    item.capability_id: item.execution for item in _OPERATOR_CAPABILITIES
 }
 
 
@@ -655,15 +640,6 @@ def status_view(status: str | None) -> dict[str, Any]:
         "category_label": status_category_label_of(status),
         "note": status_note(status),
     }
-
-
-def capabilities_for_node(node_code: str) -> list[Capability]:
-    """可挂在某审核节点上的算子级能力。"""
-    return [
-        item
-        for item in _OPERATOR_CAPABILITIES
-        if node_code in item.nodes
-    ]
 
 
 def capability_id_of_rule(rule: dict[str, Any]) -> str | None:

@@ -16,9 +16,9 @@
 import hashlib
 from ...domain import fact_snapshot, workflow_dag
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
-from ...errors import BusinessError
-from ...models import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
-from ...schemas import ManualReviewRequest
+from ...common.exceptions import BusinessError
+from ...entities import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
+from ...dto import ManualReviewRequest
 from ..operation_types import OBJECT_AUDIT_TASK
 from ..task_lookup import task_or_404
 from .facts import _current_field_fact_pairs, _refresh_extraction_rule_results, _write_human_field_fact
@@ -698,7 +698,7 @@ def _apply_review_decisions(
                 # 证据不足：标准化的原文原样保留（原文是事实本身，不因裁决被改写），
                 # 但事实状态改为「证据不足」——这条取值当前不足以支撑下游判定。
                 new_status, raw_value, normalized_json = "EVIDENCE_UNCLEAR", fact.raw_value, fact.normalized_value_json
-                # 下游此前是按这条取值算出来的，现在依据不再成立：必须与「改了值」同样重算，
+                # 下游结论以这条取值为依据；依据失效时必须与「改了值」同样重算，
                 # 否则规则会继续沿用一条已被判为证据不足的取值得出结论。
                 field_values_confirmed = True
             # 人工写出新值必须新建事实版本，不原地改写抽取事实。
@@ -833,9 +833,8 @@ def _apply_manual_reviews_direct(
     invalidated_reviews = 0
     file_quality_recompute: dict[str, Any] | None = None
     if material_state_changed:
-        # 文件质量检查（DOCUMENT_PREPARE 节点）此前按「人工已确认与材料位不符」记过
-        # “缺少有效依据”，或按“类型待复核”记过待确认说明；类型一旦定案，这条结论的依据
-        # 已经变了，必须就地重算：只失效不重算会让下游拿到“依据已不成立”的旧结论。
+        # 材料类型定案后，文件质量结论的依据已经变化，必须就地重算；
+        # 只失效不重算会让下游读取依据已不成立的旧结论。
         # 重跑该节点会重新调用外部服务并重建产物，代价与风险都高于就地重算，
         # 因此只重算质量结论：旧批次标 INVALIDATED 保留为历史，新批次挂在新执行记录上。
         # 人工结论不会被改回去：该节点现在只按 MATERIAL_CLASSIFY 产物**记录**识别结论，

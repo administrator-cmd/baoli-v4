@@ -1,6 +1,6 @@
 """规则表达式的确定性解析。
 
-本轮 Excel 契约允许两类表达式，都必须是**确定性**解析，不能交给模型：
+当前 Excel 契约允许两类表达式，都必须**确定性**解析，不能交给模型：
 
 1. 多项清单：`MAT-001；MAT-002` —— 统一使用中文分号，忽略每项前后空白；空项、重复项、
    未知引用一律明确报错，空白不表示全部。
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 # 多项清单分隔符：填写规范只认中文分号。英文分号与逗号是业务名称里可能出现的字符，
@@ -216,8 +216,3 @@ def parse_positive_int(text: str | None, *, location: CellLocation) -> int | Non
             details=location.detail(),
         )
     return int(value)
-
-
-def format_decimal(value: Decimal) -> str:
-    """把 Decimal 写成不丢精度的十进制文本（不使用浮点）。"""
-    return format(value.normalize(), "f") if value == value.normalize() else format(value, "f")

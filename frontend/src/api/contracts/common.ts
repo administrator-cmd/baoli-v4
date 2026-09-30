@@ -1,9 +1,4 @@
-/**
- * 通用响应包装与分页：所有接口共用，不承载任何业务字段。
- *
- * 契约按业务域拆分：本文件只声明本域的载荷形状，跨域引用一律显式 import，
- * 不再让所有页面共同依赖一个不断扩大的中心文件。
- */
+/** 通用响应包装与分页：所有接口共用，不承载业务字段。 */
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
@@ -25,6 +20,8 @@ export interface OperationAccepted extends ApiResponse {
   object_no: string;
   object_type: string;
   operation_type: string;
+  target_node: string | null;
+  input_version: string | null;
   status: OperationStatus;
   message: string;
   reused: boolean;
@@ -35,6 +32,9 @@ export interface OperationAccepted extends ApiResponse {
   phase?: string | null;
   /** 外部作业引用（例如 OCR jobId）；本地超时后只能续查同一个作业。 */
   external_job_ref?: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface Paged<T> extends ApiResponse {

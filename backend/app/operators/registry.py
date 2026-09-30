@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from ..domain import quality_judgement
 from ..domain.currency import canonical_currency
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 OperatorHandler = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any]]
@@ -49,26 +49,6 @@ def _comparison(
     return payload
 
 
-# 规则输入的固定契约。执行端只读取这里声明的键，不从字段名猜金融语义。
-#   field_key / material_key：稳定引用
-#   status：字段事实状态（PRESENT / REVIEWED / NOT_PRESENT / ...）
-#   raw_value：抽取到的原文（事实本身），标准化值由它确定性算出
-#   normalized_value：服务端规范化后的值
-#   value_type：字段类型（DECIMAL / DATE / STRING / CLAUSE / BOOLEAN）
-#   unit：字段声明的单位；为空表示未声明，不表示与另一方一致
-#   currency：字段声明的币种；为空表示未声明，不表示与另一方一致
-#   material_state：材料位当前状态（PREPARED / TYPE_REVIEW / TYPE_REJECTED / ONLY_UPLOADED）
-INPUT_KEYS = (
-    "field_key",
-    "material_key",
-    "status",
-    "normalized_value",
-    "value_type",
-    "unit",
-    "currency",
-    "material_state",
-)
-
 # 材料类型不可用：依赖该材料的检查缺少有效依据。两种来源必须分开：
 #   TYPE_REVIEW   = 类型待复核，**尚未由人定案**；
 #   TYPE_REJECTED = 人工已确认与材料位不符。
@@ -86,14 +66,13 @@ REJECTED_MATERIAL_STATUS = "TYPE_REJECTED"
 DECIMAL_COMPARE_MODES = {"EQ", "GTE", "LTE", "ABS_DIFF_LTE"}
 DATE_COMPARE_MODES = {"EQ", "GTE", "LTE", "GT", "LT"}
 
-# 比较方式的中文与运算符号：只用于把**实际算式**写进结果，供页面与报告直接呈现。
+# 比较方式的中文：只用于把**实际算式**写进结果，供页面与报告直接呈现。
 DECIMAL_MODE_LABELS = {
     "EQ": "金额相等",
     "GTE": "金额不小于",
     "LTE": "金额不大于",
     "ABS_DIFF_LTE": "差额不超过允许差值",
 }
-DECIMAL_COMPARISON_SYMBOLS = {"EQ": "=", "GTE": "≥", "LTE": "≤", "ABS_DIFF_LTE": "≈"}
 DATE_MODE_LABELS = {"EQ": "同一天", "GTE": "不早于", "LTE": "不晚于", "GT": "晚于", "LT": "早于"}
 DATE_COMPARISON_SYMBOLS = {"EQ": "=", "GTE": "≥", "LTE": "≤", "GT": ">", "LT": "<"}
 
@@ -114,10 +93,6 @@ def _input_label(item: dict[str, Any]) -> str:
     """输入的稳定业务标识：字段键 + 材料键。中文名由服务端在结果里另行给出。"""
     source = item.get("material_key") or "未知材料"
     return f"{item.get('field_key') or '未知字段'}@{source}"
-
-
-def _status_text(item: dict[str, Any]) -> str:
-    return str(item.get("status") or "状态未记录")
 
 
 def _unavailable_status(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -661,7 +636,7 @@ def risk_trigger(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> di
     """
     source_statuses = parameters.get("source_statuses")
     if not isinstance(source_statuses, list) or not source_statuses:
-        # 兼容旧调用：单一来源结果。
+        # 单一来源也可用 source_status 传入。
         single = parameters.get("source_status")
         if not single:
             return {"status": "NOT_EXECUTED", "message": "来源规则尚无结果"}
@@ -669,7 +644,7 @@ def risk_trigger(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> di
     condition = parameters.get("risk_condition")
     if condition not in RISK_CONDITIONS:
         # 成立条件缺失或非法都不能默认成「任一」：那会把「全部关联检查不合格」
-        # 静默放宽成「任一」，直接改变风险结论。新版由编译期保证存在；
+        # 静默放宽成「任一」，直接改变风险结论。编译期会保证该参数存在；
         # 这里再兜一次，宁可不可判定也不猜。
         return {
             "status": "EVIDENCE_INSUFFICIENT",

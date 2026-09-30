@@ -20,18 +20,15 @@ RAG 不参与本模块：数值一律来自字段事实与上游计算结果。
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from ...domain import calculation as calc, workflow_dag
-from ...domain.calculation import schema as calc_schema
 from ...domain.identity import public_no
-from ...errors import BusinessError
-from ...models import AuditTask, ManualReview, NodeExecution, RuleResult, TaskFact
+from ...common.exceptions import BusinessError
+from ...entities import AuditTask, ManualReview, NodeExecution, RuleResult, TaskFact
 from .shared import _material_names
 
 
@@ -95,7 +92,7 @@ def _calculation_rules(manifest: dict[str, Any], enabled_codes: set[str]) -> lis
     return ordered
 
 
-def _field_facts(db: Session, task: AuditTask, execution: NodeExecution) -> dict[tuple[str, str, str, str], calc.FactValue]:
+def _field_facts(db: Session, task: AuditTask) -> dict[tuple[str, str, str, str], calc.FactValue]:
     """当前有效的字段与上游计算事实，按计算参数的定位键建索引。
 
     EXTRACTED 只取已确认的数值事实；DERIVED 只取已经 COMPUTED 的数值事实。
@@ -369,7 +366,7 @@ def _calculation(
             "skipped": True,
             "skip_reason": "本方案未启用计算规则" if configured else "本模板未配置计算规则",
         }
-    facts = _field_facts(db, task, execution)
+    facts = _field_facts(db, task)
     material_names = _material_names(manifest)
     counts: dict[str, int] = {}
     computed = 0

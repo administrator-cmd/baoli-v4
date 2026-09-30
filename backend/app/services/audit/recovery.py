@@ -6,8 +6,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...errors import BusinessError
-from ...models import AuditTask, NodeExecution, WorkflowCheckpoint
+from ...common.exceptions import BusinessError
+from ...entities import AuditTask, NodeExecution, WorkflowCheckpoint
 from ..background_service import assert_no_active_operation, latest_operation
 from ..operation_types import OBJECT_AUDIT_TASK
 from .state import _scenario_nodes

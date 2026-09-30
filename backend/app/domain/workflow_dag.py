@@ -5,12 +5,11 @@
 1. **校验**：发布期检查缺失依赖、循环依赖、依赖节点未启用；
 2. **选择**：运行期按已完成集合算出「就绪节点」——依赖全部已完成、自己尚未执行的节点。
 
-首期只要求**串行**执行就绪节点，因此这里按 (sequence_no, node_code) 排序后取第一个。
+调度器**串行**执行就绪节点，按 (sequence_no, node_code) 排序后取第一个。
 排序口径是确定的：`sequence_no` 只用于展示与确定性排序，**不代替**依赖关系；
 真正决定能不能执行的是 `depends_on`。
 
-旧场景（线性流程）由编译期写成「依赖前一个节点」，语义与旧的 `nodes[index+1]`
-完全一致，因此旧任务的执行顺序不变。
+历史 manifest 缺失 `depends_on` 时，`plans_of` 按节点顺序补成线性依赖，保持已发布任务的执行顺序。
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from .node_registry import NODE_TYPE_LABELS, legacy_node_type_of
 
 
@@ -236,11 +235,6 @@ def ready_node_for_pending_review(
 def pending_nodes(plans: list[NodePlan], *, completed: set[str]) -> list[NodePlan]:
     """仍未完成且已启用的节点。"""
     return [plan for plan in plans if plan.enabled and plan.node_instance_code not in completed]
-
-
-def is_finished(plans: list[NodePlan], *, completed: set[str]) -> bool:
-    """全部已启用节点都已完成。"""
-    return not pending_nodes(plans, completed=completed)
 
 
 def blocked_nodes(plans: list[NodePlan], *, completed: set[str]) -> list[NodePlan]:

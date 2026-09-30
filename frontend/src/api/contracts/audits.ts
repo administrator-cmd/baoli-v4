@@ -1,9 +1,4 @@
-/**
- * 审核任务：任务详情、节点、字段与规则结果、复核待办、证据、纠错与检索。
- *
- * 契约按业务域拆分：本文件只声明本域的载荷形状，跨域引用一律显式 import，
- * 不再让所有页面共同依赖一个不断扩大的中心文件。
- */
+/** 审核任务：任务详情、节点、字段与规则结果、复核待办、证据、纠错与检索。 */
 
 import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 import type { TaskScope } from "./scenes";
@@ -21,15 +16,13 @@ export interface AuditNode {
   failure_message: string | null;
   skip_reason: string | null;
 }
-
 /** 任务展示结构里的一张 Sheet：本场景选用的表及它归属的节点实例。 */
 export interface TaskDisplaySheet {
   sheet_role: string;
   node_code: string | null;
 }
-
 /**
- * 任务的**展示结构**（需求 31~34）：由后端按当前任务的场景配置返回。
+ * 任务的**展示结构**：由后端按当前任务的场景配置返回。
  *
  * 页面按它通用渲染：只展示当前场景实际使用的节点、Sheet 与字段，
  * 统一模板协议里未被本场景选中的内容不出现。
@@ -358,21 +351,6 @@ export interface ExecuteNodeResponse extends ApiResponse {
   result_summary: Record<string, JsonValue>;
 }
 
-export interface ManualReviewResponse extends ApiResponse {
-  task_no: string;
-  resolved_count: number;
-  status: string;
-  next_node_name: string | null;
-  field_changes: Array<{
-    field_key: string;
-    field_name?: string | null;
-    material_name?: string | null;
-    before_value: string | null;
-    after_value: string | null;
-    fact_revision_no?: number | null;
-  }>;
-  invalidated_reviews: number;
-}
 
 export interface RiskList extends ApiResponse {
   task_no: string;
@@ -391,14 +369,6 @@ export interface RiskList extends ApiResponse {
   }>;
 }
 
-export interface AuditTaskSummary extends ApiResponse {
-  task_no: string;
-  task_name: string;
-  scenario_name: string;
-  status: string;
-  current_node_name: string;
-  updated_at: string;
-}
 
 export interface Evidence extends ApiResponse {
   evidence_no: string;
@@ -571,33 +541,4 @@ export interface TaskEvidenceIndex extends ApiResponse {
   chunk_version?: string | null;
   indexed: boolean;
   items: EvidenceIndexItem[];
-}
-
-export interface RetrievalHistoryItem {
-  retrieval_no: string;
-  rule_key: string | null;
-  node_code: string | null;
-  query_text: string;
-  scope: Record<string, JsonValue>;
-  model_id: string;
-  model_revision: string;
-  index_versions: string[];
-  status: string;
-  message: string | null;
-  top_k: number;
-  candidate_count: number;
-  candidates: RetrievalCandidate[];
-  /** 本次送入后续步骤的条目；不代表工作人员已确认过其中任何一条。 */
-  adopted: RetrievalCandidate[];
-  /** 人工结论与候选分开保存。 */
-  human_decision: string | null;
-  human_decision_note: string | null;
-  human_selected: Record<string, JsonValue> | null;
-  human_decided_at: string | null;
-  human_decided_by: string | null;
-  decision_input_revision: number | null;
-  index_version: string | null;
-  embedding_dim: number | null;
-  input_revision: number;
-  created_at: string;
 }

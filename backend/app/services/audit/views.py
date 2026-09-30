@@ -8,8 +8,8 @@
 - 证据的位置结论与内容依据结论分别透出，页面不能把「无法定位」显示成「原文不存在」。"""
 
 from ...domain.manifest import rule_node_type_of
-from ...errors import BusinessError
-from ...models import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
+from ...common.exceptions import BusinessError
+from ...entities import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
 from ..task_lookup import task_or_404
 from .evidence import _quote_check_of
 from .reporting import _configured_format_support
@@ -133,7 +133,7 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
             # 报告未生成时也要给出声明格式的支持状态：模板要求 PDF 而系统只产 Markdown，
             # 这件事不因报告尚未生成而消失。
             "conclusion": None,
-            "format_support": _configured_format_support(db, task),
+            "format_support": _configured_format_support(task),
             "business_section_count": 0,
         }
     result = execution.result_json

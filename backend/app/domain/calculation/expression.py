@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Union
 
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 
 
 # 运算符与括号的全角形态。业务在 Excel 里写的是中文标点，不归一化会让整列公式
@@ -53,9 +53,6 @@ _OPERATOR_ALIASES = {
 # 数字单独识别，因此标识符不允许以数字开头——`123` 与 `1abc` 必须区分开。
 _IDENTIFIER = re.compile(r"[^\W\d][\w]*", re.UNICODE)
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
-
-_TOKEN_KINDS = ("NUMBER", "IDENT", "OP", "LPAREN", "RPAREN", "EOF")
-
 
 @dataclass(frozen=True)
 class Token:
@@ -164,7 +161,7 @@ def tokenize(text: str, *, location: str) -> list[Token]:
         raise BusinessError(
             "CALC_EXPRESSION_CHAR_UNSUPPORTED",
             f"{location}的算式里出现了当前不支持的字符“{char}”（第 {index + 1} 个字符）。"
-            "首期只支持加、减、乘、除与括号；函数、百分比、比较符号与 Excel 公式一律不支持",
+            "只支持加、减、乘、除与括号；函数、百分比、比较符号与 Excel 公式一律不支持",
             details={"location": location, "expression": text, "char": char, "position": index},
         )
     tokens.append(Token("EOF", "", length))
@@ -240,7 +237,7 @@ class _Parser:
             return NumberLiteral(value=value)
         if token.kind == "IDENT":
             self._advance()
-            # 标识符后紧跟左括号 = 函数调用。首期不支持任何函数，这里给出**专门**的
+            # 标识符后紧跟左括号 = 函数调用。系统不支持函数，这里给出**专门**的
             # 提示而不是笼统的「语法错误」：业务看到「SUM 不支持」比看到
             # 「这里需要一个运算符」更容易明白该改什么。
             if self._peek().kind == "LPAREN":

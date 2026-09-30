@@ -54,7 +54,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 # 统一 Profile 路径由调用方注入。未注入时任何读取都明确报错。
 _PROFILE_PATH: Path | None = None
@@ -363,18 +363,6 @@ def map_sheet_columns(
     return mapping
 
 
-def node_type_definition(profile: dict[str, Any], node_type: str) -> dict[str, Any]:
-    """按节点类型取它的定义；类型未声明时明确报错。"""
-    for node in profile["node_types"]:
-        if node["node_type"] == node_type:
-            return node
-    raise BusinessError(
-        "UNIFIED_PROFILE_NODE_TYPE_UNKNOWN",
-        f"节点类型“{node_type}”不在统一模板协议里",
-        details={"node_type": node_type},
-    )
-
-
 def node_types_of_sheet_role(profile: dict[str, Any], sheet_role: str) -> tuple[str, ...]:
     """一张 Sheet 可以绑定的节点类型。
 
@@ -390,32 +378,6 @@ def instruction_sheet_name(profile: dict[str, Any]) -> str:
     隐藏只是 Excel 的展示属性，隐藏的业务 Sheet 仍可以由用户绑定与导入。
     """
     return str(profile["instruction_sheet"])
-
-
-def code_prefix_of_sheet_role(profile: dict[str, Any], sheet_role: str) -> str:
-    """一张 Sheet 的编号前缀（例如 `RSK-`）。
-
-    跨表引用填写编号时靠它判断指向：`关联风险` 列里出现 `RSK-003` 就一定是风险编号，
-    出现 `FLD-012` 就一定是字段编号；填写名称时按当前列允许的对象做精确匹配。
-    """
-    return str(sheet_definition(profile, sheet_role)["code_prefix"])
-
-
-def sheet_roles_of_prefix(profile: dict[str, Any]) -> dict[str, str]:
-    """编号前缀 → Sheet 角色。前缀重复时明确报错（两张表共用前缀会让引用无法判定）。"""
-    result: dict[str, str] = {}
-    for sheet in profile["sheets"]:
-        prefix = str(sheet["code_prefix"])
-        if prefix in result:
-            raise BusinessError(
-                "UNIFIED_PROFILE_INVALID",
-                f"编号前缀“{prefix}”被多张 Sheet 声明（{result[prefix]} / {sheet['sheet_role']}），"
-                "跨表引用将无法判断指向",
-                status_code=500,
-                details={"code_prefix": prefix},
-            )
-        result[prefix] = str(sheet["sheet_role"])
-    return result
 
 
 def role_of_legacy_role(

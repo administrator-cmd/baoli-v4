@@ -20,13 +20,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 from ..currency import canonical_currency
 from .expression import (
     Binary,
     Expression,
-    Identifier,
-    NumberLiteral,
     Unary,
     ast_to_payload,
     identifiers,
@@ -40,19 +38,6 @@ from .schema import (
     assert_bands_disjoint,
 )
 
-
-# 允许出现在算式里的期间前缀。它们不是参数名的一部分，而是**期间声明**。
-# 之所以要在这里显式列出而不是靠字符串切分：切分规则一旦宽松，
-# 「本期营业收入」与「营业收入本期」都会被切出同一个名字，而后者可能只是某个
-# 真实存在的科目名。列不出来就报错，让人工确认。
-PERIOD_PREFIXES: tuple[tuple[str, str], ...] = (
-    ("本期", "CURRENT"),
-    ("上期", "PRIOR"),
-    ("期初", "OPENING"),
-    ("期末", "CLOSING"),
-    ("年初", "OPENING"),
-    ("年末", "CLOSING"),
-)
 
 # 单位换算表**刻意留空**：系统不做单位换算。
 # 这不是遗漏——换算需要业务确认口径（万元与元、千元与元），
@@ -99,22 +84,6 @@ def _location(rule_code: str, column: str) -> str:
 def _expression_hash(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _collect_references(node: Expression) -> list[Identifier]:
-    result: list[Identifier] = []
-
-    def visit(item: Expression) -> None:
-        if isinstance(item, Identifier):
-            result.append(item)
-        elif isinstance(item, Unary):
-            visit(item.operand)
-        elif isinstance(item, Binary):
-            visit(item.left)
-            visit(item.right)
-
-    visit(node)
-    return result
 
 
 def _validate_parameter_references(

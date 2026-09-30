@@ -279,3 +279,5 @@ def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONRes
         request_id=request_id,
     )
     return JSONResponse(status_code=exc.status_code, content=body.model_dump())
+
+

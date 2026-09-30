@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..domain import field_strategy
 from ..domain.audit_vocab import SEAL_ARTIFACT_SOURCE, declared_artifact_source
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from ..integrations.llm.gateway import call_json
 
 
@@ -74,7 +74,7 @@ def extraction_payload(
 
     字段按「产物来源」声明分组：
 
-      - `fields`：未声明来源的常规字段，可选项仍是本次全部产物，行为与原来一致；
+      - `fields`：未声明来源的常规字段，可选项是本次全部产物；
       - `seal_source_fields`：声明产物来源=印章识别的字段，只提供 `seal_artifacts`。
         从输入上限定这些字段只能取自印章识别结果：模型拿不到正文产物，也就无法
         拿合同正文里的名称充当印章主体。响应校验再核对一次证据来源。

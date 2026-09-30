@@ -50,11 +50,6 @@ const activeOperator = ref("FIELD_EQUAL");
 
 /**
  * 检查方式与可选检查阶段：由后端能力目录派生，不在页面维护第二份名单。
- *
- * 此前这里硬编码了 7 个算子，后端实际有 12 个：打开一条已导入的
- * DECIMAL_SUM_COMPARE（金额加总比较）规则时，下拉框里根本找不到它的当前取值，
- * 用户一保存就把这条规则改成了别的检查方式。
- *
  * 目录读取失败时**不**回退到本地默认名单：那会让页面显示一份后端并不支持的能力集合。
  * 此时明确报错并禁用表单，规则仍可在规则列表里查看。
  */
@@ -181,8 +176,6 @@ const isAddends = computed(() => form.operator === "DECIMAL_SUM_COMPARE");
 const isComparison = computed(() => needsFieldInputs.value && !isLlmValidate.value);
 const isLlmValidate = computed(() => currentCapability.value?.execution === "LLM_VALIDATE");
 const isRisk = computed(() => currentCapability.value?.execution === "RISK_TRIGGER");
-/** 文件质量检查：表单按它切换分支，检查项目等口径见下面的 qualityParameters。 */
-const isFileQuality = computed(() => currentCapability.value?.execution === "FILE_QUALITY_CHECK");
 /**
  * 单输入：形态声明为「一个字段」的能力（非空、条款存在性），
  * 以及文件内部校验的智能判断（它只针对同一份材料里的一段约定）。

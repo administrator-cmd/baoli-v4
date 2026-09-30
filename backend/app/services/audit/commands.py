@@ -10,10 +10,10 @@ checkpoint 存储暂时不可达只让本次操作失败（可重试），不改
 import logging
 from ...config import get_settings
 from ...domain.identity import public_no
-from ...errors import BusinessError, exception_summary
+from ...common.exceptions import BusinessError, exception_summary
 from ...graphs.audit_graph import resume_audit_confirmation, resume_audit_manual_review
 from . import flow as audit_flow
-from ...models import (
+from ...entities import (
     AuditTask,
     DocumentUpload,
     ManualReview,
@@ -22,7 +22,7 @@ from ...models import (
     TaskDocument,
     WorkflowCheckpoint,
 )
-from ...schemas import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest, RecoverFailedNodeRequest
+from ...dto import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest, RecoverFailedNodeRequest
 from ..task_lookup import task_or_404
 from .artifacts import _artifact_for_upload, _ocr_job_metadata, _submit_authorized_ocr_retry
 from .evidence import _evidence_snapshot, _evidence_snapshots
@@ -35,7 +35,7 @@ from ..background_service import assert_no_active_operation
 from ..operation_log_service import find_by_idempotency, record_operation, require_idempotent_replay
 from ..operation_types import OBJECT_AUDIT_TASK
 from .reviews import _current_review_batch, _decision_command_no, _invalidate_retry_results, _invalidate_validation_results, _next_node_for_recalculation, _review_hash, _validate_review_payloads
-from .shared import _normalize_field_value, _scenario, _task_field_definitions, _task_manifest
+from .shared import _normalize_field_value, _task_field_definitions, _task_manifest
 from .state import _node_codes_of_type, _save_flow_checkpoint, _scenario_nodes, _set_task_checkpoint, _single_node_code_of_type
 from datetime import UTC, datetime, timedelta
 from decimal import InvalidOperation

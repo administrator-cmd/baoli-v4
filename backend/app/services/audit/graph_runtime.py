@@ -12,9 +12,9 @@
 - `STORAGE_UNAVAILABLE`：连接或读取异常 → 只是本次操作失败，**不能**把任务判成失败
   并丢掉等待点。"""
 
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 from ...graphs.audit_graph import CHECKPOINT_STORAGE_UNAVAILABLE, probe_interrupt
-from ...models import AuditTask, WorkflowCheckpoint
+from ...entities import AuditTask, WorkflowCheckpoint
 from ..task_lookup import task_or_404
 from .state import _fail_unrecoverable_checkpoint, _flow_checkpoint_state, _graph_namespace, _task_checkpoint
 from sqlalchemy import select, update

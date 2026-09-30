@@ -36,7 +36,7 @@
 -- 重要约束：
 --   - 应用启动与请求过程只检查连接和表结构，绝不执行 DDL、不调用 create_all()、
 --     不调用 saver.setup()、不自动修表。
---   - 表结构以 backend/app/models.py 为准，本文件必须与 ORM 保持一致。
+--   - 表结构以 backend/app/entities/ 下的 ORM 定义为准，本文件必须与 ORM 保持一致。
 --
 -- 业务主流程（表与状态取值都按这条链组织，任何一步都不得跳过）：
 --   场景草稿（scenario_draft*，可编辑、不生效）
@@ -392,7 +392,7 @@ ON DUPLICATE KEY UPDATE
 
 -- 场景配置草稿：每个场景一条。revision_no 是草稿修订号（材料/字段/规则/报告配置的
 -- 每次写入都会递增），发布必须携带页面看到的修订号；source 记录草稿来源
--- （FORM=页面直接建立；EXCEL=从导入发布派生；COPY=复制场景；REVISION=基于某个
+-- （FORM=页面直接建立；EXCEL=由规则库导入写入；COPY=复制场景；REVISION=基于某个
 -- 已发布版本创建的修订），base_version_no 记录它基于的版本号（没有则为 NULL——
 -- 不伪造“第 0 版”）。
 CREATE TABLE IF NOT EXISTS scenario_draft (
@@ -404,7 +404,7 @@ CREATE TABLE IF NOT EXISTS scenario_draft (
     revision_no INT NOT NULL DEFAULT 0,
     source VARCHAR(20) NOT NULL DEFAULT 'FORM',
     base_version_no INT NULL,
-    -- 配置草稿的来源格式版本：由导入发布 / 版本修订 / 复制从原始 manifest 继承，
+    -- 配置草稿的来源格式版本：由规则库导入 / 版本修订 / 复制从原始 manifest 继承，
     -- 发布时按它导出；NULL 表示页面表单新建、没有历史格式来源。
     profile_version VARCHAR(40) NULL,
     -- 最近一次保存时草稿还不能发布的原因（编译未通过：缺规则、缺识别类型等）。
@@ -1343,7 +1343,8 @@ CREATE TABLE IF NOT EXISTS agent_tool_call (
     -- 非空：本表只承载 Agent 工具调用，缺失评估身份说明调用来源不合法，必须显式失败
     -- （见 services/agent_tool_ledger.py 的 require 校验），不允许写一条无归属的记录。
     evaluation_id VARCHAR(80) NOT NULL,
-    -- 规则实例：同一条规则定义作用于不同材料组合时是不同实例，结果不能互相覆盖。非空理由同上。
+    -- 规则实例：同一条规则定义作用于不同材料组合时是不同实例，结果不能互相覆盖。
+    -- 非空：工具调用必须归属一条已冻结输入范围的规则实例，不能生成无业务归属的调用记录。
     rule_instance_id VARCHAR(160) NOT NULL,
     -- 模型给出的调用标识。唯一约束建在它上面（见下方 UNIQUE）。
     tool_call_id VARCHAR(120) NOT NULL,

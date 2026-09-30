@@ -1,6 +1,6 @@
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class WorkbookCell(BaseModel):
@@ -53,13 +53,3 @@ class WorkbookIR(BaseModel):
     schema_key: str | None = None
     schema_version: str | None = None
     sheets: list[WorkbookSheet]
-
-
-def workbook_source_index(ir: WorkbookIR) -> dict[str, dict[str, Any]]:
-    """工作表 key → {名称, 行号→列集合, 行号→单元格}，供来源追溯按坐标还原原文。"""
-    result: dict[str, dict[str, Any]] = {}
-    for sheet in ir.sheets:
-        rows = {row.row_no: set(row.cells) for row in sheet.rows}
-        values = {row.row_no: row.cells for row in sheet.rows}
-        result[sheet.sheet_key] = {"name": sheet.name, "rows": rows, "values": values}
-    return result

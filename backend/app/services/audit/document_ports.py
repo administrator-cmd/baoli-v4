@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ...domain.external_artifacts import ExternalServiceResult, OcrJobSubmission
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 
 
 class DocumentServicePort(Protocol):

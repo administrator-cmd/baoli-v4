@@ -1,8 +1,6 @@
 """审核节点注册表：能力类型 → 节点实现。
 
-节点分发与节点清单此前分处两处维护，新增一种节点要在两个地方改，漏一处就是
-「能发布、运行时才报节点不受支持」。本模块把这两件事收敛到一处：
-**能力类型 → handler** 的映射，`flow._dispatch` 只查表，不再写分支。
+本模块统一维护**能力类型 → handler** 的映射，`flow._dispatch` 只查注册表。
 
 为什么 handler 由调用方注入
 --------------------------
@@ -19,10 +17,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 # 节点能力类型。它描述**这个节点做什么**，与节点实例码（`node_code`）是两件事：
@@ -37,7 +34,7 @@ NODE_TYPE_MANUAL_REVIEW = "MANUAL_REVIEW"
 NODE_TYPE_RISK_RATING = "RISK_RATING"
 NODE_TYPE_REPORT_OUTPUT = "REPORT_OUTPUT"
 
-# 节点类型 → 业务中文名。页面展示与错误提示共用这一份，不再各写一遍。
+# 节点类型 → 业务中文名，供页面展示与错误提示共用。
 NODE_TYPE_LABELS: dict[str, str] = {
     NODE_TYPE_MATERIAL_CHECK: "材料检查",
     NODE_TYPE_DOCUMENT_PREPARE: "文件处理",
@@ -49,19 +46,6 @@ NODE_TYPE_LABELS: dict[str, str] = {
     NODE_TYPE_RISK_RATING: "风险评定",
     NODE_TYPE_REPORT_OUTPUT: "报告输出",
 }
-
-# 旧场景的固定节点序列。旧 manifest 里 `nodes` 是 8 个固定节点，
-# 它们编译成一条线性依赖链，执行语义与旧版本完全一致。
-LEGACY_NODE_SEQUENCE: tuple[tuple[str, str], ...] = (
-    (NODE_TYPE_MATERIAL_CHECK, "材料检查"),
-    (NODE_TYPE_DOCUMENT_PREPARE, "文件处理"),
-    (NODE_TYPE_FIELD_EXTRACTION, "字段抽取"),
-    (NODE_TYPE_INTERNAL_VALIDATE, "文件内部校验"),
-    (NODE_TYPE_CROSS_VALIDATE, "文件交叉校验"),
-    (NODE_TYPE_MANUAL_REVIEW, "人工复核"),
-    (NODE_TYPE_RISK_RATING, "风险评定"),
-    (NODE_TYPE_REPORT_OUTPUT, "报告输出"),
-)
 
 # 会走「规则评估 Agent」的节点能力类型。这是**唯一**的声明处：
 # `services.audit.flow` 据此决定执行模式，`domain.tool_catalog` 据此判定一个工具
@@ -97,13 +81,6 @@ class NodeHandler(Protocol):
         manifest: dict[str, Any],
         execution: Any,
     ) -> dict[str, Any]: ...
-
-
-@dataclass(frozen=True)
-class RegisteredNode:
-    node_type: str
-    label: str
-    handler: NodeHandler
 
 
 _HANDLERS: dict[str, NodeHandler] = {}
@@ -144,13 +121,6 @@ def handler_for(node_type: str) -> NodeHandler:
             details={"node_type": node_type, "registered": sorted(_HANDLERS)},
         )
     return handler
-
-
-def registered_node_types() -> tuple[str, ...]:
-    """已注册执行实现的能力类型（供启动自检使用）。"""
-    return tuple(sorted(_HANDLERS))
-
-
 def node_type_label(node_type: str) -> str:
     """节点能力类型的中文名；未知类型原样返回编码。"""
     return NODE_TYPE_LABELS.get(node_type, node_type)

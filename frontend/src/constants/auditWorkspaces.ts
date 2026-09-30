@@ -27,9 +27,8 @@ export type DetailTab =
 /**
  * 能力类型 → 工作区定义。
  *
- * 这是**展示方式的通用表**：同一能力类型在任何场景下都用同一种方式展示
- * （需求 34「展示方式通用」）。哪些工作区真的出现，由当前任务配置的节点决定
- * （需求 31/33「展示内容动态」），因此这不是一份「固定七个阶段」的清单。
+ * 这是**展示方式的通用表**：同一能力类型在任何场景下都用同一种方式展示。
+ * 哪些工作区真的出现，由当前任务配置的节点决定，因此这不是固定阶段清单。
  */
 export interface AuditWorkspaceDefinition {
   /** 稳定标识。 */
@@ -80,7 +79,7 @@ export interface AuditWorkspace extends AuditWorkspaceDefinition {
  * 按当前任务真实配置的节点算出工作区清单。
  *
  * 只返回当前场景**实际配置**的节点对应的那个工作区：未被本场景选中的能力类型
- * 不出现（需求 31/34）。停用的节点不出现——它不进入执行范围。
+ * 不出现。停用的节点不进入执行范围。
  * 同一能力类型有多个实例时每个实例各占一个工作区，页面据此分开展示，
  * 不再把两条检查合进一张卡片。
  */
@@ -110,21 +109,9 @@ export function workspacesOfNodes(nodes: readonly DisplayNode[] | null | undefin
 
 /**
  * 人工复核不是上面这些工作区之一：它是横跨流程的等待点，由「人工复核」页签承载。
- * 当前节点是人工复核时没有对应工作区（workspaceOfNode 返回 null），
  * 页签由审计任务详情页按 waiting-review 状态单独决定。
  */
 export const manualReviewNodeType = "MANUAL_REVIEW";
-
-/** 节点实例码 → 工作区；没有对应工作区的节点（含人工复核）返回 null。 */
-export function workspaceOfNode(
-  workspaces: readonly AuditWorkspace[],
-  nodeCode: string | null | undefined,
-): AuditWorkspace | null {
-  if (!nodeCode) {
-    return null;
-  }
-  return workspaces.find((item) => item.nodeCode === nodeCode) ?? null;
-}
 
 export const detailTabs: readonly DetailTab[] = [
   "materials",

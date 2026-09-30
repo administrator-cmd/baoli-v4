@@ -44,7 +44,7 @@ tool_catalog → operators` 会把执行层拉进领域层，与 `domain` 零 se
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from . import capabilities, file_quality, node_registry
@@ -143,8 +143,7 @@ _TOOL_LAYER_ERROR_CODES: tuple[str, ...] = (
     "TOOL_ARGUMENTS_INVALID",
 )
 
-# 输入的固定契约：模型给身份引用，系统按身份取真实取值。
-# 与 operators.registry.INPUT_KEYS 同口径——那边是执行端实际读取的键。
+# 工具输入只提交身份引用，真实取值由系统按身份读取。
 _INPUT_ITEM_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -419,21 +418,6 @@ class ToolSpec:
             "policy_version": TOOL_POLICY_VERSION,
         }
 
-    def to_openai_tool(self) -> dict[str, Any]:
-        """OpenAI Chat Completions 的 `tools` 数组元素。
-
-        描述里同时给出参数口径与输入数量要求：模型据此决定调用哪个工具、
-        传几个输入引用。**不包含**业务取值——金额与日期由系统按身份解析。
-        """
-        return {
-            "type": "function",
-            "function": {
-                "name": self.tool_id,
-                "description": self.description,
-                "parameters": self.input_schema,
-            },
-        }
-
     def to_payload(self) -> dict[str, Any]:
         return {
             "tool_id": self.tool_id,
@@ -508,7 +492,7 @@ def _input_count_text(capability: capabilities.Capability) -> str:
     }.get(capability.input_kind, capability.input_kind)
 
 
-def _description_of(capability: capabilities.Capability, spec: dict[str, Any]) -> str:
+def _description_of(capability: capabilities.Capability) -> str:
     """工具描述：能力用途 + 输入口径 + 关键约束。
 
     描述里写清「输入是身份引用，不是业务取值」，避免模型把金额或日期抄进参数——
@@ -597,7 +581,7 @@ def _build_operator_tool(capability: capabilities.Capability) -> ToolSpec:
         tool_id=capability.capability_id,
         version=capability.version,
         label=capability.label,
-        description=_description_of(capability, schema),
+        description=_description_of(capability),
         input_schema={
             "type": "object",
             "properties": {"inputs": schema["inputs"], "parameters": schema["parameters"]},
@@ -608,7 +592,7 @@ def _build_operator_tool(capability: capabilities.Capability) -> ToolSpec:
         handler_ref=handler_ref if callable_now else None,
         allowed_nodes=capability.nodes,
         allowed_scenes=None,
-        # 算子只读字段事实：产物依赖由准备输入的那一步负责（阶段四），
+        # 算子只读字段事实：产物依赖由准备输入的步骤负责，
         # 这里如实声明为空，不假装工具自己会去取产物。
         required_evidence=(),
         side_effect=False,
@@ -756,57 +740,6 @@ def tool_spec(tool_id: str | None) -> ToolSpec | None:
     if not isinstance(tool_id, str):
         return None
     return TOOL_SPECS.get(tool_id)
-
-
-def callable_tool_specs() -> tuple[ToolSpec, ...]:
-    """当前**能被真实执行**的工具，按标识排序。
-
-    包含节点级实现与 Agent 可选择两类。要给模型生成 `tools` 参数时用
-    `agent_tool_specs()`——两者不是同一个集合。
-    """
-    return tuple(spec for spec in TOOL_SPECS.values() if spec.implemented)
-
-
-def agent_tool_specs() -> tuple[ToolSpec, ...]:
-    """**模型可以选择**的工具，按标识排序。
-
-    这是 Agent manifest 与模型 `tools` 参数的唯一来源：不可调用的工具、
-    以及只由确定性节点执行的工具都不进这个集合——模型不该看到一个它调用不了、
-    或调用了也进不了主链路的选项。
-    """
-    return tuple(spec for spec in TOOL_SPECS.values() if spec.agent_selectable)
-
-
-def to_openai_tools(*, tool_ids: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    """模型的 `tools` 参数（只含 Agent 可选择的工具）。
-
-    `tool_ids` 非空时只输出其中**Agent 可选择**的工具。未注册、不可调用或
-    非 Agent 可选择的标识会被**明确报出**，不静默丢弃：静默丢弃会让
-    「模型本该能用这个工具」变成它自己猜不出来，也会掩盖目录与调用方的不一致。
-
-    注意：Agent 主链路**不**用本函数构造请求（见 `services.audit.flow._openai_tools`），
-    它读的是发布期冻结的完整工具定义。本函数供目录展示与尚未冻结定义的新发布使用。
-    """
-    specs = agent_tool_specs()
-    if tool_ids is None:
-        return [spec.to_openai_tool() for spec in specs]
-    by_id = {spec.tool_id: spec for spec in specs}
-    rejected: list[str] = []
-    selected: list[ToolSpec] = []
-    for tool_id in tool_ids:
-        spec = by_id.get(tool_id)
-        if spec is None:
-            rejected.append(tool_id)
-            continue
-        selected.append(spec)
-    if rejected:
-        raise BusinessError(
-            "TOOL_NOT_AGENT_SELECTABLE",
-            "以下工具不是 Agent 可选择的工具，不能进模型的 tools 参数："
-            + "、".join(f"“{item}”" for item in sorted(set(rejected))),
-            details={"tools": sorted(set(rejected))},
-        )
-    return [spec.to_openai_tool() for spec in selected]
 
 
 def catalog_payload() -> list[dict[str, Any]]:

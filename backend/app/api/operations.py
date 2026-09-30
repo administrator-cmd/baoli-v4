@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..schemas import OperationAcceptedResponse
+from ..vo import OperationAcceptedResponse
 from ..services.background_service import operation_by_no, operation_view
 
 

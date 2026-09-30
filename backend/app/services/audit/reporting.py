@@ -17,8 +17,8 @@ from ...domain.audit_vocab import LEGACY_TYPE_MISMATCH, MATERIAL_TYPE_REJECTED, 
 from ...domain.identity import public_no
 from ...domain.manifest import NODE_DEFINITIONS, rule_node_type_of
 from .state import _node_codes_of_type
-from ...errors import BusinessError
-from ...models import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
+from ...common.exceptions import BusinessError
+from ...entities import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
 from .evidence import _fact_evidence_suffix, _quote_check_of
 from .facts import _current_field_fact_pairs, _input_trace
 from .shared import BASIS_TYPE_LABELS, LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _current_uploads, _material_names, _scenario
@@ -42,7 +42,6 @@ def _render_report_groups(
     """
     material_names = _material_names(manifest)
     field_defs = {item["field_key"]: item for item in manifest["fields"]}
-    field_names = {item["field_key"]: item["name"] for item in manifest["fields"]}
     current_pairs = _current_field_fact_pairs(db, task)
     facts = {key: pair[0] for key, pair in current_pairs.items()}
     fact_statuses = {key: pair[1].status for key, pair in current_pairs.items()}
@@ -162,8 +161,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         # 本任务没有选入报告生成规则：**显式跳过**，不报错。
         #
         # 方案是用户自己的范围选择——勾了什么就跑什么。没勾报告生成就没有报告，
-        # 这正是这份方案表达的意思，不该让任务在最后一个节点整个失败
-        # （原实现报 REPORT_RULE_MISSING 409）。
+        # 这正是这份方案表达的意思，不该让任务在最后一个节点整个失败。
         # 跳过必须写明原因：**「没有报告」不等于「审核通过」**，也不等于
         # 「报告生成了但是空的」。因此三个信号与正常路径同一口径，report_generated=False。
         return {
@@ -1112,7 +1110,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     )
     return report_result
 
-def _configured_format_support(db: Session, task: AuditTask) -> list[dict[str, Any]]:
+def _configured_format_support(task: AuditTask) -> list[dict[str, Any]]:
     """任务绑定版本里声明的报告输出格式与各自的真实支持状态。
 
     声明（业务期望）与实现（系统能否真的产出该格式文件）必须分开表达：

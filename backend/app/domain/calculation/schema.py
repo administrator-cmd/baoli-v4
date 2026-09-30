@@ -17,13 +17,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ...errors import BusinessError
+from ...common.exceptions import BusinessError
 
 
 # 枚举
 
 # 计算类型。它描述这条计算**产出什么形态的值**，决定判定与展示方式。
-# 首期只有这几类真实样本用得上的；新增类型必须同时补上判定口径，不能先加类型后补语义。
+# 仅声明已有明确判定口径的类型；新增类型必须同时补上判定语义。
 CalculationType = Literal[
     "RATIO",       # 比率：两个金额相除，结果是无量纲或有单位比率
     "AMOUNT",      # 金额：加减得到的结果金额
@@ -54,15 +54,8 @@ PERIOD_SCOPE_LABELS: dict[str, str] = {
 # 合并口径。同一科目在合并报表与母公司报表里是不同的数，不能混用。
 StatementScope = Literal["CONSOLIDATED", "PARENT"]
 
-STATEMENT_SCOPE_LABELS: dict[str, str] = {
-    "CONSOLIDATED": "合并报表",
-    "PARENT": "母公司报表",
-}
-
-# 主体范围。首期只支持单一主体口径，多主体合并取数不在首期范围内。
+# 主体范围当前只支持单一主体口径，不支持多主体合并取数。
 EntityScope = Literal["SELF"]
-
-ENTITY_SCOPE_LABELS: dict[str, str] = {"SELF": "本主体"}
 
 # 结果类型。AMOUNT 与 DECIMAL 都是「数值」，但业务含义不同：AMOUNT 是金额
 # （带单位与币种），DECIMAL 是无量纲数值（例如倍数、天数）。分开表达是为了让
@@ -78,11 +71,6 @@ ComparisonBasis = Literal["RESULT", "ABS_RESULT"]
 # “预警”等词没有稳定的系统语义，运行期不能据此猜测通过或异常。
 CalculationResultStatus = Literal["PASSED", "ABNORMAL", "PENDING_REVIEW"]
 
-COMPARISON_BASIS_LABELS: dict[str, str] = {
-    "RESULT": "计算结果",
-    "ABS_RESULT": "计算结果的绝对值",
-}
-
 # 容差口径。它决定「上下界是绝对值还是相对值」，是**必须显式声明**的业务口径：
 # `0.5%` 与 `0.5` 在同一个判定里含义完全不同，而从数值本身看不出来。
 #   ABSOLUTE  上下界是绝对数值（例如金额差 0.5 元）
@@ -92,7 +80,6 @@ ToleranceKind = Literal["NONE", "ABSOLUTE", "PERCENT"]
 
 # 业务配置状态。与材料/字段/规则同一套三态口径。
 CONFIG_STATUS_VALUES = ("CLEAR", "PENDING", "DISABLED")
-CONFIG_STATUS_LABELS = {"CLEAR": "已明确", "PENDING": "待确认", "DISABLED": "停用"}
 
 # 计算结果的运行状态。它与规则结果状态同一口径（见 domain.capabilities.RULE_STATUSES），
 # 但只取计算真正可能出现的几种，不复制整份集合。

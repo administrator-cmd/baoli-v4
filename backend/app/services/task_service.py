@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..errors import BusinessError, exception_summary
+from ..common.exceptions import BusinessError
 from .audit.interrupt import start_audit_interrupt
 from .audit.recovery import can_recover_failed_node
 from .audit.facts import _current_field_fact_pairs
@@ -19,7 +19,7 @@ from .audit.facts import _current_field_fact_pairs
 # 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
 from .audit.reviews import _current_review_batch, _review_hash
 from .audit.state import _node_codes_of_type
-from ..models import (
+from ..entities import (
     AuditPlan,
     AuditTask,
     BackgroundOperation,
@@ -36,7 +36,6 @@ from ..models import (
     TaskFieldValue,
     WorkflowCheckpoint,
 )
-from ..schemas import CreateTaskRequest
 from . import rag_service
 from .background_service import assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
@@ -46,7 +45,7 @@ from ..domain import fact_snapshot, workflow_dag
 from ..integrations.http_services import list_material_types
 from .operation_types import OBJECT_AUDIT_TASK
 from .operation_log_service import record_operation
-from .task_lookup import scenario_or_404, task_or_404
+from .task_lookup import task_or_404
 from .storage_service import DOCUMENT_EXTENSIONS, save_upload
 
 
@@ -219,25 +218,6 @@ def _verified_material_type(declared: str) -> str:
             details={"material_type": material_type, "supported": sorted(supported)},
         )
     return material_type
-
-
-def create_task(
-    db: Session,
-    scenario_code: str,
-    version_no: int,
-    request: CreateTaskRequest,
-) -> AuditTask:
-    """旧入口已收回：新审核任务只能从已发布的方案版本创建。
-
-    任务必须绑定固定的方案版本（含场景版本引用与执行快照），直接按场景版本建任务
-    会绕过方案的范围冻结。这里明确报错并给出修正入口，不静默降级。
-    """
-    raise BusinessError(
-        "TASK_CREATE_REQUIRES_PLAN",
-        "新审核任务必须从已启用的方案创建：请先基于已发布场景建立方案，再从方案创建任务",
-        status_code=409,
-        details={"scenario_code": scenario_code, "version_no": version_no},
-    )
 
 
 def create_task_from_plan(
@@ -900,9 +880,8 @@ def _task_display_structure(
 ) -> dict[str, Any]:
     """当前任务的**展示结构**：只包含本场景真实选中的节点、Sheet 与字段。
 
-    需求 31~34 要求「展示方式通用、展示内容动态」：前端提供通用组件（文本、金额、
-    日期、表格、审核结果），具体展示什么由后端按当前场景配置返回，页面不得按场景名
-    或固定条件分支写死内容。
+    前端提供通用组件（文本、金额、日期、表格、审核结果），具体展示什么由后端按
+    当前场景配置返回，页面不得按场景名或固定条件分支写死内容。
 
     因此这里返回的是**数据**而不是文案：
     - `nodes`：本任务真实配置的节点实例（实例码 + 能力类型 + 顺序 + 依赖），
@@ -1133,7 +1112,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     extraction_finished = any(
         executions[code].status == "SUCCEEDED" for code in extraction_codes if code in executions
     )
-    # 新版 manifest 把每个字段的抽取归属冻结在节点契约里。字段状态必须看自己的
+    # manifest 把每个字段的抽取归属冻结在节点契约里。字段状态必须看自己的
     # 归属节点；只要任意一个抽取节点完成就把所有尚未抽取字段标成 NOT_EXECUTED，
     # 会把后续节点尚未开始的字段提前显示成已执行失败。
     extraction_owner_by_field: dict[str, str] = {}
@@ -1274,7 +1253,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         # 「当前这个节点是不是未配置的类别」——拿实例码与类型列表交叉比较恒为假。
         "unconfigured_check_node_types": unconfigured_node_types,
         "unconfigured_check_node_codes": unconfigured_node_codes,
-        # 展示结构（需求 31~34）：**由当前任务的场景配置动态决定**，前端按它通用渲染。
+        # 展示结构由当前任务的场景配置动态决定，前端按它通用渲染。
         # 页面不按场景名称或固定条件分支写死展示内容；这里给出本任务真实使用的
         # 节点、Sheet、字段及其数据，统一协议里未被本场景选中的内容不出现。
         "display": _task_display_structure(task, manifest, nodes),
@@ -1295,8 +1274,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             for item in documents
         ],
         "fields": field_view,
-        # 可主动纠错的字段事实清单（供页面提供纠错入口）。注意：AuditTaskResponse 未声明该键，
-        # 集成人需在 schemas.py 补字段后前端才能从顶层读取；当前前端可从 fields[] 的 field_key/material_key 取。
+        # 可主动纠错的字段事实清单（供页面提供纠错入口）。
         "field_correction_candidates": field_correction_candidates,
         "rules": [
             {

@@ -1,9 +1,7 @@
 from contextlib import asynccontextmanager
 import logging
 from logging.handlers import RotatingFileHandler
-from uuid import uuid4
-
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,7 +13,7 @@ from .domain import unified_profile
 from .integrations import http_services
 from .services.audit import document_ports, flow as audit_flow
 from .database import SessionLocal, check_database_connection
-from .errors import (
+from .common.exceptions import (
     BusinessError,
     business_error_handler,
     http_error_handler,
@@ -24,6 +22,7 @@ from .errors import (
 )
 from .runtime.checkpoint import check_checkpoint_tables
 from .runtime.schema_check import verify_schema
+from .middleware.request_context import attach_request_id
 from .services.audit import recover_interrupted_executions
 from .services.background_service import recover_interrupted_operations
 
@@ -65,10 +64,9 @@ def _configure_logging(level_name: str) -> None:
 
 
 settings = get_settings()
-# 统一模板协议从配置注入：domain 不读全局配置，由启动处喂给它。
-# 系统只有这一份 Profile——旧的 rulebook_profiles 与 scene_profiles 双轨已删除。
+# 统一模板协议从配置注入，domain 不直接读取全局配置。
 unified_profile.configure_unified_profile(settings.resolved_unified_profile_path)
-# 审核节点执行实现注册进节点注册表：flow 的分发改为查表，不再写 if/elif。
+# 注册审核节点执行实现。
 audit_flow.register_node_handlers()
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
 document_ports.register_document_service(http_services)
@@ -122,12 +120,7 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    request.state.request_id = request.headers.get("X-Request-ID") or uuid4().hex
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request.state.request_id
-    return response
+app.middleware("http")(attach_request_id)
 
 
 app.add_exception_handler(BusinessError, business_error_handler)

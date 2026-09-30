@@ -1,5 +1,5 @@
 import type { ImportSheet } from "@/api/contracts";
-import type { ProfileSheet } from "@/api/imports";
+import type { ProfileSheet } from "@/api/contracts";
 
 /**
  * Sheet 绑定下拉里的一项：节点**实例码** + 展示名。

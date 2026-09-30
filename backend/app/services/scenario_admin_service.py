@@ -1,4 +1,4 @@
-"""审核场景的后台管理：基本资料、配置草稿、发布、版本与对比。
+"""审核场景的后台管理：基本资料、配置草稿与发布。
 
 业务模型：
 - 场景身份 = scenario_template（名称/业务类型/说明/启停/逻辑删除 + 版本计数器）。
@@ -6,7 +6,7 @@
   发布必须携带当前修订号。
 - 发布 = 用 compile_form_manifest 把草稿编译成与导入流程同构的 manifest，
   形成不可覆盖的 scenario_version（source=FORM/REVISION），并写入关系投影。
-- 已发布版本不可修改；修改必须"基于此版创建修订"，在草稿上改完再发新版本。
+- 已发布版本是不可变的执行快照；后续修改当前草稿并发布新快照。
 - 页面来源不伪造 Excel 作业与工作表行号：import_job_id 为空，source 明确标为页面来源。
 
 所有写操作都在同一事务内追加 operation_log；删除材料/字段前先返回引用清单，
@@ -21,13 +21,19 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
-from ..domain import capabilities, currency, field_strategy, financial_report, manifest as manifest_module, node_rulebook, scenario_schema, unified_profile
+from ..domain import (
+    currency,
+    field_strategy,
+    financial_report,
+    manifest as manifest_module,
+    node_rulebook,
+    scenario_schema,
+    unified_profile,
+)
 from ..domain.audit_vocab import SCOPE_NOT_APPLICABLE
-from ..domain.node_registry import NODE_TYPE_LABELS, legacy_node_type_of
+from ..domain.node_registry import legacy_node_type_of
 from ..domain.manifest import (
     FORM_VALUE_TYPES,
-    NODE_DEFINITIONS,
     OPERATOR_NODE_CONSTRAINTS,
     SOURCE_NODE_RULE_NODES,
     compile_form_manifest,
@@ -35,8 +41,8 @@ from ..domain.manifest import (
     manifest_scope_hash,
     validate_rule_parameters,
 )
-from ..errors import SAFE_DETAIL_KEYS, BusinessError
-from ..models import (
+from ..common.exceptions import SAFE_DETAIL_KEYS, BusinessError
+from ..entities import (
     AuditPlan,
     ScenarioDraft,
     ScenarioDraftField,
@@ -52,13 +58,13 @@ from ..models import (
     ScenarioVersion,
 )
 from ..domain.identity import public_no, stable_key
-from .operation_log_service import OBJECT_SCENARIO, record_operation
+from .operation_log_service import record_operation
+from .operation_types import OBJECT_SCENARIO
 from .template_registry_service import allocate_version
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_OPERATORS = manifest_module.SYSTEM_OPERATORS
-BUSINESS_OPERATORS = sorted(set(OPERATOR_NODE_CONSTRAINTS) - SYSTEM_OPERATORS)
 # 草稿字段允许的数据类型：与 manifest 的表单契约共用同一份定义，
 # 包含大写金额（03_字段 的「数据类型」下拉本来就有这一项）。
 DRAFT_VALUE_TYPES = FORM_VALUE_TYPES
@@ -70,14 +76,6 @@ FIELD_ARTIFACT_SOURCES = {"SEAL"}
 FIELD_PERIOD_SCOPES = ("CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", SCOPE_NOT_APPLICABLE)
 FIELD_STATEMENT_SCOPES = ("CONSOLIDATED", "PARENT", SCOPE_NOT_APPLICABLE)
 DRAFT_SOURCE_LABELS = {"FORM": "页面编辑", "EXCEL": "规则库导入", "COPY": "复制场景", "REVISION": "版本修订"}
-VERSION_SOURCE_LABELS = {
-    "IMPORT": "规则库导入",
-    "FORM": "页面编辑",
-    "COPY": "复制场景",
-    "REVISION": "版本修订",
-}
-
-
 def template_or_404(
     db: Session,
     scenario_code: str,
@@ -172,31 +170,13 @@ def _draft_rows(
     return list(nodes), list(sheets), list(materials), list(fields), list(rules), list(sections)
 
 
-def _node_instance_payloads(nodes: list[ScenarioDraftNode]) -> list[dict[str, Any]]:
-    """草稿节点实例 → 编译输入。
-
-    只带编译真正需要的字段：实例码、能力类型、名称、顺序、依赖、配置与启停。
-    依赖是**实例码**列表，编译期据此校验缺失依赖、自依赖、循环与顺序冲突。
-    """
-    return [
-        {
-            "node_code": item.node_code,
-            "node_type": item.node_type,
-            "name": item.name,
-            "sequence_no": item.sequence_no,
-            "depends_on": list(item.depends_on or []),
-            "config_json": item.config_json,
-            "enabled": item.enabled,
-        }
-        for item in nodes
-    ]
 
 
 def ensure_draft(db: Session, template: ScenarioTemplate) -> ScenarioDraft:
     """取得场景草稿；不存在时创建。
 
-    场景已有已发布版本时，新建草稿基于最新版本派生（source=REVISION，
-    base_version_no 记录来源版本）——这是明确的“创建修订”，不会覆盖任何东西；
+    场景已有已发布版本时，用最新快照初始化缺失的草稿（source=REVISION，
+    base_version_no 记录来源版本）；
     没有已发布版本时创建空草稿（source=FORM）。
     """
     draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == template.scenario_code))
@@ -227,27 +207,6 @@ def ensure_draft(db: Session, template: ScenarioTemplate) -> ScenarioDraft:
     return draft
 
 
-def _field_scope_of(field: dict[str, Any], key: str, label: str) -> str:
-    """已发布配置里字段的取数期间 / 报表口径。
-
-    历史 manifest 没有这两项：那时口径由**计算参数**声明，同一个字段可能被不同期间的
-    参数共用（本期与上期共用一个「营业收入」）。新协议下口径由字段自己声明、一个字段
-    只有一个口径，那个字段必须拆成两行——这是**业务决定**，系统无法从旧数据推断。
-    因此这里明确拒绝把这份配置带进新草稿，而不是替业务挑一个口径：
-    挑错会让计算静默取到另一期的数，而结果看起来完全正常。
-    """
-    value = field.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise BusinessError(
-            "LEGACY_FIELD_SCOPE_INCOMPLETE",
-            f"已发布版本里的字段“{field.get('name')}”没有声明{label}："
-            "新协议要求字段自己声明取数期间与报表口径；旧版本的口径记在计算参数上，"
-            "同一个字段可能被不同期间的参数共用，系统无法推断该保留哪一个。"
-            "请重新导入规则库或重新配置这些字段后再发布新版本",
-            status_code=409,
-            details={"field_key": field.get("field_key"), "column": key},
-        )
-    return value.strip()
 
 
 def _field_scope(payload: dict[str, Any], key: str, label: str, allowed: tuple[str, ...]) -> str:
@@ -276,28 +235,6 @@ def _item_ref() -> str:
     return public_no("ref")
 
 
-def ensure_draft_from_published_version(db: Session, version: ScenarioVersion) -> ScenarioDraft | None:
-    """导入发布后为尚无草稿的场景建立草稿（来源=EXCEL，基于本次发布的版本）。
-
-    已有草稿（用户正在编辑的配置）保持不动：导入发布不会覆盖页面上的未发布编辑。
-    """
-    existing = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == version.scenario_code))
-    if existing is not None:
-        return None
-    draft = ScenarioDraft(
-        scenario_code=version.scenario_code,
-        revision_no=1,
-        source="EXCEL",
-        base_version_no=version.version_no,
-        schema_key=version.schema_key,
-        schema_version=version.schema_version,
-        schema_json=version.schema_json,
-    )
-    db.add(draft)
-    db.flush()
-    _load_manifest_into_draft(db, draft, version.manifest_json)
-    db.flush()
-    return draft
 
 
 def _node_type_label(node_type: str) -> str:
@@ -322,7 +259,7 @@ def _origin_of_source_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_manifest_into_draft(db: Session, draft: ScenarioDraft, manifest: dict[str, Any]) -> None:
-    """用已发布版本的 manifest 替换草稿内容（创建修订 / 版本回填）。
+    """用最新已发布版本的 manifest 初始化缺失的草稿。
 
     稳定键原样保留：方案对固定场景版本的规则选择依赖这些键。
     系统规则（字段抽取、报告生成）不进入草稿——它们在发布时按同一规则重新派生。
@@ -725,129 +662,6 @@ def _draft_rule_view(
     }
 
 
-def version_config_view(db: Session, scenario_code: str, version_no: int) -> dict[str, Any]:
-    """某个已发布版本的配置视图（材料、字段、规则、报告章节）。"""
-    version = version_or_404(db, scenario_code, version_no)
-    manifest = version.manifest_json
-    material_names = {item["material_key"]: item["name"] for item in manifest.get("materials", [])}
-    field_map = {item["field_key"]: item for item in manifest.get("fields", [])}
-    rule_names = {item["rule_key"]: item["name"] for item in manifest.get("rules", [])}
-    materials = [
-        {
-            "material_key": item["material_key"],
-            "name": item["name"],
-            "required": bool(item.get("required")),
-            "description": str(item.get("description") or ""),
-            "origin": item.get("origin"),
-        }
-        for item in manifest.get("materials", [])
-    ]
-    fields = [
-        {
-            "field_key": item["field_key"],
-            "material_key": item["material_key"],
-            "material_name": material_names.get(item["material_key"]),
-            "name": item["name"],
-            "value_type": item["value_type"],
-            "unit": item.get("unit"),
-            "currency": item.get("currency"),
-            "required": bool(item.get("required")),
-            "instruction": str(item.get("instruction") or ""),
-            "origin": item.get("origin"),
-        }
-        for item in manifest.get("fields", [])
-    ]
-    rules = []
-    for rule in manifest.get("rules", []):
-        parameters = rule.get("parameters") if isinstance(rule.get("parameters"), dict) else {}
-        applicability = rule.get("applicability") if isinstance(rule.get("applicability"), dict) else {}
-        inputs = [
-            {
-                "field_key": entry.get("field_key"),
-                "material_key": entry.get("material_key"),
-                "field_name": field_map.get(entry.get("field_key"), {}).get("name"),
-                "material_name": material_names.get(entry.get("material_key")),
-                "value_type": field_map.get(entry.get("field_key"), {}).get("value_type"),
-                "unit": field_map.get(entry.get("field_key"), {}).get("unit"),
-                "currency": field_map.get(entry.get("field_key"), {}).get("currency"),
-            }
-            for entry in rule.get("inputs", [])
-        ]
-        rules.append(
-            {
-                "rule_key": rule["rule_key"],
-                "name": rule["name"],
-                "node": rule["node"],
-                "operator": rule["operator"],
-                "enabled": bool(rule.get("enabled", True)),
-                "system": manifest_module.is_system_rule(rule),
-                "inputs": inputs,
-                "materials": [
-                    {"material_key": key, "material_name": material_names.get(key)}
-                    for key in rule.get("materials", [])
-                ],
-                "outputs": [
-                    {
-                        "field_key": key,
-                        "field_name": field_map.get(key, {}).get("name"),
-                        "material_key": field_map.get(key, {}).get("material_key"),
-                    }
-                    for key in rule.get("outputs", [])
-                ],
-                "parameters": parameters,
-                "requirement": str(rule.get("requirement") or ""),
-                "applicability": {"kind": applicability.get("kind", "ALWAYS"), "material_keys": list(applicability.get("material_keys", []))},
-                "source_node": rule.get("source_node"),
-                "source_rule_key": rule.get("source_rule_key"),
-                "source_rule_name": rule_names.get(rule.get("source_rule_key")) if rule.get("source_rule_key") else None,
-                "risk_level": parameters.get("risk_level"),
-                "risk_action": parameters.get("action"),
-                "requires_manual_review": parameters.get("requires_manual_review") is True,
-                "source_ref": rule.get("source_ref"),
-                "origin": rule.get("origin"),
-                "updated_at": None,
-            }
-        )
-    sections = [
-        {
-            "section_key": section["section_key"] if "section_key" in section else f"v{version_no}-s{index}",
-            "title": section.get("section_name", ""),
-            "content_instruction": str(section.get("content_instruction") or ""),
-            "field_keys": list(section.get("field_keys", [])),
-            "field_names": [field_map[key]["name"] for key in section.get("field_keys", []) if key in field_map],
-            "sort_no": index,
-            "origin": section.get("origin"),
-            "updated_at": None,
-        }
-        for index, section in enumerate(manifest.get("report_template", []), start=1)
-    ]
-    return {
-        "scenario_code": version.scenario_code,
-        "scenario_name": version.scenario_name,
-        "version_no": version.version_no,
-        "schema_key": version.schema_key,
-        "schema_version": version.schema_version,
-        "schema_json": version.schema_json,
-        "source": version.source,
-        "source_label": VERSION_SOURCE_LABELS.get(version.source, version.source),
-        "change_summary": version.change_summary,
-        "published_at": version.published_at,
-        "manifest_hash": version.manifest_hash,
-        "unconfigured_check_node_types": list(manifest.get("unconfigured_check_node_types", [])),
-        "unconfigured_check_node_codes": list(manifest.get("unconfigured_check_node_codes", [])),
-        "capability_gaps": list(manifest.get("capability_gaps", [])),
-        "materials": materials,
-        "fields": fields,
-        "rules": rules,
-        "sections": sections,
-        "calculations": _calculation_view_rows({"frozen": manifest.get("calculations") or []}),
-        "disabled_source_rows": list(manifest.get("disabled_source_rows") or []),
-        "business_rule_count": len([item for item in rules if not manifest_module.is_system_rule(item)]),
-        "system_rule_count": len([item for item in rules if manifest_module.is_system_rule(item)]),
-    }
-
-
-# 场景基本资料
 
 
 def list_scenarios_page(
@@ -998,7 +812,7 @@ def list_scenario_options(db: Session) -> list[dict[str, Any]]:
     """**业务用户可用的场景**下拉选项（方案、任务等选择器）。
 
     只列出「未删除 + 已启用 + 已有已发布版本」的场景：草稿、未发布、停用或已删除的
-    场景不能用于创建方案（需求 41）。把不可用的场景也列出来、再在创建时报错，
+    场景不能用于创建方案。把不可用的场景也列出来、再在创建时报错，
     会让业务用户在一堆选不动的选项里试错。
 
     `available` 恒为 true；保留该字段是为了让页面无需自己推断，
@@ -1242,344 +1056,11 @@ def restore_scenario(db: Session, scenario_code: str) -> ScenarioTemplate:
     return template
 
 
-def copy_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) -> ScenarioTemplate:
-    """复制场景：基本资料 + 当前草稿的**完整配置**。
-
-    复制的是一份完整可编辑的草稿，不是残件：节点实例（含顺序、依赖、启停与节点级配置）、
-    Sheet 绑定、材料、字段、规则、报告章节、计算候选与停用来源行一起复制。
-    内部引用全部重映射到新稳定键：
-
-    - 字段 → 所属材料；
-    - 规则 → 输入字段与材料、材料范围、`source_rule_key` 与 `source_rule_keys`
-      （**风险的多来源必须逐条重映射**）、来源节点实例码；
-    - 报告章节 → 字段与材料范围；
-    - 计算候选里的字段编号与节点实例码。
-
-    **节点先复制**：规则的 `node` 是节点实例码，节点实例码在复制后保持不变
-    （它由用户配置，不是系统派生的稳定键），但规则的归属必须落在真实存在的节点上，
-    因此先建节点再写规则。浅复制含旧稳定键的 JSON 会让新场景的规则指向原场景的
-    字段与规则，发布时要么报「引用的字段不存在」，要么指向另一份配置。
-
-    已发布版本不复制：复制的是一份草稿，仍要管理员显式发布才能被业务使用。
-    """
-    source = template_or_404(db, scenario_code)
-    name = str(payload.get("scenario_name") or "").strip() or f"{source.scenario_name} 副本"
-    new_code = public_no("SCN")
-    template = ScenarioTemplate(
-        scenario_code=new_code,
-        scenario_name=name,
-        category=source.category,
-        description=source.description,
-        enabled=True,
-        latest_version_no=0,
-        schema_key=source.schema_key,
-        schema_version=source.schema_version,
-        schema_json=source.schema_json,
-    )
-    db.add(template)
-    db.flush()
-    source_draft = ensure_draft(db, source)
-    nodes, sheets, materials, fields, rules, sections = _draft_rows(db, source_draft.id)
-    draft = ScenarioDraft(
-        scenario_code=new_code,
-        revision_no=1,
-        source="COPY",
-        base_version_no=None,
-        # 复制保留来源格式版本：复制出来的是同一份业务配置，不因复制换一种导出格式。
-        profile_version=source_draft.profile_version,
-        sync_error=source_draft.sync_error,
-        schema_key=source_draft.schema_key,
-        schema_version=source_draft.schema_version,
-        schema_json=source_draft.schema_json,
-    )
-    db.add(draft)
-    db.flush()
-    # 节点实例先复制：规则的节点归属与 Sheet 绑定都要按它校验。
-    for item in nodes:
-        db.add(
-            ScenarioDraftNode(
-                draft_id=draft.id,
-                node_code=item.node_code,
-                node_type=item.node_type,
-                name=item.name,
-                sequence_no=item.sequence_no,
-                depends_on=list(item.depends_on or []),
-                config_json=dict(item.config_json) if isinstance(item.config_json, dict) else item.config_json,
-                enabled=item.enabled,
-                sort_no=item.sort_no,
-            )
-        )
-    for item in sheets:
-        db.add(
-            ScenarioDraftSheet(
-                draft_id=draft.id,
-                sheet_role=item.sheet_role,
-                node_code=item.node_code,
-                sort_no=item.sort_no,
-            )
-        )
-
-    def copied_ref(mapping: dict[str, str], key: str, *, owner: str, target: str) -> str:
-        copied = mapping.get(key)
-        if copied is None:
-            raise BusinessError(
-                "SCENARIO_COPY_REFERENCE_MISSING",
-                "复制场景时配置引用的对象不存在，不能保留原场景的稳定键",
-                details={"owner": owner, "target": target, "key": key},
-            )
-        return copied
-
-    def copied_key(prefix: str, source_ref: str | None) -> str:
-        code = (source_ref or "").strip()
-        return stable_key(prefix, new_code, code if code else _item_ref())
-
-    material_key_map: dict[str, str] = {}
-    field_key_map: dict[str, str] = {}
-    rule_key_map: dict[str, str] = {}
-    for item in materials:
-        new_key = copied_key("mat", item.source_ref)
-        material_key_map[item.material_key] = new_key
-        db.add(
-            ScenarioDraftMaterial(
-                draft_id=draft.id,
-                material_key=new_key,
-                name=item.name,
-                required=item.required,
-                description=item.description,
-                source_ref=item.source_ref,
-                origin_json=item.origin_json,
-                sort_no=item.sort_no,
-            )
-        )
-    for item in fields:
-        new_key = copied_key("fld", item.source_ref)
-        field_key_map[item.field_key] = new_key
-        db.add(
-            ScenarioDraftField(
-                draft_id=draft.id,
-                field_key=new_key,
-                material_key=copied_ref(
-                    material_key_map, item.material_key, owner=item.field_key, target="MATERIAL"
-                ),
-                name=item.name,
-                value_type=item.value_type,
-                extraction_strategy=item.extraction_strategy,
-                structure_schema_json=item.structure_schema_json,
-                unit=item.unit,
-                currency=item.currency,
-                artifact_source=item.artifact_source,
-                period_scope=item.period_scope,
-                statement_scope=item.statement_scope,
-                required=item.required,
-                instruction=item.instruction,
-                source_ref=item.source_ref,
-                origin_json=item.origin_json,
-                sort_no=item.sort_no,
-            )
-        )
-    material_by_key = {item.material_key: item for item in materials}
-    node_type_by_code = {item.node_code: item.node_type for item in nodes}
-    for item in rules:
-        code = (item.source_ref or "").strip()
-        if not code:
-            new_key = copied_key("rule", None)
-        else:
-            node_type = node_type_by_code.get(item.node_code)
-            if node_type is None:
-                raise BusinessError(
-                    "SCENARIO_COPY_RULE_NODE_MISSING",
-                    "复制场景时规则所属节点不存在，无法保留业务身份",
-                    details={"rule_key": item.rule_key, "node_code": item.node_code},
-                )
-            material_code: str | None = None
-            if node_type == "INTERNAL_VALIDATE":
-                branch_keys = {
-                    entry.get("material_key") for entry in (item.rule_json or {}).get("inputs", [])
-                }
-                declared_materials = set((item.rule_json or {}).get("materials") or [])
-                if len(branch_keys) != 1 or None in branch_keys or (
-                    declared_materials and declared_materials != branch_keys
-                ):
-                    raise BusinessError(
-                        "SCENARIO_COPY_RULE_BRANCH_INVALID",
-                        "内部校验规则的输入材料与适用材料不一致，无法保留业务身份",
-                        details={"rule_key": item.rule_key, "source_ref": code},
-                    )
-                material = material_by_key.get(next(iter(branch_keys)))
-                material_code = (material.source_ref or "").strip() if material else ""
-                if not material_code:
-                    raise BusinessError(
-                        "SCENARIO_COPY_RULE_BRANCH_INVALID",
-                        "内部校验规则的输入材料缺少业务编号，无法保留业务身份",
-                        details={"rule_key": item.rule_key, "source_ref": code},
-                    )
-            new_key = manifest_module.business_rule_key(
-                new_code, node_type, code, material_code=material_code
-            )
-        rule_key_map[item.rule_key] = new_key
-    for object_type, mapping in (
-        ("MATERIAL", material_key_map),
-        ("FIELD", field_key_map),
-        ("RULE", rule_key_map),
-    ):
-        if len(set(mapping.values())) != len(mapping):
-            raise BusinessError(
-                "SCENARIO_COPY_BUSINESS_CODE_DUPLICATED",
-                "来源业务编号在副本中无法唯一确定配置对象",
-                details={"object_type": object_type},
-            )
-    for item in rules:
-        definition = dict(item.rule_json or {})
-        applicability = definition.get("applicability") if isinstance(definition.get("applicability"), dict) else {}
-        mapped_rule_keys = list(dict.fromkeys(
-            copied_ref(rule_key_map, declared, owner=item.rule_key, target="SOURCE_RULE")
-            for declared in (definition.get("source_rule_keys") or [])
-        ))
-        declared_source = definition.get("source_rule_key")
-        mapped_source = (
-            copied_ref(rule_key_map, declared_source, owner=item.rule_key, target="SOURCE_RULE")
-            if declared_source else None
-        )
-        if mapped_source and mapped_source not in mapped_rule_keys:
-            mapped_rule_keys.insert(0, mapped_source)
-        new_definition = {
-            **definition,
-            "inputs": [
-                {
-                    "field_key": copied_ref(
-                        field_key_map, entry["field_key"], owner=item.rule_key, target="FIELD"
-                    ),
-                    "material_key": copied_ref(
-                        material_key_map, entry["material_key"], owner=item.rule_key, target="MATERIAL"
-                    ),
-                }
-                for entry in definition.get("inputs", [])
-            ],
-            "outputs": [
-                copied_ref(field_key_map, key, owner=item.rule_key, target="FIELD")
-                for key in definition.get("outputs", [])
-            ],
-            "materials": [
-                copied_ref(material_key_map, key, owner=item.rule_key, target="MATERIAL")
-                for key in definition.get("materials", [])
-            ],
-            "source_rule_key": mapped_source,
-            # 风险的多来源（任一 / 全部关联检查）必须逐条重映射：只改第一条会让
-            # 「全部关联检查不合格」在副本里指向原场景的规则。
-            "source_rule_keys": mapped_rule_keys,
-            "applicability": {
-                **applicability,
-                **(
-                    {"material_keys": [
-                        copied_ref(material_key_map, key, owner=item.rule_key, target="MATERIAL")
-                        for key in applicability.get("material_keys") or []
-                    ]}
-                    if applicability.get("material_keys")
-                    else {}
-                ),
-            },
-        }
-        db.add(
-            ScenarioDraftRule(
-                draft_id=draft.id,
-                rule_key=rule_key_map[item.rule_key],
-                name=item.name,
-                node_code=item.node_code,
-                operator_code=item.operator_code,
-                enabled=item.enabled,
-                rule_json=new_definition,
-                source_ref=item.source_ref,
-                origin_json=item.origin_json,
-                sort_no=item.sort_no,
-            )
-        )
-    section_keys: set[str] = set()
-    for item in sections:
-        if item.report_code and item.report_code.strip() and item.section_order is not None and item.section_order > 0:
-            section_identity = json.dumps(
-                [item.report_code.strip(), item.section_order], ensure_ascii=False, separators=(",", ":")
-            )
-            section_key = stable_key("sec", new_code, section_identity)
-        else:
-            section_key = copied_key("sec", None)
-        if section_key in section_keys:
-            raise BusinessError(
-                "SCENARIO_COPY_SECTION_DUPLICATED",
-                "报告编号与章节顺序在副本中重复，无法保留章节身份",
-                details={"report_code": item.report_code, "section_order": item.section_order},
-            )
-        section_keys.add(section_key)
-        db.add(
-            ScenarioDraftSection(
-                draft_id=draft.id,
-                section_key=section_key,
-                title=item.title,
-                content_instruction=item.content_instruction,
-                field_keys=[
-                    copied_ref(field_key_map, key, owner=section_key, target="FIELD")
-                    for key in (item.field_keys or [])
-                ],
-                sort_no=item.sort_no,
-                # 报告分组属性随复制一起保留，材料范围按新材料键重映射。
-                report_code=item.report_code,
-                report_name=item.report_name,
-                material_keys=[
-                    copied_ref(material_key_map, key, owner=section_key, target="MATERIAL")
-                    for key in (item.material_keys or [])
-                ] or None,
-                formats=list(item.formats or []) or None,
-                section_order=item.section_order,
-                content_type=item.content_type,
-                result_sort=item.result_sort,
-                config_status=item.config_status,
-                origin_json=item.origin_json,
-            )
-        )
-    # 计算配置随复制一起带走。它内部引用的是**业务编号**（参数的 `source_code` 是字段
-    # 抽取的业务编号或计算结果编号）与**节点实例码**，三者都随复制原样保留，
-    # 因此这里只需要深拷贝一份，不重映射也不共享原对象——共享会让副本页面的保存
-    # 直接改写原场景的草稿 JSON。
-    draft.calculation_json = json.loads(json.dumps(source_draft.calculation_json or []))
-    draft.disabled_source_rows = [
-        {
-            **row,
-            "row_key": stable_key(
-                "disabled",
-                new_code,
-                json.dumps(
-                    [row["sheet_role"], row["source"]["sheet_key"], row["source"]["row_no"]],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ),
-        }
-        for row in json.loads(json.dumps(source_draft.disabled_source_rows or []))
-    ]
-    record_operation(
-        db,
-        object_type=OBJECT_SCENARIO,
-        object_no=new_code,
-        object_name=name,
-        operation_type="COPY",
-        detail={"scenario_code": new_code, "source_scenario_code": scenario_code},
-    )
-    # 复制出来的是一份完整可用的配置（节点、Sheet、材料/字段/规则/章节都按新键重映射过），
-    # 但**复制不等于发布**：新场景仍需要管理员显式发布才能被业务用户使用。
-    # 这里只刷新「能不能发布」的状态；源草稿本身不完整时带上同一原因。
-    _refresh_publish_readiness(db, template, draft)
-    db.commit()
-    db.refresh(template)
-    return template
 
 
 def scenario_detail(db: Session, scenario_code: str) -> dict[str, Any]:
-    """场景详情：基本资料、版本列表与配置统计。"""
+    """场景详情：基本资料、当前发布版本号与配置状态。"""
     template = template_or_404(db, scenario_code, include_deleted=True)
-    versions = db.scalars(
-        select(ScenarioVersion)
-        .where(ScenarioVersion.scenario_code == scenario_code)
-        .order_by(ScenarioVersion.version_no.desc())
-    ).all()
     draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == scenario_code))
     plan_count = db.scalar(
         select(func.count()).select_from(AuditPlan).where(AuditPlan.scenario_code == scenario_code, AuditPlan.deleted_at.is_(None))
@@ -1609,21 +1090,6 @@ def scenario_detail(db: Session, scenario_code: str) -> dict[str, Any]:
         }
         if draft
         else None,
-        "versions": [
-            {
-                "version_no": item.version_no,
-                "status": item.status,
-                "source": item.source,
-                "source_label": VERSION_SOURCE_LABELS.get(item.source, item.source),
-                "change_summary": item.change_summary,
-                "published_at": item.published_at,
-                "manifest_hash": item.manifest_hash,
-                "material_count": len(item.manifest_json.get("materials", [])),
-                "field_count": len(item.manifest_json.get("fields", [])),
-                "rule_count": len([rule for rule in item.manifest_json.get("rules", []) if not manifest_module.is_system_rule(rule)]),
-            }
-            for item in versions
-        ],
     }
 
 
@@ -2531,7 +1997,7 @@ def _node_type_of_draft_node(db: Session, draft_id: int, node_code: str) -> str:
     return node.node_type
 
 
-def select_draft_sheets(db: Session, scenario_code: str, selections: list[dict[str, Any]]) -> ScenarioDraft:
+def select_draft_sheets(scenario_code: str, selections: list[dict[str, Any]]) -> ScenarioDraft:
     """拒绝在流程节点页单独改写 Sheet 绑定。
 
     `scenario_draft_sheet` 只在「写入场景草稿」整体成功时，与材料、字段、规则、
@@ -2557,7 +2023,7 @@ def _assert_node_type_known(node_type: str) -> str:
     return node_type
 
 
-def _assert_depends_on(draft_id: int, nodes: list[ScenarioDraftNode], node_code: str, depends_on: list[str]) -> None:
+def _assert_depends_on(nodes: list[ScenarioDraftNode], node_code: str, depends_on: list[str]) -> None:
     """依赖必须指向本场景真实存在的节点实例，且不得自依赖。
 
     缺失依赖与自依赖在这里报出；循环依赖由发布期的 DAG 校验兜底（那时能看到完整图）。
@@ -2622,7 +2088,7 @@ def create_draft_node(db: Session, scenario_code: str, payload: dict[str, Any]) 
         )
     node_type = _assert_node_type_known(str(payload["node_type"]))
     depends_on = [str(item) for item in (payload.get("depends_on") or [])]
-    _assert_depends_on(draft.id, nodes, node_code, depends_on)
+    _assert_depends_on(nodes, node_code, depends_on)
     sequence_no = int(payload.get("sequence_no") or (max((item.sequence_no for item in nodes), default=0) + 1))
     db.add(
         ScenarioDraftNode(
@@ -2666,7 +2132,7 @@ def update_draft_node(db: Session, scenario_code: str, node_code: str, payload: 
         node.config_json = payload["config_json"]
     if "depends_on" in payload and payload["depends_on"] is not None:
         depends_on = [str(item) for item in payload["depends_on"]]
-        _assert_depends_on(draft.id, nodes, node_code, depends_on)
+        _assert_depends_on(nodes, node_code, depends_on)
         node.depends_on = depends_on
     _save_draft(
         db,
@@ -4075,7 +3541,6 @@ def compile_draft_manifest(
     """
     nodes, sheets, materials, fields, rules, sections = _draft_rows(db, draft.id)
     calculation_candidates, frozen_calculations = _calculation_store(draft.calculation_json)
-    settings = get_settings()
     # 配置行 → 编译入参的映射口径只有一份：domain.manifest.compile_inputs_of_config。
     # 方案保存走同一份，两条路径的编译产物因此必然同形。
     inputs = manifest_module.compile_inputs_of_config(
@@ -4164,146 +3629,3 @@ def publish_draft(db: Session, scenario_code: str, payload: dict[str, Any]) -> t
     db.commit()
     db.refresh(version)
     return version, reused
-
-
-def revise_from_version(db: Session, scenario_code: str, version_no: int, payload: dict[str, Any]) -> ScenarioDraft:
-    """基于某个已发布版本创建修订：用该版本配置整体替换当前草稿。
-
-    这是显式的覆盖动作（页面必须二次确认）；已发布版本本身不可修改。
-    """
-    template = template_or_404(db, scenario_code, lock=True)
-    version = version_or_404(db, scenario_code, version_no)
-    draft = ensure_draft(db, template)
-    _load_manifest_into_draft(db, draft, version.manifest_json)
-    draft.source = "REVISION"
-    draft.base_version_no = version_no
-    _save_draft(
-        db,
-        template,
-        draft,
-        operation_type="REVISE_FROM_VERSION",
-        object_name=template.scenario_name,
-        detail={"scenario_code": scenario_code, "version_no": version_no},
-    )
-    db.refresh(draft)
-    return draft
-
-
-def list_versions_page(
-    db: Session,
-    *,
-    scenario_code: str | None,
-    source: str | None,
-    published_from: datetime | None,
-    published_to: datetime | None,
-    page: int,
-    page_size: int,
-) -> dict[str, Any]:
-    """场景版本分页列表（按场景、来源与发布时间筛选）。"""
-    conditions = []
-    if scenario_code:
-        conditions.append(ScenarioVersion.scenario_code == scenario_code)
-    if source:
-        conditions.append(ScenarioVersion.source == source)
-    if published_from:
-        conditions.append(ScenarioVersion.published_at >= published_from)
-    if published_to:
-        conditions.append(ScenarioVersion.published_at <= published_to)
-    count_statement = select(func.count()).select_from(ScenarioVersion)
-    rows_statement = select(ScenarioVersion)
-    if conditions:
-        count_statement = count_statement.where(*conditions)
-        rows_statement = rows_statement.where(*conditions)
-    total = db.scalar(count_statement) or 0
-    versions = db.scalars(
-        rows_statement.order_by(ScenarioVersion.published_at.desc(), ScenarioVersion.id.desc()).limit(page_size).offset((page - 1) * page_size)
-    ).all()
-    items = []
-    for item in versions:
-        manifest = item.manifest_json
-        items.append(
-            {
-                "scenario_code": item.scenario_code,
-                "scenario_name": item.scenario_name,
-                "version_no": item.version_no,
-                "status": item.status,
-                "source": item.source,
-                "source_label": VERSION_SOURCE_LABELS.get(item.source, item.source),
-                "change_summary": item.change_summary,
-                "published_at": item.published_at,
-                "manifest_hash": item.manifest_hash,
-                "material_count": len(manifest.get("materials", [])),
-                "field_count": len(manifest.get("fields", [])),
-                "rule_count": len([rule for rule in manifest.get("rules", []) if not manifest_module.is_system_rule(rule)]),
-                "system_rule_count": len([rule for rule in manifest.get("rules", []) if manifest_module.is_system_rule(rule)]),
-            }
-        )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
-
-
-def compare_versions(db: Session, scenario_code: str, from_no: int, to_no: int) -> dict[str, Any]:
-    """按稳定键比较两个版本（不按名称猜对象）。"""
-    from_version = version_or_404(db, scenario_code, from_no)
-    to_version = version_or_404(db, scenario_code, to_no)
-
-    def diff(kind: str, key_field: str, from_items: list[dict[str, Any]], to_items: list[dict[str, Any]], fields: list[str]) -> list[dict[str, Any]]:
-        from_map = {item[key_field]: item for item in from_items}
-        to_map = {item[key_field]: item for item in to_items}
-        result = []
-        for key in sorted(set(from_map) | set(to_map)):
-            before = from_map.get(key)
-            after = to_map.get(key)
-            if before is None:
-                result.append({"kind": kind, "key": key, "name": after.get("name", key), "change": "ADDED"})
-                continue
-            if after is None:
-                result.append({"kind": kind, "key": key, "name": before.get("name", key), "change": "REMOVED"})
-                continue
-            changed_fields = [field for field in fields if before.get(field) != after.get(field)]
-            if changed_fields:
-                result.append(
-                    {
-                        "kind": kind,
-                        "key": key,
-                        "name": after.get("name", key),
-                        "change": "CHANGED",
-                        "changed_fields": changed_fields,
-                        "before": {field: before.get(field) for field in changed_fields},
-                        "after": {field: after.get(field) for field in changed_fields},
-                    }
-                )
-        return result
-
-    from_manifest = from_version.manifest_json
-    to_manifest = to_version.manifest_json
-    entries = []
-    entries.extend(diff("MATERIAL", "material_key", from_manifest.get("materials", []), to_manifest.get("materials", []), ["name", "required"]))
-    entries.extend(
-        diff(
-            "FIELD",
-            "field_key",
-            from_manifest.get("fields", []),
-            to_manifest.get("fields", []),
-            ["name", "value_type", "unit", "currency", "material_key", "required", "instruction"],
-        )
-    )
-    entries.extend(
-        diff(
-            "RULE",
-            "rule_key",
-            from_manifest.get("rules", []),
-            to_manifest.get("rules", []),
-            ["name", "node", "operator", "enabled", "parameters", "requirement", "materials", "source_rule_key"],
-        )
-    )
-    return {
-        "scenario_code": scenario_code,
-        "from_version_no": from_no,
-        "to_version_no": to_no,
-        "entries": entries,
-        "summary": {
-            "added": len([item for item in entries if item["change"] == "ADDED"]),
-            "removed": len([item for item in entries if item["change"] == "REMOVED"]),
-            "changed": len([item for item in entries if item["change"] == "CHANGED"]),
-        },
-    }

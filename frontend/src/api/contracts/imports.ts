@@ -1,12 +1,35 @@
-/**
- * 规则库导入：工作表绑定、候选、问题、预检查与导入作业。
- *
- * 契约按业务域拆分：本文件只声明本域的载荷形状，跨域引用一律显式 import，
- * 不再让所有页面共同依赖一个不断扩大的中心文件。
- */
+/** 规则库导入：工作表绑定、候选、问题、草稿写入与导入作业。 */
 
 import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 import type { DraftCalculationItem } from "./scenes";
+
+export interface ProfileSheet {
+  sheet_role: string;
+  /** 编号前缀（例如 RSK-）：跨表引用靠它判断指向。 */
+  code_prefix?: string;
+  display_name: string;
+  /** 这张 Sheet 可以绑定的节点类型（绑定由用户确认，系统只给建议）。 */
+  node_types: string[];
+  column_count: number;
+}
+
+export interface ProfileSummary {
+  profile_version: string | null;
+  display_name: string | null;
+  /** 业务场景冻结的 Schema 身份；与统一执行协议版本分开。 */
+  scenario_schema_key?: string | null;
+  scenario_schema_version?: string | null;
+  /** 内部统一协议版本；导入作业顶层 schema_version 是业务场景版本。 */
+  schema_version: string | null;
+  /** 模板说明页名称：模板生成、导出与导入读同一声明。 */
+  instruction_sheet?: string;
+  sheet_count: number;
+  node_types: Array<{ node_type: string; display_name: string; depends_on_types: string[] }>;
+  sheets: ProfileSheet[];
+  /** 作业所属场景（上传时指定）；历史作业为 null。 */
+  scenario_code?: string | null;
+  scenario_name?: string | null;
+}
 
 export interface ImportSheet {
   sheet_key: string;
@@ -43,12 +66,10 @@ export interface ImportSheet {
     cells: Record<string, JsonValue>;
   }>;
 }
-
 export interface ImportIssueOption {
   label: string;
   value: JsonValue;
 }
-
 export interface ImportIssueSource {
   target_type: string | null;
   sheet_name: string | null;
@@ -91,8 +112,12 @@ export interface RuleComparison {
   parameters: Record<string, JsonValue>;
   /** 审核要求原文：页面展示的必须是用户实际填写的内容，不是模型的改写结果。 */
   requirement: string | null;
+  /** 规则所在行的原始单元格文本（列名 → 原文），供预览逐项对照 Excel。 */
+  source_texts: Record<string, string>;
   applicability: { kind: string; material_keys: string[] };
   applicability_label: string;
+  direction_label: string | null;
+  threshold: JsonValue;
   /** 风险疑点规则的来源节点：契约值 + 服务端给出的中文文案；未提供时不显示。 */
   source_node: string | null;
   source_node_label: string | null;
@@ -191,7 +216,7 @@ export interface ImportJob extends ApiResponse {
   schema_key?: string | null;
   schema_version?: string | null;
   schema_json?: Record<string, JsonValue> | null;
-  profile_display_name: string;
+  profile: ProfileSummary;
   sheets: ImportSheet[];
   issues: ImportIssue[];
   proposals: {
@@ -238,12 +263,4 @@ export interface ImportJobSummary extends ApiResponse {
   source_filename: string;
   status: string;
   created_at: string;
-}
-
-export interface TemplateSummary extends ApiResponse {
-  scenario_code: string;
-  scenario_name: string;
-  latest_version_no: number;
-  status: string;
-  published_at: string;
 }

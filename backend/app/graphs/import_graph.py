@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from ..domain import scenario_schema
 from ..domain.proposals import ProposalBundle
 from ..domain.workbook import WorkbookIR
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from ..runtime.checkpoint import mysql_saver
 from ..services.llm_service import convert_workbook_with_notes
 from ..services.storage_service import resolve_storage_path
@@ -218,9 +218,9 @@ def _convert_sheet_chunks(state: ImportGraphState) -> dict[str, Any]:
 def _node_notes_of(payload: Any) -> list[dict[str, Any]]:
     """从转换附加信息里取出待确认事项列表。
 
-    节点版的附加信息是包含 `node_notes` / `coverage` / `bundle_hash` 的字典；
-    模型路径没有附加信息（None）。两者都归一成列表，非法形状明确报错，
-    不做“取不到就当成没有待确认事项”的静默兜底。
+    转换附加信息是包含 `node_notes` / `coverage` / `bundle_hash` 的字典；
+    图状态持久化后直接保存 `node_notes` 列表。这里统一两种当前输入形状，
+    非空的非法形状明确报错。
     """
     if payload is None:
         return []
@@ -420,26 +420,6 @@ def _graph_failure(exc: Exception) -> BusinessError:
     )
 
 
-def probe_interrupt(job_no: str, expected_node: str = IMPORT_DECISION_NODE) -> str:
-    """把检查点读取结果分成三类，调用方不再只能靠异常区分“不可达”与“确实不在等待”。
-
-    PENDING=确实停在 expected_node 的 interrupt；NOT_WAITING=能读到但没有该等待点；
-    STORAGE_UNAVAILABLE=连接或读取异常（临时故障，不代表等待点丢失）。
-    """
-    config = _config(job_no)
-    try:
-        with mysql_saver() as saver:
-            snapshot = _compiled(saver).get_state(config)
-    except BusinessError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - 区分存储故障与图执行缺陷
-        if not (type(exc).__module__ or "").startswith(_STORAGE_MODULES):
-            raise _graph_failure(exc) from exc
-        logger.exception("导入流程检查点读取失败 job_no=%s", job_no, exc_info=exc)
-        return "STORAGE_UNAVAILABLE"
-    if snapshot is not None and expected_node in snapshot.next and snapshot.interrupts:
-        return "PENDING"
-    return "NOT_WAITING"
 
 
 def _result_values(config: dict[str, dict[str, str]], result: dict[str, Any], saver: Any) -> dict[str, Any]:

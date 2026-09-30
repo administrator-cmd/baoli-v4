@@ -5,32 +5,17 @@
 不依赖无保护的 max(version_no)+1；scenario_version 上的唯一约束仍是最终兜底。
 """
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from ..domain.scenario_schema import default_schema
-from ..models import ScenarioTemplate, ScenarioVersion
+from ..entities import ScenarioTemplate
+from ..repositories import scenario_repository
 
 
 def _lock_template(db: Session, scenario_code: str) -> ScenarioTemplate | None:
-    return db.scalar(
-        select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == scenario_code).with_for_update()
-    )
-
-
-def ensure_template(db: Session, scenario_code: str, scenario_name: str) -> ScenarioTemplate:
-    """确保模板身份行存在（用于"更新已有模板"）。"""
-    template = _lock_template(db, scenario_code)
-    if template is None:
-        raise BusinessError(
-            "TEMPLATE_NOT_FOUND",
-            "要更新的审核模板不存在，请选择已有模板或新建模板",
-            status_code=404,
-            details={"scenario_code": scenario_code},
-        )
-    return template
+    return scenario_repository.lock_template_by_code(db, scenario_code)
 
 
 def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int:
@@ -38,7 +23,8 @@ def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int
     template = _lock_template(db, scenario_code)
     if template is None:
         schema = default_schema()
-        db.add(
+        scenario_repository.add_template(
+            db,
             ScenarioTemplate(
                 scenario_code=scenario_code,
                 scenario_name=scenario_name,
@@ -46,7 +32,7 @@ def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int
                 schema_key=schema["schema_key"],
                 schema_version=schema["schema_version"],
                 schema_json=schema,
-            )
+            ),
         )
         try:
             with db.begin_nested():
@@ -66,13 +52,3 @@ def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int
     template.scenario_name = scenario_name
     db.flush()
     return template.latest_version_no
-
-
-def published_version(db: Session, scenario_code: str, version_no: int) -> ScenarioVersion | None:
-    """取指定场景版本；不存在时返回 None。"""
-    return db.scalar(
-        select(ScenarioVersion).where(
-            ScenarioVersion.scenario_code == scenario_code,
-            ScenarioVersion.version_no == version_no,
-        )
-    )

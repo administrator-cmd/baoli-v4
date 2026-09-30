@@ -6,7 +6,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 from sqlalchemy.exc import SQLAlchemyError
 
-from ..errors import BusinessError, exception_summary
+from ..common.exceptions import BusinessError, exception_summary
 from ..runtime.checkpoint import mysql_saver
 
 
@@ -23,13 +23,12 @@ class AuditGraphState(TypedDict, total=False):
     三组字段职责分明：
 
     - **流程控制**（task_no…last_error）：图的固定生命周期——任务加载、节点确认、
-      人工复核等待点、结果保存。这部分与改造前一致。
+      人工复核等待点、结果保存。
     - **节点执行**（execution_id/execution_mode/node_result…）：一次节点执行的
       「开始 → 执行 → 收尾 → 推进」四步。执行模式在**执行之前**确定，因此
       任务当前节点在 Agent 评估期间不会被提前推进。
     - **Agent 运行契约**（evaluation_id…last_model_response）：规则评估子图的
-      「模型—工具—结果」循环状态。它不是给现有 State 加一个布尔字段，
-      而是新增的状态契约：本轮评估属于哪条规则实例、依据哪一版事实与工具目录、
+      「模型—工具—结果」循环状态，记录本轮评估属于哪条规则实例、依据哪一版事实与工具目录、
       模型看到哪些消息、请求了哪些工具、拿到什么结果、形成了什么候选结论。
 
     三条硬约束：
@@ -745,10 +744,10 @@ def _after_execute(state: AuditGraphState) -> str:
     """执行模式决定走哪条路径。
 
     模式在 `execute_current_node` 里、执行**之前**就已确定，因此这里只是分发：
-    人工复核节点先去准备待办；Agent 模式进入规则评估循环；其余走原有节点实现。
+    人工复核节点先去准备待办；Agent 模式进入规则评估循环；其余进入确定性节点实现。
     """
     if state.get("last_error") is not None:
-        # 校验未通过：没有执行记录可收尾，按原路径交回调用方抛出真实错误。
+        # 校验未通过时没有执行记录可收尾，交由结果节点抛出真实错误。
         return "save_node_result"
     mode = state.get("execution_mode")
     if mode == MODE_MANUAL_REVIEW:

@@ -9,8 +9,8 @@ WorkflowCheckpoint（业务侧权威记录），再让图真正停到 `await_nod
 材料变化后调用它，不必成为审核层的依赖。
 """
 
-from ...errors import BusinessError, exception_summary
-from ...models import AuditTask, BackgroundOperation, NodeExecution, WorkflowCheckpoint
+from ...common.exceptions import BusinessError, exception_summary
+from ...entities import AuditTask, BackgroundOperation, NodeExecution, WorkflowCheckpoint
 from ...domain.identity import public_no
 from . import flow as audit_flow
 from ...graphs.audit_graph import audit_interrupt_is_pending, open_audit_interrupt

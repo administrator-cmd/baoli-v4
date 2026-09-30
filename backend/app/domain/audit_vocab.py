@@ -14,7 +14,7 @@
 
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 # 字段「产物来源」列唯一受支持的取值：印章识别产物。

@@ -8,7 +8,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 from ..config import get_settings
 from ..domain.workbook import WorkbookCell, WorkbookIR, WorkbookRow, WorkbookSheet
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from ..domain.identity import stable_key
 from ..domain import unified_profile
 
@@ -42,24 +42,6 @@ def _has_business_table_data(rows: list[WorkbookRow]) -> bool:
     """业务工作表需要有表头行，且至少有一行有数据。"""
     populated_columns = [len(row.cells) for row in rows]
     return sum(column_count >= 2 for column_count in populated_columns) >= 2
-
-
-def _header_signature(sheets: list[WorkbookSheet]) -> dict[str, list[str]]:
-    """工作表名 -> 候选表头行的真实单元格文本。
-
-    两种列形态（编码版 / 中文业务版）由这些表头文本区分；读不到可区分表头时
-    detect_profile_version 会明确报错，不按默认版本模糊猜测。
-    """
-    signature: dict[str, list[str]] = {}
-    for sheet in sheets:
-        if not sheet.header_candidates:
-            continue
-        header_row_no = sheet.header_candidates[0]
-        header_row = next((row for row in sheet.rows if row.row_no == header_row_no), None)
-        if header_row is None:
-            continue
-        signature[sheet.name] = [str(value).strip() for value in header_row.cells.values() if str(value).strip()]
-    return signature
 
 
 def read_workbook_ir(

@@ -1,21 +1,17 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..database import engine, get_db
+from ..database import get_db
 from ..domain import capabilities, tool_catalog
-from ..errors import BusinessError
-from ..schemas import (
+from ..common.exceptions import BusinessError
+from ..vo import (
     CapabilityCatalogResponse,
     CapabilityItem,
-    ExternalServiceConfiguration,
     MaterialTypeCatalogResponse,
     MaterialTypeItem,
-    OperationLogPageResponse,
     RuleCapabilityStatusResponse,
     RuleStatusCatalogResponse,
     SystemServiceItem,
@@ -26,62 +22,20 @@ from ..schemas import (
     UploadPolicyResponse,
 )
 from ..integrations.http_services import list_material_types
-from ..services import operation_log_service
+from ..services import operation_log_service, system_status_service
 from ..services.embedding_service import embedding_status
 from ..services.storage_service import DOCUMENT_EXTENSIONS, RULEBOOK_EXTENSIONS
+from ..vo import OperationLogPageResponse
 
 
 router = APIRouter(prefix="/system", tags=["系统"])
 
 
-def _database_status() -> str:
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-        return "CONNECTED"
-    except SQLAlchemyError:
-        return "FAILED"
-
-
-def _configuration_status(required: dict[str, bool]) -> ExternalServiceConfiguration:
-    missing = [name for name, configured in required.items() if not configured]
-    if len(missing) == len(required):
-        status = "UNCONFIGURED"
-    elif missing:
-        status = "CONFIGURATION_INCOMPLETE"
-    else:
-        status = "CONFIGURED_UNVERIFIED"
-    return ExternalServiceConfiguration(status=status, missing=missing)
-
-
 @router.get("/status", response_model=SystemStatusResponse)
 def system_status(request: Request) -> SystemStatusResponse:
     """系统总体状态：数据库为本次真实探测结果，外部服务只报告配置状态与“未验证”。"""
-    database_status = _database_status()
-    settings = get_settings()
-    return SystemStatusResponse(
-        service="RUNNING" if database_status == "CONNECTED" else "DEGRADED",
-        database=database_status,
-        external_services={
-            "大模型": _configuration_status(
-                {
-                    "BAOLI_LLM_BASEURL": bool(settings.llm_baseurl),
-                    "BAOLI_LLM_APIKEY": bool(settings.llm_api_key_value),
-                    "BAOLI_LLM_MODEL_NAME": bool(settings.llm_model_name),
-                }
-            ),
-            "材料识别": _configuration_status({"BAOLI_SERVICE_8018_URL": bool(settings.service_8018_url)}),
-            "文件解析": _configuration_status({"BAOLI_SERVICE_8010_URL": bool(settings.service_8010_url)}),
-            "文字识别": _configuration_status(
-                {
-                    "BAOLI_OCR_SERVICE_URL": bool(settings.ocr_service_url),
-                    "BAOLI_OCR_TOKEN": bool(settings.ocr_token_value),
-                    "BAOLI_OCR_MODEL": bool(settings.ocr_model),
-                }
-            ),
-            "印章识别": _configuration_status({"BAOLI_SEAL_SERVICE_URL": bool(settings.seal_service_url)}),
-        },
-        request_id=request.state.request_id,
+    return SystemStatusResponse.model_validate(
+        {**system_status_service.status_view(), "request_id": request.state.request_id}
     )
 
 

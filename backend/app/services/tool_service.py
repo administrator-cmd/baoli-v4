@@ -16,12 +16,11 @@
 未注册任何实现时明确报错，**不**退回默认 handler 或空结果。
 这与 `services/audit/document_ports.py` 的端口注册是同一手法。
 
-本轮边界（重要）
-----------------
-本模块**不做持久化**，也**不做幂等去重**：那需要 `tool_call_id` 记录表，
-属于阶段五。因此本轮的 `invoke` 是「校验后执行真实 handler」，
-重复调用会重复执行——调用方若要避免重复，必须自己保证不重复请求
-（工具的 `idempotent=True` 说明同一输入得到同一结果，但不代表调用不会被执行两次）。
+持久化边界
+----------
+本模块只负责校验并执行真实 handler，不写工具调用账本。幂等登记与结果复用由
+审核图通过 `agent_tool_ledger` 负责；绕过该调用方直接重复执行 `invoke` 会再次调用 handler。
+工具的 `idempotent=True` 只表示同一输入应得到同一结果，不表示调用不会发生两次。
 """
 
 from __future__ import annotations
@@ -31,9 +30,9 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..domain import capabilities, tool_catalog
+from ..domain import tool_catalog
 from ..domain.tool_context import ToolExecutionContext
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 logger = logging.getLogger(__name__)
@@ -202,7 +201,7 @@ def _scene_node_types(scene_code: str) -> frozenset[str] | None:
     调用方据此**跳过**场景校验而不是当成「不允许」——把配置未就绪读成「越权」
     会让一次正常的调用被误拒。
     """
-    from ..models import ScenarioDraft, ScenarioDraftNode
+    from ..entities import ScenarioDraft, ScenarioDraftNode
     from ..database import SessionLocal
 
     with SessionLocal() as session:
@@ -391,7 +390,7 @@ def resolve(
     effective_node = node_code if node_code is not None else (context.node_code if context else None)
     manifest = None
     if context is not None and context.task_id is not None and context.database_session is not None:
-        from ..models import AuditTask
+        from ..entities import AuditTask
 
         task = context.database_session.get(AuditTask, context.task_id)
         if task is None:
@@ -745,30 +744,3 @@ def validate_result(spec: tool_catalog.ToolSpec, result: dict[str, Any]) -> dict
             details={"tool_id": spec.tool_id, "reason": exc.details},
         ) from exc
     return result
-
-
-def tool_definitions(*, tool_ids: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    """模型的 `tools` 参数，只包含当前可调用的工具。
-
-    `tool_ids` 非空时按它过滤；其中不可调用或不存在的标识会被**明确报出**，
-    不静默丢弃——静默丢弃会让「模型本该能用这个工具」变成它自己猜不出来。
-    """
-    if tool_ids is not None:
-        for tool_id in tool_ids:
-            resolve(tool_id)
-    return tool_catalog.to_openai_tools(tool_ids=tool_ids)
-
-
-def catalog_version() -> str:
-    """当前工具目录版本，随工具语义变化递增。"""
-    return tool_catalog.TOOL_CATALOG_VERSION
-
-
-def catalog_fingerprint() -> str:
-    """工具目录内容的指纹，用于发现「版本号没改但内容变了」的漂移。"""
-    return tool_catalog.catalog_fingerprint()
-
-
-def capability_of_tool(tool_id: str) -> capabilities.Capability | None:
-    """工具对应的能力声明。用于把工具结果与能力目录的判定口径对上。"""
-    return capabilities.capability_of(tool_id)

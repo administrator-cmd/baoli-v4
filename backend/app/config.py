@@ -50,9 +50,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str | None = None
     data_dir: Path = Path("data")
-    # **全系统唯一的一份模板协议**：backend/config/unified_profile.json。
-    # 它定义系统支持的全部 Sheet、每张 Sheet 的列协议，以及每张 Sheet 可以绑定的节点类型。
-    # 不再按合同审核 / 财报分析拆分，也不再按 v1-v4 拆分——双轨 Profile 已被删除。
+    # 全系统模板协议：定义支持的 Sheet、列协议和可绑定的节点类型。
     # 场景用哪些 Sheet、Sheet 对应哪些节点及其流程关系，由场景配置维护（不在这里）。
     unified_profile_path: Path = Path("backend/config/unified_profile.json")
     # 上传入口的体量上限。两者互相独立：规则库是配置表，业务材料是合同/协议扫描件，

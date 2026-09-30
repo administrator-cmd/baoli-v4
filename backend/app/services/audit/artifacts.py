@@ -4,7 +4,7 @@
 并且**先占位后调用**：占位在联系供应商之前提交，唯一键
 (上传, 产物类型, 上传哈希) 保证同一份上传同一类产物只调用一次。
 
-失败语义（不直观，改动前先读）：
+失败语义：
 
 - 只有在能确认供应商**未受理**（调用前的本地错误，见 `PRE_CONTACT_ERROR_CODES`）
   时才删除占位；其余失败一律保留占位并报「结果未知」——自动重发会制造重复外部作业。
@@ -15,10 +15,10 @@
 
 import hashlib, json
 from ...domain.identity import public_no
-from ...errors import BusinessError, exception_summary
+from ...common.exceptions import BusinessError, exception_summary
 from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult, ReadyOcrArtifact, ready_artifact_payload
 from .document_ports import document_service
-from ...models import AuditTask, DocumentUpload, StoredArtifact
+from ...entities import AuditTask, DocumentUpload, StoredArtifact
 from ..storage_service import resolve_storage_path
 from datetime import UTC, datetime
 from pathlib import Path
@@ -343,7 +343,7 @@ def _processed_document_source(artifact: StoredArtifact) -> tuple[Path, str]:
         )
     return path, filename
 
-def _material_classify_content(db: Session, task: AuditTask, upload: DocumentUpload) -> dict[str, Any] | None:
+def _material_classify_content(db: Session, upload: DocumentUpload) -> dict[str, Any] | None:
     """该上传的 8018 材料识别结果内容；没有产物时返回 None。
 
     8018 已改为**只记录不判定**：识别结论与置信度只是展示用的事实，不改变材料状态、

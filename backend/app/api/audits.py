@@ -4,89 +4,69 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..domain.identity import public_no
-from ..errors import BusinessError
-from ..models import ManualReview, RuleResult, TaskDocument, TaskFieldValue, AuditTask
-from ..schemas import (
-    ApiResponse,
-    AuditTaskResponse,
-    DocumentRemoveResponse,
-    DocumentUploadResponse,
-    EvidenceResponse,
+from ..common.exceptions import BusinessError
+from ..repositories import task_repository
+from ..query import validate_page_params
+from ..dto import (
     ExecuteNodeRequest,
     ExternalArtifactReconcileRequest,
-    ExternalArtifactReconcileResponse,
-    ExternalArtifactStatusResponse,
     FieldCorrectionRequest,
-    FieldCorrectionResponse,
     ManualReviewRequest,
     OcrReconcileRequest,
-    OcrReconcileResponse,
-    OperationAcceptedResponse,
-    PagedResponse,
-    ReportResponse,
     RetrievalDecisionRequest,
-    RetrievalDecisionResponse,
     RetrievalRequest,
-    RetrievalResponse,
     RecoverFailedNodeRequest,
-    TaskEvidenceIndexResponse,
     ReviewDraftRequest,
-    ReviewDraftResponse,
-    RiskListResponse,
     TaskCopyRequest,
     TaskUpdateRequest,
 )
-from ..services import admin_query_service, rag_service, task_admin_service
+from ..services import (
+    admin_query_service,
+    rag_service,
+    retrieval_service,
+    task_admin_service,
+    task_command_service,
+    task_review_service,
+)
 from ..services.audit import correct_field_value, reconcile_ocr
-from ..services.audit.interrupt import resume_task_creation_interrupt
 from ..services.audit.commands import reconcile_external_artifact, recover_failed_checkpoint_node
 from ..services.audit import evidence_view, report_view, risks_view
 from ..services.background_service import operation_view
 from ..services.operation_gateway import submit_manual_reviews, submit_node_execution
-from ..services.operation_log_service import require_idempotent_replay
-from ..services.operation_types import OBJECT_AUDIT_TASK
 from ..services.task_lookup import task_or_404
 from ..services.task_service import (
-    claim_task_command,
-    copy_task,
     external_artifact_status_view,
-    finish_task_command,
     ocr_status_view,
-    record_failed_task_command,
     remove_current_document_file,
-    task_of_command,
     task_view,
     upload_document,
+)
+from ..vo import (
+    AuditTaskResponse,
+    DocumentRemoveResponse,
+    DocumentUploadResponse,
+    EvidenceResponse,
+    ExternalArtifactReconcileResponse,
+    ExternalArtifactStatusResponse,
+    FieldCorrectionResponse,
+    OcrArtifactStatusResponse,
+    OcrReconcileResponse,
+    OperationAcceptedResponse,
+    PagedResponse,
+    ReportResponse,
+    RetrievalDecisionResponse,
+    RetrievalResponse,
+    ReviewDraftResponse,
+    RiskListResponse,
+    TaskEvidenceIndexResponse,
 )
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 
 router = APIRouter(prefix="/audit-tasks", tags=["合同审核"])
-
-
-class OcrArtifactStatusResponse(ApiResponse):
-    """当前上传文件 OCR 产物的只读状态；没有产物时如实说明未提交。"""
-
-    document_no: str
-    artifact_no: str | None = None
-    status: str
-    job_id: str | None = None
-    deadline_at: datetime | None = None
-    message: str
-    submit_attempts: int | None = None
-
-
-def _page_params(page: int, page_size: int) -> tuple[int, int]:
-    if page < 1:
-        raise BusinessError("PAGE_INVALID", "页码必须是大于 0 的整数", status_code=400)
-    if page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_SIZE_INVALID", "每页条数必须在 1 到 200 之间", status_code=400)
-    return page, page_size
 
 
 @router.get("", response_model=PagedResponse)
@@ -106,7 +86,7 @@ def list_tasks(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """审核任务分页列表；不传 deleted 时不返回已逻辑删除的任务。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = task_admin_service.list_tasks_page(
         db,
         name=name,
@@ -198,95 +178,13 @@ def copy_task_endpoint(task_no: str, payload: TaskCopyRequest, request: Request,
     方案、场景已失效时拒绝。同一幂等标识 + 同一请求内容的重发返回原任务。
     命令占位与任务在首次提交时一起落库；等待点确认后追加成功操作日志。
     """
-    request_payload = {"task_no": task_no, "task_name": payload.task_name}
-    existing, request_hash = require_idempotent_replay(
+    copied = task_command_service.copy_audit_task(
         db,
-        object_type=OBJECT_AUDIT_TASK,
-        operation_type="TASK_COPY",
+        task_no,
+        task_name=payload.task_name,
         idempotency_key=payload.idempotency_key,
-        request=request_payload,
     )
-    if existing is not None:
-        if str(existing.result or "") != "SUCCEEDED":
-            raise BusinessError(
-                "TASK_COPY_PREVIOUSLY_FAILED",
-                f"该幂等标识对应的复制任务命令此前执行失败：{existing.failure_message or '原因未记录'}。"
-                "请更换幂等标识后重试",
-                status_code=409,
-                details={"log_no": existing.log_no, "failure_code": existing.failure_code},
-            )
-        detail = existing.detail_json if isinstance(existing.detail_json, dict) else {}
-        replayed = db.scalar(select(AuditTask).where(AuditTask.task_no == detail.get("new_task_no")))
-        if replayed is None:
-            raise BusinessError(
-                "TASK_COPY_REPLAY_UNAVAILABLE",
-                "该幂等标识对应的任务记录不存在，请更换标识后重新复制",
-                status_code=409,
-                details={"log_no": existing.log_no},
-            )
-        return AuditTaskResponse.model_validate({**task_view(db, replayed), "request_id": request.state.request_id})
-    new_task_no = public_no("TASK")
-    command, reused = claim_task_command(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        operation_type="TASK_COPY",
-        idempotency_key=payload.idempotency_key,
-        request=request_payload,
-        request_hash=request_hash,
-        task_no=new_task_no,
-    )
-    if reused:
-        copied = task_of_command(db, command)
-        detail = {"source_task_no": task_no, "new_task_no": copied.task_no}
-        if command.status == "FAILED":
-            record_failed_task_command(
-                db, command, object_no=task_no, object_name=payload.task_name, detail=detail
-            )
-            raise BusinessError(
-                "TASK_COPY_PREVIOUSLY_FAILED",
-                f"该幂等标识对应的复制任务命令此前执行失败：{command.failure_message or '原因未记录'}。",
-                status_code=409,
-                details={"operation_no": command.operation_no, "new_task_no": copied.task_no, "failure_code": command.failure_code},
-            )
-        if command.status == "PENDING":
-            try:
-                resume_task_creation_interrupt(db, copied, command.id)
-            except BusinessError:
-                record_failed_task_command(
-                    db, command, object_no=task_no, object_name=payload.task_name, detail=detail
-                )
-                raise
-            finish_task_command(
-                db, command, object_no=task_no, object_name=payload.task_name,
-                detail={**detail, "plan_scope_hash": copied.task_schema_json.get("plan_scope_hash")},
-            )
-        elif command.status != "SUCCEEDED":
-            raise BusinessError("TASK_COMMAND_STATE_INVALID", "任务复制命令状态无效", status_code=500)
-        return AuditTaskResponse.model_validate({**task_view(db, copied), "request_id": request.state.request_id})
-    try:
-        created = copy_task(
-            db, task_no, task_name=payload.task_name, new_task_no=new_task_no,
-            creation_operation_id=command.id,
-        )
-    except BusinessError:
-        db.rollback()
-        failed = db.scalar(select(AuditTask).where(AuditTask.task_no == new_task_no))
-        if failed is not None and failed.status == "FAILED":
-            record_failed_task_command(
-                db, command, object_no=task_no, object_name=payload.task_name,
-                detail={"source_task_no": task_no, "new_task_no": new_task_no},
-            )
-        raise
-    finish_task_command(
-        db, command, object_no=task_no, object_name=payload.task_name,
-        detail={
-            "source_task_no": task_no,
-            "new_task_no": created.task_no,
-            # 复制复制的是方案当前范围，指纹留痕以说明新任务冻结的是哪一版。
-            "plan_scope_hash": created.task_schema_json.get("plan_scope_hash"),
-        },
-    )
-    return AuditTaskResponse.model_validate({**task_view(db, task_or_404(db, created.task_no)), "request_id": request.state.request_id})
+    return AuditTaskResponse.model_validate({**task_view(db, copied), "request_id": request.state.request_id})
 
 
 @router.delete("/{task_no}", response_model=AuditTaskResponse)
@@ -306,75 +204,7 @@ def restore_task(task_no: str, request: Request, db: Session = Depends(get_db)) 
 @router.get("/{task_no}/reviews")
 def get_task_reviews(task_no: str, request: Request, db: Session = Depends(get_db)) -> dict:
     """任务内的人工复核记录（含已复核与已失效），系统原判断与人工结论分开呈现。"""
-    task = task_or_404(db, task_no)
-    rows = db.scalars(
-        select(ManualReview).where(ManualReview.audit_task_id == task.id).order_by(ManualReview.id.desc())
-    ).all()
-    rule_names = {
-        item.id: item.rule_name
-        for item in db.scalars(select(RuleResult).where(RuleResult.audit_task_id == task.id)).all()
-    }
-    fact_keys = {
-        item.id: (item.field_key, item.material_key)
-        for item in db.scalars(select(TaskFieldValue).where(TaskFieldValue.audit_task_id == task.id)).all()
-    }
-    field_names = {item["field_key"]: item["name"] for item in task.task_schema_json.get("fields", [])}
-    documents = {
-        item.material_key: item.material_name
-        for item in db.scalars(select(TaskDocument).where(TaskDocument.audit_task_id == task.id)).all()
-    }
-    result = []
-    for review in rows:
-        judgment = review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {}
-        if review.rule_result_id is not None:
-            object_name = f"规则：{rule_names.get(review.rule_result_id, '未知规则')}"
-            object_kind = "RULE"
-        elif review.field_value_id is not None:
-            field_key, material_key = fact_keys.get(review.field_value_id, (None, None))
-            material_name = documents.get(material_key, material_key or "未知材料")
-            object_name = f"字段：{material_name}·{field_names.get(field_key, field_key or '未知字段')}"
-            object_kind = "FIELD"
-        elif review.document_upload_id is not None:
-            object_name = "材料文件"
-            object_kind = "MATERIAL"
-        else:
-            object_name = "未关联业务对象"
-            object_kind = "UNKNOWN"
-        result.append(
-            {
-                "review_no": review.review_no,
-                "review_type": review.review_type,
-                "object_name": object_name,
-                "object_kind": object_kind,
-                "status": review.status,
-                "system_judgment": {
-                    "status": judgment.get("status"),
-                    "message": judgment.get("message"),
-                    "raw_value": judgment.get("raw_value"),
-                    "normalized_value": judgment.get("normalized_value"),
-                    "evidence": judgment.get("evidence"),
-                    "evidences": judgment.get("evidences") if isinstance(judgment.get("evidences"), list) else [],
-                    # 取证检索与印章记录随复核快照一起返回：主体核对的待办必须能看到
-                    # 系统查过的范围、候选、双方原文与完整印章条目，不能只在后端保存。
-                    "retrieval": judgment.get("retrieval"),
-                    "seal_records": judgment.get("seal_records"),
-                    "subject_query": judgment.get("subject_query"),
-                    # 材料类型待复核的原始识别结论：置信度、8018 判定的类型与命中关键词。
-                    # 这些是人工判断"是不是放错材料位"的依据，只在后端保存等于没给。
-                    "service_code": judgment.get("service_code"),
-                    "service_result": judgment.get("service_result"),
-                },
-                "decision": review.decision,
-                "business_note": review.business_note,
-                "before_value": review.before_value,
-                "after_value": review.after_value,
-                "basis_type": review.basis_type,
-                "decision_command_no": review.decision_command_no,
-                "created_at": review.created_at,
-                "updated_at": review.updated_at,
-            }
-        )
-    return {"request_id": request.state.request_id, "task_no": task.task_no, "items": result}
+    return {**task_review_service.task_reviews_view(db, task_no), "request_id": request.state.request_id}
 
 
 @router.get("/{task_no}/review-drafts", response_model=ReviewDraftResponse)
@@ -417,7 +247,7 @@ def get_task_executions(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """该任务的节点执行记录分页（默认每页 50 条）。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = admin_query_service.list_executions_page(
         db,
         task_no=task_no,
@@ -450,7 +280,7 @@ async def upload_task_document(
     record, impact = await upload_document(
         db, task_no, document_no, file, material_type=material_type, replace=replace
     )
-    document = db.scalar(select(TaskDocument).where(TaskDocument.id == record.task_document_id))
+    document = task_repository.find_document_by_id(db, record.task_document_id)
     if not document:
         raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=500)
     return DocumentUploadResponse(
@@ -726,16 +556,7 @@ def create_task_retrieval(
     检索范围严格限定在本任务、本材料范围、当前上传版本、产物内容版本与当前模型内；
     相似度只用于候选排序，不构成主体一致的结论，结论由工作人员另行提交。
     """
-    task = task_or_404(db, task_no)
-    result = rag_service.retrieve_evidence(
-        db,
-        task,
-        query_text=payload.query_text,
-        material_keys=payload.material_keys,
-        rule_key=payload.rule_key,
-        top_k=payload.top_k,
-    )
-    db.commit()
+    task, result = retrieval_service.retrieve(db, task_no, payload.model_dump())
     return RetrievalResponse.model_validate(
         {
             "task_no": task.task_no,
@@ -764,17 +585,7 @@ def submit_retrieval_decision(
     只接受一致 / 不一致 / 证据不足：相似度不能代替审核结论，
     也不存在“自动采纳前几条候选”的取值。
     """
-    task = task_or_404(db, task_no)
-    record = rag_service.record_human_decision(
-        db,
-        task,
-        retrieval_no=retrieval_no,
-        decision=payload.decision,
-        note=payload.note,
-        selected=payload.selected,
-        expected_input_revision=payload.expected_input_revision,
-    )
-    db.commit()
+    task, record = retrieval_service.decide(db, task_no, retrieval_no, payload.model_dump())
     return RetrievalDecisionResponse.model_validate(
         {
             "task_no": task.task_no,

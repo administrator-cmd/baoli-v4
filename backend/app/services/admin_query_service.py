@@ -20,18 +20,15 @@ from sqlalchemy.orm import Session
 
 from fastapi.responses import FileResponse
 
-from ..errors import BusinessError
-from ..models import (
+from ..common.exceptions import BusinessError
+from ..entities import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from ..entities import (
     AuditPlan,
     AuditReport,
     AuditTask,
     BackgroundOperation,
     DocumentUpload,
     Evidence,
-    FieldCandidate,
-    ImportIssue,
-    ImportJob,
-    ImportSheet,
     ManualReview,
     NodeExecution,
     RuleResult,
@@ -41,7 +38,8 @@ from ..models import (
     TaskDocument,
     TaskFieldValue,
 )
-from .operation_log_service import OBJECT_REPORT, record_operation
+from .operation_log_service import record_operation
+from .operation_types import OBJECT_REPORT
 
 logger = logging.getLogger(__name__)
 

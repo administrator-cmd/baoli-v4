@@ -20,21 +20,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
-from ..errors import BusinessError, exception_summary
-from ..models import BackgroundOperation
+from ..common.exceptions import BusinessError, exception_summary
+from ..entities import BackgroundOperation
 from ..domain.identity import public_no
 
 
 logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = ("PENDING", "RUNNING")
-TERMINAL_STATUSES = ("SUCCEEDED", "FAILED", "INTERRUPTED")
 
 # 命令阶段：从「已保存未执行」到「图已推进 / 等待 interrupt」。
 # 恢复时按它决定唯一推进动作，不能靠重新执行本地业务写入来“补齐”。
 PHASE_COMMAND_ACCEPTED = "COMMAND_ACCEPTED"
-PHASE_EXTERNAL_SUBMITTED = "EXTERNAL_SUBMITTED"
-PHASE_RESULT_UNKNOWN = "RESULT_UNKNOWN"
 PHASE_BUSINESS_COMMITTED = "BUSINESS_COMMITTED"
 PHASE_GRAPH_ADVANCED = "GRAPH_ADVANCED"
 PHASE_INTERRUPT_WAITING = "INTERRUPT_WAITING"
@@ -78,20 +75,6 @@ def assert_no_active_operation(db: Session, object_type: str, object_no: str) ->
             status_code=409,
             details={"operation_no": active.operation_no, "status": active.status},
         )
-
-
-def find_operation(db: Session, object_type: str, object_no: str, operation_no: str) -> BackgroundOperation:
-    """按对象与操作编号取后台命令；取不到即 404。"""
-    operation = db.scalar(
-        select(BackgroundOperation).where(
-            BackgroundOperation.object_type == object_type,
-            BackgroundOperation.object_no == object_no,
-            BackgroundOperation.operation_no == operation_no,
-        )
-    )
-    if not operation:
-        raise BusinessError("OPERATION_NOT_FOUND", "后台操作不存在", status_code=404, details={"operation_no": operation_no})
-    return operation
 
 
 def operation_by_no(db: Session, operation_no: str) -> BackgroundOperation:
@@ -153,7 +136,6 @@ def _update_operation(
     operation_id: int,
     *,
     phase: str | None = None,
-    result_json: dict[str, Any] | None = None,
 ) -> None:
     """用独立 Session 写命令的阶段与中间结果，不干扰执行中的业务事务。"""
     session = SessionLocal()
@@ -163,8 +145,6 @@ def _update_operation(
             return
         if phase is not None:
             operation.phase = phase
-        if result_json is not None:
-            operation.result_json = result_json
         session.commit()
     finally:
         session.close()
@@ -182,17 +162,11 @@ class CommandHandle:
     operation_no: str
     request: dict[str, Any]
     resume_committed: bool
-    committed_result: dict[str, Any] | None
 
     def phase(self, phase: str | None) -> None:
         """把命令推进到明确阶段；取不到阶段时传 None，绝不编造。"""
         if phase is not None:
             _update_operation(self.operation_id, phase=phase)
-
-    def mark_business_committed(self, result: dict[str, Any] | None = None) -> None:
-        """业务写入已提交、图推进尚未完成时落盘，供重启后按同一命令补齐图推进。"""
-        _update_operation(self.operation_id, phase=PHASE_BUSINESS_COMMITTED, result_json=result)
-
 
 def _run_in_background(operation_id: int, runner: Callable[[Session, CommandHandle], dict[str, Any]]) -> None:
     """后台线程入口。必须使用独立 Session，禁止复用已结束请求的 Session。"""
@@ -210,7 +184,6 @@ def _run_in_background(operation_id: int, runner: Callable[[Session, CommandHand
             operation_no=operation.operation_no,
             request=dict(operation.request_json or {}),
             resume_committed=operation.phase == PHASE_BUSINESS_COMMITTED,
-            committed_result=operation.result_json,
         )
         session.commit()
         try:

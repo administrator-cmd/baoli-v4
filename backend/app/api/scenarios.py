@@ -1,10 +1,9 @@
-"""审核场景管理 API：场景列表、页面配置草稿、发布、版本与对比。
+"""审核场景管理 API：场景列表、页面配置草稿与发布。
 
 - 列表使用真实后端筛选、排序与分页；导出与当前筛选使用同一作用域。
 - 草稿的每次写入都会递增修订号；发布必须携带页面看到的修订号。
-- 已发布版本不可修改：修改走“基于此版创建修订”，不覆盖任何历史版本。
+- 已发布版本是不可变的执行快照；后续修改当前草稿并发布新快照。
 - 页面创建的场景没有 Excel 作业与工作表行号：发布时不伪造导入来源。
-- 旧入口 POST /scenarios/{code}/versions/{n}/tasks 已收回：新任务必须从方案版本创建。
 """
 
 from datetime import datetime
@@ -17,13 +16,9 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..domain.manifest import build_task_schema
-from ..errors import BusinessError
-from ..schemas import (
-    CreateTaskRequest,
-    CreateTaskResponse,
+from ..dto.scenarios import (
     DraftDisabledSourceRowUpdateRequest,
     DraftDisabledSourceRowActivateRequest,
-    DraftDisabledSourceRowActivationPreviewResponse,
     DraftFieldRequest,
     DraftFieldUpdateRequest,
     DraftMaterialRequest,
@@ -35,19 +30,20 @@ from ..schemas import (
     DraftSectionRequest,
     DraftSectionUpdateRequest,
     DraftSheetSelectionRequest,
-    PagedResponse,
     ScenarioCreateRequest,
-    ScenarioDetailResponse,
-    ScenarioDraftViewResponse,
     ScenarioEnabledRequest,
     ScenarioPublishRequest,
-    ScenarioPublishResponse,
     ScenarioUpdateRequest,
-    ScenarioVersionConfigResponse,
-    ScenarioVersionResponse,
-    TaskSchemaPreviewRequest,
-    TaskSchemaPreviewResponse,
 )
+from ..dto import TaskSchemaPreviewRequest
+from ..vo.scenarios import (
+    DraftDisabledSourceRowActivationPreviewResponse,
+    ScenarioDetailResponse,
+    ScenarioDraftViewResponse,
+    ScenarioPublishResponse,
+)
+from ..vo import TaskSchemaPreviewResponse
+from ..query import validate_page_params
 from ..services import scenario_admin_service
 from ..services.scenario_admin_service import (
     create_draft_field,
@@ -81,28 +77,15 @@ from ..services.scenario_admin_service import (
     update_scenario,
 )
 from ..services.task_lookup import scenario_or_404
-from ..services.task_service import create_task
 from ..services.template_export_service import build_scenario_version_export
+from ..vo import PagedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 
 
-def _page_params(page: int, page_size: int) -> tuple[int, int]:
-    if page < 1:
-        raise BusinessError("PAGE_INVALID", "页码必须是大于 0 的整数", status_code=400)
-    if page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_SIZE_INVALID", "每页条数必须在 1 到 200 之间", status_code=400)
-    return page, page_size
-
-
 def _export_manifest(manifest: dict) -> bytes:
-    """按统一模板协议导出。
-
-    系统只有一份协议，因此不再按 manifest 的「格式版本」在多个导出器之间分派——
-    那种分派本身就是已删除的双轨 Profile 的产物。导出的 Sheet 集合由**配置实际用到的
-    内容**决定（见 `template_export_service.build_scenario_version_export`）。
-    """
+    """按统一模板协议导出配置实际使用的 Sheet。"""
     return build_scenario_version_export(manifest)
 
 
@@ -127,7 +110,7 @@ def list_scenarios(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """场景分页列表：按名称、业务类型、启用状态与发布时间筛选。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = list_scenarios_page(
         db,
         name=name,
@@ -147,7 +130,7 @@ def scenario_options(request: Request, db: Session = Depends(get_db)) -> dict:
     """**业务用户可用**的场景下拉：只含已启用且已有已发布版本的场景。
 
     方案与任务的场景选择器用它。草稿、未发布、停用或已删除的场景不出现——
-    业务用户只能从已发布且启用的场景创建方案（需求 41）。
+    业务用户只能从已发布且启用的场景创建方案。
     """
     return {"request_id": request.state.request_id, "items": list_scenario_options(db)}
 
@@ -307,16 +290,8 @@ def preview_disabled_source_row_activation(
 def select_sheets(
     scenario_code: str, payload: DraftSheetSelectionRequest, request: Request, db: Session = Depends(get_db)
 ) -> ScenarioDraftViewResponse:
-    """整体替换本场景**选用**的 Sheet 清单（需求 23/24）。
-
-    场景负责配置「使用哪些 Sheet、Sheet 对应哪些节点及其流程关系」；统一模板协议
-    负责定义「系统支持哪些 Sheet 以及每张 Sheet 的结构」。两者职责分离，
-    但只有一份 Profile 文件。
-
-    一次提交完整清单：Sheet 选择是一份集合，逐条增删会让结果取决于历史操作顺序。
-    清空清单是合法配置（还没选表），不是错误。
-    """
-    draft = select_draft_sheets(db, scenario_code, [item.model_dump() for item in payload.sheets])
+    """拒绝脱离导入作业单独改写 Sheet 绑定，避免形成第二份配置来源。"""
+    draft = select_draft_sheets(scenario_code, [item.model_dump() for item in payload.sheets])
     return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
 
 
@@ -487,7 +462,7 @@ def publish_scenario_draft(
 def export_scenario_draft(scenario_code: str, db: Session = Depends(get_db)) -> StreamingResponse:
     """导出当前草稿的有效配置（与发布使用同一编译结果）。
 
-    导出格式由 manifest 自己的格式版本决定，规则见 _export_manifest。
+    导出格式由统一模板协议决定。
     """
     from ..services.scenario_admin_service import compile_draft_manifest, ensure_draft
 
@@ -559,19 +534,3 @@ def _task_scope_view(manifest: dict, schema: dict) -> dict:
         "capability_coverage": dict(manifest.get("capability_coverage") or {}),
         "capability_version": manifest.get("capability_version"),
     }
-
-
-@router.post("/{scenario_code}/versions/{version_no}/tasks", response_model=CreateTaskResponse, status_code=201)
-def create_audit_task(
-    scenario_code: str,
-    version_no: int,
-    payload: CreateTaskRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> CreateTaskResponse:
-    """旧入口已收回：新审核任务必须从已发布的方案版本创建。
-
-    按场景版本直接建任务会绕过方案的范围冻结（显式规则、自动依赖与快照），
-    因此这里返回明确的业务错误并给出修正入口，不静默降级。
-    """
-    create_task(db, scenario_code, version_no, payload)

@@ -2,7 +2,7 @@
 import { computed, h, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { apiFileUrl, getOperation, isOperationActive, isOperationFinished, operationIdempotencyKey, type ApiError, type OperationView } from "@/api/http";
+import { getOperation, isOperationActive, isOperationFinished, operationIdempotencyKey, type ApiError, type OperationView } from "@/api/http";
 import {
   applyImportToDraft,
   createImportJob,
@@ -13,17 +13,16 @@ import {
   type TemplateOption,
   startImportConversion,
   updateSheetBindings,
-  type ImportDecision,
-  type ImportJobView,
-  type ProposalRuleView,
-  type ProposalSheetView,
 } from "@/api/imports";
 import type {
   CandidateDecisionState,
+  ImportJob,
   ImportJobSummary,
   ImportSheet,
   JsonValue,
   ProposalCalculation,
+  ProposalRule,
+  ProposalSheet,
   UploadPolicy,
 } from "@/api/contracts";
 import type { ConfigOrigin, DraftNodeItem } from "@/api/contracts/scenes";
@@ -50,7 +49,6 @@ import {
   applicabilityLabel,
   failureNextStep,
   formatBusinessValue,
-  formatDate,
   nodeLabel,
   riskSourceNodeColumnLabel,
   riskSourceRuleColumnLabel,
@@ -66,7 +64,7 @@ const { pending, failure, formMessage, run, setFailure } = useRequestRunner();
 
 type CandidateTab = "material" | "field" | "rule" | "calculation";
 
-const job = ref<ImportJobView | null>(null);
+const job = ref<ImportJob | null>(null);
 const importJobs = ref<ImportJobSummary[]>([]);
 const templates = ref<TemplateOption[]>([]);
 /**
@@ -98,7 +96,6 @@ const correctionPending = ref(false);
 /* 业务问题作答：状态与提交流程见 useDecisionAnswers。能力缺口在场景发布页逐条确认。 */
 const {
   selectedOptions,
-  unresolved: unresolvedIssues,
   update: updateIssueAnswer,
   readDecisionValue,
   initialise: initialiseDecisionAnswers,
@@ -193,7 +190,7 @@ function roleLabel(role: string | null | undefined): string {
 const openIssues = computed(() => job.value?.issues.filter((item) => item.status === "OPEN") ?? []);
 /** 已作结论的问题：提交后仍要能核对原答案与生效值。 */
 const resolvedIssues = computed(() => job.value?.issues.filter((item) => item.status !== "OPEN") ?? []);
-const proposalSheets = computed<ProposalSheetView[]>(() => job.value?.proposals?.sheets ?? []);
+const proposalSheets = computed<ProposalSheet[]>(() => job.value?.proposals?.sheets ?? []);
 const proposalCalculations = computed<ProposalCalculation[]>(() => job.value?.proposals?.calculations ?? []);
 const hasProposals = computed(() => proposalSheets.value.length > 0 || proposalCalculations.value.length > 0);
 const blockingIssueCount = computed(() => importBlockingIssues(job.value));
@@ -376,7 +373,6 @@ const bindingBlockedReason = computed(() => {
   return null;
 });
 
-/** 当前绑定与已保存状态是否有未提交的改动：重新加载前需要确认。 */
 /**
  * 当前绑定相对**初值**是否有未提交的改动。
  *
@@ -449,7 +445,7 @@ const materialColumns: CandidateColumn[] = [
 ];
 
 /** 风险疑点（06_风险疑点）规则的节点，由服务端返回，不按工作表名称判断。 */
-function isRiskRule(rule: ProposalRuleView): boolean {
+function isRiskRule(rule: ProposalRule): boolean {
   return rule.node === "RISK_RATING";
 }
 
@@ -614,17 +610,17 @@ const calculationRows = computed<CandidateRow[]>(() =>
 );
 
 /** 来源节点：只用服务端给出的中文文案；服务端没有给出时不显示，不在这里猜测。 */
-function riskSourceNodeText(rule: ProposalRuleView): string {
+function riskSourceNodeText(rule: ProposalRule): string {
   return rule.comparison.source_node_label ?? "";
 }
 
 /** 风险的全部来源审核规则，顺序与服务端候选引用一致。 */
-function riskSourceRuleText(rule: ProposalRuleView): string {
+function riskSourceRuleText(rule: ProposalRule): string {
   return rule.comparison.source_rule_names.join("、");
 }
 
 /** 规则的比较对象用业务语言描述。 */
-function ruleComparisonText(rule: ProposalRuleView): string {
+function ruleComparisonText(rule: ProposalRule): string {
   const comparison = rule.comparison;
   const left = describeTarget(comparison.left) || "未指定";
   const right = comparison.right ? describeTarget(comparison.right) : "无（单字段条款审核）";
@@ -633,7 +629,7 @@ function ruleComparisonText(rule: ProposalRuleView): string {
   return `${left} ${operator} ${right}${label}`;
 }
 
-function ruleApplicability(rule: ProposalRuleView): string {
+function ruleApplicability(rule: ProposalRule): string {
   return rule.comparison.applicability_label ?? applicabilityLabel(rule.comparison.applicability?.kind);
 }
 
@@ -659,7 +655,7 @@ const writeBlockers = computed<string[]>(() => {
   return items;
 });
 
-function countState(sheet: ProposalSheetView, state: CandidateDecisionState): number {
+function countState(sheet: ProposalSheet, state: CandidateDecisionState): number {
   return (
     sheet.materials.filter((item) => item.decision_state === state).length +
     sheet.fields.filter((item) => item.decision_state === state).length +
@@ -716,7 +712,7 @@ function decisionDisplay(decision: JsonValue): string {
  * 三个默认值都只是**初值**，提交仍以用户看到并确认的值为准。
  * preserveAnswers：同一作业刷新时保留用户本地已填但未落库的答案，避免刷新清空输入。
  */
-function initialiseBindings(importJob: ImportJobView, preserveAnswers = false): void {
+function initialiseBindings(importJob: ImportJob, preserveAnswers = false): void {
   const profileSheets = importJob.profile?.sheets ?? [];
   bindings.value = Object.fromEntries(
     importJob.sheets.map(
@@ -734,7 +730,7 @@ function initialiseBindings(importJob: ImportJobView, preserveAnswers = false): 
  * 刷新或切换作业后落在真实可操作的步骤上。
  * 已有转换结果时不再落回工作表绑定：作业完成转换后，服务端不再接受改动绑定。
  */
-function inferStep(importJob: ImportJobView): number {
+function inferStep(importJob: ImportJob): number {
   if (importJob.status === "PUBLISHED" || importJob.status === "APPLIED") {
     return 3;
   }
@@ -750,7 +746,7 @@ function inferStep(importJob: ImportJobView): number {
  * **先读回节点，再初始化绑定**：绑定的默认节点取决于「该用途下有几个可选实例」，
  * 节点还没读回来就会把本该预选的那一项算成 0 个。顺序不能颠倒。
  */
-async function receiveJob(importJob: ImportJobView, keepStep = false): Promise<void> {
+async function receiveJob(importJob: ImportJob, keepStep = false): Promise<void> {
   const reception = ++jobReception;
   const changed = job.value?.job_no !== importJob.job_no;
   job.value = importJob;
@@ -1091,7 +1087,7 @@ function restoreCandidate(targetType: "MATERIAL" | "FIELD" | "RULE", row: Candid
 /**
  * 暂存只回写修订号与问题状态，不重置绑定与步骤，避免打断用户当前编辑。
  */
-function applyJobRevision(updated: ImportJobView): void {
+function applyJobRevision(updated: ImportJob): void {
   if (!job.value) {
     return;
   }
@@ -1643,16 +1639,6 @@ watch(activeStep, (next, previous) => {
   color: var(--el-text-color-secondary);
   font-size: 13px;
   line-height: 1.6;
-}
-
-/* 每条能力缺口一行：说明与「逐条确认」在同一行，确认对象不会与说明错位。 */
-.gap-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px 16px;
-  margin-bottom: 6px;
 }
 
 .binding-actions {

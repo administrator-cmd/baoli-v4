@@ -23,8 +23,8 @@ LangGraph checkpoint 保存的是**流程状态**，它不构成审计账本：
 把身份校验变成「两边都写了才比」。评估身份与快照身份必须非空——本表只承载
 Agent 工具调用，缺它们说明调用来源不合法或快照未冻结，必须显式失败。
 
-四种恢复情形（与需求一一对应）
-------------------------------
+四种恢复情形
+------------
 | 原记录状态 | 处理 |
 | --- | --- |
 | `SUCCEEDED` | 读原结果，**不再次执行** |
@@ -48,8 +48,8 @@ from typing import Any
 
 from ..domain import tool_catalog
 from ..domain.tool_context import ToolExecutionContext
-from ..errors import BusinessError
-from ..models import AgentToolCall
+from ..common.exceptions import BusinessError
+from ..entities import AgentToolCall
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -62,9 +62,6 @@ TOOL_CALL_PENDING = "PENDING"
 TOOL_CALL_RUNNING = "RUNNING"
 TOOL_CALL_SUCCEEDED = "SUCCEEDED"
 TOOL_CALL_FAILED = "FAILED"
-
-# 终态：形成后不允许改为任何其他状态，也不允许在同一个 tool_call_id 上重新执行。
-TERMINAL_STATUSES = frozenset({TOOL_CALL_SUCCEEDED, TOOL_CALL_FAILED})
 
 # 恢复判定的结果。调用方按它决定是复用、核查还是拒绝。
 RECOVERY_REUSE = "REUSE"                 # 已有成功结果，直接复用
@@ -491,7 +488,7 @@ def ledger_view(db: Session, *, task_id: int, evaluation_id: str) -> list[dict[s
 def call_view(item: AgentToolCall) -> dict[str, Any]:
     """一条工具调用记录的可读视图。
 
-    字段与需求逐条对应：调用标识、工具名与状态、**冻结时**的目录与策略身份、
+    字段覆盖调用标识、工具名与状态、**冻结时**的目录与策略身份、
     快照身份、参数、结果、错误与起止时间。密钥与外部原始载荷不在其中。
     """
     return {

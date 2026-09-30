@@ -5,7 +5,6 @@ import { FileSpreadsheet, Upload } from "lucide-vue-next";
 
 import StatusBadge from "@/components/StatusBadge.vue";
 import { formatDate, formatFileSize } from "@/constants/labels";
-import { getUploadPolicy } from "@/api/system";
 import type { UploadKindPolicy } from "@/api/contracts";
 
 /**

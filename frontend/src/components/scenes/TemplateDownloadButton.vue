@@ -3,7 +3,8 @@ import { computed, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { Download } from "lucide-vue-next";
 
-import { getProfileSheets, unifiedTemplateUrl, type ProfileSheet } from "@/api/imports";
+import type { ProfileSheet } from "@/api/contracts";
+import { getProfileSheets, unifiedTemplateUrl } from "@/api/imports";
 import { getSceneDraft } from "@/api/scenes";
 
 /**

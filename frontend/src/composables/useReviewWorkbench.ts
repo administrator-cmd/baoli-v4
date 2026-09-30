@@ -5,9 +5,6 @@ import { getTaskReviewDrafts, saveTaskReviewDrafts } from "@/api/audits";
 import type { ReviewDraft } from "@/components/audit/PendingReviewCard.vue";
 
 export interface ReviewWorkbenchState {
-  drafts: Ref<Record<string, ReviewDraft>>;
-  /** 用户真正编辑过的待办编号。 */
-  touched: Ref<Set<string>>;
   saveState: Ref<"idle" | "saving" | "saved" | "error">;
   saveMessage: Ref<string | null>;
   /**
@@ -22,12 +19,8 @@ export interface ReviewWorkbenchState {
   setDraft: (reviewNo: string, draft: ReviewDraft) => void;
   /** 恢复服务端保存的草稿；已被用户编辑过的条目不覆盖。 */
   restore: () => Promise<void>;
-  /** 提交前调用：标记用户编辑。 */
-  markTouched: (reviewNo: string) => void;
   /** 清空本地草稿状态（提交成功或切换任务）。 */
   clear: () => void;
-  /** 组装提交载荷：只提交用户编辑过的条目。 */
-  payloadOf: (reviews: PendingReview[]) => Array<Record<string, unknown>>;
   /** 立即写入服务端（页面「保存草稿」按钮）。 */
   flush: () => Promise<void>;
 }
@@ -35,7 +28,7 @@ export interface ReviewWorkbenchState {
 /**
  * 人工复核表单的本地状态与服务端草稿暂存。
  *
- * 关键区分（改动前先读）：**页面预填 ≠ 用户输入**。
+ * 关键区分：**页面预填 ≠ 用户输入**。
  * 页面加载会用「系统建议值」预填表单，那不是用户输入：不加区分的话，刷新时预填值会被
  * 当成「本地已有内容」，既挡住服务端草稿恢复，又会被去抖保存写回（把已保存的人工结论清空）。
  * 因此只有 `markTouched` 标记过的条目才参与恢复与保存。
@@ -146,21 +139,6 @@ export function useReviewWorkbench(options: { taskNo: Ref<string> }): ReviewWork
     }
   }
 
-  function payloadOf(reviews: PendingReview[]): Array<Record<string, unknown>> {
-    return reviews
-      .filter((review) => touched.value.has(review.review_no))
-      .map((review) => {
-        const draft = drafts.value[review.review_no];
-        return {
-          review_no: review.review_no,
-          decision: draft?.decision || null,
-          business_note: draft?.note || null,
-          field_value: draft?.fieldValue || null,
-          basis_type: draft?.basisType || null,
-        };
-      });
-  }
-
   function clear(): void {
     if (timer) {
       clearTimeout(timer);
@@ -180,5 +158,5 @@ export function useReviewWorkbench(options: { taskNo: Ref<string> }): ReviewWork
     }
   });
 
-  return { drafts, touched, saveState, saveMessage, initialise, draftOf, setDraft, restore, markTouched, clear, payloadOf, flush };
+  return { saveState, saveMessage, initialise, draftOf, setDraft, restore, clear, flush };
 }

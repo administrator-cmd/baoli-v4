@@ -1,50 +1,6 @@
-/**
- * 场景配置：场景版本、草稿、材料/字段/规则/章节、发布与版本对比。
- *
- * 契约按业务域拆分：本文件只声明本域的载荷形状，跨域引用一律显式 import，
- * 不再让所有页面共同依赖一个不断扩大的中心文件。
- */
+/** 场景配置：草稿、材料、字段、规则、章节与发布。 */
 
 import type { ApiResponse, JsonValue } from "./common";
-
-export interface ScenarioSummary extends ApiResponse {
-  scenario_code: string;
-  scenario_name: string;
-  latest_version_no: number;
-  status: string;
-  published_at: string;
-}
-
-export interface ScenarioManifest {
-  scene_name: string;
-  materials: Array<{
-    material_key: string;
-    name: string;
-    required: boolean;
-  }>;
-  fields: Array<{
-    field_key: string;
-    name: string;
-    material_key: string;
-    required: boolean;
-  }>;
-  rules: Array<{
-    rule_key: string;
-    name: string;
-    node: string;
-    operator: string;
-    enabled: boolean;
-  }>;
-}
-
-export interface ScenarioVersion extends ApiResponse {
-  scenario_code: string;
-  scenario_name: string;
-  version_no: number;
-  status: string;
-  manifest: ScenarioManifest;
-  published_at: string;
-}
 
 export interface RuleSnapshotEntry {
   rule_key: string;
@@ -73,30 +29,6 @@ export interface TaskScope {
     message: string;
   }>;
 }
-
-export interface TaskSchemaPreview extends ApiResponse {
-  enabled_rule_keys: string[];
-  unenabled_rule_keys: string[];
-  unconfigured_check_node_types: string[];
-  unconfigured_check_node_codes: string[];
-  scope: TaskScope;
-  field_count: number;
-}
-
-export interface CreateTaskResponse extends ApiResponse {
-  task_no: string;
-  task_name: string;
-  status: string;
-  current_node_name: string;
-  materials: Array<{
-    name: string;
-    required: boolean;
-  }>;
-  field_count: number;
-  unenabled_rule_keys: string[];
-  scope: TaskScope;
-}
-
 export interface DocumentUploadResponse extends ApiResponse {
   document_no: string;
   material_name: string;
@@ -132,20 +64,6 @@ export interface ConfigSyncError {
   details: Record<string, JsonValue>;
 }
 
-export interface ScenarioVersionRow {
-  version_no: number;
-  status: string;
-  source: string;
-  source_label: string;
-  change_summary: string | null;
-  published_at: string;
-  manifest_hash: string;
-  material_count: number;
-  field_count: number;
-  rule_count: number;
-  system_rule_count?: number;
-}
-
 export interface ScenarioDraftInfo {
   schema_key?: string | null;
   schema_version?: string | null;
@@ -174,7 +92,6 @@ export interface ScenarioDetail extends ApiResponse {
   updated_at: string;
   plan_count: number;
   draft: ScenarioDraftInfo | null;
-  versions: ScenarioVersionRow[];
 }
 
 export interface DraftMaterialItem {
@@ -385,32 +302,6 @@ export interface ScenarioDraftView extends ApiResponse {
   business_rule_count: number;
   system_rule_count: number;
 }
-
-export interface ScenarioVersionConfigView extends ApiResponse {
-  scenario_code: string;
-  scenario_name: string;
-  schema_key?: string | null;
-  schema_version?: string | null;
-  schema_json?: Record<string, unknown> | null;
-  version_no: number;
-  source: string;
-  source_label: string;
-  change_summary: string | null;
-  published_at: string;
-  manifest_hash: string;
-  unconfigured_check_node_types: string[];
-  unconfigured_check_node_codes: string[];
-  capability_gaps: Array<Record<string, JsonValue>>;
-  materials: DraftMaterialItem[];
-  fields: DraftFieldItem[];
-  rules: DraftRuleItem[];
-  sections: DraftSectionItem[];
-  calculations: DraftCalculationItem[];
-  disabled_source_rows: DraftDisabledSourceRow[];
-  business_rule_count: number;
-  system_rule_count: number;
-}
-
 export interface ScenarioPublishResult extends ApiResponse {
   scenario_code: string;
   scenario_name: string;
@@ -425,22 +316,4 @@ export interface ScenarioPublishResult extends ApiResponse {
   published_at: string;
   /** 内容与最新已发布版本完全一致时复用该版本，不制造重复版本。 */
   reused: boolean;
-}
-
-export interface VersionCompareEntry {
-  kind: "MATERIAL" | "FIELD" | "RULE";
-  key: string;
-  name: string;
-  change: "ADDED" | "REMOVED" | "CHANGED";
-  changed_fields?: string[];
-  before?: Record<string, JsonValue>;
-  after?: Record<string, JsonValue>;
-}
-
-export interface VersionCompareResult extends ApiResponse {
-  scenario_code: string;
-  from_version_no: number;
-  to_version_no: number;
-  entries: VersionCompareEntry[];
-  summary: { added: number; removed: number; changed: number };
 }

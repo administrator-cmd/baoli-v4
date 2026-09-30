@@ -15,21 +15,15 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..errors import BusinessError
-from ..schemas import PagedResponse, ReportRemarkRequest, RiskResultPageResponse
+from ..common.exceptions import BusinessError
+from ..dto import ReportRemarkRequest
+from ..query import validate_page_params
 from ..services import admin_query_service
+from ..vo import PagedResponse, RiskResultPageResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/reports", tags=["审核报告"])
 risks_router = APIRouter(prefix="/risk-results", tags=["风险结果"])
-
-
-def _page_params(page: int, page_size: int) -> tuple[int, int]:
-    if page < 1:
-        raise BusinessError("PAGE_INVALID", "页码必须是大于 0 的整数", status_code=400)
-    if page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_SIZE_INVALID", "每页条数必须在 1 到 200 之间", status_code=400)
-    return page, page_size
 
 
 @router.get("", response_model=PagedResponse)
@@ -47,7 +41,7 @@ def list_reports(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """审核报告分页列表：按名称、任务、场景、方案与归档状态筛选。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = admin_query_service.list_reports_page(
         db,
         name=name,
@@ -167,7 +161,7 @@ def list_risk_results(
     db: Session = Depends(get_db),
 ) -> RiskResultPageResponse:
     """跨任务的风险结果分页列表。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = admin_query_service.list_risk_results_page(
         db,
         task_no=task_no,

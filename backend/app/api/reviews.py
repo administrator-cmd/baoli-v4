@@ -12,21 +12,13 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..errors import BusinessError
+from ..query import validate_page_params
 from ..services import admin_query_service
-from ..schemas import PagedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
+from ..vo import PagedResponse
 
 router = APIRouter(prefix="/reviews", tags=["人工复核"])
 executions_router = APIRouter(prefix="/executions", tags=["执行记录"])
-
-
-def _page_params(page: int, page_size: int) -> tuple[int, int]:
-    if page < 1:
-        raise BusinessError("PAGE_INVALID", "页码必须是大于 0 的整数", status_code=400)
-    if page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_SIZE_INVALID", "每页条数必须在 1 到 200 之间", status_code=400)
-    return page, page_size
 
 
 @router.get("", response_model=PagedResponse)
@@ -42,7 +34,7 @@ def list_reviews(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """人工复核分页列表（跨任务）：系统原判断、人工结论与复核后有效状态分开呈现。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = admin_query_service.list_reviews_page(
         db,
         task_no=task_no,
@@ -111,7 +103,7 @@ def list_executions(
     db: Session = Depends(get_db),
 ) -> PagedResponse:
     """节点执行记录分页列表（跨任务）。"""
-    page, page_size = _page_params(page, page_size)
+    page, page_size = validate_page_params(page, page_size)
     result = admin_query_service.list_executions_page(
         db,
         task_no=task_no,

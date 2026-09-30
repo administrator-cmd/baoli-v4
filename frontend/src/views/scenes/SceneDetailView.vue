@@ -56,9 +56,6 @@ let activationSequence = 0;
 
 /**
  * 场景详情分区。**`?tab=` 是当前分区的唯一真相源**：URL 变分区就变，分区变就写回 URL。
- *
- * 只在这里放一份状态，不用「ref + 挂载时读一次」——那样切 tab 不写地址栏，
- * 于是在材料 tab 刷新会跳回基本信息、后退会直接离开详情，地址与实际画面还会不一致。
  */
 const TAB_NAMES = ["basic", "source", "materials", "fields", "rules", "calculations", "flow", "sections"];
 
@@ -68,8 +65,7 @@ const tabs = computed({
     return typeof requested === "string" && TAB_NAMES.includes(requested) ? requested : "basic";
   },
   set: (value: string) => {
-    // replace 而不是 push：场景详情算「一个页面」，后退应当离开详情回场景列表，
-    // 而不是被逐次切过的 tab 塞满历史。
+    // 分区切换不增加浏览器历史，后退直接返回场景列表。
     void router.replace({ query: { ...route.query, tab: value } });
   },
 });

@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import { computed, onMounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type {
   AuditDocument,
   AuditField,
-  Evidence,
   ExecuteNodeResponse,
   ExecutionRow,
   FieldCorrectionRequest,
@@ -27,38 +26,25 @@ import {
 } from "@/api/http";
 import {
   deleteAuditTask,
-  createTaskRetrieval,
-  documentFileUrl,
   executeAuditNode,
   getAuditTask,
   getDocumentArtifact,
   getDocumentOcr,
-  getTaskEvidence,
-  getTaskEvidenceIndex,
   getTaskReport,
-  getTaskReviewDrafts,
   getTaskRisks,
   listTaskExecutions,
   listTaskReviews,
   reconcileDocumentArtifact,
   reconcileDocumentOcr,
   recoverFailedAuditNode,
-  removeTaskDocumentFile,
-  saveTaskReviewDrafts,
   submitFieldCorrections,
-  submitRetrievalDecision as submitRetrievalDecisionRequest,
   submitManualReviews,
-  uploadTaskDocument,
   type AuditTaskView,
   type DocumentArtifactStatus,
-  type ReplacementImpact,
 } from "@/api/audits";
 import type {
   RetrievalCandidate,
   RetrievalDecision,
-  RetrievalDecisionResult,
-  RetrievalResult,
-  TaskEvidenceIndex,
 } from "@/api/contracts";
 
 import { getExecution } from "@/api/reviews";
@@ -88,7 +74,6 @@ import {
   manualReviewNodeType,
   workspacesOfNodes,
   type DetailTab,
-  type DisplayNode,
 } from "@/constants/auditWorkspaces";
 import {
   basisTypeLabel,
@@ -179,16 +164,12 @@ const reportLoading = ref(false);
 const lastExecution = ref<ExecuteNodeResponse | null>(null);
 const executingNode = ref<{ code: string; name: string } | null>(null);
 const {
-  drafts: reviewDrafts,
-  touched: draftTouched,
   saveState: draftSaveState,
   saveMessage: draftSaveMessage,
   initialise: initialiseReviewDrafts,
   draftOf: reviewDraftOf,
   setDraft: setReviewDraft,
-  payloadOf: reviewDraftPayload,
   restore: restoreReviewDrafts,
-  markTouched: markReviewTouched,
   clear: clearReviewWorkbench,
   flush: flushReviewDrafts,
 } = useReviewWorkbench({ taskNo });
@@ -202,9 +183,7 @@ const correctionPending = ref(false);
 const lastOperationType = ref<string | null>(null);
 let executionAttemptKey: string | null = null;
 
-/* 弹窗与抽屉的可见性
- * 这些状态在 resetWorkspace() 里会被统一清理，因此必须与其它页面状态一起声明在
- * 调用之前——声明在后面会让「切换任务清理抽屉」在第一次调用时就踩到暂时性死区。 */
+/* 弹窗与抽屉状态由 resetWorkspace() 统一清理，须在首次调用前声明。 */
 type ProcessingArtifact = {
   artifact_type: DocumentArtifactStatus["artifact_type"] | "OCR";
   artifact_no: string | null;
@@ -1322,8 +1301,6 @@ function closeCorrection(): void {
   correctionResult.value = null;
 }
 
-
-
 /* 人工复核提交 */
 function requiresConfirmedFieldValue(decision: string): boolean {
   return decision === "CONFIRM_FIELD" || decision === "MODIFY_FIELD";
@@ -1337,7 +1314,6 @@ async function submitReviews(): Promise<void> {
   const currentTaskNo = task.value.task_no;
   const token = stateGeneration;
   const currentRevision = task.value.input_revision;
-  // 提交载荷与草稿暂存共用同一份组装口径（workbench.payloadOf），不再各写一套。
   // 集合来自**本批**：不属于本批的待办留在服务端，下一批再处理。
   const reviews = reviewBatch.value.map((review) => {
     const draft = reviewDraftOf(review.review_no);
@@ -1844,7 +1820,7 @@ watch(
                   show-word-limit
                   placeholder="例如：主合同甲方名称（合同主体全称）"
                 />
-                <div class="text-hint">只检索印章识别出的主体名称；合同正文本轮不参与检索。</div>
+                <div class="text-hint">只检索印章识别出的主体名称；合同正文不参与检索。</div>
               </el-form-item>
               <el-form-item>
                 <el-button type="primary" :loading="retrievalLoading" @click="runRetrieval(uploadableMaterialKeys)">检索印章主体</el-button>

@@ -1,7 +1,7 @@
 """规则评估 Agent：在授权范围内选择取证与比较工具，形成候选结论。
 
-职责边界（与需求一致）
-----------------------
+职责边界
+--------
 Agent **只**负责在授权范围内选择工具并形成候选结论。以下全部由 Graph 控制，
 不由模型决定：任务加载、模型调用、人工审核、保存结果、报告渲染。
 
@@ -27,7 +27,7 @@ Agent **只**负责在授权范围内选择工具并形成候选结论。以下�
 模型结论与确定性工具冲突时
 --------------------------
 不能覆盖确定性结果。冲突时把候选结论降为「无法判断」并附冲突说明，
-交人工复核——这是需求里明确的口径：模型不能推翻精确计算。
+交人工复核：模型不能推翻精确计算。
 
 模型结论文本怎么解析
 --------------------
@@ -44,9 +44,9 @@ from typing import Any
 
 from ...domain import capabilities, fact_snapshot, tool_catalog
 from ...domain.tool_context import ToolExecutionContext
-from ...errors import BusinessError
-from ...integrations.llm.gateway import ModelTurn, TURN_CONTENT, TURN_REFUSAL, TURN_TOOL_CALLS, call_chat
-from ...models import AgentToolCall, AuditTask, EvaluationSnapshot
+from ...common.exceptions import BusinessError
+from ...integrations.llm.gateway import ModelTurn, call_chat
+from ...entities import AgentToolCall, AuditTask, EvaluationSnapshot
 from .. import agent_tool_ledger as ledger
 from .. import tool_service
 from sqlalchemy.exc import IntegrityError
@@ -55,10 +55,8 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 # 循环状态。BLOCKED 必须带 unresolved_items，不允许用「跑完轮次」冒充 DONE。
-LOOP_RUNNING = "RUNNING"
 LOOP_NEEDS_HUMAN = "NEEDS_HUMAN"
 LOOP_DONE = "DONE"
-LOOP_BLOCKED = "BLOCKED"
 
 # 需要人工复核的候选结论状态。
 HUMAN_REVIEW_STATUSES = frozenset({"PENDING_REVIEW", "EVIDENCE_INSUFFICIENT"})
@@ -346,7 +344,7 @@ def conflicts_with_tool(verdict: dict[str, Any], tool_results: list[dict[str, An
 
     冲突的判据只有一条：工具给出了**确定的**结论（PASSED / ABNORMAL），
     而模型的结论与它相反。此时不能采信模型——确定性结果由程序算出，
-    模型不能推翻它（需求明确要求）。
+    模型不能推翻它。
 
     工具返回 EVIDENCE_INSUFFICIENT 不算冲突：那是「没算出结论」，
     模型据其它证据给出判断是允许的。
@@ -514,7 +512,7 @@ def _task_facts(
     - 材料位状态随之冻结：算子按 `material_state` 判定依据是否可用，
       用当前值会让结论无法复现。
     """
-    from ...models import DocumentUpload, Evidence, TaskDocument, TaskFact, TaskFieldValue
+    from ...entities import DocumentUpload, Evidence, TaskDocument, TaskFact, TaskFieldValue
     from sqlalchemy import select
 
     material_states = {
@@ -583,9 +581,7 @@ def _task_facts(
         material_states=material_states,
     )
     # 一个字段身份在快照中只能出现一次。TaskFact 决定状态与可执行值，
-    # TaskFieldValue 只补充统一事实没有保存的原文和证据引用。此前把两条记录都塞进
-    # 快照、再靠 setdefault 让 TaskFieldValue 抢先，会让候选表反过来成为执行来源，
-    # 同时把同一事实重复计入指纹。
+    # TaskFieldValue 只补充统一事实没有保存的原文和证据引用。
     extracted_by_identity: dict[tuple[str, Any], dict[str, Any]] = {}
     facts: list[dict[str, Any]] = []
     for item in task_facts:
@@ -689,7 +685,7 @@ def _task_materials(db: Session, task: AuditTask) -> list[dict[str, Any]]:
     只列已上传的会让必传缺失变成查不到，判不出不合格。
     """
     from .state import _material_states
-    from ...models import DocumentUpload, TaskDocument
+    from ...entities import DocumentUpload, TaskDocument
     from sqlalchemy import select
 
     states = _material_states(db, task)
@@ -761,7 +757,6 @@ def freeze_snapshot(
     db: Session,
     *,
     task: AuditTask,
-    manifest: dict[str, Any],
     node_code: str,
     rule_instance_id: str,
     evaluation_id: str,
@@ -786,7 +781,7 @@ def freeze_snapshot(
     因此「两条规则的事实内容恰好相同」不会再撞全局唯一键。
     """
     # 冻结的工具定义来自发布期清单；缺失即显式报错（见 frozen_tool_definitions）。
-    frozen_tools = frozen_tool_definitions(allowed_tools)
+    frozen_tool_definitions(allowed_tools)
     tool_catalog_version = str(policy.get("tool_catalog_version") or "")
     tool_catalog_hash = str(policy.get("tool_catalog_hash") or "")
     tool_policy_version = str(policy.get("tool_policy_version") or "")

@@ -35,10 +35,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..domain import file_quality, quality_judgement
+from ..domain import quality_judgement
 from ..domain.audit_vocab import read_material_type_status
-from ..errors import BusinessError
-from ..models import DocumentUpload, EvaluationSnapshot, StoredArtifact, TaskDocument
+from ..common.exceptions import BusinessError
+from ..entities import DocumentUpload, EvaluationSnapshot, TaskDocument
 from sqlalchemy import select
 
 
@@ -389,29 +389,3 @@ def decimal_cn_equal_tool(
     当前该判定固定返回「口径未确认，不可判定」，工具如实透出，不伪装成已执行。
     """
     return quality_judgement.decimal_cn_equal(inputs)
-
-
-def artifact_ready(context: Any, upload_id: int, artifact_type: str, upload_sha256: str) -> bool:
-    """某份上传是否已有指定类型的就绪产物。
-
-    文件质量检查的真实依据是产物（例如印章识别的结果），
-    工具据此判断「证据是否已经准备好」，不拿处理成功冒充质量通过。
-    """
-    if context is None or context.database_session is None:
-        return False
-    return (
-        context.database_session.scalar(
-            select(StoredArtifact).where(
-                StoredArtifact.document_upload_id == upload_id,
-                StoredArtifact.artifact_type == artifact_type,
-                StoredArtifact.upload_sha256 == upload_sha256,
-                StoredArtifact.status == "READY",
-            )
-        )
-        is not None
-    )
-
-
-def known_quality_items() -> tuple[str, ...]:
-    """系统已知的文件检查项目。工具目录据此枚举，不另写一份名单。"""
-    return tuple(sorted(file_quality.KNOWN_QUALITY_ITEMS))

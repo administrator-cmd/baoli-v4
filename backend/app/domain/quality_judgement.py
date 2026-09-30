@@ -2,9 +2,7 @@
 
 为什么需要这一层
 ----------------
-这三类判定原先只写在节点实现里。要让 Agent 也能自主调用它们，复制一份给工具
-adapter 是不可接受的：同一口径两处维护，漂移一次就会出现「节点判不合格、工具判
-合格」而没人发现。因此判定逻辑下沉到本模块，节点与工具**都调它**。
+节点与 Agent 工具共用这些判定，避免同一业务口径出现两套实现。
 
 本模块因此是这三类判定的**唯一实现**：节点负责取数、落库、生成审核标准视图；
 它只回答「按这些真实输入，判定结论是什么」。两侧传入的输入形状相同，结论必然一致。
@@ -27,12 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import file_quality
-from ..errors import BusinessError
-
-# 汇总口径：不合格优先，其次不可判定，全部适用结果合格才通过。
-# 与填写规范一致，也与节点原有实现一致（本模块是那段的唯一来源）。
-_STATUS_PRIORITY = ("ABNORMAL", "EVIDENCE_INSUFFICIENT", "NOT_APPLICABLE", "PASSED")
-
+from ..common.exceptions import BusinessError
 
 def summarize_per_material(per_material: list[dict[str, Any]]) -> dict[str, Any]:
     """把逐份材料的判定汇总成一个结论。

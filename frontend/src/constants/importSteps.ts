@@ -1,5 +1,5 @@
-import type { ImportJobView } from "@/api/imports";
-import { isOperationActive, isOperationFinished, type OperationView } from "@/api/http";
+import type { ImportJob } from "@/api/contracts";
+import { isOperationActive, type OperationView } from "@/api/http";
 
 /**
  * 导入流程的四个业务步骤。
@@ -22,13 +22,13 @@ export interface ImportStep {
 }
 
 /** 人工复核项：候选里存在待处理问题的数量。 */
-export function importBlockingIssues(job: ImportJobView | null): number {
+export function importBlockingIssues(job: ImportJob | null): number {
   return job?.issues.filter((issue) => issue.status === "OPEN").length ?? 0;
 }
 
 /** 按当前服务端数据算出四个导入步骤的可进入性与阻断原因。 */
 export function buildImportSteps(options: {
-  job: ImportJobView | null;
+  job: ImportJob | null;
   operation: OperationView | null;
   hasProposals: boolean;
   blockingIssues: number;
@@ -122,15 +122,4 @@ export function buildImportSteps(options: {
   }
 
   return steps.map((step, index) => ({ ...step, index }));
-}
-
-/** 操作结束后重新读取作业时，判断主动作是否还可以再次提交。 */
-export function operationFinishedState(operation: OperationView | null): "none" | "running" | "failed" | "done" {
-  if (!operation) {
-    return "none";
-  }
-  if (!isOperationFinished(operation.status)) {
-    return "running";
-  }
-  return operation.status === "SUCCEEDED" ? "done" : "failed";
 }

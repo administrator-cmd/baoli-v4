@@ -67,17 +67,11 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from . import field_strategy
 
-# 快照口径版本：拼接字段或语义变化时递增，避免旧指纹被按新口径重新解释。
-# v2：取值改为 JSON 安全投影（Decimal/date 显式编码），ref 加入评估作用域身份。
-# v3：字段事实优先于同身份的统一事实，并排除已失效上传的抽取事实。
-# v4：把执行真正读取的状态、原文、规范值与证据引用纳入内容指纹。
-# v5：结构化字段冻结全部属性证据引用，不再只保留首条兼容引用。
-# v6：计算派生事实以 COMPUTED 作为已定型状态，保留真实计算值供下游 Agent 使用。
-# v7：抽取候选与统一事实合并为单条快照记录，统一事实是状态与有效值的唯一来源。
-# v8：字段金额统一为不带无意义小数尾零的十进制字符串，候选层与统一事实层同口径。
+# 快照口径版本：当前口径冻结统一事实、完整属性证据和规范化金额；
+# 拼接字段或语义变化时必须递增，避免旧指纹被按新口径解释。
 FACT_SNAPSHOT_VERSION = "8"
 
 # 作用域摘要与内容摘要在 ref 里的截断长度。两者相加 + 固定前缀与分隔符
@@ -87,22 +81,6 @@ REF_DIGEST_CHARS = 12
 # 被显式编码的标量类型。`kind` 取值即这几个，解码时据此还原。
 ENCODED_KINDS = ("decimal", "date", "datetime")
 _ENVELOPE_KEYS = frozenset({"kind", "value"})
-
-# 字段事实在冻结快照里的投影键。工具执行解析 `inputs` 时逐字使用这些键，
-# 因此写入与读取必须共用同一份清单，不能各写一份。
-_FACT_VALUE_KEYS = (
-    "field_key",
-    "material_key",
-    "value_type",
-    "unit",
-    "currency",
-    "status",
-    "raw_value",
-    "normalized_value",
-    "evidence_id",
-    "evidence_ids",
-)
-
 
 def encode_value(value: Any) -> Any:
     """把一个取值投影成 JSON 可表达、且可无损还原的形式。
@@ -477,7 +455,7 @@ def facts_of_task_fact_rows(
             "boolean_value": row.boolean_value if executable else None,
             "unit": row.unit,
             "currency": row.currency,
-            # 以下键供工具解析输入（见 _FACT_VALUE_KEYS），不参与指纹（见 _fact_identity）
+            # 以下键供工具解析输入，不参与指纹（见 _fact_identity）。
             "status": row.status,
             "material_state": states.get(row.material_key) if row.material_key else None,
             "raw_value": encode_value(row.text_value) if row.text_value is not None else None,
@@ -612,7 +590,7 @@ def facts_of_field_value_rows(
     字段事实没有期间/报表口径：它们按 (字段, 材料位) 定位，期间与报表口径留空。
     这不是「缺维度」，而是这条事实本身不带这些维度。
 
-    投影同时带上**工具解析输入所需的那几个键**（`_FACT_VALUE_KEYS`）：冻结内容
+    投影同时带上工具解析输入所需的字段：冻结内容
     既是指纹的输入，也是运行期解析 `inputs` 的唯一来源，两者不能各投影一份。
     类型、单位和币种取自任务创建时冻结的字段定义，不由事实行推断。
     """
@@ -661,8 +639,3 @@ def facts_of_field_value_rows(
             }
         )
     return facts
-
-
-def fact_value_keys() -> tuple[str, ...]:
-    """字段事实投影里供工具解析输入的键。调用方据此断言投影完整。"""
-    return _FACT_VALUE_KEYS

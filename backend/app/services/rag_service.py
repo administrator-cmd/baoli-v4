@@ -1,6 +1,6 @@
 """任务内证据检索：印章主体候选与 OCR 正文候选分别建索引。
 
-范围与边界（本轮已收窄，与 docs/规则库与审核执行契约.md 一致）：
+范围与边界：
 
 - 印章索引只对识别产物中的**主体名称**建向量。页码、坐标、识别置信度、条目序号、
   印章类型不进入向量文本；原始产物按既有机制完整保留，不在本模块改写。
@@ -19,8 +19,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -30,8 +28,8 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..errors import BusinessError, exception_summary
-from ..models import (
+from ..common.exceptions import BusinessError, exception_summary
+from ..entities import (
     AuditTask,
     DocumentUpload,
     EvidenceChunk,
@@ -61,7 +59,6 @@ INDEX_INVALIDATED = "INVALIDATED"
 
 # 页号来源：合成序号只表示产物内的顺序，不等于原 PDF 页码。
 PAGE_NO_PROVIDER = "PROVIDER"
-PAGE_NO_SYNTHETIC = "SYNTHETIC_SEQUENCE"
 PAGE_NO_ABSENT = "ABSENT"
 
 # 主体名称转成向量的唯一入口：文本必须非空且不超过模型实际长度。
@@ -99,9 +96,8 @@ def _seal_items(artifact: StoredArtifact) -> list[dict[str, Any]]:
     content = _artifact_content(artifact)
     items = content.get("seal_subjects")
     if not isinstance(items, list):
-        # 本次归一化之前写入的印章产物只有 pages[].seals[]，其中的 text 就是主体名称
-        # （与供应商字段一致，旁证见 integrations 层的归一化说明）。这里按下标读取旧结构，
-        # 让历史任务无需清库重建也能建主体索引；新旧结构都缺失才是明确的契约错误。
+        # 旧格式只有 pages[].seals[]，其中 text 是供应商返回的主体名称。
+        # 按条目下标兼容读取；两种结构都缺失时明确报契约错误。
         legacy = _legacy_seal_subjects(content)
         if legacy is None:
             raise BusinessError(
@@ -274,16 +270,6 @@ def _chunk_index_rows(runtime: Any, artifact: StoredArtifact) -> list[dict[str, 
         return _build_ocr_text_chunks(runtime, artifact)
     return []
 
-def _current_upload(db: Session, task: AuditTask, material_key: str) -> DocumentUpload | None:
-    document = db.scalar(
-        select(TaskDocument).where(
-            TaskDocument.audit_task_id == task.id,
-            TaskDocument.material_key == material_key,
-        )
-    )
-    if document is None or document.current_upload_id is None:
-        return None
-    return db.get(DocumentUpload, document.current_upload_id)
 
 
 def build_task_index(
@@ -1116,45 +1102,6 @@ def _assert_retrieval_still_current(db: Session, task: AuditTask, record: Eviden
             )
 
 
-def retrieval_evidence(db: Session, task: AuditTask, retrieval_no: str) -> dict[str, Any]:
-    """取回某条检索记录的真实候选与双方原文，供人工复核与页面展示。
-
-    内容是本次检索**自己保存的**记录，不是重新检索、也不是重新推断：
-    复核快照与页面必须能看到系统当时查到了什么，才能说明人工结论依据的是哪一条。
-    """
-    record = db.scalar(
-        select(EvidenceRetrieval).where(
-            EvidenceRetrieval.audit_task_id == task.id,
-            EvidenceRetrieval.retrieval_no == retrieval_no,
-        )
-    )
-    if record is None:
-        return {}
-    candidates = [item for item in (record.candidates_json or []) if isinstance(item, dict)]
-    scope = record.scope_json if isinstance(record.scope_json, dict) else {}
-    return {
-        "retrieval_no": record.retrieval_no,
-        "rule_key": record.rule_key,
-        "node_code": record.node_code,
-        "status": record.status,
-        "message": record.message,
-        # 待核对主体原文：人工要同时看到查询对象与候选对象才能判断是否一致。
-        "query_text": record.query_text,
-        "scope": scope,
-        "index_versions": list(record.index_versions or []),
-        "model_id": record.model_id,
-        "model_revision": record.model_revision,
-        "index_version": record.index_version,
-        "input_revision": record.input_revision,
-        "candidate_count": len(candidates),
-        "candidates": candidates,
-        "human_decision": record.human_decision,
-        "human_decision_note": record.human_decision_note,
-        "human_selected": record.human_selected,
-        "human_decided_at": record.human_decided_at,
-        "human_decided_by": record.human_decided_by,
-        "decision_input_revision": record.decision_input_revision,
-    }
 
 
 def _candidate_identity(item: dict[str, Any]) -> tuple[Any, Any, Any]:
@@ -1165,13 +1112,6 @@ def _candidate_identity(item: dict[str, Any]) -> tuple[Any, Any, Any]:
     return (item.get("index_no"), item.get("chunk_no"), item.get("source_entry_no"))
 
 
-def retrieval_scope_hash(payload: dict[str, Any]) -> str:
-    """检索范围的规范化哈希：任务、材料、上传版本与索引版本共同决定它。"""
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-# 只读视图：索引状态与检索历史
 
 
 def index_status_view(db: Session, task: AuditTask) -> dict[str, Any]:

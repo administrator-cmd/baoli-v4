@@ -1,9 +1,4 @@
-/**
- * 审核方案与任务创建：方案选择、范围预览与任务创建结果。
- *
- * 契约按业务域拆分：本文件只声明本域的载荷形状，跨域引用一律显式 import，
- * 不再让所有页面共同依赖一个不断扩大的中心文件。
- */
+/** 审核方案与任务创建：方案选择、范围预览与任务创建结果。 */
 
 import type { ApiResponse } from "./common";
 import type { DraftCalculationItem } from "./scenes";

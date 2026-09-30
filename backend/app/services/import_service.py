@@ -9,7 +9,6 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..domain import capabilities
 from ..domain.manifest import (
     NODE_DEFINITIONS,
     RESOLVABLE_PROPERTIES,
@@ -22,7 +21,7 @@ from ..domain.manifest import (
 )
 from ..domain.proposals import ProposalBundle
 from ..domain.workbook import WorkbookIR
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 from ..graphs.import_graph import (
     import_decision_signature,
     node_note_target_ref,
@@ -30,18 +29,15 @@ from ..graphs.import_graph import (
     run_sheet_conversion,
     run_workbook_read,
 )
-from ..models import (
+from ..entities import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from ..entities import (
     BackgroundOperation,
-    FieldCandidate,
-    ImportIssue,
-    ImportJob,
-    ImportSheet,
     ScenarioDraft,
     ScenarioDraftNode,
     ScenarioTemplate,
     ScenarioVersion,
 )
-from ..schemas import ImportDecisionsRequest, PublishRequest, SheetBindingsRequest
+from ..dto import ImportDecisionsRequest, PublishRequest, SheetBindingsRequest
 from .background_service import ACTIVE_STATUSES, assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
 from .operation_types import OBJECT_IMPORT_JOB
@@ -53,8 +49,7 @@ from .storage_service import RULEBOOK_EXTENSIONS, save_upload
 NODE_LABELS = dict(NODE_DEFINITIONS)
 
 # 模板说明页（元数据 Sheet）在 import_sheet 里的**唯一**状态值。
-# 保存绑定与转换必须读同一个值：此前保存绑定写 HIDDEN、转换却要求 EXCLUDED，
-# 任何一份含说明页的模板都会在转换时必然失败。
+# 保存绑定与转换必须统一使用该值，否则元数据 Sheet 会被误当成待绑定业务表。
 METADATA_SHEET_STATUS = "EXCLUDED"
 
 
@@ -611,9 +606,7 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
         "schema_key": job.schema_key,
         "schema_version": job.schema_version,
         "schema_json": _job_schema(job),
-        # 作业所属场景 + 统一模板协议摘要（Sheet 数量、名称与可绑定的节点类型）。
-        # 页面据此显示真实的表数量与名称，不再写死「7 类工作表」——
-        # 统一模板覆盖的是系统能力全集，任何具体场景都只用到其中一部分。
+        # 作业所属场景与统一模板协议摘要；具体场景只使用系统能力全集中的一部分 Sheet。
         "profile": _job_profile_summary(db, job),
         "draft_revision": job.draft_revision,
         "sheets": [
@@ -629,7 +622,7 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
                 # 已确认的绑定：Sheet 角色 + 所属**节点实例**。两者都由用户确认后落库，
                 # 刷新页面时直接读它们，不重新按表头推导。
                 #
-                # 历史作业可能保存了旧 role（例如双轨 Profile 时期的短名）。
+                # 历史作业可能保存协议旧角色名。
                 # 旧 role 会同时命中多张表，单独一个旧名不足以确定角色，因此这里
                 # **如实标出它无法解释**，由页面提示用户重新确认绑定；
                 # 不静默按第一个同名角色解释。
@@ -927,7 +920,7 @@ def update_sheet_bindings(db: Session, job_no: str, request: SheetBindingsReques
     job.proposals_json = None
     job.decisions_json = None
     job.manifest_draft_json = None
-    # 绑定变化会让此前的发布检查失效，不能让它继续被当成有效预检查使用。
+    # 历史作业可能留有导入发布检查绑定；绑定变化后必须作废。
     job.precheck_json = None
     job.draft_revision = job.draft_revision + 1
     job.status = "PARSED"
@@ -977,7 +970,7 @@ def retry_conversion(db: Session, job_no: str) -> ImportJob:
     job.decisions_json = None
     job.manifest_draft_json = None
     job.coverage_json = None
-    # 重新转换会整体替换草稿配置，旧发布检查绑定随之失效。
+    # 重新转换会整体替换候选配置，历史导入发布检查绑定随之失效。
     job.precheck_json = None
     job.draft_revision = job.draft_revision + 1
     try:
@@ -1339,7 +1332,7 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
         issue.status = "RESOLVED"
         issue.decision_json = decision_value
     job.decisions_json = merged_decisions
-    # 任何裁决都会改变有效配置：此前的发布检查绑定随之失效，必须重新预检查。
+    # 裁决会改变候选配置，历史导入发布检查绑定随之失效。
     job.precheck_json = None
     job.draft_revision = job.draft_revision + 1
     # 会话未启用 autoflush，必须先落盘本轮的裁决状态，否则这里统计到的仍是裁决前的未决数量。
@@ -1359,7 +1352,7 @@ def _merge_decision_items(
 ) -> dict[str, Any]:
     """按目标合并裁决：RESOLVE 按属性更新，其他动作替换目标状态。
 
-    直接裁决与问题裁决可能分多批提交，整体替换会把上一轮的非 ISSUE 直接裁决丢掉。
+    直接裁决与问题裁决可能分多批提交，整体替换会把此前批次的非 ISSUE 直接裁决丢掉。
     合并键是 (target_type, target_ref)；同一候选分批修改不同属性时保留先前属性。
     parameters 是完整的业务参数对象，按属性整体替换；同一轮的参数问题已在上游汇总。
     被覆盖的旧值连同替换时间写入 history，不静默丢弃。
@@ -1393,8 +1386,8 @@ def _merge_decision_items(
 def save_decision_draft(db: Session, job_no: str, answers: dict[str, Any]) -> ImportJob:
     """暂存业务问题的作答，不改变候选、问题状态与草稿修订。
 
-    暂存只是让页面在提交前能保留用户已填的内容，因此不递增 draft_revision，
-    也不清空已完成的预检查；真正的生效仍要经过 save_decisions。
+    暂存只是让页面在提交前保留已填内容，因此不递增 draft_revision，也不改变候选、
+    问题状态或历史导入发布检查绑定；正式裁决仍由 save_decisions 提交。
     """
     job = _job_or_404(db, job_no, lock=True)
     assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
@@ -1447,22 +1440,18 @@ def _proposal_refs(proposals: dict[str, Any]) -> dict[str, set[str]]:
     return result
 
 
-# 能力覆盖
-#
 # 「配置可保存」不等于「规则可执行」。覆盖结果由 domain.capabilities 计算，
-# 并随已发布版本一起冻结进 manifest（参与 manifest_hash）；
-# 这里只负责把「未实现」的覆盖项变成发布检查的阻断项。
-
-
+# 并随已发布版本一起冻结进 manifest（参与 manifest_hash）。这里把未实现的
+# 覆盖项转换为场景发布检查的阻断项。
 def _capability_blockers(
     coverage: dict[str, Any],
     acknowledged: list[str],
 ) -> list[dict[str, Any]]:
     """能力缺口默认阻断发布；只有被逐条确认的规则键才放行。
 
-    确认过的缺口紧随版本冻结（见 manifest.capability_gaps 与 manifest.capability_coverage），
+    确认过的缺口随版本冻结（见 manifest.capability_gaps 与 manifest.capability_coverage），
     报告与任务范围里继续可见；未列出的缺口继续阻断。
-    确认**不是**「忽略全部缺口」的开关：它逐条列出使用者已看过并接受的规则键。
+    确认不是“忽略全部缺口”的开关：它逐条列出使用者已看过并接受的规则键。
     """
     acknowledged_keys = set(acknowledged)
     gaps = [row for row in coverage.get("rules", []) if not row.get("implemented")]
@@ -1490,7 +1479,7 @@ def _capability_blockers(
         )
     stale = sorted(acknowledged_keys - {row.get("rule_key") for row in gaps})
     if stale:
-        # 确认集合里出现本次并不存在的缺口：说明确认基于另一份配置，必须报出而不是忽略。
+        # 确认集合里出现本次并不存在的缺口，说明确认基于另一份配置，必须显式阻断。
         blockers.append(
             {
                 "code": "CAPABILITY_ACKNOWLEDGEMENT_STALE",

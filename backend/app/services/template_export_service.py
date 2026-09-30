@@ -18,9 +18,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from ..domain import scenario_schema, unified_profile
-from ..domain.manifest import DATE_COMPARISON_LABELS, DECIMAL_COMPARISON_LABELS, is_system_rule, rule_node_type_of
+from ..domain.manifest import is_system_rule, rule_node_type_of
 from ..domain.rule_expression import LIST_SEPARATOR, SUM_OPERATOR
-from ..errors import BusinessError
+from ..common.exceptions import BusinessError
 
 
 HEADER_FILL = PatternFill("solid", fgColor="174A5B")
@@ -133,55 +133,10 @@ def _enabled_text(config_status: Any) -> str:
     return "否" if str(config_status or "").upper() == "DISABLED" else "是"
 
 
-def _number_text(value: Any) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return ""
-    return f"{value:g}"
 
 
-def _requirement_text(rule: dict[str, Any], unit: str | None, operator_label: str) -> str:
-    """审核要求列：已确认的方向与阈值写在最前，原始 requirement 原文追加在后。
-
-    导入端以「审核要求」原文重建方向与阈值，含糊的原文不能覆盖已确认的参数，
-    因此确认参数必须在前，原文只作追溯。
-    """
-    operator = rule.get("operator")
-    parameters = rule.get("parameters") if isinstance(rule.get("parameters"), dict) else {}
-    confirmed: list[str] = []
-    if operator in {"FIELD_EQUAL", "FIELD_NOT_EQUAL"}:
-        confirmed.append(operator_label)
-    elif operator == "DATE_COMPARE":
-        direction = DATE_COMPARISON_LABELS.get(parameters.get("operator"))
-        if direction:
-            confirmed.append(f"日期{direction}")
-    elif operator == "DECIMAL_COMPARE":
-        comparison = parameters.get("operator")
-        if comparison == "ABS_DIFF_LTE":
-            unit_text = f"（{unit}）" if unit else ""
-            confirmed.append(f"金额绝对差不超过 {_number_text(parameters.get('threshold'))}{unit_text}")
-        elif isinstance(comparison, str) and comparison:
-            confirmed.append(f"金额{DECIMAL_COMPARISON_LABELS.get(comparison, comparison)}")
-    if parameters.get("requires_manual_review") is True:
-        confirmed.append("需要人工复核")
-    confirmed_text = "\n".join(text for text in confirmed if text)
-    requirement = rule.get("requirement")
-    original = requirement.strip() if isinstance(requirement, str) and requirement.strip() else ""
-    if original and original != confirmed_text:
-        return f"{confirmed_text}\n原始要求：{original}" if confirmed_text else original
-    return confirmed_text or original
 
 
-def _quality_requirement_text(rule: dict[str, Any]) -> str:
-    """材料质量的「检查要求」：保留原文，并把已确认的处理产物类型显式写出。"""
-    parameters = rule.get("parameters") if isinstance(rule.get("parameters"), dict) else {}
-    texts: list[str] = []
-    requirement = rule.get("requirement")
-    if isinstance(requirement, str) and requirement.strip():
-        texts.append(requirement.strip())
-    artifact_type = parameters.get("artifact_type")
-    if rule.get("operator") == "FILE_QUALITY_CHECK" and isinstance(artifact_type, str) and artifact_type:
-        texts.append(f"处理产物类型：{artifact_type}")
-    return "\n".join(texts)
 
 
 def build_scenario_version_export(manifest: dict[str, Any]) -> bytes:
@@ -339,11 +294,7 @@ def build_scenario_version_export(manifest: dict[str, Any]) -> bytes:
                     "required": "是" if material["required"] else "否",
                     "description": material.get("description") or "",
                     "source_id": material.get("source_ref") or "",
-                    # 材料位的「是否生效」写**是**：已发布配置里不可能有停用材料
-                    # （停用行在转换期就按 EXCLUDED 短路、不进候选，草稿也没有这一列）。
-                    # 这里**不是**代填默认值——它是这份配置的真实状态。
-                    # 曾经误写成 `_enabled_text(rule.get(...))`（上一轮循环泄漏的变量），
-                    # 会让整份材料清单跟随最后一条规则的状态被写成「否」。
+                    # 已发布配置不包含停用材料，因此导出其真实生效状态。
                     "enabled": "是",
                 }
             )
@@ -398,14 +349,6 @@ def build_scenario_version_export(manifest: dict[str, Any]) -> bytes:
                     continue
                 operator_column = column_of(role, "operator")
                 inputs = rule.get("inputs", [])
-                unit = next(
-                    (
-                        definition["unit"]
-                        for item in inputs
-                        if (definition := field_defs.get(item.get("field_key"))) and definition.get("unit")
-                    ),
-                    None,
-                )
                 rows_of(role).append(
                     {
                         "name": rule["name"],
