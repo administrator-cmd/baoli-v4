@@ -23,7 +23,7 @@ from ..domain import field_strategy, manifest as manifest_module
 from ..domain import unified_profile
 from ..domain.manifest import FORM_VALUE_TYPES, build_task_schema, compile_form_manifest
 from ..common.exceptions import BusinessError
-from ..entities import (
+from ..entity import (
     AuditPlan,
     PlanField,
     PlanMaterial,

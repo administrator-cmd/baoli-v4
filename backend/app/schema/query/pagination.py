@@ -1,4 +1,4 @@
-from ..common.exceptions import BusinessError
+from ...common.exceptions import BusinessError
 
 
 def validate_page_params(page: int, page_size: int) -> tuple[int, int]:

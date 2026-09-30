@@ -13,9 +13,9 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..query import validate_page_params
+from ..schema.query import validate_page_params
 from ..services import admin_query_service
-from ..vo import PagedResponse
+from ..schema.vo import PagedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/documents", tags=["审核材料"])

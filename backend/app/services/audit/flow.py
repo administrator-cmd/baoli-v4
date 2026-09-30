@@ -42,8 +42,8 @@ from ...domain import capabilities, node_registry, workflow_dag
 from ...domain.identity import public_no
 from ...domain.manifest import comparison_label
 from ...common.exceptions import BusinessError, exception_summary
-from ...entities import AuditTask, Evidence, ManualReview, NodeExecution, RuleResult
-from ...dto import ManualReviewRequest
+from ...entity import AuditTask, Evidence, ManualReview, NodeExecution, RuleResult
+from ...schema.dto import ManualReviewRequest
 from ..task_lookup import task_or_404
 from .facts import _field_extraction, _material_check, _refresh_extraction_rule_results
 from .evidence import _copy_evidence_to_rule, _rule_evidence_snapshots

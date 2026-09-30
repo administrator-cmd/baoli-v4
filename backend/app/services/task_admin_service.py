@@ -14,7 +14,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..common.exceptions import BusinessError
-from ..entities import AuditPlan, AuditTask, ScenarioNode, ScenarioVersion
+from ..entity import AuditPlan, AuditTask, ScenarioNode, ScenarioVersion
 from .background_service import assert_no_active_operation
 from .operation_types import OBJECT_AUDIT_TASK
 from .operation_log_service import record_operation

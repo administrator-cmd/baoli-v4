@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..domain.manifest import build_task_schema
-from ..dto.scenarios import (
+from ..schema.dto.scenarios import (
     DraftDisabledSourceRowUpdateRequest,
     DraftDisabledSourceRowActivateRequest,
     DraftFieldRequest,
@@ -35,15 +35,15 @@ from ..dto.scenarios import (
     ScenarioPublishRequest,
     ScenarioUpdateRequest,
 )
-from ..dto import TaskSchemaPreviewRequest
-from ..vo.scenarios import (
+from ..schema.dto import TaskSchemaPreviewRequest
+from ..schema.vo.scenarios import (
     DraftDisabledSourceRowActivationPreviewResponse,
     ScenarioDetailResponse,
     ScenarioDraftViewResponse,
     ScenarioPublishResponse,
 )
-from ..vo import TaskSchemaPreviewResponse
-from ..query import validate_page_params
+from ..schema.vo import TaskSchemaPreviewResponse
+from ..schema.query import validate_page_params
 from ..services import scenario_admin_service
 from ..services.scenario_admin_service import (
     create_draft_field,
@@ -78,7 +78,7 @@ from ..services.scenario_admin_service import (
 )
 from ..services.task_lookup import scenario_or_404
 from ..services.template_export_service import build_scenario_version_export
-from ..vo import PagedResponse
+from ..schema.vo import PagedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])

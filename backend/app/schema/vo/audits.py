@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from ..common.api import ApiResponse
+from ...common.api import ApiResponse
 
 
 class OcrArtifactStatusResponse(ApiResponse):

@@ -8,7 +8,7 @@
 from sqlalchemy.orm import Session
 
 from ..common.exceptions import BusinessError
-from ..entities import AuditTask, ScenarioVersion
+from ..entity import AuditTask, ScenarioVersion
 from ..repositories import scenario_repository, task_repository
 
 

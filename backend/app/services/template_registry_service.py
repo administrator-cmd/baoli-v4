@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..common.exceptions import BusinessError
 from ..domain.scenario_schema import default_schema
-from ..entities import ScenarioTemplate
+from ..entity import ScenarioTemplate
 from ..repositories import scenario_repository
 
 

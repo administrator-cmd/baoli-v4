@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from ..domain.identity import public_no
 from ..common.exceptions import BusinessError
-from ..entities import AuditTask
+from ..entity import AuditTask
 from ..repositories import plan_repository, scenario_repository, task_repository
 from .audit.interrupt import resume_task_creation_interrupt, start_audit_interrupt
 from .operation_log_service import require_idempotent_replay

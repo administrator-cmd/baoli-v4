@@ -19,8 +19,8 @@ from sqlalchemy import and_, case, func, literal, or_, select, text, union_all
 from sqlalchemy.orm import Session
 
 from ..common.exceptions import BusinessError
-from ..entities import ImportJob
-from ..entities import AuditTask, BackgroundOperation, OperationLog
+from ..entity import ImportJob
+from ..entity import AuditTask, BackgroundOperation, OperationLog
 from ..domain.identity import public_no
 
 logger = logging.getLogger(__name__)

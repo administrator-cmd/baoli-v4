@@ -42,7 +42,7 @@ from ..domain.manifest import (
     validate_rule_parameters,
 )
 from ..common.exceptions import SAFE_DETAIL_KEYS, BusinessError
-from ..entities import (
+from ..entity import (
     AuditPlan,
     ScenarioDraft,
     ScenarioDraftField,

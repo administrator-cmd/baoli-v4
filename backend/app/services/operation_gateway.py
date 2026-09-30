@@ -12,9 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common.exceptions import BusinessError
-from ..entities import ImportJob, ImportSheet
-from ..entities import AuditTask
-from ..dto import ExecuteNodeRequest, ManualReviewRequest
+from ..entity import ImportJob, ImportSheet
+from ..entity import AuditTask
+from ..schema.dto import ExecuteNodeRequest, ManualReviewRequest
 from . import background_service
 from .audit.state import _single_node_code_of_type
 from .background_service import (

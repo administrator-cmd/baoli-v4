@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..dto import (
+from ..schema.dto import (
     ApplyImportDraftRequest,
     DecisionDraftRequest,
     ImportDecisionsRequest,
@@ -20,9 +20,9 @@ from ..dto import (
     PublishRequest,
     SheetBindingsRequest,
 )
-from ..query import validate_page_params
-from ..vo import OperationAcceptedResponse
-from ..vo.scenarios import ScenarioVersionResponse
+from ..schema.query import validate_page_params
+from ..schema.vo import OperationAcceptedResponse
+from ..schema.vo.scenarios import ScenarioVersionResponse
 from ..services import admin_query_service, import_service
 from ..services.background_service import operation_view
 from ..services.import_service import (
@@ -36,7 +36,7 @@ from ..services.import_service import (
     update_sheet_bindings,
 )
 from ..services.operation_gateway import submit_conversion
-from ..vo import ImportJobResponse, ImportJobSummaryResponse, PagedResponse
+from ..schema.vo import ImportJobResponse, ImportJobSummaryResponse, PagedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 

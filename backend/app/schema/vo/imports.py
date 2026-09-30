@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import Field
 
-from ..common.api import ApiResponse
+from ...common.api import ApiResponse
 
 
 class ImportJobResponse(ApiResponse):

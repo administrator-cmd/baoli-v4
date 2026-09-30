@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
-from ...entities import AuditTask, NodeExecution, WorkflowCheckpoint
+from ...entity import AuditTask, NodeExecution, WorkflowCheckpoint
 from ..background_service import assert_no_active_operation, latest_operation
 from ..operation_types import OBJECT_AUDIT_TASK
 from .state import _scenario_nodes

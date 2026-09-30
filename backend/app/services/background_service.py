@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
 from ..common.exceptions import BusinessError, exception_summary
-from ..entities import BackgroundOperation
+from ..entity import BackgroundOperation
 from ..domain.identity import public_no
 
 

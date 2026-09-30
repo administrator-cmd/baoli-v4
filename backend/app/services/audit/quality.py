@@ -17,7 +17,7 @@ from ...domain.identity import public_no
 from ...domain.manifest import OPERATOR_LABELS, rule_node_type_of
 from ...common.exceptions import BusinessError
 from .document_ports import document_service
-from ...entities import AuditTask, DocumentUpload, ManualReview, NodeExecution, RuleResult, StoredArtifact
+from ...entity import AuditTask, DocumentUpload, ManualReview, NodeExecution, RuleResult, StoredArtifact
 from ..storage_service import resolve_storage_path
 from .artifacts import _complete_ocr_job, _ensure_external_artifact, _material_classify_content, _submit_ocr_job
 from .evidence import _copy_artifact_evidence_to_rule

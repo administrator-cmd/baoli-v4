@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..dto.plans import (
+from ..schema.dto.plans import (
     PlanConfigUpdateRequest,
     PlanCopyRequest,
     PlanCreateRequest,
@@ -21,7 +21,7 @@ from ..dto.plans import (
     PlanUpdateRequest,
     TaskFromPlanRequest,
 )
-from ..query import validate_page_params
+from ..schema.query import validate_page_params
 from ..services import plan_service, plan_task_service
 from ..services.plan_service import (
     copy_plan,
@@ -38,7 +38,7 @@ from ..services.plan_service import (
     update_plan,
     update_plan_config,
 )
-from ..vo import PagedResponse, PlanSelectionResponse, TaskCreatedResponse
+from ..schema.vo import PagedResponse, PlanSelectionResponse, TaskCreatedResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])

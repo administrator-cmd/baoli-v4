@@ -2,7 +2,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..common.api import ApiResponse
+from ...common.api import ApiResponse
 
 
 class ReportSnapshotSignal(BaseModel):

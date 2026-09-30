@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..entities import AuditTask, ManualReview, RuleResult, TaskDocument, TaskFieldValue
+from ..entity import AuditTask, ManualReview, RuleResult, TaskDocument, TaskFieldValue
 
 
 @dataclass(frozen=True)

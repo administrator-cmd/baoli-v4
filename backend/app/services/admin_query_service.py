@@ -21,8 +21,8 @@ from sqlalchemy.orm import Session
 from fastapi.responses import FileResponse
 
 from ..common.exceptions import BusinessError
-from ..entities import FieldCandidate, ImportIssue, ImportJob, ImportSheet
-from ..entities import (
+from ..entity import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from ..entity import (
     AuditPlan,
     AuditReport,
     AuditTask,

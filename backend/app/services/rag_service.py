@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..common.exceptions import BusinessError, exception_summary
-from ..entities import (
+from ..entity import (
     AuditTask,
     DocumentUpload,
     EvidenceChunk,

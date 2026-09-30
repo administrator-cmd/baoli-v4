@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from ..entities import AuditPlan
+from ..entity import AuditPlan
 
 
 def find_by_id(db: Session, plan_id: int | None) -> AuditPlan | None:

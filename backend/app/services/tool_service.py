@@ -201,7 +201,7 @@ def _scene_node_types(scene_code: str) -> frozenset[str] | None:
     调用方据此**跳过**场景校验而不是当成「不允许」——把配置未就绪读成「越权」
     会让一次正常的调用被误拒。
     """
-    from ..entities import ScenarioDraft, ScenarioDraftNode
+    from ..entity import ScenarioDraft, ScenarioDraftNode
     from ..database import SessionLocal
 
     with SessionLocal() as session:
@@ -390,7 +390,7 @@ def resolve(
     effective_node = node_code if node_code is not None else (context.node_code if context else None)
     manifest = None
     if context is not None and context.task_id is not None and context.database_session is not None:
-        from ..entities import AuditTask
+        from ..entity import AuditTask
 
         task = context.database_session.get(AuditTask, context.task_id)
         if task is None:

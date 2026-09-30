@@ -17,8 +17,8 @@ import hashlib
 from ...domain import fact_snapshot, workflow_dag
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
 from ...common.exceptions import BusinessError
-from ...entities import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
-from ...dto import ManualReviewRequest
+from ...entity import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
+from ...schema.dto import ManualReviewRequest
 from ..operation_types import OBJECT_AUDIT_TASK
 from ..task_lookup import task_or_404
 from .facts import _current_field_fact_pairs, _refresh_extraction_rule_results, _write_human_field_fact

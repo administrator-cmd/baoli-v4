@@ -7,7 +7,7 @@ from ..config import get_settings
 from ..database import get_db
 from ..domain import capabilities, tool_catalog
 from ..common.exceptions import BusinessError
-from ..vo import (
+from ..schema.vo import (
     CapabilityCatalogResponse,
     CapabilityItem,
     MaterialTypeCatalogResponse,
@@ -25,7 +25,7 @@ from ..integrations.http_services import list_material_types
 from ..services import operation_log_service, system_status_service
 from ..services.embedding_service import embedding_status
 from ..services.storage_service import DOCUMENT_EXTENSIONS, RULEBOOK_EXTENSIONS
-from ..vo import OperationLogPageResponse
+from ..schema.vo import OperationLogPageResponse
 
 
 router = APIRouter(prefix="/system", tags=["系统"])

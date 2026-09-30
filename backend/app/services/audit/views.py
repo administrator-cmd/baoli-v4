@@ -9,7 +9,7 @@
 
 from ...domain.manifest import rule_node_type_of
 from ...common.exceptions import BusinessError
-from ...entities import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
+from ...entity import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
 from ..task_lookup import task_or_404
 from .evidence import _quote_check_of
 from .reporting import _configured_format_support

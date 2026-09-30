@@ -38,7 +38,7 @@ from typing import Any
 from ..domain import quality_judgement
 from ..domain.audit_vocab import read_material_type_status
 from ..common.exceptions import BusinessError
-from ..entities import DocumentUpload, EvaluationSnapshot, TaskDocument
+from ..entity import DocumentUpload, EvaluationSnapshot, TaskDocument
 from sqlalchemy import select
 
 

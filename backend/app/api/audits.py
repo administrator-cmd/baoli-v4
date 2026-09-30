@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..common.exceptions import BusinessError
 from ..repositories import task_repository
-from ..query import validate_page_params
-from ..dto import (
+from ..schema.query import validate_page_params
+from ..schema.dto import (
     ExecuteNodeRequest,
     ExternalArtifactReconcileRequest,
     FieldCorrectionRequest,
@@ -44,7 +44,7 @@ from ..services.task_service import (
     task_view,
     upload_document,
 )
-from ..vo import (
+from ..schema.vo import (
     AuditTaskResponse,
     DocumentRemoveResponse,
     DocumentUploadResponse,

@@ -2,7 +2,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..entities import EvidenceRetrieval
+from ..entity import EvidenceRetrieval
 from . import rag_service
 from .task_lookup import task_or_404
 

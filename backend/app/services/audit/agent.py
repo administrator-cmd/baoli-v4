@@ -46,7 +46,7 @@ from ...domain import capabilities, fact_snapshot, tool_catalog
 from ...domain.tool_context import ToolExecutionContext
 from ...common.exceptions import BusinessError
 from ...integrations.llm.gateway import ModelTurn, call_chat
-from ...entities import AgentToolCall, AuditTask, EvaluationSnapshot
+from ...entity import AgentToolCall, AuditTask, EvaluationSnapshot
 from .. import agent_tool_ledger as ledger
 from .. import tool_service
 from sqlalchemy.exc import IntegrityError
@@ -512,7 +512,7 @@ def _task_facts(
     - 材料位状态随之冻结：算子按 `material_state` 判定依据是否可用，
       用当前值会让结论无法复现。
     """
-    from ...entities import DocumentUpload, Evidence, TaskDocument, TaskFact, TaskFieldValue
+    from ...entity import DocumentUpload, Evidence, TaskDocument, TaskFact, TaskFieldValue
     from sqlalchemy import select
 
     material_states = {
@@ -685,7 +685,7 @@ def _task_materials(db: Session, task: AuditTask) -> list[dict[str, Any]]:
     只列已上传的会让必传缺失变成查不到，判不出不合格。
     """
     from .state import _material_states
-    from ...entities import DocumentUpload, TaskDocument
+    from ...entity import DocumentUpload, TaskDocument
     from sqlalchemy import select
 
     states = _material_states(db, task)

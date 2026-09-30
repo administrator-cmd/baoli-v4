@@ -16,10 +16,10 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..common.exceptions import BusinessError
-from ..dto import ReportRemarkRequest
-from ..query import validate_page_params
+from ..schema.dto import ReportRemarkRequest
+from ..schema.query import validate_page_params
 from ..services import admin_query_service
-from ..vo import PagedResponse, RiskResultPageResponse
+from ..schema.vo import PagedResponse, RiskResultPageResponse
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/reports", tags=["审核报告"])

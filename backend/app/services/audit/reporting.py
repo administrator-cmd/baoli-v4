@@ -18,7 +18,7 @@ from ...domain.identity import public_no
 from ...domain.manifest import NODE_DEFINITIONS, rule_node_type_of
 from .state import _node_codes_of_type
 from ...common.exceptions import BusinessError
-from ...entities import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
+from ...entity import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
 from .evidence import _fact_evidence_suffix, _quote_check_of
 from .facts import _current_field_fact_pairs, _input_trace
 from .shared import BASIS_TYPE_LABELS, LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _current_uploads, _material_names, _scenario

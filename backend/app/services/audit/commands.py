@@ -13,7 +13,7 @@ from ...domain.identity import public_no
 from ...common.exceptions import BusinessError, exception_summary
 from ...graphs.audit_graph import resume_audit_confirmation, resume_audit_manual_review
 from . import flow as audit_flow
-from ...entities import (
+from ...entity import (
     AuditTask,
     DocumentUpload,
     ManualReview,
@@ -22,7 +22,7 @@ from ...entities import (
     TaskDocument,
     WorkflowCheckpoint,
 )
-from ...dto import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest, RecoverFailedNodeRequest
+from ...schema.dto import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest, RecoverFailedNodeRequest
 from ..task_lookup import task_or_404
 from .artifacts import _artifact_for_upload, _ocr_job_metadata, _submit_authorized_ocr_retry
 from .evidence import _evidence_snapshot, _evidence_snapshots

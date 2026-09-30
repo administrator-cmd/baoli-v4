@@ -14,7 +14,7 @@
 
 from ...common.exceptions import BusinessError
 from ...graphs.audit_graph import CHECKPOINT_STORAGE_UNAVAILABLE, probe_interrupt
-from ...entities import AuditTask, WorkflowCheckpoint
+from ...entity import AuditTask, WorkflowCheckpoint
 from ..task_lookup import task_or_404
 from .state import _fail_unrecoverable_checkpoint, _flow_checkpoint_state, _graph_namespace, _task_checkpoint
 from sqlalchemy import select, update

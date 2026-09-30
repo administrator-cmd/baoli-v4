@@ -12,10 +12,10 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..query import validate_page_params
+from ..schema.query import validate_page_params
 from ..services import admin_query_service
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
-from ..vo import PagedResponse
+from ..schema.vo import PagedResponse
 
 router = APIRouter(prefix="/reviews", tags=["人工复核"])
 executions_router = APIRouter(prefix="/executions", tags=["执行记录"])

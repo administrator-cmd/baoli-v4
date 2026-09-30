@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..entities import ScenarioDraft, ScenarioDraftSheet, ScenarioTemplate, ScenarioVersion
+from ..entity import ScenarioDraft, ScenarioDraftSheet, ScenarioTemplate, ScenarioVersion
 
 
 def find_template_by_code(db: Session, scenario_code: str) -> ScenarioTemplate | None:

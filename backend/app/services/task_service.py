@@ -19,7 +19,7 @@ from .audit.facts import _current_field_fact_pairs
 # 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
 from .audit.reviews import _current_review_batch, _review_hash
 from .audit.state import _node_codes_of_type
-from ..entities import (
+from ..entity import (
     AuditPlan,
     AuditTask,
     BackgroundOperation,

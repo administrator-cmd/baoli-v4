@@ -36,7 +36,7 @@
 -- 重要约束：
 --   - 应用启动与请求过程只检查连接和表结构，绝不执行 DDL、不调用 create_all()、
 --     不调用 saver.setup()、不自动修表。
---   - 表结构以 backend/app/entities/ 下的 ORM 定义为准，本文件必须与 ORM 保持一致。
+--   - 表结构以 backend/app/entity/ 下的 ORM 定义为准，本文件必须与 ORM 保持一致。
 --
 -- 业务主流程（表与状态取值都按这条链组织，任何一步都不得跳过）：
 --   场景草稿（scenario_draft*，可编辑、不生效）

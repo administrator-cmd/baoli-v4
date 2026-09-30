@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from ...domain import calculation as calc, workflow_dag
 from ...domain.identity import public_no
 from ...common.exceptions import BusinessError
-from ...entities import AuditTask, ManualReview, NodeExecution, RuleResult, TaskFact
+from ...entity import AuditTask, ManualReview, NodeExecution, RuleResult, TaskFact
 from .shared import _material_names
 
 

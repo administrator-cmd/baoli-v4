@@ -49,7 +49,7 @@ from typing import Any
 from ..domain import tool_catalog
 from ..domain.tool_context import ToolExecutionContext
 from ..common.exceptions import BusinessError
-from ..entities import AgentToolCall
+from ..entity import AgentToolCall
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session

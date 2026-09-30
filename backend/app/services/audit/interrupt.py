@@ -10,7 +10,7 @@ WorkflowCheckpoint（业务侧权威记录），再让图真正停到 `await_nod
 """
 
 from ...common.exceptions import BusinessError, exception_summary
-from ...entities import AuditTask, BackgroundOperation, NodeExecution, WorkflowCheckpoint
+from ...entity import AuditTask, BackgroundOperation, NodeExecution, WorkflowCheckpoint
 from ...domain.identity import public_no
 from . import flow as audit_flow
 from ...graphs.audit_graph import audit_interrupt_is_pending, open_audit_interrupt

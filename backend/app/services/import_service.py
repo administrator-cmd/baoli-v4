@@ -29,15 +29,15 @@ from ..graphs.import_graph import (
     run_sheet_conversion,
     run_workbook_read,
 )
-from ..entities import FieldCandidate, ImportIssue, ImportJob, ImportSheet
-from ..entities import (
+from ..entity import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from ..entity import (
     BackgroundOperation,
     ScenarioDraft,
     ScenarioDraftNode,
     ScenarioTemplate,
     ScenarioVersion,
 )
-from ..dto import ImportDecisionsRequest, PublishRequest, SheetBindingsRequest
+from ..schema.dto import ImportDecisionsRequest, PublishRequest, SheetBindingsRequest
 from .background_service import ACTIVE_STATUSES, assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
 from .operation_types import OBJECT_IMPORT_JOB

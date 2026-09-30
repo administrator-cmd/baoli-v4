@@ -18,7 +18,7 @@ from ...domain.identity import public_no
 from ...common.exceptions import BusinessError, exception_summary
 from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult, ReadyOcrArtifact, ready_artifact_payload
 from .document_ports import document_service
-from ...entities import AuditTask, DocumentUpload, StoredArtifact
+from ...entity import AuditTask, DocumentUpload, StoredArtifact
 from ..storage_service import resolve_storage_path
 from datetime import UTC, datetime
 from pathlib import Path

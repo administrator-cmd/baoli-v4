@@ -16,7 +16,7 @@ from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, 
 from ...domain import currency, field_strategy, quality_judgement
 from ...domain.manifest import EVIDENCE_SEAL_SUBJECT, applicability_view
 from ...common.exceptions import BusinessError
-from ...entities import AuditTask, DocumentUpload, ScenarioVersion, TaskDocument
+from ...entity import AuditTask, DocumentUpload, ScenarioVersion, TaskDocument
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from sqlalchemy import select
