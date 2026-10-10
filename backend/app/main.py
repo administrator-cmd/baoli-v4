@@ -7,9 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import audits, imports, materials, operations, plans, reports, reviews, scenarios, system, templates
+from .api import audits, imports, materials, operations, plans, reports, reviews, scenarios, system
 from .config import PROJECT_DIR, get_settings
-from .domain import unified_profile
+from .domain import node_profile
 from .integrations import http_services
 from .services.audit import document_ports, flow as audit_flow
 from .database import SessionLocal, check_database_connection
@@ -64,8 +64,8 @@ def _configure_logging(level_name: str) -> None:
 
 
 settings = get_settings()
-# 统一模板协议从配置注入，domain 不直接读取全局配置。
-unified_profile.configure_unified_profile(settings.resolved_unified_profile_path)
+# 节点能力目录路径从配置注入，domain 不直接读取全局配置。
+node_profile.configure_node_profile(settings.resolved_node_profile_path)
 # 注册审核节点执行实现。
 audit_flow.register_node_handlers()
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
@@ -81,8 +81,8 @@ async def lifespan(_: FastAPI):
     except (OSError, SQLAlchemyError):
         logger.error("数据库连接检查失败")
         raise RuntimeError("数据库连接失败，请检查 BAOLI_DATABASE_URL、网络和账号权限") from None
-    # 只读校验业务结构：缺表、缺列、缺唯一键/外键/触发器或迁移记录不完整时拒绝启动。
-    # 应用绝不执行 DDL、不调用 create_all()、不自动修表——结构漂移必须由人确认后跑迁移脚本。
+    # 只读校验实际表、列、唯一键、外键及触发器，不依赖迁移记录。
+    # 应用绝不执行 DDL、不调用 create_all()；结构变更由用户从空库执行 schema.sql。
     try:
         verify_schema()
     except RuntimeError as exc:
@@ -130,7 +130,6 @@ app.add_exception_handler(Exception, unhandled_error_handler)
 
 for router in (
     system.router,
-    templates.router,
     imports.router,
     scenarios.router,
     plans.router,

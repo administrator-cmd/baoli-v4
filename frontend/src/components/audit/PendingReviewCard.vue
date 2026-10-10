@@ -7,9 +7,6 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import {
   basisTypeOptions,
   formatBusinessValue,
-  locatorStatusLabel,
-  quoteCheckLabel,
-  quoteCheckTone,
   reviewDecisionLabel,
   reviewOptions,
   reviewTypeLabel,
@@ -31,7 +28,7 @@ export interface ReviewDraft {
  * 首屏按人工真正要回答的问题组织：
  *   系统原判断 → 原文内容 → 系统标准化结果 → 当前有效值 → 用户修改后的值 →
  *   修改理由 → 复核后有效状态 → 依赖哪些规则重新计算。
- * 证据页码与坐标只放在辅助信息里。
+ * 证据展示引用原文和内容依据核对结论。
  *
  * 系统判断只读；人工结论由用户在业务选项中选择，并显式选择依据类型。
  * 不要求用户填 JSON、编码或内部编号。
@@ -123,7 +120,7 @@ const draftValueText = computed(() => {
  * 依赖哪些规则重新计算。
  *
  * 服务端在复核响应里给出 `field_changes` 与 `recomputed_rules`；待办本身没有携带
- * 该清单，因此这里**不猜**——只如实提示「提交后由服务端计算失效与重算范围」，
+ * 该清单，因此这里不猜——只如实提示「提交后由服务端计算失效与重算范围」，
  * 并在字段确认类复核里说明会退回校验链路的哪一步（这是已确认的业务口径）。
  */
 const recomputeText = computed(() => {
@@ -186,9 +183,10 @@ function openSingleReviewEvidence(): void {
       <!-- 2. 原文内容：本条复核判断所依据的材料原文 -->
       <el-descriptions-item label="原文内容">
         <template v-if="judgmentEvidences.length">
-          <div v-for="item in judgmentEvidences" :key="item.evidence_no || item.quote_text" class="review-quote block-gap-sm">
+          <div v-for="(item, index) in judgmentEvidences" :key="index" class="review-quote block-gap-sm">
             <div v-if="item.field_path" class="text-muted">字段属性：{{ item.field_path }}</div>
             {{ item.quote_text || "本条证据没有记录引用原文。" }}
+            <div v-if="item.quote_check_label" class="text-muted">原文核对：{{ item.quote_check_label }}</div>
           </div>
         </template>
         <div v-else class="review-quote">{{ review.evidence_quote || "本条复核没有关联证据原文，请人工核对材料后再下结论。" }}</div>
@@ -293,7 +291,7 @@ function openSingleReviewEvidence(): void {
     <el-card v-if="isSubjectReview" shadow="never" class="block-gap">
       <template #header>主体核对判据（来自本次执行快照）</template>
       <div v-if="subjectQuery" class="block-gap-sm">
-        <div class="subject-label">待核对主体（合同侧）</div>
+        <div class="subject-label">待核对主体（材料侧）</div>
         <div class="subject-value">{{ subjectQuery.value || "未取得有效值" }}</div>
         <div class="text-muted">
           来源：{{ subjectQuery.material_name || "未关联材料" }}
@@ -336,9 +334,6 @@ function openSingleReviewEvidence(): void {
           <el-table-column prop="material_name" label="材料" min-width="140" show-overflow-tooltip />
           <el-table-column prop="subject_name" label="识别主体" min-width="180" show-overflow-tooltip />
           <el-table-column prop="seal_type" label="印章类型" width="120" show-overflow-tooltip />
-          <el-table-column label="页码" width="80">
-            <template #default="{ row }">{{ row.page_no ?? "—" }}</template>
-          </el-table-column>
           <el-table-column label="置信度" width="100">
             <template #default="{ row }">{{ row.confidence ?? "—" }}</template>
           </el-table-column>
@@ -397,30 +392,6 @@ function openSingleReviewEvidence(): void {
       </el-form-item>
     </el-form>
 
-    <!-- 辅助信息：证据定位、编号等一律收在这里 -->
-    <el-collapse>
-      <el-collapse-item title="辅助信息（证据定位与技术编号）" name="tech">
-        <div v-if="judgment?.evidence" class="block-gap-sm">
-          <StatusBadge
-            :status="judgment.evidence.quote_check ?? 'PENDING'"
-            :label="judgment.evidence.quote_check_label || quoteCheckLabel(judgment.evidence.quote_check)"
-            :tone="quoteCheckTone(judgment.evidence.quote_check)"
-          />
-          <div class="text-muted">
-            位置核对：{{ locatorStatusLabel(judgment.evidence.locator_status) }}（仅作辅助定位，对不上不影响上述原文内容）
-          </div>
-          <div v-if="judgment.evidence.page_no !== null && judgment.evidence.page_no !== undefined" class="text-muted">
-            页码：{{ judgment.evidence.page_no }}
-          </div>
-        </div>
-        <div v-else class="text-muted">本条复核没有记录证据定位信息。</div>
-        <div class="mono">复核编号：{{ review.review_no }}</div>
-        <div class="mono">复核类型：{{ review.review_type }}</div>
-        <div v-if="review.basis_type" class="mono">依据类型：{{ review.basis_type }}</div>
-        <div v-if="review.effective_status" class="mono">有效状态：{{ review.effective_status }}</div>
-        <div v-if="review.evidence_no" class="mono">证据编号：{{ review.evidence_no }}</div>
-      </el-collapse-item>
-    </el-collapse>
   </div>
 </template>
 

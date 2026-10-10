@@ -29,11 +29,8 @@ import type { ConfigOrigin, DraftNodeItem } from "@/api/contracts/scenes";
 import CandidateCorrectionDialog from "@/components/import/CandidateCorrectionDialog.vue";
 import CandidateTable, { type CandidateColumn, type CandidateRow } from "@/components/import/CandidateTable.vue";
 import FileUploadCard from "@/components/import/FileUploadCard.vue";
-import ImportIssueCard from "@/components/import/ImportIssueCard.vue";
 import ImportJobPicker from "@/components/import/ImportJobPicker.vue";
-import { useDecisionAnswers } from "@/composables/useDecisionAnswers";
 import ImportStepNav from "@/components/import/ImportStepNav.vue";
-import TemplateDownloadButton from "@/components/scenes/TemplateDownloadButton.vue";
 import SheetBindingTable from "@/components/import/SheetBindingTable.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
 import PageHeader from "@/components/PageHeader.vue";
@@ -49,13 +46,11 @@ import {
   applicabilityLabel,
   failureNextStep,
   formatBusinessValue,
-  nodeLabel,
   riskSourceNodeColumnLabel,
   riskSourceRuleColumnLabel,
-  sheetRoleLabel,
   valueTypeLabel,
 } from "@/constants/labels";
-import { initialBindingOf, type NodeOption, type SheetBindingDraft } from "@/constants/sheetBinding";
+import { initialBindingOf, type SheetBindingDraft } from "@/constants/sheetBinding";
 
 const route = useRoute();
 const router = useRouter();
@@ -68,7 +63,7 @@ const job = ref<ImportJob | null>(null);
 const importJobs = ref<ImportJobSummary[]>([]);
 const templates = ref<TemplateOption[]>([]);
 /**
- * 本次上传所属的**场景编码**。
+ * 本次上传所属的场景编码。
  *
  * 上传流程以场景为起点：用户先建场景、再在该场景下上传，作业明确记录它属于哪个场景。
  * 系统不再从 Excel 表头推断场景——猜错场景会拿另一套列协议解释这份文件，
@@ -93,23 +88,6 @@ const correctionTarget = ref<{ targetType: "MATERIAL" | "FIELD" | "RULE"; target
 );
 const correctionPending = ref(false);
 
-/* 业务问题作答：状态与提交流程见 useDecisionAnswers。能力缺口在场景发布页逐条确认。 */
-const {
-  selectedOptions,
-  update: updateIssueAnswer,
-  readDecisionValue,
-  initialise: initialiseDecisionAnswers,
-  flush: flushDecisionDraft,
-  submit: submitDecisionAnswers,
-  reset: resetDecisionAnswers,
-} = useDecisionAnswers({
-  job,
-  applyRevision: applyJobRevision,
-  run,
-  setFailure,
-  formMessage,
-});
-
 const candidateTabModel = computed<CandidateTab>({
   get: () => candidateTab.value,
   set: (value) => {
@@ -117,43 +95,15 @@ const candidateTabModel = computed<CandidateTab>({
   },
 });
 
-/** 下载模板使用的场景：已打开作业时用作业所属场景，否则用上传前选中的场景。 */
-const templateScenarioCode = computed(() => job.value?.profile?.scenario_code || uploadScenarioCode.value || null);
-
-/** 统一模板协议声明的 Sheet 中文名（按 sheet_role）。 */
-const profileSheetLabels = computed<Record<string, string>>(() => {
-  const sheets = job.value?.profile?.sheets ?? [];
-  return Object.fromEntries(sheets.map((item) => [item.sheet_role, item.display_name]));
-});
-
 /**
- * 作业所属场景里**用户配置的节点实例**：Sheet 绑定的唯一来源。
- *
- * 一张 Sheet 只能绑定一个节点；一个节点可以绑定多张 Sheet。系统不按表头自动绑定，
- * 建议只用于页面预选。作业没有记录场景（历史作业）时为空列表——
- * 此时页面明确提示「先在场景配置里建立节点」，不补一份默认节点。
- *
- * 节点**不在这里新建**：顺序与上游依赖是发布期 DAG 与执行顺序的唯一依据，
- * 这里只够填实例码与能力类型两项，建出来的节点依赖为空、会被排到最后执行，
- * 而发布期校验拦不住（依赖存在、无环、上游已启用三条全过）——是一个静默的错误顺序。
- * 新建与修改节点只在场景详情的「流程」页签里做。
+ * 本场景的实际节点供解析和候选展示使用。工作表只选择是否参与解析，不按表绑定节点；
+ * 同一工作表的字段和规则可归到不同节点。节点及依赖由管理员在场景流程中配置，LLM 不创建节点。
  */
 const scenarioNodes = ref<DraftNodeItem[]>([]);
 const nodeLoadError = ref<string | null>(null);
 let nodeRequest = 0;
 let jobReception = 0;
 let jobLoadRequest = 0;
-
-const nodeOptions = computed<NodeOption[]>(() =>
-  scenarioNodes.value.map((item) => ({
-    nodeCode: item.node_code,
-    nodeType: item.node_type,
-    // 名称与能力类型同名时只显示一次：预置节点的名称就是能力类型名，
-    // 无条件拼成「材料检查（材料检查）」是纯噪音。改了名的节点才需要标出能力类型。
-    label:
-      item.name === item.node_type_label ? item.name : `${item.name}（${item.node_type_label}）`,
-  })),
-);
 
 async function loadScenarioNodes(scenarioCode: string | null | undefined): Promise<void> {
   const request = ++nodeRequest;
@@ -174,24 +124,12 @@ async function loadScenarioNodes(scenarioCode: string | null | undefined): Promi
   }
 }
 
-/**
- * Sheet 用途的中文名。
- *
- * 优先用**统一模板协议声明的名称**，其次退回既有标签表；
- * 两者都没有时如实显示未识别，不猜。
- */
-function roleLabel(role: string | null | undefined): string {
-  if (!role) {
-    return sheetRoleLabel(role);
-  }
-  return profileSheetLabels.value[role] ?? sheetRoleLabel(role);
-}
-
-const openIssues = computed(() => job.value?.issues.filter((item) => item.status === "OPEN") ?? []);
-/** 已作结论的问题：提交后仍要能核对原答案与生效值。 */
-const resolvedIssues = computed(() => job.value?.issues.filter((item) => item.status !== "OPEN") ?? []);
 const proposalSheets = computed<ProposalSheet[]>(() => job.value?.proposals?.sheets ?? []);
 const proposalCalculations = computed<ProposalCalculation[]>(() => job.value?.proposals?.calculations ?? []);
+const rejectedCandidates = computed(() => (job.value?.coverage?.rejected_candidates ?? []).map((item) => ({
+  ...item,
+  sourceSheet: job.value?.sheets.find((sheet) => sheet.sheet_key === item.source?.sheet_key)?.name,
+})));
 const hasProposals = computed(() => proposalSheets.value.length > 0 || proposalCalculations.value.length > 0);
 const blockingIssueCount = computed(() => importBlockingIssues(job.value));
 
@@ -246,9 +184,8 @@ const candidateIndex = computed(() => {
 });
 
 /**
- * 需要业务确认用途的工作表：绑定表格里只出现这些。
- * 判定完全依据服务端返回的 fixed_excluded（模板说明页等元数据、没有业务数据的工作表），
- * 不按工作表名称在前端硬编码。
+ * 可选择参与解析的工作表；服务端仅将空表标记为 fixed_excluded。
+ * 说明页是否参与由实际选择决定，表内说明行由模型声明处置。
  */
 const bindingSheets = computed<ImportSheet[]>(() => (job.value?.sheets ?? []).filter((sheet) => !isSystemExcludedSheet(sheet)));
 /** 已排除的候选不参与有效统计：它们是明确不发布的项。 */
@@ -280,19 +217,8 @@ const decisionCounts = computed(() => {
   return counts;
 });
 
-/** 有歧义候选：仍在等待业务补充。 */
-const ambiguousCount = computed(() => decisionCounts.value.PENDING);
 /** 明确候选：已自动识别或已人工处理，不需要逐项确认。 */
 const confirmedCandidateCount = computed(() => decisionCounts.value.AUTO + decisionCounts.value.MANUAL);
-/** 还没有选择用途、也没有显式排除的工作表：必须由业务选择用途或显式排除，没有默认值。 */
-const unidentifiedSheets = computed(() => bindingSheets.value.filter((sheet) => !bindingFor(sheet).role && !bindingFor(sheet).excluded));
-/** 已填写用途但没有表头行的工作表：同样不能被提交入口放过。 */
-const missingHeaderSheets = computed(() =>
-  bindingSheets.value.filter((sheet) => {
-    const draft = bindingFor(sheet);
-    return !draft.excluded && draft.role && draft.headerRow === null;
-  }),
-);
 const excludedSheetNames = computed(() =>
   (job.value?.sheets ?? [])
     .filter((sheet) => isSystemExcludedSheet(sheet) || bindingFor(sheet).excluded)
@@ -311,6 +237,8 @@ const published = computed(() => job.value?.status === "PUBLISHED");
 /** 已写入场景配置，或历史作业已经产生过场景版本。这两种都不能再改这份导入作业。 */
 const sealed = computed(() => published.value || job.value?.status === "APPLIED");
 const operationRunning = computed(() => isOperationActive(operation.value?.status) || watching.value);
+/** 仅在持续查询到活跃解析操作时显示动画；查询出错后由页面展示真实错误。 */
+const parsing = computed(() => watching.value && isOperationActive(operation.value?.status));
 
 /** 已经形成转换结果或已发布的作业，服务端不再接受改动绑定与重复解析。 */
 const importMutable = computed(() => Boolean(job.value?.proposals) === false && !sealed.value);
@@ -321,60 +249,11 @@ const candidateEditingEnabled = computed(() => Boolean(job.value) && hasProposal
 /** 解析失败或成功后都允许再次提交；提交期间和查询期间不允许重复提交。 */
 const canSubmitConversion = computed(() => importMutable.value && !pending.value && !operationRunning.value);
 
-const duplicateRoleSheets = computed(() => {
-  const byRole = new Map<string, string[]>();
-  for (const sheet of bindingSheets.value) {
-    const draft = bindingFor(sheet);
-    if (draft.excluded || !draft.role) {
-      continue;
-    }
-    const names = byRole.get(draft.role) ?? [];
-    names.push(sheet.name);
-    byRole.set(draft.role, names);
-  }
-  return Array.from(byRole.values()).filter((names) => names.length > 1);
-});
-
-const duplicateRoleNames = computed(() => new Set(duplicateRoleSheets.value.flat()));
-
-function sheetProblems(sheet: ImportSheet): string[] {
-  const problems: string[] = [];
-  const draft = bindingFor(sheet);
-  if (duplicateRoleNames.value.has(sheet.name)) {
-    problems.push(`「${roleLabel(draft.role)}」被多个工作表同时使用`);
-  }
-  if (!draft.excluded && !draft.role) {
-    problems.push("请选择本表用途，或设为不参与本次导入");
-  }
-  if (!draft.excluded && draft.role && draft.headerRow === null) {
-    problems.push("请填写表头所在行");
-  }
-  if (!draft.excluded && draft.role && !draft.nodeCode) {
-    // 未绑定节点的 Sheet 不进入执行范围：必须由用户显式绑定，系统不自动推断。
-    problems.push("请选择这张表绑定的业务节点");
-  }
-  return problems;
-}
-
-const bindingBlocked = computed(
-  () => Boolean(job.value) && (bindingSheets.value.some((sheet) => sheetProblems(sheet).length > 0) || duplicateRoleSheets.value.length > 0),
-);
-
-const bindingBlockedReason = computed(() => {
-  if (unidentifiedSheets.value.length) {
-    return `还有 ${unidentifiedSheets.value.length} 个工作表没有选择用途。`;
-  }
-  if (duplicateRoleSheets.value.length) {
-    return "有工作表用途重复，请调整后再开始解析。";
-  }
-  if (missingHeaderSheets.value.length) {
-    return `还有 ${missingHeaderSheets.value.length} 个工作表填写了用途但没有填写表头行。`;
-  }
-  return null;
-});
+const bindingBlocked = computed(() => Boolean(job.value) && bindingSheets.value.every((sheet) => bindingFor(sheet).excluded));
+const bindingBlockedReason = computed(() => bindingBlocked.value ? "请至少选择一张参与解析的工作表。" : null);
 
 /**
- * 当前绑定相对**初值**是否有未提交的改动。
+ * 当前绑定相对初值是否有未提交的改动。
  *
  * 比对的基线必须是绑定初值（`bindingDefaultsFor`），不是服务端原始字段：
  * 用途与表头行现在有默认值，拿原始字段当基线会让页面一打开就谎报「有未保存的改动」。
@@ -384,9 +263,6 @@ const hasUnsavedBindings = computed(() =>
     const draft = bindingFor(sheet);
     const saved = bindingDefaultsFor(sheet);
     return (
-      draft.role !== saved.role ||
-      draft.nodeCode !== saved.nodeCode ||
-      draft.headerRow !== saved.headerRow ||
       draft.excluded !== saved.excluded
     );
   }),
@@ -424,7 +300,7 @@ const steps = computed(() =>
 );
 
 const decisionStats = computed<StatItem[]>(() => [
-  { label: "待业务确认", value: ambiguousCount.value, tone: ambiguousCount.value ? "warning" : "success" },
+  { label: "未导入项目", value: rejectedCandidates.value.length, tone: rejectedCandidates.value.length ? "warning" : "success" },
   { label: "已自动识别", value: decisionCounts.value.AUTO },
   { label: "已人工处理", value: decisionCounts.value.MANUAL },
   { label: "已排除候选", value: decisionCounts.value.EXCLUDED },
@@ -444,9 +320,9 @@ const materialColumns: CandidateColumn[] = [
   { key: "description", label: "材料说明", minWidth: 220 },
 ];
 
-/** 风险疑点（06_风险疑点）规则的节点，由服务端返回，不按工作表名称判断。 */
+/** 风险按规则能力识别，节点实例码由管理员配置。 */
 function isRiskRule(rule: ProposalRule): boolean {
-  return rule.node === "RISK_RATING";
+  return rule.operator === "RISK_TRIGGER";
 }
 
 /** 本次转换结果里是否存在风险疑点规则：只有存在时才展示来源节点与来源审核规则两列。 */
@@ -468,9 +344,10 @@ const ruleColumns = computed<CandidateColumn[]>(() => {
 
 const calculationColumns: CandidateColumn[] = [
   { key: "name", label: "计算规则", primary: true, minWidth: 190 },
-  { key: "formula", label: "公式", minWidth: 220 },
+  { key: "execution_mode", label: "计算用途", minWidth: 150 },
+  { key: "formula", label: "计算方法", minWidth: 220 },
   { key: "parameters", label: "参数来源", minWidth: 260 },
-  { key: "bands", label: "判定区间", width: 110 },
+  { key: "bands", label: "判断标准", minWidth: 220 },
   { key: "status", label: "配置状态", width: 110 },
 ];
 
@@ -556,7 +433,10 @@ const ruleRows = computed<CandidateRow[]>(() =>
   proposalSheets.value.flatMap((sheet) =>
     sheet.rules.map((rule) => {
       const risk = isRiskRule(rule);
-      const values = [rule.name, rule.node_name || nodeLabel(rule.node)];
+      const values = [
+        `${rule.name}${rule.config_status === "DISABLED" ? "（停用）" : ""}`,
+        rule.node_name ?? "未找到所属节点",
+      ];
       if (hasRiskRules.value) {
         // 风险疑点必须写明来源：只有风险规则有来源节点与来源审核规则，其它规则这两列为空。
         values.push(risk ? riskSourceNodeText(rule) : "", risk ? riskSourceRuleText(rule) : "");
@@ -571,6 +451,7 @@ const ruleRows = computed<CandidateRow[]>(() =>
         details: [
           { label: "候选标识", value: rule.candidate_ref },
           { label: "规则编码", value: `${rule.node} · ${rule.operator}` },
+          { label: "配置状态", value: rule.config_status ? calculationStatusLabel(rule.config_status) : "未记录" },
           { label: "适用条件", value: ruleApplicability(rule) },
           { label: "原始识别内容", value: originalSummary(rule.original) },
         ],
@@ -585,9 +466,10 @@ const calculationRows = computed<CandidateRow[]>(() =>
     name: item.rule_name,
     values: [
       item.rule_name,
+      item.execution_mode === "VALUE_ONLY" ? "仅计算中间值" : "计算并判定",
       item.formula,
       item.parameters.map(calculationParameterText).join("；") || "无参数声明",
-      `${item.bands.length} 个`,
+      item.execution_mode === "VALUE_ONLY" ? "不作判定" : item.judgement_instruction || `${item.bands.length} 个区间`,
       calculationStatusLabel(item.status),
     ],
     state: item.decision_state,
@@ -595,7 +477,9 @@ const calculationRows = computed<CandidateRow[]>(() =>
     details: [
       { label: "规则编号", value: item.rule_code },
       { label: "结果编号 / 类型", value: `${item.result_code} / ${item.result_type}` },
-      { label: "节点实例", value: item.node_code },
+      { label: "所属节点", value: item.node_name ?? "未找到所属节点" },
+      { label: "计算方式", value: item.execution_engine === "LLM" ? "AI 辅助计算与判断" : "旧程序计算，需重新解析规则库" },
+      { label: "判断标准", value: item.judgement_instruction || "见判定区间" },
       { label: "判定区间原文", value: item.bands_text || "未记录" },
       { label: "未声明参数", value: item.unresolved_identifiers.join("、") || "无" },
       { label: "计算定义原表", value: calculationOriginText(item.origin) },
@@ -611,17 +495,27 @@ const calculationRows = computed<CandidateRow[]>(() =>
 
 /** 来源节点：只用服务端给出的中文文案；服务端没有给出时不显示，不在这里猜测。 */
 function riskSourceNodeText(rule: ProposalRule): string {
-  return rule.comparison.source_node_label ?? "";
+  const labels = [
+    ...(rule.comparison.source_node_label ? [rule.comparison.source_node_label] : []),
+    ...rule.comparison.calculation_sources.map((source) => source.node_name ?? "未找到计算来源节点"),
+  ];
+  return Array.from(new Set(labels)).join("、");
 }
 
 /** 风险的全部来源审核规则，顺序与服务端候选引用一致。 */
 function riskSourceRuleText(rule: ProposalRule): string {
-  return rule.comparison.source_rule_names.join("、");
+  return [
+    ...rule.comparison.source_rule_names,
+    ...rule.comparison.calculation_sources.map((source) => `计算：${source.rule_name ?? "未找到来源计算规则"}`),
+  ].join("、");
 }
 
 /** 规则的比较对象用业务语言描述。 */
 function ruleComparisonText(rule: ProposalRule): string {
   const comparison = rule.comparison;
+  if (isRiskRule(rule)) {
+    return `${riskSourceRuleText(rule) || "未声明来源审核规则"}：${comparison.risk_condition_label ?? "未声明触发条件"}`;
+  }
   const left = describeTarget(comparison.left) || "未指定";
   const right = comparison.right ? describeTarget(comparison.right) : "无（单字段条款审核）";
   const operator = comparison.operator_label ?? "比较";
@@ -640,20 +534,6 @@ function describeTarget(target: { material_name: string | null; field_name: stri
   return [target.material_name, target.field_name].filter(Boolean).join(" · ");
 }
 
-/** 写入草稿前已能确定的阻断项：未处理问题与未确认用途的工作表。 */
-const writeBlockers = computed<string[]>(() => {
-  const items: string[] = [];
-  if (openIssues.value.length) {
-    items.push(`还有 ${openIssues.value.length} 项业务问题没有处理；提交业务结论后才能导入。`);
-  }
-  if (unidentifiedSheets.value.length) {
-    items.push(`还有 ${unidentifiedSheets.value.length} 个工作表没有选择用途。`);
-  }
-  if (duplicateRoleSheets.value.length) {
-    items.push("有工作表用途重复，写入草稿前需要调整。");
-  }
-  return items;
-});
 
 function countState(sheet: ProposalSheet, state: CandidateDecisionState): number {
   return (
@@ -666,24 +546,21 @@ function countState(sheet: ProposalSheet, state: CandidateDecisionState): number
 /**
  * 系统固定排除的工作表。
  *
- * 判定只依据服务端返回的字段：fixed_excluded 表示模板元数据（说明页等）或没有业务数据的工作表，
- * 这些工作表既不能绑定业务用途，也不会出现在 Sheet 绑定表格里。前端不按工作表名称做特判。
+ * fixed_excluded 表示服务端判定的空表，前端不按名称或隐藏状态排除工作表。
  */
 function isSystemExcludedSheet(sheet: ImportSheet): boolean {
   return sheet.fixed_excluded;
 }
 
-/** 当前绑定值；没有本地草稿时退回初值口径（与渲染、与「是否有未提交改动」同源）。 */
+/** 当前工作表选择值；显示和未提交改动比较共用初值。 */
 function bindingFor(sheet: ImportSheet): SheetBindingDraft {
   return bindings.value[sheet.sheet_key] ?? bindingDefaultsFor(sheet);
 }
 
-/** 一张工作表的绑定初值。口径只有一份：`constants/sheetBinding.initialBindingOf`。 */
+/** 工作表选择初值由 `constants/sheetBinding.initialBindingOf` 统一提供。 */
 function bindingDefaultsFor(sheet: ImportSheet): SheetBindingDraft {
   return initialBindingOf(
     sheet,
-    job.value?.profile?.sheets ?? [],
-    nodeOptions.value,
     isSystemExcludedSheet(sheet),
   );
 }
@@ -693,42 +570,22 @@ function updateBinding(payload: { sheetKey: string; draft: SheetBindingDraft }):
 }
 
 /**
- * 已保存的裁决形状是 {selected: ...}；刷新恢复时只取其中的选择值。
- * 不能把整个 decision 对象当成业务值用，否则回填形状与提交形状不一致。
+ * 恢复每张表是否参与解析；用途、节点和表头不设置表级绑定。
  */
-/** 已作结论的问题展示用：优先显示生效的选择值（取值口径由 workbench 提供）。 */
-function decisionDisplay(decision: JsonValue): string {
-  return formatBusinessValue(readDecisionValue(decision));
-}
-
-/**
- * 绑定初值。已确认的用途/节点/表头行从作业记录恢复；未确认的按下述默认值给出：
- *
- * - **用途**：系统按工作表名称识别出的结果直接选中（协议固定 Sheet 名，名称与角色一一对应）；
- *   识别不出的留空，必须由业务明确选择或排除；
- * - **表头行**：默认第 1 行——系统生成的 base Excel 构造上就把表头写在第 1 行；
- * - **节点**：只在「该用途下唯一可选」时预选，同类节点有多个实例时不猜。
- *
- * 三个默认值都只是**初值**，提交仍以用户看到并确认的值为准。
- * preserveAnswers：同一作业刷新时保留用户本地已填但未落库的答案，避免刷新清空输入。
- */
-function initialiseBindings(importJob: ImportJob, preserveAnswers = false): void {
-  const profileSheets = importJob.profile?.sheets ?? [];
+function initialiseBindings(importJob: ImportJob): void {
   bindings.value = Object.fromEntries(
     importJob.sheets.map(
       (sheet): [string, SheetBindingDraft] => [
         sheet.sheet_key,
-        initialBindingOf(sheet, profileSheets, nodeOptions.value, isSystemExcludedSheet(sheet)),
+        initialBindingOf(sheet, isSystemExcludedSheet(sheet)),
       ],
     ),
   );
-  // 答案的初值口径（草稿值 → 展示值、以及刷新时保留本地输入）由 workbench 统一负责。
-  initialiseDecisionAnswers(importJob, preserveAnswers);
 }
 
 /**
  * 刷新或切换作业后落在真实可操作的步骤上。
- * 已有转换结果时不再落回工作表绑定：作业完成转换后，服务端不再接受改动绑定。
+ * 已有转换结果时不再落回工作表选择：作业完成转换后，服务端不再接受改动解析范围。
  */
 function inferStep(importJob: ImportJob): number {
   if (importJob.status === "PUBLISHED" || importJob.status === "APPLIED") {
@@ -737,23 +594,21 @@ function inferStep(importJob: ImportJob): number {
   if (!importJob.proposals) {
     return importJob.latest_operation && isOperationActive(importJob.latest_operation.status) ? 1 : 0;
   }
-  return importJob.issues.some((issue) => issue.status === "OPEN") ? 2 : 3;
+  return 3;
 }
 
 /**
  * 接收一份作业视图并落到真实可操作的步骤上。
  *
- * **先读回节点，再初始化绑定**：绑定的默认节点取决于「该用途下有几个可选实例」，
- * 节点还没读回来就会把本该预选的那一项算成 0 个。顺序不能颠倒。
+ * 读取作业所属场景的实际节点，用于候选归属展示；随后恢复工作表选择和问题答案。
  */
 async function receiveJob(importJob: ImportJob, keepStep = false): Promise<void> {
   const reception = ++jobReception;
-  const changed = job.value?.job_no !== importJob.job_no;
   job.value = importJob;
-  // 节点实例来自作业所属场景的配置：绑定下拉只能选它们。
+  // 候选归属名称来自作业所属场景的实际节点。
   await loadScenarioNodes(importJob.profile?.scenario_code);
   if (reception !== jobReception || job.value?.job_no !== importJob.job_no) return;
-  initialiseBindings(importJob, !changed);
+  initialiseBindings(importJob);
   if (!keepStep) {
     activeStep.value = inferStep(importJob);
   }
@@ -845,7 +700,6 @@ function resetImportWorkspace(): void {
   loadingJob.value = false;
   // 完整重置操作查询：切作业后不再残留上一个作业的操作面板与轮询编号。
   resetTracking();
-  resetDecisionAnswers();
   job.value = null;
   importJobs.value = [];
   bindings.value = {};
@@ -884,7 +738,7 @@ async function refreshAfterOperation(finished: OperationView, jobNo: string): Pr
     await dropOperationQuery();
   }
   if (finished.status === "SUCCEEDED" && reloaded.proposals) {
-    activeStep.value = reloaded.issues.some((issue) => issue.status === "OPEN") ? 2 : 3;
+    activeStep.value = 3;
   }
 }
 
@@ -958,7 +812,7 @@ async function syncImportWorkspaceFromRoute(): Promise<void> {
 }
 
 async function uploadRulebook(file: File): Promise<void> {
-  // 上传必须从**已创建的场景**进入：场景由用户先建好，不由 Excel 表头推断。
+  // 上传必须从已创建的场景进入：场景由用户先建好，不由 Excel 表头推断。
   if (!uploadScenarioCode.value) {
     formMessage.value = "请先选择本次导入所属的场景；上传后系统不会再从 Excel 内容猜场景。";
     return;
@@ -971,7 +825,7 @@ async function uploadRulebook(file: File): Promise<void> {
   });
 }
 
-/** 保存工作表用途并提交后台解析。长处理只受理，随后由页面查询真实状态。 */
+/** 保存参与解析的工作表并提交后台解析。长处理只受理，随后查询真实状态。 */
 async function submitConversion(saveBindings: boolean): Promise<void> {
   if (!job.value) {
     return;
@@ -990,9 +844,6 @@ async function submitConversion(saveBindings: boolean): Promise<void> {
           const systemExcluded = isSystemExcludedSheet(sheet);
           return {
             sheet_key: sheet.sheet_key,
-            role: systemExcluded ? null : binding.role,
-            node_code: systemExcluded ? null : binding.nodeCode,
-            header_row: systemExcluded ? null : binding.headerRow,
             excluded: systemExcluded || binding.excluded,
           };
         }),
@@ -1034,8 +885,6 @@ async function applyCandidateDecision(
   }
   const jobNo = job.value.job_no;
   await run(async () => {
-    // 先落暂存，确保下面带上的草稿修订号与服务端当前修订一致。
-    await flushDecisionDraft();
     const revision = job.value?.draft_revision ?? 0;
     const updated = await saveImportDecisions(jobNo, [{ target_type: targetType, target_ref: targetRef, action, value }], revision);
     await receiveJob(updated, true);
@@ -1084,24 +933,6 @@ function restoreCandidate(targetType: "MATERIAL" | "FIELD" | "RULE", row: Candid
   void applyCandidateDecision(targetType, row.ref, "ACCEPT");
 }
 
-/**
- * 暂存只回写修订号与问题状态，不重置绑定与步骤，避免打断用户当前编辑。
- */
-function applyJobRevision(updated: ImportJob): void {
-  if (!job.value) {
-    return;
-  }
-  job.value = { ...job.value, draft_revision: updated.draft_revision, issues: updated.issues };
-}
-
-/** 提交业务结论：读回作业与场景节点后进入第三步。 */
-async function saveDecisions(): Promise<void> {
-  await submitDecisionAnswers(async (updated) => {
-    await receiveJob(updated, true);
-    activeStep.value = 3;
-  });
-}
-
 /** 用导入结果替换 Excel 管理的草稿内容；流程节点保留，场景不会自动发布。 */
 async function applyToSceneDraft(): Promise<void> {
   if (!job.value || sealed.value) {
@@ -1133,17 +964,21 @@ async function applyToSceneDraft(): Promise<void> {
         h("div", [
           h("p", { style: { marginBottom: "12px" } },
             `本次将导入 ${proposalTotals.value.materials} 个材料位、${proposalTotals.value.fields} 个字段、${proposalTotals.value.rules} 条业务规则、${includedCalculations.value.length} 条计算规则。`),
+          ...(rejectedCandidates.value.length
+            ? [h("p", { style: { marginBottom: "12px", color: "var(--el-color-warning)" } },
+                `本次解析有 ${rejectedCandidates.value.length} 个项目未导入，草稿只包含上列候选。未导入项目及其原因保留在解析结果中。`)]
+            : []),
           ...(hasExistingBusinessDraft
             ? [h("p", { style: { marginBottom: "12px" } },
                 `当前草稿已有 ${draft.materials.length} 个材料位、${draft.fields.length} 个字段、${draft.rules.filter((rule) => !rule.system).length} 条业务规则、${draft.calculations.length} 条计算规则；其中的人工修改将被覆盖。`)]
             : []),
           h("p", { style: { marginBottom: "12px" } },
-            "材料、字段、业务规则、计算配置、报告章节和 Sheet 绑定将被整份替换；流程节点、节点顺序和依赖关系继续保留。"),
+            "材料、字段、业务规则、计算配置、报告章节和来源工作表清单将被整份替换；流程节点、节点顺序和依赖关系继续保留。"),
           h("p", "本次操作只生成草稿，不会发布场景，也不会影响当前已发布版本、已有方案和审核任务。"),
         ]),
         hasExistingBusinessDraft ? "覆盖现有草稿" : "生成场景草稿",
         {
-          type: hasExistingBusinessDraft ? "warning" : "info",
+          type: hasExistingBusinessDraft || rejectedCandidates.value.length ? "warning" : "info",
           confirmButtonText: hasExistingBusinessDraft ? "覆盖现有草稿" : "生成场景草稿",
           cancelButtonText: "取消",
         },
@@ -1181,12 +1016,6 @@ watch(
   },
 );
 
-/** 离开歧义处理步骤前落一次答案暂存，避免未提交答案只存在内存里。 */
-watch(activeStep, (next, previous) => {
-  if (previous === 2 && next !== 2) {
-    void flushDecisionDraft().catch((error) => setFailure(error));
-  }
-});
 </script>
 
 <template>
@@ -1196,11 +1025,7 @@ watch(activeStep, (next, previous) => {
       :object-name="job?.source_filename ?? null"
       :busy="pending"
       @refresh="job ? loadJob(job.job_no) : loadImportJobs()"
-    >
-      <template #actions>
-        <TemplateDownloadButton :scenario-code="templateScenarioCode" label="下载当前场景模板" />
-      </template>
-    </PageHeader>
+    />
 
     <FailureNotice :error="failure" @dismiss="failure = null" />
 
@@ -1235,7 +1060,6 @@ watch(activeStep, (next, previous) => {
           :job-created-at="null"
           :job-status="null"
           :failure-message="null"
-          :profile-name="null"
           :selected-file-size="null"
           :policy="uploadPolicy?.rulebook ?? null"
           :pending="pending"
@@ -1259,6 +1083,11 @@ watch(activeStep, (next, previous) => {
         <ImportStepNav :steps="steps" :active="activeStep" clickable @select="activeStep = $event" />
       </el-card>
 
+      <div v-if="parsing" class="parsing-status block-gap" role="status" aria-live="polite">
+        <span class="parsing-status__spinner" aria-hidden="true"></span>
+        <span>正在解析规则库，完成后将显示解析结果。</span>
+      </div>
+
       <!-- 只展示业务失败原因与下一步，不暴露内部操作状态。 -->
       <el-alert
         v-if="jobFailure"
@@ -1279,7 +1108,6 @@ watch(activeStep, (next, previous) => {
           :job-created-at="job.created_at"
           :job-status="job.status"
           :failure-message="job.failure?.message ?? null"
-          :profile-name="job.profile?.display_name || job.profile_version"
           :selected-file-size="selectedFileSize"
           :policy="uploadPolicy?.rulebook ?? null"
           :pending="pending"
@@ -1288,18 +1116,18 @@ watch(activeStep, (next, previous) => {
         />
         <div class="sticky-actions">
           <div class="sticky-actions__bar">
-            <span class="text-muted">上传成功后才能进入工作表绑定。</span>
+            <span class="text-muted">上传成功后选择需要解析的工作表。</span>
             <div class="card-actions">
               <el-button @click="startNewImport">重新上传规则库</el-button>
-              <el-button type="primary" @click="activeStep = 1">下一步：Sheet 绑定</el-button>
+              <el-button type="primary" @click="activeStep = 1">下一步：选择工作表</el-button>
             </div>
           </div>
         </div>
       </el-card>
 
-      <!-- 第二步：Sheet 绑定 -->
+      <!-- 第二步：选择参与解析的工作表 -->
       <el-card v-else-if="activeStep === 1" shadow="never" class="block-gap">
-        <template #header>第二步 · 确认工作表用途和表头</template>
+        <template #header>第二步 · 选择参与解析的工作表</template>
 
         <el-alert v-if="nodeLoadError" class="block-gap-sm" type="error" show-icon :closable="false" :title="nodeLoadError" />
 
@@ -1307,9 +1135,6 @@ watch(activeStep, (next, previous) => {
           class="block-gap"
           :sheets="bindingSheets"
           :drafts="bindings"
-          :profile-sheets="job?.profile?.sheets ?? []"
-          :node-options="nodeOptions"
-          :problems-of="sheetProblems"
           @update:draft="updateBinding"
         />
 
@@ -1319,24 +1144,23 @@ watch(activeStep, (next, previous) => {
           type="warning"
           show-icon
           :closable="false"
-          title="工作表绑定还有待处理项"
-        >
-          {{ bindingBlockedReason ?? "请检查每张工作表的用途与表头行。" }}
-        </el-alert>
+          :title="bindingBlockedReason ?? ''"
+        />
 
         <div class="sticky-actions">
           <div class="sticky-actions__bar binding-actions">
             <div class="card-actions">
               <el-button @click="activeStep = 0">上一步</el-button>
               <el-button :disabled="!job.profile?.scenario_code" @click="openSceneFlow">配置场景流程</el-button>
-              <el-button :loading="loadingJob" @click="reloadSavedBindings">重新加载已保存绑定</el-button>
+              <el-button :loading="loadingJob" @click="reloadSavedBindings">重新加载已保存选择</el-button>
               <el-button
                 type="primary"
+                :loading="pending || parsing"
                 :disabled="!canSubmitConversion"
                 :title="conversionDisabledReason ?? ''"
                 @click="submitConversion(true)"
               >
-                保存并开始解析
+                {{ parsing ? "正在解析" : "保存并开始解析" }}
               </el-button>
             </div>
           </div>
@@ -1347,20 +1171,36 @@ watch(activeStep, (next, previous) => {
       <el-card v-else-if="activeStep === 2" shadow="never" class="block-gap">
         <template #header>
           <div class="card-header">
-            <span>第三步 · 规则转换、候选和歧义处理</span>
-            <StatusBadge
-              :status="openIssues.length ? 'PENDING_DECISION' : 'CONFIRMED'"
-              :label="openIssues.length ? `${openIssues.length} 项待确认` : '无需补充'"
-            />
+            <span>第三步 · 解析结果</span>
+            <StatusBadge status="READY" label="解析结果" />
           </div>
         </template>
 
         <p class="text-muted">
-          这里只列出需要业务判断的内容（多个真实候选、缺少阈值或口径、无法唯一确定的检查方式）。
-          其余内容系统已自动识别，不需要逐项确认。
+          按规则库原文生成配置，直接执行生效规则；停用规则仅保留原文。
+          无法解析或执行的项目逐条记录原因，不影响其他规则。
         </p>
 
         <StatGrid class="block-gap" :items="decisionStats" />
+
+        <el-card v-if="rejectedCandidates.length" shadow="never" class="block-gap">
+          <template #header>未导入项目（{{ rejectedCandidates.length }} 项）</template>
+          <p class="text-muted">以下项目未形成有效配置，原始模型内容和失败原因已保留；其他候选可继续写入草稿。</p>
+          <el-table :data="rejectedCandidates" border>
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <pre class="rejected-json">{{ JSON.stringify(row.raw, null, 2) }}</pre>
+              </template>
+            </el-table-column>
+            <el-table-column label="项目" min-width="180">
+              <template #default="{ row }">{{ row.name || "未提供名称" }}</template>
+            </el-table-column>
+            <el-table-column label="模型声明的来源" min-width="180">
+              <template #default="{ row }">{{ row.sourceSheet || "未提供有效工作表" }}<template v-if="row.source?.row_no"> · 第 {{ row.source.row_no }} 行</template></template>
+            </el-table-column>
+            <el-table-column label="失败原因" prop="message" min-width="360" />
+          </el-table>
+        </el-card>
 
         <StateBlock
           v-if="loadingJob"
@@ -1370,61 +1210,9 @@ watch(activeStep, (next, previous) => {
           v-else-if="operationRunning && !hasProposals"
           kind="loading"
           title="正在解析规则库"
-          description="完成后将显示需要确认的材料、字段和规则。"
+          description="完成后将显示解析得到的材料、字段和规则。"
         />
         <template v-else-if="hasProposals">
-          <el-alert
-            v-if="!openIssues.length"
-            type="success"
-            show-icon
-            :closable="false"
-            title="当前没有需要业务确认的问题"
-          >
-            系统已把全部候选纳入有效配置，可以直接查看有效配置。
-          </el-alert>
-
-          <template v-else>
-            <el-alert
-              class="block-gap"
-              type="warning"
-              show-icon
-              :closable="false"
-              :title="`有 ${openIssues.length} 项需要业务判断`"
-            >
-              提交业务结论后才能写入场景草稿。
-            </el-alert>
-            <div class="stack block-gap">
-              <ImportIssueCard
-                v-for="issue in openIssues"
-                :key="issue.issue_no"
-                :issue="issue"
-                :selected="selectedOptions[issue.issue_no]"
-                @update:selected="updateIssueAnswer(issue.issue_no, $event)"
-              />
-            </div>
-            <p v-if="formMessage" class="text-danger block-gap">{{ formMessage }}</p>
-          </template>
-
-          <el-card v-if="resolvedIssues.length" shadow="never" class="block-gap">
-            <template #header>已处理的问题（{{ resolvedIssues.length }} 项）</template>
-            <el-table :data="resolvedIssues" border>
-              <el-table-column label="问题" prop="title" min-width="220" show-overflow-tooltip />
-              <el-table-column label="结论状态" width="140">
-                <template #default="{ row }"><StatusBadge :status="row.status" /></template>
-              </el-table-column>
-              <el-table-column label="已作结论（生效值）" min-width="200" show-overflow-tooltip>
-                <template #default="{ row }">{{ decisionDisplay(row.decision) }}</template>
-              </el-table-column>
-              <el-table-column label="来源" min-width="180" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row.source.sheet_name || "未知工作表" }}
-                  <template v-if="row.source.row_no"> · 第 {{ row.source.row_no }} 行</template>
-                </template>
-              </el-table-column>
-            </el-table>
-            <p class="text-hint">这里显示已作结论的问题及其生效值；未处理问题仍需在上面作答。</p>
-          </el-card>
-
           <el-card shadow="never" class="block-gap">
             <template #header>有效配置</template>
             <el-tabs v-model="candidateTabModel">
@@ -1435,7 +1223,7 @@ watch(activeStep, (next, previous) => {
                   :rows="materialRows"
                   :can-edit="candidateEditingEnabled"
                   empty-title="转换结果中没有材料候选"
-                  empty-description="当前工作表没有定义材料位。核查 01_材料清单工作表的用途与表头行后，请重新上传规则库再解析——已形成转换结果的作业不接受原地改动工作表绑定。"
+                  empty-description="当前工作表没有定义材料位。可查看原文与解析结果核对是否包含材料定义。"
                   @edit="openCandidateEdit('MATERIAL', $event)"
                   @exclude="excludeCandidate('MATERIAL', $event)"
                   @restore="restoreCandidate('MATERIAL', $event)"
@@ -1448,7 +1236,7 @@ watch(activeStep, (next, previous) => {
                   :rows="fieldRows"
                   :can-edit="candidateEditingEnabled"
                   empty-title="转换结果中没有字段候选"
-                  empty-description="当前工作表的转换结果只有材料或规则，没有可纳入的字段。请检查工作表用途后重新上传规则库。"
+                  empty-description="当前工作表的转换结果只有材料或规则，没有可纳入的字段。可查看原文核对是否包含字段抽取要求。"
                   @edit="openCandidateEdit('FIELD', $event)"
                   @exclude="excludeCandidate('FIELD', $event)"
                   @restore="restoreCandidate('FIELD', $event)"
@@ -1480,28 +1268,25 @@ watch(activeStep, (next, previous) => {
           </el-card>
 
           <p class="text-hint block-gap">
-            自动识别与已人工处理的候选共 {{ confirmedCandidateCount }} 项；仍有 {{ ambiguousCount }} 项处于待补充状态。
-            系统不会代替业务做选择，也不会在缺少阈值时使用默认值。
+            已接收候选共 {{ confirmedCandidateCount }} 项。
+            保留规则原文，不要求业务口径确认。
           </p>
         </template>
         <StateBlock
           v-else
           kind="empty"
           title="还没有解析结果"
-          description="回到上一步确认工作表用途并提交解析，完成后这里会显示材料、字段和规则候选。"
+          description="回到上一步选择工作表并提交解析，完成后这里会显示材料、字段和规则候选。"
         />
 
         <div class="sticky-actions">
           <div class="sticky-actions__bar">
             <span class="text-muted">
-              {{ openIssues.length ? "存在需要业务确认的内容，处理后才能写入草稿。" : "没有待确认问题，可以生成场景草稿。" }}
+              可以直接写入场景草稿。
             </span>
             <div class="card-actions">
               <el-button @click="activeStep = 1">上一步</el-button>
-              <el-button v-if="openIssues.length" type="primary" :disabled="pending" @click="saveDecisions">
-                提交业务结论
-              </el-button>
-              <el-button v-else type="primary" :disabled="!hasProposals" @click="activeStep = 3">
+              <el-button type="primary" :disabled="!hasProposals" @click="activeStep = 3">
                 下一步：写入草稿
               </el-button>
             </div>
@@ -1514,7 +1299,7 @@ watch(activeStep, (next, previous) => {
         <template #header>
           <div class="card-header">
             <span>第四步 · 写入场景草稿</span>
-            <StatusBadge :status="job.status === 'APPLIED' ? 'APPLIED' : writeBlockers.length ? 'BLOCKED' : 'READY'" />
+            <StatusBadge :status="job.status === 'APPLIED' ? 'APPLIED' : 'READY'" />
           </div>
         </template>
 
@@ -1538,7 +1323,7 @@ watch(activeStep, (next, previous) => {
           <div class="draft-write-scope block-gap">
             <section>
               <strong>本次替换</strong>
-              <span>材料、字段、业务规则、计算配置、报告章节和 Sheet 绑定</span>
+              <span>材料、字段、业务规则、计算配置、报告章节和来源工作表清单</span>
             </section>
             <section>
               <strong>继续保留</strong>
@@ -1555,16 +1340,6 @@ watch(activeStep, (next, previous) => {
           </el-alert>
         </template>
 
-        <el-alert
-          v-if="writeBlockers.length"
-          class="block-gap"
-          type="error"
-          show-icon
-          :closable="false"
-          title="存在阻断项，不能导入场景配置"
-        >
-          <div v-for="item in writeBlockers" :key="item">{{ item }}</div>
-        </el-alert>
         <div class="sticky-actions">
           <div class="sticky-actions__bar">
             <span class="text-muted">
@@ -1576,7 +1351,7 @@ watch(activeStep, (next, previous) => {
                 v-if="job.status !== 'APPLIED'"
                 type="primary"
                 :loading="pending"
-                :disabled="writeBlockers.length > 0 || !hasProposals"
+                :disabled="!hasProposals"
                 @click="applyToSceneDraft"
               >
                 写入场景草稿
@@ -1600,6 +1375,7 @@ watch(activeStep, (next, previous) => {
       :candidate="correctionTarget?.candidate ?? null"
       :materials="materialRefOptions"
       :rules="ruleRefOptions"
+      :nodes="scenarioNodes"
       :pending="correctionPending"
       @close="correctionTarget = null"
       @submit="submitCandidateEdit"
@@ -1608,6 +1384,46 @@ watch(activeStep, (next, previous) => {
 </template>
 
 <style scoped>
+.rejected-json {
+  margin: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.parsing-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: 6px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-text-color-primary);
+  font-size: 14px;
+}
+
+.parsing-status__spinner {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--el-color-primary-light-7);
+  border-top-color: var(--el-color-primary);
+  border-radius: 50%;
+  animation: parsing-spin 0.9s linear infinite;
+}
+
+@keyframes parsing-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .parsing-status__spinner {
+    animation: none;
+  }
+}
+
 .draft-write-scope {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

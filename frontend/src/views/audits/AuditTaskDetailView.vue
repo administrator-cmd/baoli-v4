@@ -465,10 +465,10 @@ function retryLoadExecutions(): void {
 const currentNodeCode = computed(() => task.value?.current_node.node_code ?? null);
 const currentNode = computed(() => task.value?.current_node ?? null);
 /**
- * 当前任务的工作区：按后端返回的**展示结构**（`display.nodes`）算出。
+ * 当前任务的工作区：按后端返回的展示结构（`display.nodes`）算出。
  *
- * 只展示当前场景实际配置的节点对应的工作区；统一模板协议里未被本场景选中的
- * 能力类型不出现。旧任务没有 `display` 时退回任务自己的 `nodes`——
+ * 只展示任务冻结配置中实际节点对应的工作区。
+ * 旧任务没有 `display` 时读取任务自己的 `nodes`——
  * 那里同样只有本任务真实配置的节点，不凭空补一份固定阶段表。
  */
 /** 本任务真实配置的校验阶段（能力类型），供规则结果页的阶段下拉使用。 */
@@ -493,7 +493,7 @@ const currentStepIndex = computed(() => {
 /**
  * 节点在流程条上的呈现状态。
  *
- * SKIPPED 必须与「还没执行」分开：它已经执行过并给出了结论（例如本模板未配置此类检查），
+ * SKIPPED 必须与「还没执行」分开：它已经执行过并给出了结论（例如当前场景未配置此类检查），
  * 显示成灰色等待会让人以为流程停在该节点。
  */
 function stepStatus(node: { node_code: string; status: string }): "wait" | "process" | "finish" | "error" | "success" {
@@ -526,7 +526,7 @@ const hasAnyUpload = computed(() => uploadedDocumentCount.value > 0);
 /**
  * 节点实例码 → 能力类型。
  *
- * `node_code` 是用户配置的**实例码**（例如 `INT_A`），`node_type` 才是能力类型
+ * `node_code` 是用户配置的实例码（例如 `INT_A`），`node_type` 才是能力类型
  * （`INTERNAL_VALIDATE`）。页面判断「这是哪一类节点」必须用能力类型：拿实例码与
  * 能力类型比较，在用户改了实例码之后恒为假，对应的工作区与进度会静默失效。
  *
@@ -566,7 +566,7 @@ const prerequisites = computed(() => {
   if (!task.value) {
     return [] as Array<{ label: string; satisfied: boolean }>;
   }
-  // 前置条件按**能力类型**判断：当前节点的 `node_code` 是用户配置的实例码。
+  // 前置条件按能力类型判断：当前节点的 `node_code` 是用户配置的实例码。
   const nodeType = nodeTypeOf(task.value.current_node.node_code);
   const items: Array<{ label: string; satisfied: boolean }> = [
     { label: "任务不在后台执行中", satisfied: task.value.status !== "RUNNING" && !watching.value },
@@ -742,7 +742,7 @@ const blockers = computed<BlockerItem[]>(() => {
   if (currentNodeUnconfigured.value) {
     items.push({
       tone: "warning",
-      title: `本模板未配置「${currentNodeName.value}」的检查规则`,
+      title: `当前场景未配置「${currentNodeName.value}」的检查规则`,
       description: "执行后会记为跳过并说明原因，不代表该检查通过。",
     });
   }
@@ -866,7 +866,7 @@ const reportDownloadUrl = computed(() => {
 /**
  * 本批可提交的复核项。
  *
- * **以服务端给出的 `pending_review_batch.review_nos` 为准**，不是把页面看到的
+ * 以服务端给出的 `pending_review_batch.review_nos` 为准，不是把页面看到的
  * 全部待办一起提交：复核是分批判决的（字段事实先于规则结论），不属于本批的待办
  * 留在服务端，一次性全提交会被服务端以 409 拒绝，而页面没有任何自救手段。
  */
@@ -1314,7 +1314,7 @@ async function submitReviews(): Promise<void> {
   const currentTaskNo = task.value.task_no;
   const token = stateGeneration;
   const currentRevision = task.value.input_revision;
-  // 集合来自**本批**：不属于本批的待办留在服务端，下一批再处理。
+  // 集合来自本批：不属于本批的待办留在服务端，下一批再处理。
   const reviews = reviewBatch.value.map((review) => {
     const draft = reviewDraftOf(review.review_no);
     return {
@@ -1326,7 +1326,7 @@ async function submitReviews(): Promise<void> {
     };
   });
   await run(async () => {
-    // 人工复核等待点的**实例码**由用户配置：从任务冻结的节点里按能力类型取出，
+    // 人工复核等待点的实例码由用户配置：从任务冻结的节点里按能力类型取出，
     // 不写死 MANUAL_REVIEW 当实例码（用户改过实例码后那条记录就找不到对应节点）。
     const reviewNode = task.value?.nodes.find((node) => nodeTypeOf(node.node_code) === manualReviewNodeType) ?? null;
     const attemptKey = executionAttemptKey ?? operationIdempotencyKey(reviewNode?.node_code ?? manualReviewNodeType, currentTaskNo);
@@ -1415,6 +1415,9 @@ watch(
         <StatusBadge v-if="task" :status="task.status" size="default" />
         <el-tag v-if="task?.deleted" type="danger" size="small" effect="light" disable-transitions>已删除</el-tag>
         <div class="card-actions">
+          <el-button v-if="task?.intermediate_csv_available" tag="a"
+            :href="apiFileUrl(`/audit-tasks/${encodeURIComponent(task.task_no)}/intermediate/download`)"
+            target="_blank">下载中间结果 CSV</el-button>
           <el-button :loading="loadingTask" @click="refreshTask">刷新</el-button>
           <el-button v-if="task && !task.deleted" type="danger" plain @click="removeTask">删除任务</el-button>
         </div>
@@ -1743,7 +1746,7 @@ watch(
                 以印章识别产物中的主体名称为检索对象，按当前任务、材料范围、当前上传版本与当前产物限定范围；
                 相似度只用于候选排序。
               </div>
-              <div>没有候选不等于合同不存在该主体；结论由工作人员选择一致、不一致或证据不足后保存。</div>
+              <div>没有候选不等于材料不存在该主体；结论由工作人员选择一致、不一致或证据不足后保存。</div>
             </el-alert>
 
             <el-alert
@@ -1818,9 +1821,9 @@ watch(
                   v-model="retrievalQuery"
                   maxlength="200"
                   show-word-limit
-                  placeholder="例如：主合同甲方名称（合同主体全称）"
+                  placeholder="输入材料中待核对的主体全称"
                 />
-                <div class="text-hint">只检索印章识别出的主体名称；合同正文不参与检索。</div>
+                <div class="text-hint">只检索印章识别出的主体名称；材料正文不参与检索。</div>
               </el-form-item>
               <el-form-item>
                 <el-button type="primary" :loading="retrievalLoading" @click="runRetrieval(uploadableMaterialKeys)">检索印章主体</el-button>

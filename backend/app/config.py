@@ -50,14 +50,13 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str | None = None
     data_dir: Path = Path("data")
-    # 全系统模板协议：定义支持的 Sheet、列协议和可绑定的节点类型。
-    # 场景用哪些 Sheet、Sheet 对应哪些节点及其流程关系，由场景配置维护（不在这里）。
-    unified_profile_path: Path = Path("backend/config/unified_profile.json")
+    # 节点能力类型及预置依赖；场景业务字段和规则来自 LLM 解析的 JSON。
+    node_profile_path: Path = Path("backend/config/node_profile.json")
     # 上传入口的体量上限。两者互相独立：规则库是配置表，业务材料是合同/协议扫描件，
     # 不是一回事，不能共用一个数值。
     # 只校验为正数，不设固定上界：真实运行环境里几十 MiB 的扫描件是正常的，
     # 写死上界会让正常业务在入口就被拒。
-    # 这里只约束**本系统的上传入口**；8018/8010/OCR 与部署入口（反向代理等）
+    # 这里只约束本系统的上传入口；8018/8010/OCR 与部署入口（反向代理等）
     # 各自的体量上限是另一回事，本配置不构成对它们的承诺，也未经连通验证。
     max_rulebook_bytes: int = Field(default=30 * 1024 * 1024, gt=0)
     max_document_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
@@ -70,7 +69,7 @@ class Settings(BaseSettings):
     llm_baseurl: str | None = None
     llm_apikey: SecretStr | None = None
     llm_model_name: str | None = None
-    # 工具调用循环的轮数上限。达到上限时审核流程**显式失败**（LLM_TOOL_LOOP_LIMIT），
+    # 工具调用循环的轮数上限。达到上限时审核流程显式失败（LLM_TOOL_LOOP_LIMIT），
     # 不把「跑到上限」当作结论，也不静默降级成普通文本解析。
     # 0 表示不设上限，由调用方自行控制终止——上限是安全阀，不是业务默认。
     llm_tool_max_rounds: int = Field(default=12, ge=0)
@@ -84,12 +83,15 @@ class Settings(BaseSettings):
     ocr_poll_interval_seconds: float = Field(default=5.0, gt=0)
     ocr_max_wait_seconds: float = Field(default=600.0, gt=0)
 
-    # 这是单次 HTTP 请求的超时，不是整轮 OCR 作业的超时。
+    # 普通外部 HTTP 请求的超时，不是整轮 OCR 作业的超时，也不用于 LLM 长响应。
     request_timeout_seconds: float = Field(default=300.0, gt=0)
+    # LLM 规则解析、抽取和审核响应可能持续输出数分钟；单独配置，避免普通 HTTP
+    # 请求的 5 分钟时限截断仍在正常流式输出的模型响应。无固定上限，由部署环境决定。
+    llm_timeout_seconds: float = Field(default=900.0, gt=0)
     log_level: str = "INFO"
 
     # 审核任务 RAG（本地 Embedding + 任务范围检索）
-    # 本地嵌入模型目录。必须指向本机**已经存在**的模型；系统不会自动下载权重，
+    # 本地嵌入模型目录。必须指向本机已经存在的模型；系统不会自动下载权重，
     # 也不会切换到远程模型或云 Embedding。留空表示未配置，需要检索的规则会明确报错。
     embedding_model_path: Path | None = None
     # 嵌入模型标识与修订号：它们与切分方式一起决定索引版本，模型变化必须新建索引版本。
@@ -144,9 +146,9 @@ class Settings(BaseSettings):
         return root.resolve()
 
     @property
-    def resolved_unified_profile_path(self) -> Path:
-        """统一模板协议的绝对路径。系统只读这一份，没有第二份 Profile。"""
-        path = self.unified_profile_path
+    def resolved_node_profile_path(self) -> Path:
+        """节点能力目录的绝对路径。"""
+        path = self.node_profile_path
         if not path.is_absolute():
             path = PROJECT_DIR / path
         return path.resolve()

@@ -1,22 +1,22 @@
 """跨任务的管理列表查询：审核材料、证据、执行记录、人工复核、报告与风险结果。
 
-全部使用真实后端筛选、排序与分页（total 为同一作用域下的总行数），
-不把当前页数组长度冒充总数；读取失败由调用方明确报错，不用空数组冒充成功。
+全部使用真实后端筛选、排序与分页（total 为同一作用域下的总行数），不把当前页数组长度冒充
+总数；读取失败由调用方明确报错，不用空数组冒充成功。
 
-“当前 / 历史”的口径：
-- 材料：当前文件 = task_document.current_upload_id 指向的上传；其余上传是历史版本。
-- 证据：当前 = 属于当前上传且仍支撑当前有效对象；失效只表示不再支撑当前结论，
-  历史证据仍可按历史身份查看。
-- 报告：当前 = 该任务最新生成的一份；来源执行已失效或输入修订已变化标为已失效。
-- 风险：只取当前有效执行批次（RISK_RATING 节点最新的未失效执行）的规则结果。
+「当前 / 历史」的口径：材料以 `task_document.current_upload_id` 指向的上传为当前，其余是历史
+版本；证据的当前 = 属于当前上传且仍支撑当前有效对象，失效只表示不再支撑当前结论、历史证据仍
+可按历史身份查看；报告取该任务最新生成的一份，来源执行已失效或输入修订已变化标为已失效；
+风险只取当前有效执行批次（每个 RISK_RATING 节点最新的未失效执行）的规则结果；节点的
+执行顺序由 DAG 依赖决定，不能按展示用的 sequence_no 截断。
 """
 
 import logging
+from .audit.evidence import result_content_view
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, delete as sa_delete, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from fastapi.responses import FileResponse
 
@@ -40,6 +40,7 @@ from ..entity import (
 )
 from .operation_log_service import record_operation
 from .operation_types import OBJECT_REPORT
+from . import task_csv_service
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,6 @@ def list_evidence_page(
     *,
     task_no: str | None,
     reference_type: str | None,
-    locator_status: str | None,
     keyword: str | None,
     page: int,
     page_size: int,
@@ -241,8 +241,6 @@ def list_evidence_page(
         conditions.append(Evidence.rule_result_id.is_not(None))
     elif reference_type == "ARTIFACT":
         conditions.append(and_(Evidence.field_value_id.is_(None), Evidence.rule_result_id.is_(None)))
-    if locator_status:
-        conditions.append(Evidence.locator_status == locator_status)
     if keyword:
         conditions.append(Evidence.quote_text.like(f"%{keyword.strip()}%"))
 
@@ -316,10 +314,7 @@ def list_evidence_page(
                 "filename": upload.original_filename if upload else None,
                 "document_upload_no": upload.upload_no if upload else None,
                 "field_path": evidence.field_path,
-                "page_no": evidence.page_no,
                 "quote_text": evidence.quote_text,
-                "locator_status": evidence.locator_status,
-                "locator_note": evidence.locator_note,
                 "artifact_type": None,
                 "historical": historical,
                 "created_at": evidence.created_at,
@@ -581,7 +576,7 @@ def list_reviews_page(
         else:
             object_name = "未关联业务对象"
             effective_status = None
-        judgment = row.system_judgment_json if isinstance(row.system_judgment_json, dict) else {}
+        judgment = result_content_view(row.system_judgment_json if isinstance(row.system_judgment_json, dict) else {})
         items.append(
             {
                 "review_no": row.review_no,
@@ -681,7 +676,8 @@ def list_import_jobs_page(
     if job_ids:
         for job_id, count in db.execute(
             select(ImportIssue.import_job_id, func.count())
-            .where(ImportIssue.import_job_id.in_(job_ids), ImportIssue.status == "OPEN")
+            .where(ImportIssue.import_job_id.in_(job_ids), ImportIssue.status == "OPEN",
+                   ImportIssue.category.notin_(["BUSINESS_AMBIGUITY", "BUSINESS_CONFIRMATION"]))
             .group_by(ImportIssue.import_job_id)
         ).all():
             issue_counts[int(job_id)] = int(count)
@@ -733,6 +729,23 @@ def delete_import_job(db: Session, job_no: str) -> None:
     已发布作业（或已经产生场景版本的作业）不删除：删除会破坏版本来源追溯。
     有活跃后台转换时同样拒绝——先等待或按其真实状态处理。
     """
+    # 先读取活跃操作，不要在转换线程持有作业锁时直接 FOR UPDATE 等待。
+    # 转换期间删除的语义是明确返回 409，不能让页面长时间表现为“没有反应”。
+    active = db.scalar(
+        select(BackgroundOperation.operation_no).where(
+            BackgroundOperation.object_type == "IMPORT_JOB",
+            BackgroundOperation.object_no == job_no,
+            BackgroundOperation.status.in_(("PENDING", "RUNNING")),
+        )
+    )
+    if active is not None:
+        raise BusinessError(
+            "OPERATION_ALREADY_ACTIVE",
+            "该导入作业正在转换，请先点击中止或等待转换完成后再删除",
+            status_code=409,
+            details={"job_no": job_no, "operation_no": active},
+        )
+
     job = db.scalar(select(ImportJob).where(ImportJob.job_no == job_no).with_for_update())
     if not job:
         raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": job_no})
@@ -751,6 +764,7 @@ def delete_import_job(db: Session, job_no: str) -> None:
             status_code=409,
             details={"job_no": job_no},
         )
+    # 行锁建立后再次检查，避免“检查活跃操作”和“删除”之间恰好受理了新转换。
     active = db.scalar(
         select(BackgroundOperation.operation_no).where(
             BackgroundOperation.object_type == "IMPORT_JOB",
@@ -761,7 +775,7 @@ def delete_import_job(db: Session, job_no: str) -> None:
     if active is not None:
         raise BusinessError(
             "OPERATION_ALREADY_ACTIVE",
-            "该导入作业有正在进行的转换操作，请等待完成或查询其状态",
+            "该导入作业正在转换，请先点击中止或等待转换完成后再删除",
             status_code=409,
             details={"job_no": job_no, "operation_no": active},
         )
@@ -1009,30 +1023,46 @@ def list_risk_results_page(
 ) -> dict[str, Any]:
     """风险结果分页列表（跨任务，只取当前有效执行批次）。
 
-    归属按**能力类型**判定：`node_execution.node_code` 是用户配置的实例码，
+    归属按能力类型判定：`node_execution.node_code` 是用户配置的实例码，
     拿它与能力类型比较在用户改了实例码之后一条风险都查不到。这里按
     `scenario_node.node_type == RISK_RATING` 先解析出该版本下的全部风险节点实例，
     再取这些实例的未失效执行。
     """
+    later_execution = aliased(NodeExecution)
     latest_execution = (
-        select(func.max(NodeExecution.id))
+        select(func.max(later_execution.id))
+        .where(
+            later_execution.audit_task_id == NodeExecution.audit_task_id,
+            later_execution.node_code == NodeExecution.node_code,
+            later_execution.status != "INVALIDATED",
+        )
+        .correlate(NodeExecution)
+        .scalar_subquery()
+    )
+    # 与任务详情一致：按节点取最新未失效执行。
+    # 节点执行由 depends_on 决定，sequence_no 只用于展示排序；按当前节点序号
+    # 截断会漏掉高序号依赖节点已经形成的真实风险结果。
+    base_query = (
+        select(RuleResult.id)
+        .select_from(RuleResult)
+        .join(NodeExecution, NodeExecution.id == RuleResult.node_execution_id)
+        .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
         .join(
             ScenarioNode,
             and_(
                 ScenarioNode.scenario_version_id == NodeExecution.scenario_version_id,
                 ScenarioNode.node_code == NodeExecution.node_code,
-                ScenarioNode.node_type == "RISK_RATING",
             ),
         )
+        .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
+        .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
         .where(
-            NodeExecution.audit_task_id == RuleResult.audit_task_id,
-            NodeExecution.status != "INVALIDATED",
+            ScenarioNode.node_type == "RISK_RATING",
+            NodeExecution.id == latest_execution,
         )
-        .correlate(RuleResult)
-        .scalar_subquery()
     )
     risk_level_expr = func.json_unquote(func.json_extract(RuleResult.result_json, "$.risk_level"))
-    conditions = [RuleResult.node_execution_id == latest_execution]
+    conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
     else:
@@ -1042,24 +1072,19 @@ def list_risk_results_page(
         conditions.append(ScenarioVersion.scenario_code == scenario_code)
     if plan_code:
         conditions.append(AuditPlan.plan_code == plan_code)
-    # 等级下拉的取值范围：与当前筛选同一作用域，但**不含** risk_level 条件本身
+    if status:
+        conditions.append(RuleResult.status == status)
+    # 等级下拉的取值范围：与当前筛选同一作用域，但不含 risk_level 条件本身
     # （否则选定一个等级后下拉里只剩它自己）。取值范围必须来自真实数据：
-    # 页面硬编码旧四级「高/中/低/待确认」时，节点版「最高/一级/二级/三级」一条都筛不出来，
-    # 而页面看起来一切正常。
+    # 各场景可以使用自己的风险等级名称，查询不预设等级集合。
     level_conditions = list(conditions)
     if risk_level:
         conditions.append(risk_level_expr == risk_level)
-    if status:
-        conditions.append(RuleResult.status == status)
     risk_levels = sorted(
         {
             str(item)
             for item in db.scalars(
-                select(func.distinct(risk_level_expr))
-                .select_from(RuleResult)
-                .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
-                .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
-                .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
+                base_query.with_only_columns(risk_level_expr).distinct()
                 .where(*level_conditions)
             ).all()
             if item
@@ -1067,24 +1092,16 @@ def list_risk_results_page(
     )
 
     total = db.scalar(
-        select(func.count())
-        .select_from(RuleResult)
-        .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
-        .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
-        .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
+        base_query.with_only_columns(func.count())
         .where(*conditions)
     ) or 0
     # 只取列表真正用到的列：scenario_version 带 200KB+ 的 manifest_json，
     # 整行 SELECT * 会让 ORDER BY 的 filesort 把整行塞进排序缓冲（MySQL 默认 256KB），
     # 少量结果就报 1038 Out of sort memory；列表页不读 manifest_json。
     rows = db.execute(
-        select(
+        base_query.with_only_columns(
             RuleResult.id,
-            RuleResult.rule_key,
-            RuleResult.rule_name,
-            RuleResult.status,
-            RuleResult.message,
-            RuleResult.result_json,
+            RuleResult.audit_task_id,
             RuleResult.created_at,
             AuditTask.task_no,
             AuditTask.task_name,
@@ -1093,25 +1110,27 @@ def list_risk_results_page(
             AuditPlan.plan_name,
             AuditPlan.id.label("plan_id"),
         )
-        .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
-        .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
-        .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
         .where(*conditions)
         .order_by(RuleResult.created_at.desc(), RuleResult.id.desc())
         .limit(page_size)
         .offset((page - 1) * page_size)
     ).all()
     hit_count = db.scalar(
-        select(func.count())
-        .select_from(RuleResult)
-        .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
-        .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
-        .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
+        base_query.with_only_columns(func.count())
         .where(*conditions, RuleResult.status == "ABNORMAL")
     ) or 0
+    indexes_by_task: dict[int, list[Any]] = {}
+    for row in rows:
+        indexes_by_task.setdefault(row.audit_task_id, []).append(row)
+    csv_results = {}
+    for task_id, indexes in indexes_by_task.items():
+        task = db.get(AuditTask, task_id)
+        for result in task_csv_service.from_index(db, task, RuleResult, indexes):
+            csv_results[result.id] = result
     items = []
     for row in rows:
-        data = row.result_json if isinstance(row.result_json, dict) else {}
+        result = csv_results[row.id]
+        data = result.result_json if isinstance(result.result_json, dict) else {}
         items.append(
             {
                 "task_no": row.task_no,
@@ -1120,11 +1139,11 @@ def list_risk_results_page(
                 "scenario_version_no": row.version_no,
                 "plan_name": row.plan_name,
                 "is_legacy_config": row.plan_id is None,
-                "rule_key": row.rule_key,
-                "name": row.rule_name,
+                "rule_key": result.rule_key,
+                "name": result.rule_name,
                 "risk_level": data.get("risk_level"),
-                "status": row.status,
-                "message": row.message,
+                "status": result.status,
+                "message": result.message,
                 "suggestion": data.get("action"),
                 "source_rule_key": data.get("source_rule_key"),
                 "source_rule_name": data.get("source_rule_name"),
@@ -1132,21 +1151,6 @@ def list_risk_results_page(
                 "created_at": row.created_at,
             }
         )
-    # 等级下拉的取值范围：与当前筛选同一作用域，但**不含** risk_level 条件本身
-    # （否则选定一个等级后下拉里只剩它自己）。取值范围必须来自真实数据：
-    # 页面硬编码旧四级「高/中/低/待确认」时，节点版「最高/一级/二级/三级」一条都筛不出来，
-    # 而页面看起来一切正常。
-    level_conditions = [item for item in conditions if item is not None][: len(conditions)]
-    conditions = conditions + [risk_level_expr == risk_level] if risk_level else conditions
-    levels = db.scalars(
-        select(func.distinct(risk_level_expr))
-        .select_from(RuleResult)
-        .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
-        .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
-        .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
-        .where(*level_conditions)
-    ).all()
-    risk_levels = sorted({str(item) for item in levels if item})
     return {
         "items": items,
         "total": int(total),

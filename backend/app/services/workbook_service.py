@@ -10,7 +10,6 @@ from ..config import get_settings
 from ..domain.workbook import WorkbookCell, WorkbookIR, WorkbookRow, WorkbookSheet
 from ..common.exceptions import BusinessError
 from ..domain.identity import stable_key
-from ..domain import unified_profile
 
 
 def _cell_value(value: Any, max_chars: int | None = None) -> tuple[str | int | float | bool | None, bool]:
@@ -38,12 +37,6 @@ def _header_candidates(sheet, max_columns: int) -> list[int]:
     return [row_no for row_no, count in candidates if count == highest][:3]
 
 
-def _has_business_table_data(rows: list[WorkbookRow]) -> bool:
-    """业务工作表需要有表头行，且至少有一行有数据。"""
-    populated_columns = [len(row.cells) for row in rows]
-    return sum(column_count >= 2 for column_count in populated_columns) >= 2
-
-
 def read_workbook_ir(
     path: Path,
     *,
@@ -51,16 +44,16 @@ def read_workbook_ir(
     source_filename: str,
     source_size: int,
     source_sha256: str,
-    profile: dict[str, Any] | None = None,
+    profile_version: str,
     scenario_code: str | None = None,
     schema_key: str | None = None,
     schema_version: str | None = None,
 ) -> WorkbookIR:
-    """读取工作簿 IR（工作表、表头候选与截断标记）。
+    """读取工作簿 IR：完整原文用于转换，预览另保存截断标记。
 
-    **不判断场景**：场景由上传入口决定（用户先建场景、再在该场景下上传）。
-    这里只按场景有效 Profile 给每张 Sheet 一个**绑定建议**——建议不写库，
-    绑定结果必须由用户在绑定步骤确认（见 `import_sheet.bound_node_code`）。
+    不判断场景：场景由上传入口决定（用户先建场景、再在该场景下上传）。
+    版本身份由调用方提供；不按历史模板匹配表名、表头或角色。
+    动态导入由 LLM 识别业务定义，字段和规则分别引用当前场景节点。
     """
     settings = get_settings()
     try:
@@ -147,7 +140,7 @@ def read_workbook_ir(
                 name=sheet.title,
                 original_name=sheet.title,
                 visible=sheet.sheet_state == "visible",
-                state="EMPTY" if non_empty_rows == 0 else ("DATA" if _has_business_table_data(rows) else "NO_BUSINESS_DATA"),
+                state="EMPTY" if non_empty_rows == 0 else "DATA",
                 max_row=sheet.max_row,
                 max_column=sheet.max_column,
                 non_empty_rows=non_empty_rows,
@@ -159,26 +152,15 @@ def read_workbook_ir(
                 rows_truncated=sheet.max_row > settings.workbook_preview_rows,
                 columns_truncated=sheet.max_column > settings.workbook_preview_columns,
                 cells_truncated=cells_truncated,
-                # 工作表用途在识别出格式版本后再判定：别名和列协议都随版本不同。
-                suggested_role=None,
             )
         )
     workbook.close()
-    # 按场景有效 Profile 给每张 Sheet 一个**建议**角色。建议只用于页面预选，
-    # 不写库、不生成节点、不决定场景：绑定结果由用户确认后落库。
-    if profile is None:
-        profile = unified_profile.load_unified_profile()
-    for sheet in sheets:
-        header_row = sheet.header_candidates[0] if sheet.header_candidates else None
-        header = next((row for row in sheet.rows if row.row_no == header_row), None) if header_row else None
-        cells = {str(value).strip() for value in (header.cells.values() if header else []) if str(value).strip()}
-        sheet.suggested_role = unified_profile.suggest_sheet_role(profile, sheet.name, cells)
     return WorkbookIR(
         workbook_id=workbook_id,
         source_filename=source_filename,
         source_size=source_size,
         source_sha256=source_sha256,
-        profile_version=profile["profile_version"],
+        profile_version=profile_version,
         scenario_code=scenario_code,
         schema_key=schema_key,
         schema_version=schema_version,

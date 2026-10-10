@@ -16,16 +16,7 @@ import {
 } from "@/api/scenes";
 import { reportContentTypeOptions, reportFormatOptions, reportResultSortOptions } from "@/constants/labels";
 
-/**
- * 报告配置面板。
- *
- * 两种语义并存，由章节自带的报告编号区分：
- *   - 节点版（contract_review_v3）：一行一个章节，同一报告编号组成一份报告，
- *     带报告名称、材料范围、输出格式、章节顺序、内容类型、结果排序与配置状态；
- *   - 旧格式：没有报告编号，保持原有的「附加展示章节」语义。
- * 固定事实报告由系统保证，不在这里配置；内容要求只作为展示说明，
- * 不代表系统会生成自由正文。
- */
+/** 场景章节控制报告正文，材料范围与排序由配置确定。 */
 const props = defineProps<{
   scenarioCode: string | null;
   /** 由父页面触发的外部刷新（例如发布后）。 */
@@ -60,6 +51,7 @@ const form = reactive({
   section_order: null as number | null,
   content_type: "",
   result_sort: "",
+  risk_level_order_text: "",
   // 是否生效：与 Excel 的「是否生效」同一口径。业务只表达「这一行参不参与输出」，
   // 不表达「系统配没配好」——后者是系统内部状态。
   enabled: true,
@@ -112,6 +104,7 @@ function openCreate(): void {
   form.section_order = null;
   form.content_type = "";
   form.result_sort = "";
+  form.risk_level_order_text = "";
   form.enabled = true;
   dialogVisible.value = true;
 }
@@ -128,6 +121,7 @@ function openEdit(item: DraftSectionItem): void {
   form.section_order = item.section_order ?? null;
   form.content_type = item.content_type ?? "";
   form.result_sort = item.result_sort ?? "";
+  form.risk_level_order_text = (item.risk_level_order ?? []).join("\n");
   form.enabled = item.config_status !== "DISABLED";
   dialogVisible.value = true;
 }
@@ -143,7 +137,7 @@ async function submitForm(): Promise<void> {
       title: form.title.trim(),
       content_instruction: form.content_instruction,
       field_keys: form.field_keys,
-      // 报告编号留空即视为旧格式的附加章节：这部分键如实提交为空，
+      // 报告编号留空即视为旧格式的报告章节：这部分键如实提交为空，
       // 不替业务补一个编号，也不沿用上一份报告的分组属性。
       report_code: form.report_code.trim() || null,
       report_name: form.report_name.trim() || null,
@@ -152,6 +146,7 @@ async function submitForm(): Promise<void> {
       section_order: form.section_order,
       content_type: form.content_type || null,
       result_sort: form.result_sort || null,
+      risk_level_order: form.risk_level_order_text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
       // 内部配置状态由「是否生效」映射：不生效 → DISABLED，生效 → CLEAR。
       config_status: form.enabled ? "CLEAR" : "DISABLED",
     };
@@ -207,7 +202,7 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增章节</el-button>
-          <span class="text-hint">固定事实报告由系统始终生成；这里配置的是附加展示章节。</span>
+          <span class="text-hint">系统执行摘要由系统始终生成；这里配置的是报告章节。</span>
         </div>
         <div class="app-toolbar__right">
           <el-button :loading="loading" @click="load">刷新</el-button>
@@ -218,7 +213,7 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
         <el-button size="small" @click="load">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="sections" border stripe v-loading="loading" empty-text="暂无附加章节（固定事实报告仍会生成）">
+      <el-table v-else :data="sections" border stripe v-loading="loading" empty-text="暂无报告章节（系统执行摘要仍会生成）">
         <el-table-column label="报告编号" width="120">
           <template #default="{ row }">{{ row.report_code || "—" }}</template>
         </el-table-column>
@@ -235,7 +230,7 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
         <el-table-column label="绑定字段" min-width="260">
           <template #default="{ row }">
             <span v-if="row.field_names.length">{{ row.field_names.join("、") }}</span>
-            <span v-else class="text-hint">未绑定字段（本章节不生成额外正文）</span>
+            <span v-else class="text-hint">未绑定字段（按章节类型使用审核结果）</span>
           </template>
         </el-table-column>
         <el-table-column prop="content_instruction" label="内容要求" min-width="220" show-overflow-tooltip>
@@ -269,7 +264,7 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
             />
           </el-form-item>
 
-          <h4 class="app-section-title">报告分组（节点版格式；留空表示旧格式的附加章节）</h4>
+          <h4 class="app-section-title">报告分组（节点版格式；留空表示旧格式的报告章节）</h4>
           <el-form-item label="报告编号">
             <el-input v-model="form.report_code" maxlength="80" style="width: 220px" placeholder="例如：RPT-001" />
             <span class="text-hint" style="margin-left: 8px">同一编号的章节组成一份报告</span>
@@ -300,6 +295,9 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
             <el-select v-model="form.result_sort" clearable style="width: 260px" placeholder="留空表示未声明">
               <el-option v-for="item in reportResultSortOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="风险等级顺序">
+            <el-input v-model="form.risk_level_order_text" type="textarea" :rows="3" placeholder="按风险从高到低，每行填写一个场景等级；不排序时可留空" />
           </el-form-item>
           <el-form-item label="是否生效">
             <el-switch v-model="form.enabled" active-text="生效" inactive-text="不生效" />

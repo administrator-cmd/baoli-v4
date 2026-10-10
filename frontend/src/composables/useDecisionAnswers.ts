@@ -14,9 +14,9 @@ export interface DecisionAnswersState {
   /** 立即落一次暂存（提交裁决、离开步骤前必须执行）。 */
   flush: () => Promise<void>;
   /**
-   * 提交全部业务结论。`onAccepted` 收到服务端返回的最新作业视图。
+   * 保存已填写的可选业务说明。`onAccepted` 收到服务端返回的最新作业视图。
    *
-   * 回调**允许是异步的**且会被等待：回调里要做的事（例如重新读回作业与场景节点）
+   * 回调允许是异步的且会被等待：回调里要做的事（例如重新读回作业与场景节点）
    * 必须在本函数返回之前完成，否则调用方会在数据还没就绪时就推进页面。
    */
   submit: (onAccepted: (updated: ImportJob) => void | Promise<void>) => Promise<boolean>;
@@ -28,10 +28,9 @@ export interface DecisionAnswersState {
  *
  * 两条口径不要弱化：
  *
- * - **答案先暂存、再提交**：暂存会回写草稿修订号，提交裁决必须带暂存之后的最新修订，
+ * - 答案先暂存、再提交：暂存会回写草稿修订号，提交裁决必须带暂存之后的最新修订，
  *   否则服务端会按过期修订拒绝。因此提交前一定先 flush。
- * - **未答完不提交**：留空、或数值类问题填了非有限/负值，都算未答完，明确提示原因，
- *   不代填默认值、不跳过。
+ * - 允许分批补充：只提交已填写的答案，不代填空白；已填数值的格式错误明确提示。
  */
 export function useDecisionAnswers(options: {
   /** 当前导入作业；未加载时为 null。 */
@@ -52,21 +51,7 @@ export function useDecisionAnswers(options: {
     return decision ?? "";
   }
 
-  const openIssues = computed(() => options.job.value?.issues.filter((item) => item.status === "OPEN") ?? []);
-
-  const unresolved = computed(() =>
-    openIssues.value.filter((issue) => {
-      const value = selectedOptions.value[issue.issue_no];
-      if (value === undefined || value === null || value === "") {
-        return true;
-      }
-      if (issue.input_kind === "DECIMAL") {
-        const numeric = Number(value);
-        return Number.isNaN(numeric) || !Number.isFinite(numeric) || numeric < 0;
-      }
-      return false;
-    }),
-  );
+  const openIssues = computed(() => options.job.value?.issues.filter((item) => item.status === "OPEN" && !item.resolution_notice) ?? []);
 
   /**
    * 用作业当前的问题与草稿答案初始化表单。
@@ -115,8 +100,17 @@ export function useDecisionAnswers(options: {
 
   async function submit(onAccepted: (updated: ImportJob) => void | Promise<void>): Promise<boolean> {
     if (!options.job.value) return false;
-    if (unresolved.value.length) {
-      options.formMessage.value = "请先为每一项业务问题给出结论；缺少阈值时必须填写真实数值，不能留空。";
+    const answered = openIssues.value.filter((issue) => {
+      const value = selectedOptions.value[issue.issue_no];
+      return value !== undefined && value !== null && value !== "";
+    });
+    if (!answered.length) {
+      options.formMessage.value = "尚未填写补充说明，可以直接写入草稿。";
+      return false;
+    }
+    if (answered.some((issue) => issue.input_kind === "DECIMAL"
+      && !Number.isFinite(Number(selectedOptions.value[issue.issue_no])))) {
+      options.formMessage.value = "已填写的数值格式无效，请修改该项后保存。";
       return false;
     }
     const jobNo = options.job.value.job_no;
@@ -126,7 +120,7 @@ export function useDecisionAnswers(options: {
       await flush();
       // 暂存可能回写草稿修订号，提交裁决必须带暂存之后的最新修订。
       const revision = options.job.value?.draft_revision ?? 0;
-      const decisions = openIssues.value.map((issue) => ({
+      const decisions = answered.map((issue) => ({
         target_type: "ISSUE" as const,
         target_ref: issue.issue_no,
         action: "RESOLVE" as const,
@@ -136,7 +130,7 @@ export function useDecisionAnswers(options: {
       // 等回调做完再往下：回调可能要重新读回作业与场景节点，页面据它才切下一步。
       await onAccepted(updated);
       accepted = true;
-      ElMessage.success("业务结论已保存");
+      ElMessage.success("补充说明已保存");
     });
     return accepted;
   }

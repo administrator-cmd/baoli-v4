@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
+from ..domain.configuration import empty_config, config_property
 from .base import TimestampMixin
 
 
@@ -41,36 +42,35 @@ class ScenarioDraft(Base, TimestampMixin):
     schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
     schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
     schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # 动态业务配置的唯一存储：节点、材料、字段、规则、报告章节。
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=empty_config)
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="FORM", server_default=text("'FORM'"))
     base_version_no: Mapped[int | None] = mapped_column(Integer)
-    # 配置草稿的来源格式版本（contract_review_v1 / v2 / v3）。页面表单没有这个版本概念，
-    # 因此它由规则库导入、发布快照继承或复制从原始 manifest 继承：发布时按它导出，
-    # 不能一律用默认版本给所有草稿打戳，那样会把旧格式配置说成节点版格式。
+    # 来源配置的能力版本身份：导入、继承或复制时保留，不能覆盖已有历史身份。
     profile_version: Mapped[str | None] = mapped_column(String(40))
     # 最近一次保存时草稿还不能发布的原因。NULL 表示当前草稿可以通过发布检查，
     # 不是「已经发布」：已发布版本只在显式发布时产生。
     sync_error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 计算规则候选，或历史版本留下的 {"frozen": [已编译计算规则]}。
     # NULL 与空数组都表示没有计算配置。
-    calculation_json: Mapped[Any | None] = mapped_column(JSON)
+    calculation_json = config_property("calculation_json")
     # 停用行允许保留未填写的业务列，不能强行塞进完整业务对象表。
-    disabled_source_rows: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    disabled_source_rows = config_property("disabled_source_rows")
 
 
 class ScenarioDraftNode(Base, TimestampMixin):
-    """场景配置草稿里的**节点实例**：用户配置的流程节点。
+    """场景配置草稿里的节点实例：用户配置的流程节点。
 
-    节点的存在、顺序与依赖由用户配置，不由系统按规则内容或固定序列自动生成。
-    一个场景可以有两个同类节点（例如两张报表各一个字段抽取），因此
-    `node_code` 是**实例码**，`node_type` 才是能力类型——两者不能混用。
+    节点的存在、顺序与依赖由用户配置，不由系统按规则内容或固定序列自动生成。一个场景可以
+    有两个同类节点（例如两张报表各一个字段抽取），因此 `node_code` 是实例码，`node_type`
+    才是能力类型，两者不能混用。
 
-    `depends_on` 保存上游**实例码**列表：依赖表达的是数据流，必须指向真实存在的实例。
-    发布期校验缺失依赖、自依赖、循环依赖与顺序冲突，运行期不再遇到这类问题。
+    `depends_on` 保存上游实例码列表：依赖表达的是数据流，必须指向真实存在的实例。缺失依赖、
+    自依赖、循环依赖与顺序冲突在发布期校验，运行期不再遇到。
 
-    节点与 Sheet 的关系是**一对多**：一个节点可以绑定多张 Sheet
-    （财报的计算三表都绑到同一个 CALCULATION 实例上），一张 Sheet 只能绑定一个节点
-    （见 `import_sheet.bound_node_code`）。
+    来源工作表不绑定节点；同一表中的字段、规则与计算按各自配置引用实际节点实例。
+    此类是 config_json.nodes 的内部投影，不对应单独的节点明细存储表。
     """
 
     __tablename__ = "scenario_draft_node"
@@ -84,11 +84,11 @@ class ScenarioDraftNode(Base, TimestampMixin):
     draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
     # 节点实例码：同一场景内唯一，规则按它归属。
     node_code: Mapped[str] = mapped_column(String(80), nullable=False)
-    # 能力类型：来自统一模板协议的 node_types，决定谁执行这个节点。
+    # 能力类型：来自节点能力目录，决定谁执行这个节点。
     node_type: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
-    # 上游节点**实例码**列表。
+    # 上游节点实例码列表。
     depends_on: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     # 节点级配置（例如计算节点参与的计算规则编号）。为空表示该节点没有额外配置。
     config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -97,17 +97,10 @@ class ScenarioDraftNode(Base, TimestampMixin):
 
 
 class ScenarioDraftSheet(Base, TimestampMixin):
-    """场景**选用**的 Sheet：这个场景用统一模板协议里的哪几张表，每张归哪个节点。
+    """草稿来源工作表的内部投影；实际清单保存在 config_json。
 
-    统一模板协议定义「系统支持哪些 Sheet 以及每张表的结构」；场景负责配置
-    「使用哪些 Sheet、Sheet 对应哪些节点及其流程关系」。这张表就是后者的落点。
-
-    没有它，模板下载只能按草稿里已有内容反推（有材料→材料清单表，有规则→按节点类型
-    反查），于是「本场景选了哪些表」没有权威来源：反推区分不了合同版与财报版的同名
-    Sheet，也会把用户明确排除的表重新算进来。
-
-    一个节点可以绑多张 Sheet（财报的计算三表绑到同一个计算节点实例上），
-    一张 Sheet 只能绑一个节点——与 `import_sheet.bound_node_code` 同一口径。
+    新来源保存上传文件的真实 sheet_key/sheet_name，业务配置各自引用节点，
+    不按表名、表头或固定角色限制场景；node_code 只保留已有历史绑定数据。
     """
 
     __tablename__ = "scenario_draft_sheet"
@@ -118,7 +111,7 @@ class ScenarioDraftSheet(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
-    # Sheet 角色：来自统一模板协议的 sheet_role。
+    # 来源表标识：动态来源用 RULE_LIBRARY:<sheet_key>，历史记录保留已存标识。
     sheet_role: Mapped[str] = mapped_column(String(80), nullable=False)
     # 该 Sheet 归属的节点实例码。为空表示本场景选用这张表但尚未指定节点。
     node_code: Mapped[str | None] = mapped_column(String(80))
@@ -176,10 +169,8 @@ class ScenarioDraftField(Base, TimestampMixin):
     # 主体核对必须按这一声明确定「待核对主体取自哪份材料的哪种产物」，
     # 不能靠字段名猜。留空表示字段由常规字段抽取提供。
     artifact_source: Mapped[str | None] = mapped_column(String(30))
-    # 取数期间与报表口径：**由字段自己声明**，计算参数按这两项定位字段事实
-    # （参数表不再声明它们，因此这里是唯一的来源）。必填、无默认值——
-    # 默认成「本期 / 合并」会让一个声明了上期的计算参数静默取到本期的数，
-    # 而结果看起来完全正常。
+    # 取数期间与报表口径：业务涉及时由字段声明，计算参数按这两项定位事实；
+    # 草稿 JSON 缺省时由编译层归一为 NOT_APPLICABLE。
     period_scope: Mapped[str] = mapped_column(String(30), nullable=False)
     statement_scope: Mapped[str] = mapped_column(String(20), nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -202,7 +193,7 @@ class ScenarioDraftRule(Base, TimestampMixin):
     draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
     rule_key: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    node_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    node_code: Mapped[str] = mapped_column(String(80), nullable=False)
     operator_code: Mapped[str] = mapped_column(String(40), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
     # 规则的业务定义：输入对象（材料/字段引用）、审核要求、参数、适用条件、
@@ -217,7 +208,7 @@ class ScenarioDraftRule(Base, TimestampMixin):
 class ScenarioDraftSection(Base, TimestampMixin):
     """报告配置草稿：一个报告章节。
 
-    节点版（contract_review_v3）的报告配置一行一个章节，并自带报告编号、报告名称、
+    场景报告配置按章节保存，并可声明报告编号、报告名称、
     材料范围、输出格式、结果排序与内容类型；这些都是业务维护的配置事实，必须随草稿
     一起保存，否则页面保存一次就会把按编号分组的报告退回成旧的附加展示章节。
     旧格式没有这些列，它们保持 NULL，渲染与导出继续按旧的附加章节语义处理。
@@ -245,6 +236,8 @@ class ScenarioDraftSection(Base, TimestampMixin):
     section_order: Mapped[int | None] = mapped_column(Integer)
     content_type: Mapped[str | None] = mapped_column(String(40))
     result_sort: Mapped[str | None] = mapped_column(String(60))
+    # 配置对象仅序列化到 config_json，不创建业务明细表。
+    risk_level_order: Mapped[list[str] | None] = mapped_column(JSON)
     # 业务配置状态（已明确 / 待确认 / 停用）：待确认的非停用章节属于未完成配置。
     config_status: Mapped[str | None] = mapped_column(String(30))
     origin_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)

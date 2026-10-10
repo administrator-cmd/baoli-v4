@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
-from ..common.exceptions import BusinessError, exception_summary
+from ..common.exceptions import BusinessError, exception_summary, safe_error_details
 from ..entity import BackgroundOperation
 from ..domain.identity import public_no
 
@@ -29,12 +29,16 @@ logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = ("PENDING", "RUNNING")
 
-# 命令阶段：从「已保存未执行」到「图已推进 / 等待 interrupt」。
+# 命令阶段：从「已保存未执行」到「图已推进 / 等待 interrupt / 结果已就绪」。
 # 恢复时按它决定唯一推进动作，不能靠重新执行本地业务写入来“补齐”。
 PHASE_COMMAND_ACCEPTED = "COMMAND_ACCEPTED"
+PHASE_LLM_REQUEST = "LLM_REQUEST"
 PHASE_BUSINESS_COMMITTED = "BUSINESS_COMMITTED"
 PHASE_GRAPH_ADVANCED = "GRAPH_ADVANCED"
 PHASE_INTERRUPT_WAITING = "INTERRUPT_WAITING"
+# 结果文件或外部结果已经可靠写入，但这次操作没有 LangGraph interrupt 要等待。
+# 场景来源解析属于这一类：预览文件与 operation.result_json 都已保存后才算完成。
+PHASE_RESULT_READY = "RESULT_READY"
 
 
 def normalized_request_hash(payload: dict[str, Any]) -> str:
@@ -114,6 +118,7 @@ def operation_view(operation: BackgroundOperation, *, reused: bool = False) -> d
         "message": _status_message(operation),
         "reused": reused,
         "result": operation.result_json,
+        "raw_response_path": operation.raw_response_path,
         "failure_code": operation.failure_code,
         "failure_message": operation.failure_message,
         "created_at": operation.created_at,
@@ -172,7 +177,9 @@ def _run_in_background(operation_id: int, runner: Callable[[Session, CommandHand
     """后台线程入口。必须使用独立 Session，禁止复用已结束请求的 Session。"""
     session = SessionLocal()
     try:
-        operation = session.get(BackgroundOperation, operation_id)
+        operation = session.scalar(
+            select(BackgroundOperation).where(BackgroundOperation.id == operation_id).with_for_update()
+        )
         if operation is None or operation.status not in ACTIVE_STATUSES:
             # 含已被中止（INTERRUPTED）的操作：线程可能在受理后才拿到执行权，
             # 此时必须退出，不能把中止过的命令再执行一遍。
@@ -191,7 +198,10 @@ def _run_in_background(operation_id: int, runner: Callable[[Session, CommandHand
         except BusinessError as exc:
             session.rollback()
             _finish(session, operation_id, "FAILED", None, exc.code, exc.message)
-            logger.warning("后台操作失败 operation_no=%s code=%s", operation.operation_no, exc.code)
+            logger.warning(
+                "后台操作失败 operation_no=%s code=%s message=%s details=%s",
+                operation.operation_no, exc.code, exc.message, safe_error_details(exc.details),
+            )
         except Exception as exc:  # noqa: BLE001 - 未处理异常必须显式落库，不能静默
             session.rollback()
             # 摘要带上异常类型与出错位置：只写「请查看服务日志」时，日志一旦丢失，
@@ -219,8 +229,14 @@ def _finish(
     failure_code: str | None,
     failure_message: str | None,
 ) -> None:
-    operation = session.get(BackgroundOperation, operation_id)
+    operation = session.scalar(
+        select(BackgroundOperation).where(BackgroundOperation.id == operation_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
     if operation is None:
+        return
+    if operation.status == "INTERRUPTED":
+        logger.info("后台操作已中止，保留中止状态 operation_no=%s", operation.operation_no)
         return
     operation.status = status
     operation.result_json = result

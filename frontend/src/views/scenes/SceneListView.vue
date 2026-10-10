@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { ScenarioListItem } from "@/api/contracts";
 import {
   createScene,
+  deleteScene,
   listScenes,
-  restoreScene,
   setSceneEnabled,
   updateScene,
 } from "@/api/scenes";
@@ -15,11 +15,12 @@ import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 
 /**
- * 场景列表：管理场景身份（名称/业务类型/启停/逻辑删除）与配置入口。
+ * 场景列表：管理场景身份（名称/业务类型/启停/实际删除）与配置入口。
  * 列表数字来自真实草稿配置；发布版本列来自已发布版本。
  * 管理员在这里创建场景，再到规则库导入和场景配置完成设置。
  */
 const creating = ref(false);
+const deletingCode = ref<string | null>(null);
 const router = useRouter();
 
 const list = usePagedList<ScenarioListItem, {
@@ -28,10 +29,9 @@ const list = usePagedList<ScenarioListItem, {
   enabled: string;
   published_from: string;
   published_to: string;
-  deleted: boolean;
 }>({
   key: "scenes",
-  initialFilters: { name: "", category: "", enabled: "", published_from: "", published_to: "", deleted: false },
+  initialFilters: { name: "", category: "", enabled: "", published_from: "", published_to: "" },
   fetch: (params) =>
     listScenes({
       name: params.name || undefined,
@@ -39,7 +39,6 @@ const list = usePagedList<ScenarioListItem, {
       enabled: params.enabled === "" ? undefined : params.enabled === "true",
       published_from: params.published_from || undefined,
       published_to: params.published_to || undefined,
-      deleted: params.deleted,
       page: params.page,
       page_size: params.page_size,
     }),
@@ -129,13 +128,28 @@ async function toggleEnabled(row: ScenarioListItem): Promise<void> {
   }
 }
 
-async function restoreRow(row: ScenarioListItem): Promise<void> {
+async function deleteRow(row: ScenarioListItem): Promise<void> {
   try {
-    await restoreScene(row.scenario_code);
-    ElMessage.success("场景已恢复");
+    await ElMessageBox.confirm(
+      `确认永久删除场景「${row.scenario_name}」及其草稿？删除后无法恢复，已有方案和任务不受影响。`,
+      "删除场景",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  deletingCode.value = row.scenario_code;
+  try {
+    await deleteScene(row.scenario_code);
+    ElMessage.success("场景已删除");
+    if (items.value.length === 1 && page.value > 1) {
+      page.value -= 1;
+    }
     await list.load();
   } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "恢复失败");
+    ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
+  } finally {
+    deletingCode.value = null;
   }
 }
 
@@ -187,9 +201,6 @@ onMounted(() => {
     <div class="app-toolbar">
       <div class="app-toolbar__left">
         <el-button type="primary" @click="openCreate">新建场景</el-button>
-      </div>
-      <div class="app-toolbar__right">
-        <el-checkbox v-model="filters.deleted" @change="search">已删除</el-checkbox>
       </div>
     </div>
 
@@ -245,17 +256,18 @@ onMounted(() => {
       <el-table-column label="更新时间" width="170">
         <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="150" align="center" fixed="right">
+      <el-table-column label="操作" width="200" align="center" fixed="right">
         <template #default="{ row }">
-          <template v-if="!filters.deleted">
-            <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
-          </template>
-          <template v-else>
-            <el-button link type="primary" size="small" @click="restoreRow(row)">恢复</el-button>
-            <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
-          </template>
+          <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
+          <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
+          <el-button
+            link
+            type="danger"
+            size="small"
+            :loading="deletingCode === row.scenario_code"
+            @click="deleteRow(row)"
+          >删除</el-button>
         </template>
       </el-table-column>
     </el-table>

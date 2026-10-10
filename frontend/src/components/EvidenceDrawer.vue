@@ -1,16 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
 
 import type { Evidence } from "@/api/contracts";
 import DrawerPanel from "./DrawerPanel.vue";
-import StatusBadge from "./StatusBadge.vue";
-import { locatorStatusLabel, locatorStatusTone } from "@/constants/labels";
 
-/**
- * 证据抽屉：标题优先显示材料中文名称。
- * 位置信息只在服务端真实返回坐标时显示，没有坐标时明确说明，不伪造高亮位置。
- * 定位核对状态与所属上传版本必须显式呈现：未核实/无法定位不能显示成已核实。
- */
+/** 原文依据：展示来源材料、引用原文、内容核对及当前或历史版本。 */
 const props = defineProps<{
   open: boolean;
   /** 材料中文名称。 */
@@ -28,63 +21,6 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const evidenceMeta = computed(() => {
-  const parts: string[] = [];
-  if (props.evidence?.document_name) {
-    parts.push(props.evidence.document_name);
-  }
-  if (props.evidence?.page_no) {
-    parts.push(`第 ${props.evidence.page_no} 页`);
-  }
-  return parts.join(" · ") || "未提供文件名与页码";
-});
-
-/** 定位信息只在服务端真实返回坐标时显示。 */
-const locationText = computed(() => {
-  const bbox = props.evidence?.bbox;
-  if (!bbox || !bbox.length) {
-    return null;
-  }
-  return bbox.map((value) => Math.round(value)).join(", ");
-});
-
-/** 定位核对说明：无法核对与没有可定位坐标是两件事。 */
-const locatorNote = computed(() => {
-  const status = props.evidence?.locator_status;
-  if (props.evidence?.locator_note) {
-    return props.evidence.locator_note;
-  }
-  if (status === "UNLOCATABLE") {
-    return "声明的位置无法核对：引文/页码/坐标未能在所属产物里定位。";
-  }
-  if (status === "UNVERIFIED") {
-    return "该记录的位置尚未核对。";
-  }
-  if (status === "VERIFIED") {
-    return "已记录定位核对通过，具体位置以产物提供的信息为准。";
-  }
-  return "服务端没有返回定位核对状态。";
-});
-
-const uploadVersionText = computed(() => {
-  const evidence = props.evidence;
-  if (!evidence) {
-    return "未提供";
-  }
-  const parts: string[] = [];
-  if (evidence.document_upload_no) {
-    parts.push(evidence.document_upload_no);
-  }
-  if (evidence.artifact_type) {
-    parts.push(evidence.artifact_type);
-  }
-  if (evidence.historical || evidence.is_current_upload === false) {
-    parts.push("历史上传版本");
-  } else if (evidence.is_current_upload) {
-    parts.push("当前上传版本");
-  }
-  return parts.join(" · ") || "未提供";
-});
 </script>
 
 <template>
@@ -120,20 +56,6 @@ const uploadVersionText = computed(() => {
         <blockquote class="evidence-quote">{{ evidence.quote_text || "本条证据没有记录引用原文。" }}</blockquote>
       </el-card>
 
-      <el-collapse class="block-gap">
-        <el-collapse-item title="来源与位置详情（辅助信息）" name="tech">
-          <div>所属上传版本：{{ uploadVersionText }}</div>
-          <div>文件与页码：{{ evidenceMeta }}</div>
-          <StatusBadge
-            :status="evidence.locator_status"
-            :label="locatorStatusLabel(evidence.locator_status)"
-            :tone="locatorStatusTone(evidence.locator_status)"
-          />
-          <div class="text-muted block-gap-sm">{{ locatorNote }}</div>
-          <div v-if="locationText">页面坐标：{{ locationText }}</div>
-          <div class="mono">证据编号：{{ evidence.evidence_no }}</div>
-        </el-collapse-item>
-      </el-collapse>
     </template>
 
     <el-empty v-else description="还没有读取到证据内容" />

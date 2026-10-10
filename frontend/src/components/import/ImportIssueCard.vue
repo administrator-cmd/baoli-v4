@@ -84,7 +84,14 @@ const savedAnswer = computed(() => {
       <span>来源：{{ sourceText }}（{{ targetText }}）</span>
     </div>
 
-    <el-form label-position="top" class="block-gap">
+    <el-alert
+      v-if="issue.resolution_notice"
+      type="info"
+      :closable="false"
+      :title="issue.resolution_notice"
+      class="block-gap"
+    />
+    <el-form v-else label-position="top" class="block-gap">
       <el-form-item>
         <template #label>业务结论</template>
 

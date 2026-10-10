@@ -237,7 +237,7 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
       </el-table>
       <p class="text-hint">
         材料编码由系统生成，用于稳定引用；材料位只定义「需要哪些材料」，
-        材料类型在**上传文件时**由用户从 8018 支持目录中选择，不在这里配置。
+        材料类型在上传文件时由用户从 8018 支持目录中选择，不在这里配置。
       </p>
 
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑材料' : '新增材料'" width="600px" :close-on-click-modal="false">

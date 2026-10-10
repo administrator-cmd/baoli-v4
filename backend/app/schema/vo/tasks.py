@@ -7,7 +7,7 @@ from ...common.api import ApiResponse
 
 
 class TaskSchemaPreviewResponse(ApiResponse):
-    """方案范围预览。**范围完全等于勾选的规则**——系统不补入任何规则，
+    """方案范围预览。范围完全等于勾选的规则——系统不补入任何规则，
     因此只有「已启用」与「未启用」两类，没有「自动补入」。"""
 
     enabled_rule_keys: list[str]
@@ -21,6 +21,7 @@ class TaskSchemaPreviewResponse(ApiResponse):
     field_count: int = 0
 
 class AuditTaskResponse(ApiResponse):
+    intermediate_csv_available: bool = False
     task_no: str
     task_name: str
     # 任务备注是可编辑基本资料；执行快照不随重命名或备注修改变化。
@@ -43,7 +44,7 @@ class AuditTaskResponse(ApiResponse):
     fields: list[dict[str, Any]]
     field_correction_candidates: list[dict[str, Any]] = Field(default_factory=list)
     rules: list[dict[str, Any]]
-    # **当前复核批次**：唯一允许提交的集合。复核分批判决（字段事实先于规则结论），
+    # 当前复核批次：唯一允许提交的集合。复核分批判决（字段事实先于规则结论），
     # 页面只能提交这一批；不属于本批的待办留在服务端，提交它们会被明确拒绝。
     pending_reviews: list[dict[str, Any]]
     # 全部待办（含不属于本批的批次）：仅用于展示「还有多少项在排队」。
@@ -54,7 +55,7 @@ class AuditTaskResponse(ApiResponse):
     pending_review_batch: dict[str, Any] = Field(default_factory=dict)
     pending_review_hash: str | None = None
     pending_review_count: int = 0
-    # 本模板未配置的业务校验类别与对应的节点实例；这些节点会显式跳过，不代表检查通过。
+    # 当前场景未配置的业务校验类别与对应的节点实例；这些节点会显式跳过，不代表检查通过。
     # 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
     # `..._codes` 是这些类型下真实存在的节点实例码（「这个节点是不是未配置的类别」）。
     # 两者口径不同，页面不得交叉比较。
@@ -148,14 +149,8 @@ class EvidenceResponse(ApiResponse):
     evidence_no: str
     document_name: str | None
     field_path: str | None
-    page_no: int | None
     quote_text: str
-    bbox: list[float] | None
-    # 定位核对结论与所属上传版本：证据抽屉必须能显示「未核实/无法定位」与「当前/历史上传版本」，
-    # 这些字段由 evidence_view 计算，声明缺失会在响应模型校验时被静默丢弃。
-    locator_status: str
-    locator_note: str | None = None
-    # 内容核对独立于页码坐标；声明服务层返回值，避免响应序列化时丢失。
+    # 引用原文在所属处理产物中的核对结论。
     quote_check: str
     quote_check_label: str
     document_upload_no: str | None = None

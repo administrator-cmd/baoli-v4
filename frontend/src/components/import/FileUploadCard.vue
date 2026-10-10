@@ -23,8 +23,6 @@ const props = defineProps<{
   jobStatus: string | null;
   /** 解析失败的真实原因（来自作业的 failure 字段）。 */
   failureMessage: string | null;
-  /** 模板格式的中文名，由服务端给出。 */
-  profileName: string | null;
   /** 本次浏览器选择的文件大小；刷新后浏览器不再保留该信息。 */
   selectedFileSize: number | null;
   /** 后端上传策略中的规则库一项；未取得前不展示大小与格式提示，也不做前端预检。 */
@@ -88,8 +86,8 @@ function onFileChange(file: { raw?: File; name: string }): void {
         </el-descriptions-item>
         <el-descriptions-item label="文件大小">{{ sizeText ?? "刷新后不再显示" }}</el-descriptions-item>
         <el-descriptions-item label="上传时间">{{ jobCreatedAt ? formatDate(jobCreatedAt) : "未提供" }}</el-descriptions-item>
-        <el-descriptions-item label="模板格式" :span="2">
-          {{ profileName ?? "未识别" }}
+        <el-descriptions-item label="解析方式" :span="2">
+          LLM 解析规则库
         </el-descriptions-item>
       </el-descriptions>
 
@@ -127,7 +125,7 @@ function onFileChange(file: { raw?: File; name: string }): void {
             支持 {{ policy.allowed_extensions.join("、") }} 格式，单个文件不超过 {{ maxSizeText }}。
           </template>
           <template v-else>文件格式与大小上限以上传策略为准，当前未取得该策略。</template>
-          每张工作表读取前 200 行、前 40 列只用于**页面预览摘要**；
+          每张工作表读取前 200 行、前 40 列只用于页面预览摘要；
           业务转换读取的是完整业务行，不按该范围截断。
         </div>
       </template>
@@ -142,7 +140,7 @@ function onFileChange(file: { raw?: File; name: string }): void {
       title="规则解析失败"
     >
       <div>{{ failureMessage }}</div>
-      <div>确认工作表用途后可以重新提交解析；已识别的文件与工作表不会丢失。</div>
+      <div>确认参与解析的工作表后可以重新提交解析；已识别的文件与工作表不会丢失。</div>
     </el-alert>
   </div>
 </template>

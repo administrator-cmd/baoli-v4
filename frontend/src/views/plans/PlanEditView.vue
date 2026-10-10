@@ -13,7 +13,6 @@ import {
   defaultExtractionStrategy,
   extractionStrategyOptions,
   extractionStrategySupports,
-  nodeLabel,
   reportContentTypeOptions,
   reportFormatOptions,
   reportResultSortOptions,
@@ -24,7 +23,7 @@ import {
  * 方案编辑：以已发布场景版本为基准的个性化配置。
  *
  * 新建 = 选一个已发布且启用的场景版本，服务端把那一版的配置（材料 / 字段 / 规则 /
- * 报告章节）整份复制过来并立即编译一次；**新建时不再挑规则**，规则在方案里逐条勾。
+ * 报告章节）整份复制过来并立即编译一次；新建时不再挑规则，规则在方案里逐条勾。
  *
  * 编辑 = 调整方案自己的规则、材料、字段和报告章节。
  */
@@ -51,6 +50,9 @@ const scenesError = ref<string | null>(null);
 const scenesLoading = ref(false);
 const plan = ref<PlanSelection | null>(null);
 const config = ref<PlanConfig | null>(null);
+function nodeName(code: string | null): string {
+  return config.value?.nodes.find((node) => node.node_code === code)?.name ?? "所属节点未记录";
+}
 const savedConfigJson = ref("");
 const loading = ref(false);
 const loadError = ref<string | null>(null);
@@ -89,6 +91,7 @@ const sectionForm = reactive({
   section_order: null as number | null,
   content_type: "",
   result_sort: "",
+  risk_level_order_text: "",
   config_status: null as string | null,
 });
 const fieldOptions = computed(() => (config.value?.fields ?? []).map((field) => ({
@@ -97,10 +100,7 @@ const fieldOptions = computed(() => (config.value?.fields ?? []).map((field) => 
 })));
 
 function handlePlanFieldTypeChange(field: PlanFieldItem): void {
-  if (!extractionStrategySupports(field.extraction_strategy, field.value_type)) {
-    field.extraction_strategy = defaultExtractionStrategy(field.value_type);
-    field.structure_schema = null;
-  }
+  if (field.extraction_strategy !== "STRUCTURED") field.structure_schema = null;
 }
 
 function handlePlanFieldStrategyChange(field: PlanFieldItem): void {
@@ -140,10 +140,6 @@ function applyFieldSchema(): void {
 
 function validatePlanFieldStrategies(fields: PlanFieldItem[]): boolean {
   for (const field of fields) {
-    if (!extractionStrategySupports(field.extraction_strategy, field.value_type)) {
-      ElMessage.warning(`字段“${field.name}”的数据类型与抽取策略不匹配`);
-      return false;
-    }
     if (field.extraction_strategy === "STRUCTURED" && !field.structure_schema) {
       ElMessage.warning(`字段“${field.name}”使用结构化抽取，必须填写结构定义`);
       return false;
@@ -406,6 +402,7 @@ function openSectionEditor(item?: PlanSectionItem): void {
   sectionForm.section_order = item?.section_order ?? null;
   sectionForm.content_type = item?.content_type ?? "";
   sectionForm.result_sort = item?.result_sort ?? "";
+  sectionForm.risk_level_order_text = (item?.risk_level_order ?? []).join("\n");
   sectionForm.config_status = item ? item.config_status ?? null : "PENDING";
   sectionDialogVisible.value = true;
 }
@@ -428,6 +425,7 @@ function applySection(): void {
     section_order: sectionForm.section_order,
     content_type: sectionForm.content_type || null,
     result_sort: sectionForm.result_sort || null,
+    risk_level_order: sectionForm.risk_level_order_text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
     config_status: sectionForm.config_status,
     sort_no: existing?.sort_no ?? config.value.sections.length + 1,
   };
@@ -707,7 +705,7 @@ function adjustmentValue(value: unknown): string {
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="规则名称" min-width="220" show-overflow-tooltip />
-                <el-table-column label="阶段" width="130"><template #default="{ row }">{{ nodeLabel(row.node_code) }}</template></el-table-column>
+                <el-table-column label="阶段" width="130"><template #default="{ row }">{{ nodeName(row.node_code) }}</template></el-table-column>
                 <el-table-column label="类型" width="90"><template #default="{ row }">{{ row.is_system ? "系统" : "业务" }}</template></el-table-column>
                 <el-table-column label="适用材料" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
               </el-table>
@@ -719,8 +717,12 @@ function adjustmentValue(value: unknown): string {
                 <el-table-column type="expand" width="48"><template #default="{ row }"><CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" :band-sources="row.band_sources" /></template></el-table-column>
                 <el-table-column label="启用" width="80"><template #default="{ row }"><el-switch v-model="row.enabled" :aria-label="`启用计算规则 ${row.rule_code}`" /></template></el-table-column>
                 <el-table-column prop="rule_name" label="指标名称" min-width="220" show-overflow-tooltip />
+                <el-table-column label="计算方式" min-width="220"><template #default="{ row }">{{ row.execution_engine === 'LLM' ? 'AI 辅助计算与判断' : '旧程序计算，需重新解析规则库' }}</template></el-table-column>
+                <el-table-column label="计算用途" min-width="160"><template #default="{ row }">{{ row.execution_mode === 'VALUE_ONLY' ? '仅计算中间值' : '计算并判定' }}</template></el-table-column>
+                <el-table-column prop="formula" label="计算方法" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="judgement_instruction" label="判断标准" min-width="220" show-overflow-tooltip />
                 <el-table-column prop="rule_code" label="编号" width="150" />
-                <el-table-column label="计算节点" min-width="150"><template #default="{ row }">{{ nodeLabel(row.node_code) }}</template></el-table-column>
+                <el-table-column label="计算节点" min-width="150"><template #default="{ row }">{{ nodeName(row.node_code) }}</template></el-table-column>
               </el-table>
             </el-tab-pane>
 
@@ -784,6 +786,9 @@ function adjustmentValue(value: unknown): string {
               <el-select v-model="sectionForm.result_sort" clearable style="width: 100%">
                 <el-option v-for="item in reportResultSortOptions" :key="item.value" :value="item.value" :label="item.label" />
               </el-select>
+            </el-form-item>
+            <el-form-item label="风险等级顺序">
+              <el-input v-model="sectionForm.risk_level_order_text" type="textarea" :rows="3" placeholder="按风险从高到低，每行填写一个场景等级；不排序时可留空" />
             </el-form-item>
             <el-form-item label="章节处理">
               <el-select v-model="sectionForm.config_status" style="width: 100%">

@@ -1,14 +1,13 @@
 """LangGraph 持久化 checkpoint 运行时。
 
-使用社区实现 langgraph-checkpoint-mysql 的 PyMySQLSaver，把 checkpoint 保存在同一个
+用社区实现 langgraph-checkpoint-mysql 的 PyMySQLSaver，把 checkpoint 保存在同一个
 MySQL 业务库 baoli_v4 中，不额外引入数据库。
 
-连接生命周期：每次图调用/状态读取都新建一个 saver 连接，用完立即关闭。
-等待用户操作期间既不持有业务 Session，也不长期占用请求连接；下次调用重新建连即可
-读取同一个 thread 的 checkpoint。
+每次图调用/状态读取都新建一个 saver 连接、用完立即关闭：等待用户操作期间既不持有业务
+Session，也不长期占用请求连接；下次调用重新建连即可读取同一个 thread 的 checkpoint。
 
-注意：本模块不会调用 saver.setup()。建表由用户手工执行
-backend/database/schema.sql。表不存在时明确失败。
+本模块不调用 saver.setup()，也不维护迁移记录表。
+建表由人工从空库执行 backend/database/schema.sql，结构不匹配时明确失败。
 """
 
 from contextlib import contextmanager
@@ -16,9 +15,18 @@ from typing import Any, Iterator
 
 import pymysql
 from pymysql.cursors import DictCursor
+from sqlalchemy.exc import DBAPIError, DisconnectionError, InterfaceError, OperationalError
 
 from ..config import get_settings, validated_database_url
 from ..common.exceptions import BusinessError
+
+
+def is_storage_unavailable(exc: Exception) -> bool:
+    """识别连接及数据库运行故障，不按异常模块把所有数据库错误都当成不可达。"""
+    return isinstance(
+        exc,
+        (pymysql.OperationalError, pymysql.InterfaceError, OperationalError, InterfaceError, DisconnectionError),
+    ) or (isinstance(exc, DBAPIError) and exc.connection_invalidated)
 
 
 def _connection_kwargs() -> dict[str, object]:
@@ -73,17 +81,7 @@ REQUIRED_CHECKPOINT_TABLES = (
     "checkpoints",
     "checkpoint_blobs",
     "checkpoint_writes",
-    "checkpoint_migrations",
 )
-
-# 依赖包 langgraph-checkpoint-mysql 3.0.0 的 MIGRATIONS 最大版本。
-# 来源：langgraph/checkpoint/mysql/base.py 的 MIGRATIONS 列表共 22 条（索引 0..21，
-# 第 0 条创建 checkpoint_migrations 表），最后一条的版本号即 21。
-# 核对方式（依赖升级后这个数字会变，必须重新核对）：
-#   python -c "from langgraph.checkpoint.mysql.base import MIGRATIONS; print(len(MIGRATIONS) - 1)"
-# 输出的数字与常量不一致时说明依赖已升级：先把数据库结构按该包迁移脚本升到最新，
-# 再同步更新本常量与 backend/database/schema.sql 中写入的版本行。
-EXPECTED_CHECKPOINT_MIGRATION_VERSION = 21
 
 def _open_checkpoint_connection() -> "pymysql.connections.Connection":
     """打开 checkpoint 存储连接；连接失败统一抛 CHECKPOINT_CONNECT_FAILED（临时不可达，可重试）。"""
@@ -103,7 +101,7 @@ def _single_value(row: Any) -> Any:
 def _checkpoint_unreachable() -> BusinessError:
     """存储暂不可达的显式错误。
 
-    这是**临时**状态：连接或查询异常只说明这一次读不到存储，不能证明 checkpoint 真的缺失，
+    这是临时状态：连接或查询异常只说明这一次读不到存储，不能证明 checkpoint 真的缺失，
     调用方不得据此把任务标记为永久失败或丢弃等待中的流程，应提示稍后重试。
     """
     return BusinessError(
@@ -134,27 +132,8 @@ def _existing_checkpoint_tables(connection: "pymysql.connections.Connection") ->
         raise _checkpoint_unreachable() from exc
 
 
-def _applied_checkpoint_migration_version(connection: "pymysql.connections.Connection") -> int | None:
-    """已应用的最大迁移版本；表为空时返回 None。"""
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT MAX(v) FROM checkpoint_migrations")
-            value = _single_value(cursor.fetchone())
-    except pymysql.MySQLError as exc:
-        raise _checkpoint_unreachable() from exc
-    if value is None:
-        return None
-    return int(value)
-
-
-
-
 def check_checkpoint_tables() -> None:
-    """启动时校验 checkpoint 表结构与迁移版本。只读检查，绝不建表、不执行任何 DDL。
-
-    必须说清「连的是哪个库、库里有多少张表、缺哪几张、迁移到哪个版本」：
-    否则无法区分「没执行建表脚本」「脚本执行到了另一个库」和「依赖升级但库结构没跟上」。
-    """
+    """只读核对 checkpoint 表是否存在；列和索引由 schema_check 统一核对。"""
     connection = _open_checkpoint_connection()
     try:
         database = _database_name(connection)
@@ -164,7 +143,7 @@ def check_checkpoint_tables() -> None:
             raise BusinessError(
                 "CHECKPOINT_TABLES_MISSING",
                 f"数据库 {database} 缺少持久化 checkpoint 数据表：{'、'.join(missing)}。"
-                "请执行 backend/database/schema.sql（可重复执行，只补缺表，不会改动已有数据）。",
+                "请清空开发库后执行 backend/database/schema.sql 重新建表。",
                 status_code=500,
                 details={
                     "database": database,
@@ -173,20 +152,5 @@ def check_checkpoint_tables() -> None:
                     "script": "backend/database/schema.sql",
                 },
             )
-        applied = _applied_checkpoint_migration_version(connection)
     finally:
         connection.close()
-    if applied is None or applied < EXPECTED_CHECKPOINT_MIGRATION_VERSION:
-        raise BusinessError(
-            "CHECKPOINT_MIGRATIONS_OUTDATED",
-            f"数据库 {database} 的 checkpoint 迁移版本不足：已应用 "
-            f"{applied if applied is not None else '无'}，期望至少 {EXPECTED_CHECKPOINT_MIGRATION_VERSION}。"
-            "说明依赖包结构已升级但库结构没跟上，请执行 backend/database/schema.sql 补齐（含版本记录）。",
-            status_code=500,
-            details={
-                "database": database,
-                "applied_version": applied,
-                "expected_version": EXPECTED_CHECKPOINT_MIGRATION_VERSION,
-                "script": "backend/database/schema.sql",
-            },
-        )

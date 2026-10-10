@@ -1,13 +1,13 @@
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable
+from typing import Any
+
+from langchain_core.tools import BaseTool, tool
 
 from ..domain import quality_judgement
 from ..domain.currency import canonical_currency
+from ..domain.decimal_math import exact_subtract, exact_sum
 from ..common.exceptions import BusinessError
-
-
-OperatorHandler = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any]]
 
 
 def _comparison(
@@ -25,7 +25,7 @@ def _comparison(
 ) -> dict[str, Any]:
     """一条检查的对比过程，供页面与报告直接呈现。
 
-    金额与日期都由服务端按标准化值做确定性计算，这里如实记下**实际算式**与双方取值：
+    金额与日期都由服务端按标准化值做确定性计算，这里如实记下实际算式与双方取值：
     只给一个“通过/异常”会让工作人员无法核验系统到底比了什么。
     左右两侧用输入下标引用，中文名由服务端按同一次执行的输入摘要补齐，
     算子层不猜字段中文名、也不从字段名推断业务语义。
@@ -50,7 +50,7 @@ def _comparison(
 
 
 # 材料类型不可用：依赖该材料的检查缺少有效依据。两种来源必须分开：
-#   TYPE_REVIEW   = 类型待复核，**尚未由人定案**；
+#   TYPE_REVIEW   = 类型待复核，尚未由人定案；
 #   TYPE_REJECTED = 人工已确认与材料位不符。
 # 只有 TYPE_REJECTED 是确定的人工结论，才阻断依赖它的检查。TYPE_REVIEW 的识别结论
 # 来自已下线为“仅供参考”的自动识别（或人工的“证据不足”），它既不是人的否定结论，
@@ -66,27 +66,15 @@ REJECTED_MATERIAL_STATUS = "TYPE_REJECTED"
 DECIMAL_COMPARE_MODES = {"EQ", "GTE", "LTE", "ABS_DIFF_LTE"}
 DATE_COMPARE_MODES = {"EQ", "GTE", "LTE", "GT", "LT"}
 
-# 比较方式的中文：只用于把**实际算式**写进结果，供页面与报告直接呈现。
+# 比较方式的中文：只用于把实际算式写进结果，供页面与报告直接呈现。
 DECIMAL_MODE_LABELS = {
-    "EQ": "金额相等",
-    "GTE": "金额不小于",
-    "LTE": "金额不大于",
+    "EQ": "数值相等",
+    "GTE": "数值不小于",
+    "LTE": "数值不大于",
     "ABS_DIFF_LTE": "差额不超过允许差值",
 }
 DATE_MODE_LABELS = {"EQ": "同一天", "GTE": "不早于", "LTE": "不晚于", "GT": "晚于", "LT": "早于"}
 DATE_COMPARISON_SYMBOLS = {"EQ": "=", "GTE": "≥", "LTE": "≤", "GT": ">", "LT": "<"}
-
-# 风险的成立条件：缺失时不能默认成任一，否则会静默放宽业务条件。
-RISK_CONDITIONS = {"ANY_ABNORMAL", "ALL_ABNORMAL"}
-# 来源检查允许出现的执行状态。除此之外的取值（含 None）都表示来源无法判断。
-KNOWN_SOURCE_STATUSES = {
-    "PASSED",
-    "ABNORMAL",
-    "NOT_APPLICABLE",
-    "EVIDENCE_INSUFFICIENT",
-    "NOT_EXECUTED",
-    "PENDING_REVIEW",
-}
 
 
 def _input_label(item: dict[str, Any]) -> str:
@@ -101,7 +89,7 @@ def _unavailable_status(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
     每种不可用都必须区分开：材料类型被人工确认不符、材料尚未形成处理产物、
     字段没有有效值。任何一种都不能当作通过，原因文案也不能互相冒充。
 
-    这里**不**把「材料类型待复核」当作不可用：该状态来源于已下线为仅供参考的自动识别
+    这里不把「材料类型待复核」当作不可用：该状态来源于已下线为仅供参考的自动识别
     （或人工的“证据不足”），不是对材料内容的否定结论，真实原文依据仍然可用。
     依赖它的规则照常按真实内容判定，类型问题单独作为待确认事项暴露。
     """
@@ -156,7 +144,7 @@ def _unit_gap(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
         ]
         declared = [value for value in values if value]
         if key == "currency" and any(
-            str(item.get("value_type") or "").upper() in {"DECIMAL", "DECIMAL_CN"}
+            str(item.get("value_type") or "").upper() in {"AMOUNT", "DECIMAL_CN"}
             for item in inputs
         ) and not declared:
             return {
@@ -196,7 +184,10 @@ def _require_inputs(inputs: list[dict[str, Any]], count: int) -> tuple[list[dict
 
 
 def _decimal_of(value: Any) -> Decimal:
-    return Decimal(str(value))
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise InvalidOperation("规则数值必须是有限十进制数")
+    return number
 
 
 def _threshold_of(
@@ -231,6 +222,7 @@ def _threshold_of(
     return threshold
 
 
+@tool("FIELD_EQUAL")
 def field_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """字段一致比较：两侧规范化取值必须相同。"""
     selected, problem = _require_inputs(inputs, 2)
@@ -243,7 +235,7 @@ def field_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dic
         raise BusinessError("RULE_VALUE_INVALID", "两个字段的类型不一致，不能直接比较")
     left_value = left["normalized_value"]
     right_value = right["normalized_value"]
-    if left_type == "DECIMAL":
+    if left_type in {"DECIMAL", "AMOUNT"}:
         gap = _unit_gap(selected)
         if gap:
             return gap
@@ -253,7 +245,7 @@ def field_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dic
         except InvalidOperation as exc:
             raise BusinessError("RULE_VALUE_INVALID", "金额字段无法按数值比较") from exc
         passed = left_decimal == right_decimal
-        diff = left_decimal - right_decimal
+        diff = exact_subtract(left_decimal, right_decimal)
         comparison = _comparison(
             kind="DECIMAL",
             left_index=0,
@@ -312,9 +304,10 @@ def field_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dic
     }
 
 
+@tool("FIELD_NOT_EQUAL")
 def field_not_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """字段应当不同：两侧规范化取值必须不同。"""
-    result = field_equal(parameters, inputs)
+    result = field_equal.invoke({"parameters": parameters, "inputs": inputs})
     if result["status"] != "PASSED" and result["status"] != "ABNORMAL":
         return result
     passed = result["status"] == "ABNORMAL"
@@ -325,8 +318,9 @@ def field_not_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
     }
 
 
+@tool("DECIMAL_COMPARE")
 def decimal_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
-    """金额数值比较：单位与币种必须一致，允许差值按业务配置。"""
+    """数值比较：核对单位，金额另核对币种；允许差值来自业务配置。"""
     selected, problem = _require_inputs(inputs, 2)
     if problem:
         return problem
@@ -345,46 +339,59 @@ def decimal_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
     threshold = _threshold_of(parameters, selected)
     if isinstance(threshold, dict):
         return threshold
+    difference = exact_subtract(left, right)
+    absolute_difference = difference.copy_abs()
+    reverse_difference = difference.copy_negate()
     if mode == "EQ":
-        passed = left == right if threshold is None else abs(left - right) <= threshold
+        passed = left == right if threshold is None else absolute_difference <= threshold
     elif mode == "GTE":
-        passed = left >= right if threshold is None else right - left <= threshold
+        passed = left >= right if threshold is None else reverse_difference <= threshold
     elif mode == "LTE":
-        passed = left <= right if threshold is None else left - right <= threshold
+        passed = left <= right if threshold is None else difference <= threshold
     else:
         # ABS_DIFF_LTE：等价于「相等且差额不超过差值」，旧版语义原样保留。
         if threshold is None:
             raise BusinessError("RULE_PARAMETER_MISSING", "金额比较缺少业务确认阈值")
-        passed = abs(left - right) <= threshold
+        passed = absolute_difference <= threshold
     threshold_text = None if threshold is None else str(threshold)
     mode_label = DECIMAL_MODE_LABELS.get(mode, mode)
     # 算式必须与结论一致地读出来：结论为“异常”时，算式里也要写明哪里不满足，
     # 不能出现「100 ≥ 100.03，允许差值 5」这种看起来留有余地、实际判定为异常的文字。
     if mode == "EQ":
         expression = (
-            f"两侧差额 {abs(left - right)}" + (f"，未超过允许差值 {threshold_text}" if threshold is not None else "")
+            f"两侧差额 {absolute_difference}" + (f"，未超过允许差值 {threshold_text}" if threshold is not None else "")
             if passed
-            else f"两侧差额 {abs(left - right)}"
+            else f"两侧差额 {absolute_difference}"
             + (f"，超过允许差值 {threshold_text}" if threshold is not None else "，不相等")
         )
     elif mode == "ABS_DIFF_LTE":
         expression = (
-            f"两侧差额 {abs(left - right)}，未超过允许差值 {threshold_text}"
+            f"两侧差额 {absolute_difference}，未超过允许差值 {threshold_text}"
             if passed
-            else f"两侧差额 {abs(left - right)}，超过允许差值 {threshold_text}"
+            else f"两侧差额 {absolute_difference}，超过允许差值 {threshold_text}"
         )
     elif mode == "GTE":
-        expression = (
-            f"{left} 不小于 {right}（{left} − {right} = {left - right}）"
-            if passed
-            else f"{left} 小于 {right}（{left} − {right} = {left - right}）"
-        )
+        if threshold is not None:
+            expression = (
+                f"右侧 {right} − 左侧 {left} = {reverse_difference}，"
+                f"{'未超过' if passed else '超过'}允许差值 {threshold_text}"
+            )
+        else:
+            expression = (
+                f"{left} {'不小于' if passed else '小于'} {right}"
+                f"（{left} − {right} = {difference}）"
+            )
     else:
-        expression = (
-            f"{left} 不大于 {right}（{left} − {right} = {left - right}）"
-            if passed
-            else f"{left} 大于 {right}（{left} − {right} = {left - right}）"
-        )
+        if threshold is not None:
+            expression = (
+                f"左侧 {left} − 右侧 {right} = {difference}，"
+                f"{'未超过' if passed else '超过'}允许差值 {threshold_text}"
+            )
+        else:
+            expression = (
+                f"{left} {'不大于' if passed else '大于'} {right}"
+                f"（{left} − {right} = {difference}）"
+            )
     comparison = _comparison(
         kind="DECIMAL",
         left_index=0,
@@ -394,7 +401,7 @@ def decimal_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
         expression=expression,
         mode_label=mode_label,
         threshold_text=threshold_text,
-        actual_diff=str(left - right),
+        actual_diff=str(difference),
     )
     return {
         "status": "PASSED" if passed else "ABNORMAL",
@@ -405,6 +412,7 @@ def decimal_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
     }
 
 
+@tool("DECIMAL_SUM_COMPARE")
 def decimal_sum_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """左侧一个字段与右侧多个加数之和比较，使用 Decimal 计算。
 
@@ -432,7 +440,8 @@ def decimal_sum_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]
         raise BusinessError("RULE_PARAMETER_MISSING", "加总比较缺少业务确认的允许差值")
     try:
         left = _decimal_of(inputs[0]["normalized_value"])
-        total = sum((_decimal_of(item["normalized_value"]) for item in inputs[1:]), Decimal("0"))
+        addend_values = [_decimal_of(item["normalized_value"]) for item in inputs[1:]]
+        total = exact_sum(addend_values)
     except (InvalidOperation, TypeError) as exc:
         raise BusinessError("RULE_VALUE_INVALID", "加总比较的字段无法按数值计算") from exc
     threshold = _threshold_of(parameters, inputs)
@@ -441,33 +450,34 @@ def decimal_sum_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]
     if threshold is None:
         raise BusinessError("RULE_PARAMETER_MISSING", "加总比较缺少业务确认的允许差值")
     # 相等为 |左−右| ≤ 差值；不大于为 左−右 ≤ 差值；不小于为 右−左 ≤ 差值。
+    difference = exact_subtract(left, total)
+    absolute_difference = difference.copy_abs()
+    reverse_difference = difference.copy_negate()
     if mode == "EQ":
-        passed = abs(left - total) <= threshold
+        passed = absolute_difference <= threshold
     elif mode == "LTE":
-        passed = left - total <= threshold
+        passed = difference <= threshold
     else:
-        passed = total - left <= threshold
-    addends = " + ".join(str(_decimal_of(item["normalized_value"])) for item in inputs[1:])
+        passed = reverse_difference <= threshold
+    addends = " + ".join(str(value) for value in addend_values)
     # 与单值比较同一口径：算式要能读出结论，不满足时写明超出允许差值。
     # 比对关系是「左侧待核对总额」对「加数合计」，措辞必须按这个方向写，
     # 否则会出现「合计未大于左侧」这种与实际判定相反的句子。
     if mode == "EQ":
         expression = (
-            f"{addends} = {total}，与左侧 {left} 的差额 {abs(left - total)}，未超过允许差值 {threshold}"
+            f"{addends} = {total}，与左侧 {left} 的差额 {absolute_difference}，未超过允许差值 {threshold}"
             if passed
-            else f"{addends} = {total}，与左侧 {left} 的差额 {abs(left - total)}，超过允许差值 {threshold}"
+            else f"{addends} = {total}，与左侧 {left} 的差额 {absolute_difference}，超过允许差值 {threshold}"
         )
     elif mode == "LTE":
         expression = (
-            f"{addends} = {total}，左侧 {left} 不大于加数合计"
-            if passed
-            else f"{addends} = {total}，左侧 {left} 大于加数合计共 {left - total}，超过允许差值 {threshold}"
+            f"{addends} = {total}，左侧 {left} − 合计 {total} = {difference}，"
+            f"{'未超过' if passed else '超过'}允许差值 {threshold}"
         )
     else:
         expression = (
-            f"{addends} = {total}，左侧 {left} 不小于加数合计"
-            if passed
-            else f"{addends} = {total}，左侧 {left} 小于加数合计共 {total - left}，超过允许差值 {threshold}"
+            f"{addends} = {total}，合计 {total} − 左侧 {left} = {reverse_difference}，"
+            f"{'未超过' if passed else '超过'}允许差值 {threshold}"
         )
     comparison = _comparison(
         kind="DECIMAL_SUM",
@@ -478,8 +488,8 @@ def decimal_sum_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]
         expression=expression,
         mode_label=DECIMAL_MODE_LABELS.get(mode, mode),
         threshold_text=str(threshold),
-        actual_diff=str(left - total),
-        addends=[str(_decimal_of(item["normalized_value"])) for item in inputs[1:]],
+        actual_diff=str(difference),
+        addends=[str(value) for value in addend_values],
     )
     return {
         "status": "PASSED" if passed else "ABNORMAL",
@@ -493,6 +503,7 @@ def decimal_sum_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]
     }
 
 
+@tool("FIELD_NOT_EMPTY")
 def field_not_empty(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """单字段非空校验（对照内容为空的检查行）。
 
@@ -517,6 +528,7 @@ def field_not_empty(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
     return {"status": "PASSED", "message": "该字段已取得非空值", "comparison": comparison}
 
 
+@tool("DECIMAL_CN_EQUAL")
 def decimal_cn_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """大小写金额一致性比较。
 
@@ -526,6 +538,7 @@ def decimal_cn_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -
     return quality_judgement.decimal_cn_equal(inputs)
 
 
+@tool("DATE_COMPARE")
 def date_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """日期比较：允许差值以天为单位；不带差值时按严格比较。"""
     selected, problem = _require_inputs(inputs, 2)
@@ -626,133 +639,22 @@ def date_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> di
     }
 
 
+@tool("RISK_TRIGGER")
 def risk_trigger(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
-    """风险成立条件按「任一关联检查不合格」或「全部关联检查不合格」组合来源结果。
+    """按当前场景的完整风险条件，由大模型判断真实来源结果是否构成风险。"""
+    from ..services.llm_risk import evaluate_risk
 
-    组合口径与填写规范一致，且不把缺项当成合格：
-      任一：有确定不合格即成立；没有不合格但有无法判断则无法判断；其余适用结果全部合格时不成立。
-      全部：所有来源都必须适用且确定不合格才成立；存在确定合格则不成立；其他不完整组合无法判断。
-    全部来源不适用时风险不适用。没有任何来源是配置错误，由编译期报出，不在这里按空集合推导。
-    """
-    source_statuses = parameters.get("source_statuses")
-    if not isinstance(source_statuses, list) or not source_statuses:
-        # 单一来源也可用 source_status 传入。
-        single = parameters.get("source_status")
-        if not single:
-            return {"status": "NOT_EXECUTED", "message": "来源规则尚无结果"}
-        source_statuses = [single]
-    condition = parameters.get("risk_condition")
-    if condition not in RISK_CONDITIONS:
-        # 成立条件缺失或非法都不能默认成「任一」：那会把「全部关联检查不合格」
-        # 静默放宽成「任一」，直接改变风险结论。编译期会保证该参数存在；
-        # 这里再兜一次，宁可不可判定也不猜。
-        return {
-            "status": "EVIDENCE_INSUFFICIENT",
-            "message": (
-                "风险没有已确认的成立条件（任一关联检查不合格 / 全部关联检查不合格），"
-                "系统不替业务选择默认值，本风险无法判断"
-            ),
-        }
-    risk_level = parameters.get("risk_level", "待确认")
-    # 来源结果必须是已识别的执行状态：None（来源规则没有结果）、空值与任何未知取值
-    # 都表示“这条来源无法判断”，绝不能落入“合格”分支而让风险静默不成立。
-    statuses = [str(item) if item is not None else None for item in source_statuses]
-    unknown = sorted({str(item) for item in statuses if item not in KNOWN_SOURCE_STATUSES})
-    if unknown:
-        # 非法状态（含 None）明确暴露，且**先**判定已经确定的组合结论：
-        # 已有确定不合格时「任一」模式成立，不能因为另一条来源缺少结果就把它压成无法判断；
-        # 已有确定合格时「全部」模式不成立，同样不能被缺项压过。
-        # 只有确定结论缺席时，缺项才让风险无法判断。
-        abnormal_count = sum(1 for status in statuses if status == "ABNORMAL")
-        passed_count = sum(1 for status in statuses if status == "PASSED")
-        if condition not in RISK_CONDITIONS:
-            return {
-                "status": "EVIDENCE_INSUFFICIENT",
-                "message": (
-                    "风险没有已确认的成立条件（任一关联检查不合格 / 全部关联检查不合格），"
-                    "系统不替业务选择默认值，本风险无法判断"
-                ),
-            }
-        if condition == "ANY_ABNORMAL" and abnormal_count:
-            return {
-                "status": "ABNORMAL",
-                "message": (
-                    f"存在确定不合格的关联检查，风险成立（另有 "
-                    f"{len(unknown)} 条关联检查没有可用结果：{'、'.join(unknown)}）"
-                ),
-                "risk_level": risk_level,
-            }
-        if condition == "ALL_ABNORMAL" and passed_count:
-            return {
-                "status": "PASSED",
-                "message": (
-                    f"关联检查中存在确定合格的结果，风险不成立（另有 "
-                    f"{len(unknown)} 条关联检查没有可用结果：{'、'.join(unknown)}）"
-                ),
-                "risk_level": risk_level,
-            }
-        return {
-            "status": "EVIDENCE_INSUFFICIENT",
-            "message": (
-                "部分关联检查没有可用的执行结果或结果状态无法识别（"
-                + "、".join(unknown)
-                + "），风险无法判断；缺少来源结果不等于来源合格"
-            ),
-        }
-    if all(status == "NOT_APPLICABLE" for status in statuses):
-        return {"status": "NOT_APPLICABLE", "message": "全部来源规则均不适用，当前风险不适用"}
-    inconclusive = [
-        status
-        for status in statuses
-        if status in {"EVIDENCE_INSUFFICIENT", "NOT_EXECUTED", "PENDING_REVIEW", "NOT_APPLICABLE"}
-    ]
-    abnormal_count = sum(1 for status in statuses if status == "ABNORMAL")
-    passed_count = sum(1 for status in statuses if status == "PASSED")
-    if condition == "ALL_ABNORMAL":
-        if abnormal_count == len(statuses):
-            return {
-                "status": "ABNORMAL",
-                "message": "全部关联检查均确定不合格，风险成立",
-                "risk_level": risk_level,
-            }
-        if passed_count:
-            return {
-                "status": "PASSED",
-                "message": "关联检查中存在确定合格的结果，风险不成立",
-                "risk_level": risk_level,
-            }
-        return {
-            "status": "EVIDENCE_INSUFFICIENT",
-            "message": "部分关联检查尚未形成确定不合格的结论，风险无法判断（不能忽略缺项后认定全部成立）",
-        }
-    if abnormal_count:
-        return {
-            "status": "ABNORMAL",
-            "message": "存在确定不合格的关联检查，风险成立",
-            "risk_level": risk_level,
-        }
-    if inconclusive:
-        return {
-            "status": "EVIDENCE_INSUFFICIENT",
-            "message": "没有确定不合格的关联检查，但仍有无法判断的来源，风险无法判断",
-        }
-    return {
-        "status": "PASSED",
-        "message": "适用的关联检查均为合格，风险不成立",
-        "risk_level": risk_level,
-    }
+    return evaluate_risk(parameters)
 
 
+@tool("CLAUSE_ABSENT")
 def clause_absent(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
-    """条款存在性检查：条款**不应存在**。
+    """条款存在性检查：条款不应存在。
 
-    判断的是条款本身是否存在，不是「抽取到的文字是否非空」——按文字非空判断
-    会把「抽取失败」和「条款确实不存在」混为一谈，那是两种完全不同的结论。
-
-    因此取值来源必须区分清楚：
-      - 条款事实明确标注不存在（normalized_value 为「无」/False）-> 合格；
-      - 条款事实明确存在（「有」/True 或有原文）-> 不合格；
-      - 尚未抽取、抽取失败、证据不足 -> 无法判断，不默认通过也不默认不合格。
+    判断的是条款本身是否存在，不是「抽取到的文字是否非空」——按文字非空判断会把「抽取失败」
+    与「条款确实不存在」混为一谈。取值来源必须区分：条款事实明确标注不存在（normalized_value
+    为「无」/False）判合格；明确存在（「有」/True 或有原文）判不合格；尚未抽取、抽取失败、
+    证据不足则无法判断，不默认通过也不默认不合格。
     """
     selected, problem = _require_inputs(inputs, 1)
     if problem:
@@ -799,16 +701,19 @@ def clause_absent(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> d
     return {"status": "PASSED", "message": "该条款不存在，符合要求", "clause_exists": False, "comparison": comparison}
 
 
-REGISTRY: dict[str, OperatorHandler] = {
-    "FIELD_EQUAL": field_equal,
-    "FIELD_NOT_EQUAL": field_not_equal,
-    "DATE_COMPARE": date_compare,
-    "DECIMAL_COMPARE": decimal_compare,
-    "DECIMAL_SUM_COMPARE": decimal_sum_compare,
-    "DECIMAL_CN_EQUAL": decimal_cn_equal,
-    "FIELD_NOT_EMPTY": field_not_empty,
-    "CLAUSE_ABSENT": clause_absent,
-    "RISK_TRIGGER": risk_trigger,
+REGISTRY: dict[str, BaseTool] = {
+    handler.name: handler
+    for handler in (
+        field_equal,
+        field_not_equal,
+        date_compare,
+        decimal_compare,
+        decimal_sum_compare,
+        decimal_cn_equal,
+        field_not_empty,
+        clause_absent,
+        risk_trigger,
+    )
 }
 
 
@@ -817,4 +722,4 @@ def execute_operator(operator: str, parameters: dict[str, Any], inputs: list[dic
     handler = REGISTRY.get(operator)
     if not handler:
         raise BusinessError("OPERATOR_NOT_EXECUTABLE", "当前节点没有可执行的已注册算子", details={"operator": operator})
-    return handler(parameters, inputs)
+    return handler.invoke({"parameters": parameters, "inputs": inputs})

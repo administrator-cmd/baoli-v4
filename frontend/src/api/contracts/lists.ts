@@ -52,10 +52,7 @@ export interface EvidenceRow {
   filename: string | null;
   document_upload_no: string | null;
   field_path: string | null;
-  page_no: number | null;
   quote_text: string;
-  locator_status: "VERIFIED" | "UNVERIFIED" | "UNLOCATABLE";
-  locator_note: string | null;
   historical: boolean;
   created_at: string;
 }

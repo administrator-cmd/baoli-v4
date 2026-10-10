@@ -1,3 +1,5 @@
+from . import configuration_store as config_store
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -38,11 +40,4 @@ def draft_sheet_roles(db: Session, scenario_code: str) -> list[str]:
     draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == scenario_code))
     if draft is None:
         return []
-    return list(
-        db.scalars(
-            select(ScenarioDraftSheet.sheet_role)
-            .where(ScenarioDraftSheet.draft_id == draft.id)
-            .order_by(ScenarioDraftSheet.sort_no, ScenarioDraftSheet.id)
-        ).all()
-    )
-
+    return [item.sheet_role for item in config_store.rows(db, ScenarioDraftSheet, draft.id)]

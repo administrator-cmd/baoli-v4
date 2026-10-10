@@ -58,7 +58,6 @@ class ImportSheet(Base, TimestampMixin):
     __tablename__ = "import_sheet"
     __table_args__ = (
         UniqueConstraint("import_job_id", "sheet_key"),
-        CheckConstraint("header_row IS NULL OR header_row >= 1"),
         Index("idx_import_sheet_job_status", "import_job_id", "status"),
     )
 
@@ -68,9 +67,6 @@ class ImportSheet(Base, TimestampMixin):
     sheet_name: Mapped[str] = mapped_column(String(255), nullable=False)
     visible: Mapped[bool] = mapped_column(Boolean, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    bound_role: Mapped[str | None] = mapped_column(String(40))
-    bound_node_code: Mapped[str | None] = mapped_column(String(80))
-    header_row: Mapped[int | None] = mapped_column(Integer)
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 

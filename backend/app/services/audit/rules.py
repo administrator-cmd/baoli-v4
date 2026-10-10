@@ -1,15 +1,13 @@
 """规则执行：按能力标识分发，产出带标准、输入、比较过程与证据的规则结果。
 
-分发依据是**能力目录**（`domain.capabilities`）的 `execution` 字段，不是算子码分支：
+分发依据是能力目录（`domain.capabilities`）的 `execution` 字段，不是算子码分支：能力不在
+目录中或执行方式未知都明确报错；能力 `implemented=false` 返回「能力未实现」并附缺口，
+不默认通过、也不挂人工待办（人工没有可核对的依据，判成正常会给一条从未执行的检查伪造通过结论）。
 
-- 能力不在目录中 → 明确报错；
-- 能力 `implemented=false` → 返回「能力未实现」并附缺口，**不**默认通过、**不**挂人工待办
-  （人工没有可核对的依据，判成正常会给一条从未执行的检查伪造通过结论）；
-- 执行方式未知 → 明确报错，不落到别的分支。
+风险规则会把全部来源规则的当前有效结果带入，只传第一条会让「全部来源均不合格」被静默放宽成
+任一。主体/签章一致性不做程序判定：检索只返回候选，结论由人工确认。"""
 
-风险规则会把**全部**来源规则的当前有效结果带入，只传第一条会让「全部来源均不合格」
-被静默放宽成任一。主体/签章一致性不做程序判定：检索只返回候选，结论由人工确认。"""
-
+from .. import task_csv_service
 from ...domain import capabilities
 from ...domain.identity import public_no
 from ...domain.manifest import EVIDENCE_RETRIEVAL, EVIDENCE_SEAL_SUBJECT, rule_node_type_of
@@ -22,7 +20,7 @@ from .artifacts import _artifact_payload
 from .evidence import _copy_evidence_to_rule, _rule_evidence_snapshots
 from .facts import _comparison_view, _field_inputs, _input_summary, _rule_standard_view
 from .shared import SUBJECT_ARTIFACT_SOURCE, _applicability_json, _applicability_state, _current_uploads, _is_subject_rule, _material_input_problem, _material_names, _material_type_review_notice, _not_applicable_message, _subject_query, _subject_type_review_notice, _uploaded_material_keys
-from .state import _current_execution_ids, _result_material_keys
+from .state import _current_node_executions, _result_material_keys
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
@@ -64,11 +62,6 @@ def _candidate_summary(item: Any) -> dict[str, Any]:
         "subject_name": item.get("subject_name"),
         "artifact_type": item.get("artifact_type"),
         "text": item.get("text"),
-        "page_no": item.get("page_no"),
-        "page_no_source": item.get("page_no_source"),
-        "heading_path": item.get("heading_path"),
-        "char_start": item.get("char_start"),
-        "char_end": item.get("char_end"),
         "material_key": item.get("material_key"),
         "material_name": item.get("material_name"),
         "filename": item.get("filename"),
@@ -92,7 +85,7 @@ def _retrieval_material_keys(
     ]))
 
 def _build_index_if_needed(db: Session, task: AuditTask, manifest: dict[str, Any]) -> dict[str, Any]:
-    """只有本任务启用了**需要检索取证**的规则时才建立证据索引。
+    """只有本任务启用了需要检索取证的规则时才建立证据索引。
 
     明确的字段算术规则（金额加总、日期先后、字段比较）走直接取数，不需要向量检索：
     它们不应因为 Embedding 不可用而增加依赖，也不应让文件处理节点整体失败。
@@ -146,9 +139,9 @@ def _build_index_if_needed(db: Session, task: AuditTask, manifest: dict[str, Any
 def _seal_records(
     db: Session, task: AuditTask, rule: dict[str, Any], artifact_source_by_field: dict[str, str | None]
 ) -> list[dict[str, Any]]:
-    """规则材料范围内**全部**印章识别记录：不隐藏不相似或冲突的条目。
+    """规则材料范围内全部印章识别记录：不隐藏不相似或冲突的条目。
 
-    N 条识别主体与 M 条合同主体在库里各自独立保留，本函数只做展示，
+    N 条识别主体与 M 条待核对主体在库里各自独立保留，本函数只做展示，
     不合并成一个确定主体，也不按相似度挑选“最匹配”的那条。
 
     每条记录带完整身份（产物号 + 条目序号）：人工判断要能指回具体是哪一枚印章，
@@ -186,7 +179,7 @@ def _seal_records(
 def _seal_subject_entries(content: Any) -> list[dict[str, Any]]:
     """印章产物的主体条目（新结构优先，旧结构按下标读取）。
 
-    只取主体名称与归属定位；识别类型、坐标与置信度只作为原始事实附带，
+    只取主体名称与归属；识别类型与置信度只作为原始事实附带，
     不参与主体是否一致的判断。
     """
     if not isinstance(content, dict):
@@ -217,7 +210,6 @@ def _seal_subject_entries(content: Any) -> list[dict[str, Any]]:
         ]
     return [
         {
-            "page_no": item.get("page_no"),
             "entry_no": item.get("entry_no"),
             # 识别到的主体名称原样保留：识别名称不等于已确认的主体。
             "subject_name": item.get("subject_name"),
@@ -235,13 +227,13 @@ def _rule_retrieval(
     *,
     artifact_source_by_field: dict[str, str | None] | None = None,
 ) -> dict[str, Any] | None:
-    """为一条语义规则在**本任务、本规则材料范围**内检索证据。
+    """为一条语义规则在本任务、本规则材料范围内检索证据。
 
     取证方式与材料范围在编译期已冻结在规则的 route 与 materials 里：运行时只按它们分派，
     不让大模型临时决定路由或扩大材料范围。检索失败（模型缺失、索引损坏等）抛出明确错误，
     不返回空结果或默认成功。
 
-    `inputs` 必须是**本次执行实际取得**的字段输入：待核对主体的当前有效值只能从这里取，
+    `inputs` 必须是本次执行实际取得的字段输入：待核对主体的当前有效值只能从这里取，
     不能另取一份或用空输入兜底——那会让检索查的对象与这条规则无关。
     """
     route = rule.get("route") if isinstance(rule.get("route"), dict) else {}
@@ -328,10 +320,22 @@ def _unimplemented_capability_result(
         "unimplemented_capability": _capability_result_payload(rule),
     }
 
-def _risk_source_result_keys(rule: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+def _risk_source_result_refs(rule: dict[str, Any], manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    """来源身份保留所属节点，普通规则稳定键与计算业务编号不能混为同一对象。"""
     keys = list(dict.fromkeys(rule.get("source_rule_keys") or []))
     if rule.get("source_rule_key") and rule["source_rule_key"] not in keys:
         keys.insert(0, rule["source_rule_key"])
+    rules_by_key = {item["rule_key"]: item for item in manifest["rules"]}
+    refs: list[tuple[str, str]] = []
+    for key in keys:
+        source = rules_by_key.get(key)
+        if source is None:
+            raise BusinessError(
+                "AUDIT_RISK_SOURCE_INVALID",
+                "风险来源规则不在任务冻结配置中",
+                details={"rule": rule["name"], "source_rule_key": key},
+            )
+        refs.append((source["node"], key))
     for code in rule.get("source_rule_codes") or []:
         calculations = [
             item for item in manifest.get("calculations") or []
@@ -345,14 +349,78 @@ def _risk_source_result_keys(rule: dict[str, Any], manifest: dict[str, Any]) -> 
                 details={"rule": rule["name"], "source_code": code},
             )
         if calculations:
-            source_key = calculations[0]["rule_code"]
+            source_ref = (calculations[0]["node_instance_code"], calculations[0]["rule_code"])
         else:
             raise BusinessError("AUDIT_RISK_FIELD_SOURCE_UNJUDGED", "字段抽取结果没有合格/不合格判定，不能作为风险来源", details={"rule": rule["name"], "source_code": code})
-        if source_key not in keys:
-            keys.append(source_key)
-    if not keys:
-        raise BusinessError("AUDIT_RISK_SOURCE_INVALID", "风险规则没有可执行的来源", details={"rule": rule["name"]})
-    return keys
+        if source_ref not in refs:
+            refs.append(source_ref)
+    return refs
+
+
+def _risk_source_result_keys(rule: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+    """工具参数保留既有字符串协议与来源顺序，运行期取结果使用完整节点身份。"""
+    return [key for _, key in _risk_source_result_refs(rule, manifest)]
+
+
+def _risk_source_payloads(source_refs: list[tuple[str, str]], source_results: dict[tuple[str, str], Any]) -> list[dict[str, Any]]:
+    """节点与 Agent 共用本次来源事实，不让模型自行填写上游结果。"""
+    return [
+        {"node_code": node, "rule_key": key, "status": source_results[(node, key)].status,
+         "rule_result_id": source_results[(node, key)].id,
+         "rule_name": source_results[(node, key)].rule_name,
+         "message": source_results[(node, key)].message,
+         "result": source_results[(node, key)].result_json}
+        if (node, key) in source_results else
+        {"node_code": node, "rule_key": key, "status": "NOT_EXECUTED", "result": None}
+        for node, key in source_refs
+    ]
+
+
+def _risk_result_context(
+    rule: dict[str, Any],
+    source_refs: list[tuple[str, str]],
+    source_results: dict[tuple[str, str], Any],
+) -> dict[str, Any]:
+    """两条执行路径共用风险来源摘要，保留实际结果版本和材料归属。"""
+    sources = [(ref, source_results[ref]) for ref in source_refs if ref in source_results]
+    context: dict[str, Any] = {
+        "source_rules": [
+            {
+                "rule_result_id": source.id,
+                "node_code": ref[0],
+                "rule_key": source.rule_key,
+                "rule_name": source.rule_name,
+                "status": source.status,
+            }
+            for ref, source in sources
+        ],
+        "source_instances": [
+            {
+                "rule_result_id": source.id,
+                "node_code": ref[0],
+                "rule_key": source.rule_key,
+                "rule_name": source.rule_name,
+                "status": source.status,
+                "material_key": material_key,
+            }
+            for ref, source in sources
+            for material_key in sorted(_result_material_keys(source))
+        ],
+    }
+    first_source = source_results.get(source_refs[0]) if source_refs else None
+    if first_source is not None:
+        context["source_rule_key"] = first_source.rule_key
+        context["source_rule_name"] = first_source.rule_name
+    parameters = rule.get("parameters") or {}
+    risk_level = parameters.get("risk_level")
+    if risk_level is not None:
+        context["risk_level"] = risk_level
+    action = parameters.get("action")
+    if isinstance(action, str) and action:
+        context["action"] = action
+    if rule.get("risk_condition"):
+        context["risk_condition"] = rule["risk_condition"]
+    return context
 
 
 def _execute_rules(
@@ -373,14 +441,14 @@ def _execute_rules(
         enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
         rules = [rule for rule in manifest["rules"] if rule["node"] == node_code and rule["rule_key"] in enabled_keys]
     if not rules:
-        # 模板允许不配置某类检查（例如单合同场景没有交叉校验、或未配置风险评级）。
+        # 当前场景可按业务需要不配置某类检查。
         # 这里显式跳过并说明原因，绝不等价于该检查通过。
         return {
             "rule_count": 0,
             "status_counts": {},
             "check_configured": False,
             "skipped": True,
-            "skip_reason": "本模板未配置此类检查",
+            "skip_reason": "当前场景未配置此类检查",
         }
     counts: dict[str, int] = {}
     field_definitions = {item["field_key"]: item for item in manifest["fields"]}
@@ -390,12 +458,13 @@ def _execute_rules(
     }
     material_names = _material_names(manifest)
     uploaded_keys = _uploaded_material_keys(db, task)
-    current_execution_ids = _current_execution_ids(db, task)
+    current_executions = _current_node_executions(db, task)
+    current_execution_ids = {item.id for item in current_executions.values()}
+    execution_node_by_id = {item.id: item.node_code for item in current_executions.values()}
     # 来源规则只取当前有效执行批次：失效批次与旧上传版本的结果不能成为风险结论的依据。
-    prior_results = (
-        {
-            item.rule_key: item
-            for item in db.scalars(
+    prior_rows = (
+        list(
+            db.scalars(
                 select(RuleResult)
                 .where(
                     RuleResult.audit_task_id == task.id,
@@ -404,10 +473,14 @@ def _execute_rules(
                 )
                 .order_by(RuleResult.id)
             ).all()
-        }
+        )
         if current_execution_ids
-        else {}
+        else []
     )
+    prior_results = {
+        (execution_node_by_id[item.node_execution_id], item.rule_key): item
+        for item in task_csv_service.from_index(db, task, RuleResult, prior_rows)
+    }
     abnormal = 0
     for rule in rules:
         state = _applicability_state(rule, uploaded_keys)
@@ -428,7 +501,7 @@ def _execute_rules(
             continue
         inputs = _field_inputs(db, task, rule)
         parameters = dict(rule.get("parameters", {}))
-        risk_source_keys = _risk_source_result_keys(rule, manifest) if rule["operator"] == "RISK_TRIGGER" else []
+        risk_source_refs = _risk_source_result_refs(rule, manifest) if rule["operator"] == "RISK_TRIGGER" else []
         retrieval: dict[str, Any] | None = None
         # 材料类型待复核不是「依据不可用」：真实原文照常参与判定，但类型这件事尚未由人定案，
         # 结果里要带着这条事实说明，不能让人把结论读成“材料类型已经没问题”。
@@ -436,7 +509,7 @@ def _execute_rules(
         type_review_notice = _material_type_review_notice(inputs, manifest) or (
             _subject_type_review_notice(db, task, rule) if not inputs else None
         )
-        # 执行分发按**能力标识**进行，不按算子码逐个分支：
+        # 执行分发按能力标识进行，不按算子码逐个分支：
         #   算子是否存在、当前是否已实现，都由能力目录回答；未实现的能力在这里明确返回
         #   「不可判定」并附能力缺口，绝不落到别的分支、也绝不静默跳过。
         #   能力参数与输入数量已在编译期校验，运行时只按能力声明的输入形态取输入。
@@ -452,7 +525,7 @@ def _execute_rules(
             result = _unimplemented_capability_result(capability, rule)
         elif capability.execution == capabilities.EXEC_SUBJECT_RETRIEVAL:
             # 主体/签章一致性：用待核对主体的当前有效值检索相似印章主体，返回候选，
-            # 由工作人员确认。相似度不构成结论，因此这里**不判合格/不合格**，
+            # 由工作人员确认。相似度不构成结论，因此这里不判合格/不合格，
             # 而是形成一条人工复核待办并把候选一并附上。
             material_problem = _material_input_problem(inputs)
             if material_problem is not None:
@@ -494,7 +567,7 @@ def _execute_rules(
             material_problem = _material_input_problem(inputs)
             if material_problem is not None:
                 result = material_problem
-            elif any(
+            elif parameters.get("evidence_source") != "FIELD_FACTS" and any(
                 item.get("status") not in {"PRESENT", "REVIEWED"}
                 or item.get("normalized_value") is None
                 for item in inputs
@@ -518,23 +591,25 @@ def _execute_rules(
                     ],
                 }
             else:
-                # 正文检索只在规则声明的材料范围内使用当前 OCR 产物；候选会连同
-                # 字段事实交给模型。空候选不等于原文不存在。
-                retrieval = _rule_retrieval(db, task, rule, inputs)
-                if retrieval is None:
-                    raise BusinessError("RETRIEVAL_ROUTE_MISSING", "语义判断规则缺少正文检索路由", details={"rule": rule["name"]})
-                if retrieval.get("status") != "OK" or not retrieval.get("adopted"):
-                    result = {
-                        "status": "EVIDENCE_INSUFFICIENT",
-                        "message": retrieval.get("message") or "本次材料范围内没有可引用的 OCR 原文，无法执行语义判断",
-                        "blocked_reason": "OCR_EVIDENCE_MISSING",
-                    }
+                if parameters.get("evidence_source") == "FIELD_FACTS":
+                    result = validate_fields_with_llm(rule, inputs)
                 else:
-                    result = validate_fields_with_llm(rule, inputs, retrieval=retrieval)
+                    # 正文检索使用本规则材料范围内的真实 OCR 候选。
+                    retrieval = _rule_retrieval(db, task, rule, inputs)
+                    if retrieval is None:
+                        raise BusinessError("RETRIEVAL_ROUTE_MISSING", "语义判断规则缺少正文检索路由", details={"rule": rule["name"]})
+                    if retrieval.get("status") != "OK" or not retrieval.get("adopted"):
+                        result = {
+                            "status": "EVIDENCE_INSUFFICIENT",
+                            "message": retrieval.get("message") or "本次材料范围内没有可引用的 OCR 原文，无法执行语义判断",
+                            "blocked_reason": "OCR_EVIDENCE_MISSING",
+                        }
+                    else:
+                        result = validate_fields_with_llm(rule, inputs, retrieval=retrieval)
         elif capability.execution == capabilities.EXEC_RISK:
-            # 风险可能关联多条来源检查（任一 / 全部）：把**全部**来源的当前有效结果交给算子，
-            # 只传第一条会让「全部关联检查不合格」被静默放宽成任一。
-            parameters["source_statuses"] = [prior_results[key].status if key in prior_results else None for key in risk_source_keys]
+            # 完整业务条件可能引用多个检查或计算值，向共用工具提供全部真实来源。
+            parameters["source_results"] = _risk_source_payloads(risk_source_refs, prior_results)
+            parameters["requirement"] = rule.get("requirement")
             parameters["risk_condition"] = rule.get("risk_condition")
             result = execute_operator(rule["operator"], parameters, inputs)
         elif capability.execution == capabilities.EXEC_OPERATOR:
@@ -559,38 +634,7 @@ def _execute_rules(
         # 这里把执行时刻的真实来源名称与配置的建议原文一并保存，不靠前端再猜。
         risk_context: dict[str, Any] = {}
         if rule["operator"] == "RISK_TRIGGER":
-            # 写入**全部**来源规则的实际结果：风险列表与报告要能说明每条来源当时判成了什么。
-            risk_context["source_rules"] = [
-                {
-                    "rule_key": prior_results[key].rule_key,
-                    "rule_name": prior_results[key].rule_name,
-                    "status": prior_results[key].status,
-                }
-                for key in risk_source_keys
-                if key in prior_results
-            ]
-            # 风险实际涉及的材料：沿当前有效来源检查实例取得，不直接套用规则声明的所有材料。
-            # 报告要按这条风险真实发生的材料归属，而不是按配置里写得最全的范围。
-            risk_context["source_instances"] = [
-                {
-                    "rule_key": prior_results[key].rule_key,
-                    "rule_name": prior_results[key].rule_name,
-                    "status": prior_results[key].status,
-                    "material_key": material_key,
-                }
-                for key in risk_source_keys
-                if key in prior_results
-                for material_key in sorted(_result_material_keys(prior_results[key]))
-            ]
-            source_context = prior_results.get(risk_source_keys[0]) if risk_source_keys else None
-            if source_context is not None:
-                # 兼容旧读取路径：第一条来源规则同时以单值形式给出。
-                risk_context["source_rule_key"] = source_context.rule_key
-                risk_context["source_rule_name"] = source_context.rule_name
-            if isinstance(parameters.get("action"), str) and parameters["action"]:
-                risk_context["action"] = parameters["action"]
-            if rule.get("risk_condition"):
-                risk_context["risk_condition"] = rule["risk_condition"]
+            risk_context = _risk_result_context(rule, risk_source_refs, prior_results)
         # 本次执行的输入摘要：原文值与标准化值分开，供结果、对比过程与页面共用同一份事实。
         input_summary = _input_summary(inputs, field_definitions, material_names)
         record = RuleResult(
@@ -621,10 +665,10 @@ def _execute_rules(
         db.add(record)
         db.flush()
         if rule["operator"] == "RISK_TRIGGER":
-            # 把**全部**来源规则结果的证据都带到风险上：报告要保留完整证据链，
+            # 把全部来源规则结果的证据都带到风险上：报告要保留完整证据链，
             # 只复制第一条来源的引文会让其余来源的判断无法追溯。
             source_result_ids = [
-                prior_results[key].id for key in risk_source_keys if key in prior_results
+                prior_results[ref].id for ref in risk_source_refs if ref in prior_results
             ]
             evidence_ids = [
                 item.id
@@ -670,7 +714,7 @@ def _execute_rules(
             }
         ):
             requires_review = True
-        # 归属按**能力类型**判断：`node_code` 是用户配置的实例码，拿它与 RISK_RATING
+        # 归属按能力类型判断：`node_code` 是用户配置的实例码，拿它与 RISK_RATING
         # 比较在用户改了实例码之后恒为假，风险节点上会静默冒出本该被拦住的待复核项。
         if requires_review and rule_node_type_of(rule) == "RISK_RATING":
             raise BusinessError(

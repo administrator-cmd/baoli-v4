@@ -21,21 +21,17 @@ from .base import TimestampMixin
 class AgentToolCall(Base, TimestampMixin):
     """Agent 工具调用账本：模型请求了什么、传了什么、得到什么。
 
-    为什么独立成表而不是塞进 checkpoint：LangGraph checkpoint 只负责恢复**流程状态**，
-    它回答不了「这次审核里模型调了哪些工具、依据哪一版事实、当时看到的是哪一版工具定义」。
-    把审计寄托在 checkpoint 上会让 interrupt/resume 后无法判断某个 tool_call_id
-    是否已执行过，只能重跑。
+    独立成表而不是塞进 checkpoint：checkpoint 只恢复流程状态，回答不了「模型调了哪些工具、
+    依据哪一版事实、当时看到的是哪一版工具定义」，interrupt/resume 后也无法判断某个
+    `tool_call_id` 是否已执行过，只能重跑。
 
-    `tool_call_id` 唯一：这是「同一个调用不重复执行」的数据库级保证。
-    恢复时按 status 区分：SUCCEEDED 读原结果、RUNNING 进待核查、FAILED 保留原错误。
-
-    失败**不允许**用同一个 `tool_call_id` 重试：那会让一条记录先后对应两次真实执行。
-    明确重试必须由调用方生成新的调用标识，并把原标识写进 `retry_of_tool_call_id`，
-    两次调用因此各自可追溯、可对账。
+    `tool_call_id` 唯一，这是「同一个调用不重复执行」的数据库级保证。恢复时按 status 区分：
+    SUCCEEDED 读原结果、RUNNING 进待核查、FAILED 保留原错误。失败不允许用同一个
+    `tool_call_id` 重试（那会让一条记录先后对应两次真实执行），必须生成新标识并把原标识
+    写进 `retry_of_tool_call_id`。
 
     `evaluation_id` / `rule_instance_id` / `input_snapshot_hash` / `fact_snapshot_ref`
-    非空：本表只承载 Agent 工具调用，缺任一列都说明调用来源不合法或快照未冻结，
-    必须显式失败（见 `services/agent_tool_ledger.begin_call`），不允许写无归属记录。
+    非空：缺任一列都说明调用来源不合法或快照未冻结，必须显式失败。
     """
 
     __tablename__ = "agent_tool_call"
@@ -79,15 +75,14 @@ class AgentToolCall(Base, TimestampMixin):
 
 
 class EvaluationSnapshot(Base, TimestampMixin):
-    """规则评估所依据的**冻结事实内容**（不是只有指纹）。
+    """规则评估所依据的冻结事实内容（不是只有指纹）。
 
-    为什么不能只存哈希：只存哈希意味着工具执行时仍然去读「当前数据」，
-    同一批次的两次工具调用可能落到不同的材料版本上，而指纹对得上只是巧合。
-    本表把事实内容本身落库，工具执行只从它解析事实；工具确实需要读文件或产物时，
-    必须核对其引用、hash 与修订号与本表一致。
+    只存哈希意味着工具执行时仍去读「当前数据」，同一批次的两次工具调用可能落到不同的材料
+    版本上，而指纹对得上只是巧合。本表把事实内容本身落库，工具执行只从它解析事实；工具
+    确实需要读文件或产物时，必须核对其引用、hash 与修订号与本表一致。
 
-    冻结内容不可改写（`trg_evaluation_snapshot_immutable`）：改写它等于让已经
-    据此执行的工具结果无从解释。
+    冻结内容不可改写（`trg_evaluation_snapshot_immutable`）：改写它等于让已经据此执行的
+    工具结果无从解释。
     """
 
     __tablename__ = "evaluation_snapshot"

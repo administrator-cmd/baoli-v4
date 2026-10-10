@@ -1,15 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 
-import type { JsonValue } from "@/api/contracts";
+import type { CapabilityItem, DraftNodeItem, JsonValue } from "@/api/contracts";
+import { getCapabilityCatalog } from "@/api/system";
 import {
   artifactTypeOptions,
   dateCompareOperatorOptions,
   decimalCompareOperatorOptions,
-  nodeOptions,
-  riskLevelOptions,
   riskSourceNodeOptions,
-  ruleOperatorOptions,
   valueTypeOptions,
   valueTypeLabel,
 } from "@/constants/labels";
@@ -40,6 +38,7 @@ const props = defineProps<{
   materials: Array<{ ref: string; name: string }>;
   /** 当前作业已有的规则候选，用于选择风险来源审核规则。 */
   rules: Array<{ ref: string; name: string }>;
+  nodes: DraftNodeItem[];
   pending?: boolean;
 }>();
 
@@ -49,6 +48,35 @@ const emit = defineEmits<{
 }>();
 
 const form = ref<Record<string, unknown>>({});
+const catalog = ref<CapabilityItem[]>([]);
+const catalogLoading = ref(false);
+const catalogError = ref<string | null>(null);
+
+async function loadCatalog(): Promise<void> {
+  catalogLoading.value = true;
+  catalogError.value = null;
+  try {
+    catalog.value = (await getCapabilityCatalog()).items;
+  } catch (error) {
+    catalogError.value = error instanceof Error ? error.message : "审核能力目录读取失败";
+  } finally {
+    catalogLoading.value = false;
+  }
+}
+
+const actualNodeOptions = computed(() => props.nodes
+  .filter((node) => node.enabled || (props.candidate?.config_status === "DISABLED" && node.node_code === form.value.node))
+  .map((node) => ({ value: node.node_code, label: node.name })));
+const availableOperators = computed(() => {
+  const nodeType = props.nodes.find((node) => node.node_code === form.value.node)?.node_type;
+  return catalog.value.filter((item) => {
+    const preserveDisabled = props.candidate?.config_status === "DISABLED" && props.candidate?.operator === item.capability_id;
+    const allowedNodes = preserveDisabled ? item.nodes : item.new_rule_nodes;
+    return item.kind === "OPERATOR" && allowedNodes.length > 0
+      && (nodeType === undefined || allowedNodes.includes(nodeType))
+      && (!["LLM_EXTRACT", "REPORT_RENDER"].includes(item.capability_id) || props.candidate?.operator === item.capability_id);
+  }).map((item) => ({ value: item.capability_id, label: item.label }));
+});
 
 /** 把当前值合并进下拉选项：服务端返回了选项集合外的取值时也要如实显示，不能丢。 */
 function withCurrent(options: Array<{ value: string; label: string }>, current: unknown): Array<{ value: string; label: string }> {
@@ -85,12 +113,12 @@ const specs = computed<Spec[]>(() => {
   }
   const ruleSpecs: Spec[] = [
     { key: "name", label: "规则名称", kind: "text" },
-    { key: "node", label: "所属节点", kind: "select", options: withCurrent(nodeOptions, form.value.node) },
+    { key: "node", label: "所属节点", kind: "select", options: actualNodeOptions.value },
     {
       key: "operator",
       label: "判断方式",
       kind: "select",
-      options: withCurrent(ruleOperatorOptions, form.value.operator),
+      options: withCurrent(availableOperators.value, form.value.operator),
     },
   ];
   if (form.value.operator === "RISK_TRIGGER") {
@@ -133,7 +161,7 @@ const parameterSpecs = computed<Spec[]>(() => {
   }
   if (operator === "RISK_TRIGGER") {
     return [
-      { key: "param_risk_level", label: "风险等级", kind: "select", options: withCurrent(riskLevelOptions, form.value.param_risk_level) },
+      { key: "param_risk_level", label: "风险等级", kind: "text" },
       { key: "param_action", label: "风险处置动作", kind: "text" },
     ];
   }
@@ -149,7 +177,7 @@ const parameterSpecs = computed<Spec[]>(() => {
     return [
       {
         key: "param_operator",
-        label: operator === "DECIMAL_SUM_COMPARE" ? "加总比较方向" : "金额比较方向",
+        label: operator === "DECIMAL_SUM_COMPARE" ? "加总比较方向" : "数值比较方向",
         kind: "select",
         options: withCurrent(decimalCompareOperatorOptions, form.value.param_operator),
         hint: operator === "DECIMAL_SUM_COMPARE" ? "加总比较必须填写允许差值。" : undefined,
@@ -171,6 +199,10 @@ const parameterSpecs = computed<Spec[]>(() => {
   if (operator === "LLM_VALIDATE") {
     return [
       { key: "param_instruction", label: "审核要求", kind: "textarea" },
+      { key: "param_evidence_source", label: "判断依据", kind: "select", options: [
+        { value: "FIELD_FACTS", label: "已抽取字段" },
+        { value: "RETRIEVAL", label: "材料正文检索" },
+      ] },
       { key: "param_requires_manual_review", label: "需人工复核", kind: "switch" },
     ];
   }
@@ -202,13 +234,14 @@ function resetForm(): void {
     param_threshold: parameters.threshold == null ? "" : String(parameters.threshold),
     param_threshold_unit: parameters.threshold_unit ?? "",
     param_instruction: parameters.instruction ?? "",
+    param_evidence_source: parameters.evidence_source ?? "",
     param_requires_manual_review: Boolean(parameters.requires_manual_review),
   };
 }
 
 function updateSpecValue(key: string, value: unknown): void {
   if (key === "operator" && value !== form.value.operator) {
-    for (const parameter of ["artifact_type", "risk_level", "action", "operator", "threshold", "threshold_unit", "instruction"]) {
+    for (const parameter of ["artifact_type", "risk_level", "action", "operator", "threshold", "threshold_unit", "instruction", "evidence_source"]) {
       form.value[`param_${parameter}`] = "";
     }
     form.value.param_requires_manual_review = false;
@@ -219,10 +252,11 @@ function updateSpecValue(key: string, value: unknown): void {
 }
 
 watch(
-  () => [props.open, props.candidate] as const,
+  () => [props.open, props.candidate, props.targetType] as const,
   () => {
     if (props.open) {
       resetForm();
+      if (props.targetType === "RULE") void loadCatalog();
     }
   },
   { immediate: true },
@@ -276,6 +310,7 @@ function equalValue(left: unknown, right: unknown): boolean {
 }
 
 function submit(): void {
+  if (props.targetType === "RULE" && (catalogLoading.value || catalogError.value)) return;
   const candidate = props.candidate ?? {};
   const value: Record<string, JsonValue> = {};
   if (props.targetType === "MATERIAL") {
@@ -321,7 +356,8 @@ function submit(): void {
       只显示本类型允许修改的业务属性；提交后立即按服务端校验重新编译，未发布的草稿可继续修正。
     </p>
 
-    <el-form label-width="160px" label-position="right">
+    <el-alert v-if="targetType === 'RULE' && catalogError" :title="catalogError" type="error" :closable="false" />
+    <el-form label-width="160px" label-position="right" :disabled="targetType === 'RULE' && (catalogLoading || Boolean(catalogError))">
       <el-form-item v-for="spec in specs" :key="spec.key" :label="spec.label">
         <el-switch v-if="spec.kind === 'switch'" :model-value="Boolean(form[spec.key])" @update:model-value="form[spec.key] = $event" />
         <el-input
@@ -334,8 +370,6 @@ function submit(): void {
           :model-value="(form[spec.key] as string) ?? ''"
           type="textarea"
           :rows="2"
-          maxlength="500"
-          show-word-limit
           @update:model-value="form[spec.key] = $event"
         />
         <el-select
@@ -378,8 +412,6 @@ function submit(): void {
           :model-value="(form[spec.key] as string) ?? ''"
           type="textarea"
           :rows="2"
-          maxlength="500"
-          show-word-limit
           @update:model-value="form[spec.key] = $event"
         />
         <el-select
@@ -407,7 +439,7 @@ function submit(): void {
 
     <template #footer>
       <el-button @click="emit('close')">取消</el-button>
-      <el-button type="primary" :loading="pending" @click="submit">保存修改</el-button>
+      <el-button type="primary" :loading="pending || catalogLoading" :disabled="targetType === 'RULE' && Boolean(catalogError)" @click="submit">保存修改</el-button>
     </template>
   </el-dialog>
 </template>

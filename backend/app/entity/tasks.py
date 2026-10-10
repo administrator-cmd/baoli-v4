@@ -50,15 +50,17 @@ class AuditTask(Base, TimestampMixin):
     # 任务备注：属于可编辑的基本资料，不进入执行快照。
     remark: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    current_node: Mapped[str] = mapped_column(String(40), nullable=False)
+    current_node: Mapped[str] = mapped_column(String(80), nullable=False)
     thread_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    # 本任务的执行快照：**方案的编译产物整份冻结**（材料/字段/规则/报告章节/节点/Sheet）。
+    # 本任务的执行快照：方案的编译产物整份冻结（材料/字段/规则/报告章节/节点/Sheet）。
     # 执行期只读它，不读场景版本、也不读方案当前配置——方案后来怎么改都不影响已建任务。
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 本任务的规则范围（启用/未启用、字段清单、未配置节点）。从上面的 manifest 算出。
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     checkpoint_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     pending_review_hash: Mapped[str | None] = mapped_column(CHAR(64))
+    # 业务中间值 CSV 的已提交文件指针；事务回滚不覆盖上一份文件。
+    intermediate_csv_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 任务输入修订号：首次补传、替换材料和人工有效值变化都会递增。
     # 写入口在对象锁内核对命令携带的修订号，过期命令不得覆盖新输入。
     input_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
@@ -163,7 +165,7 @@ class StoredArtifact(Base, TimestampMixin):
     relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
     # 上传身份：这份产物是由哪个上传文件产生的（同一次上传重跑同一产物时不变）。
     upload_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    # 产物内容版本：产物**实际内容**的哈希（JSON 规范序列化或二进制字节）。
+    # 产物内容版本：产物实际内容的哈希（JSON 规范序列化或二进制字节）。
     # 它与上传哈希是两件事：同一份 PDF 重新识别后上传哈希不变，但内容可能不同；
     # 索引必须绑定内容哈希，否则旧主体向量会继续冒充当前产物。
     content_sha256: Mapped[str | None] = mapped_column(CHAR(64))
@@ -243,29 +245,16 @@ class TaskFieldValue(Base, TimestampMixin):
 class TaskFact(Base, TimestampMixin):
     """统一事实：字段抽取事实与计算派生事实。
 
-    为什么不能复用 `task_field_value`
-    ---------------------------------
-    `task_field_value` 的唯一范围是 (任务, 字段, 材料位, 上传版本, 版本号)，
-    它表达不了财报场景的三个必要维度：
+    与 `task_field_value` 的抽取候选分开，统一表达字段事实和计算结果。
+    事实身份包含来源编号、材料、期间、报表口径与主体范围，定位口径来自业务配置，
+    不涉及时显式声明不适用，不根据场景名称补值。
 
-    - **期间**：同一个「营业收入」在本期与上期是两个不同的数；
-    - **报表口径**：合并报表与母公司报表是两套数；
-    - **主体范围**：多主体场景下同一科目属于哪个主体。
+    事实不可变：重跑不覆盖旧行，而是新增 `revision_no` 并置为当前；旧行保留为历史，
+    旧复核与旧证据仍指向它们当时依据的那一版事实。同一 (任务, 事实编号, 材料位, 期间,
+    报表口径, 主体范围) 最多只有一条当前事实，由生成列唯一键在数据库层保证。
 
-    没有这三个维度，本期与上期的事实会互相覆盖，而覆盖之后页面看起来完全正常。
-
-    事实不可变
-    ----------
-    重跑不覆盖旧行，而是新增 `revision_no` 并把它置为当前；旧行保留为历史，
-    旧复核与旧证据仍指向它们当时依据的那一版事实。同一
-    (任务, 事实编号, 材料位, 期间, 报表口径, 主体范围) 最多只有一条当前事实，
-    由生成列唯一键在数据库层保证（`material_key` 可空，生成列里用 COALESCE 归一）。
-
-    计算派生事实的追溯
-    ------------------
-    `input_snapshot_json` 记录本次计算**实际用到的每一版事实**（fact_id + revision_no）
-    与表达式版本哈希。没有它就无法回答「这个数是按哪一版输入算出来的」。
-    `judgement_json` 记录命中的判定区间与业务结论。
+    计算派生事实的追溯：`input_snapshot_json` 记录本次计算用到的每一版事实
+    （fact_id + revision_no）及实际输入信息；`judgement_json` 记录模型判断与业务结论。
 
     RAG 只保存证据、原文与检索信息，不是 `decimal_value` 的权威来源。
     """
@@ -348,9 +337,9 @@ class TaskFact(Base, TimestampMixin):
 class RuleResult(Base, TimestampMixin):
     """一次规则执行的结果。
 
-    `rule_key` 是历史规则身份，唯一键仍建在它上面（历史任务按它去重）。
-    新任务的规则身份在 `rule_code`：写入时两个列取同一个业务编号，
-    因此唯一性口径与历史完全一致，读取路径也各自能用自己熟悉的那一列。
+    普通规则的 `rule_key` 是配置中的稳定键，计算结果的 `rule_key` 是计算业务编号。
+    两者可能重名，结果须结合所属节点执行定位；数据库唯一键为
+    (`node_execution_id`, `rule_key`)，不能按裸 `rule_key` 跨节点合并。
     """
 
     __tablename__ = "rule_result"
@@ -369,7 +358,7 @@ class RuleResult(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
     node_execution_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    rule_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    rule_key: Mapped[str] = mapped_column(String(80), nullable=False)
     rule_code: Mapped[str | None] = mapped_column(String(80))
     legacy_rule_key: Mapped[str | None] = mapped_column(String(40))
     rule_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -381,11 +370,8 @@ class RuleResult(Base, TimestampMixin):
 class Evidence(Base, TimestampMixin):
     """一条证据引用。
 
-    locator_status 记录本次引用是否真的能在所属产物里核对到：
-    VERIFIED=引文/页码/坐标已在指定产物页内核对通过；
-    UNVERIFIED=产物里没有可定位依据（例如 OCR 只给出文本块，没有坐标）；
-    UNLOCATABLE=声明了位置但核对失败（引文不在该页、页码超范围、坐标越界）。
-    任何情况下都不伪造高亮：页号或坐标缺失时保持 NULL 并如实标注。
+    引用原文及所属材料/产物供内容核对使用。page_no、bbox_json、locator_status、
+    locator_note 仅保留历史存储兼容；新证据不生成定位信息，接口不返回这些历史列。
     """
 
     __tablename__ = "evidence"
@@ -530,7 +516,7 @@ class NodeExecution(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     audit_task_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     scenario_version_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    node_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    node_code: Mapped[str] = mapped_column(String(80), nullable=False)
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))

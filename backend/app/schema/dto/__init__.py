@@ -19,7 +19,6 @@ from .plans import (
     TaskFromPlanRequest,
 )
 from .scenarios import (
-    DraftDisabledSourceRowActivateRequest,
     DraftDisabledSourceRowUpdateRequest,
     DraftFieldRequest,
     DraftFieldUpdateRequest,
@@ -72,7 +71,6 @@ __all__ = [
     "PlanFromTaskRequest",
     "PlanUpdateRequest",
     "TaskFromPlanRequest",
-    "DraftDisabledSourceRowActivateRequest",
     "DraftDisabledSourceRowUpdateRequest",
     "DraftFieldRequest",
     "DraftFieldUpdateRequest",

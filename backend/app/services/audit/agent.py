@@ -1,42 +1,20 @@
 """规则评估 Agent：在授权范围内选择取证与比较工具，形成候选结论。
 
-职责边界
---------
-Agent **只**负责在授权范围内选择工具并形成候选结论。以下全部由 Graph 控制，
-不由模型决定：任务加载、模型调用、人工审核、保存结果、报告渲染。
+Agent 只负责选工具与形成候选结论。任务加载、模型调用、人工审核、保存结果、报告渲染
+全部由 Graph 控制。这里没有函数内部循环——循环由 `graphs/audit_graph.py` 的节点与条件边
+表达，因此每一步都是可 checkpoint 的状态，interrupt / resume 能停在循环中间。
 
-这里的函数都是**单步**的：一次模型调用、一次工具执行批、一次结论校验。
-没有函数内部循环——循环由 `graphs/audit_graph.py` 的节点与条件边表达，
-因此每一步都是可 checkpoint 的状态，interrupt / resume 能停在循环中间，
-恢复后也不会重复执行已经登记过的工具调用。
+为什么不在这里循环：一旦在函数内部跑完整个「模型 → 工具 → 模型」，interrupt 就只能停在
+函数外面，进程重启后无法知道循环走到第几轮、哪些工具已经执行过；工具可能已产生真实外部
+效果，重跑危险，不重跑又没有可恢复的中间状态。把每一步做成图节点后，「当前轮次、待执行
+调用、已得结果」全部落在 State 与账本里。
 
-为什么不在这里循环
-------------------
-一旦在函数内部跑完整个「模型 → 工具 → 模型」，interrupt 就只能停在函数外面：
-进程重启后无法知道循环走到第几轮、哪些工具已经执行过。工具可能已经产生真实
-外部效果，重跑是危险的；不重跑又没有可恢复的中间状态。把每一步做成图节点，
-「当前轮次、待执行调用、已得结果」全部落在 State 与账本里。
-
-不做什么
---------
-- **不保存规则结果**：候选结论交回 Graph，由 `save_evaluation_result` 落库。
-- **不自动通过**：模型给出 PASSED 也必须带证据引用，且与确定性工具结果一致。
-- **不把「跑满轮次」当结论**：轮次上限由调用方给，达到即显式失败。
-- **不重复执行已成功的工具调用**：每次调用先查账本（见 `agent_tool_ledger`）。
-
-模型结论与确定性工具冲突时
---------------------------
-不能覆盖确定性结果。冲突时把候选结论降为「无法判断」并附冲突说明，
-交人工复核：模型不能推翻精确计算。
-
-模型结论文本怎么解析
---------------------
-要求模型以 JSON 对象给出结论（`response_format={"type": "json_object"}`），
-再由服务端按固定 Schema 逐项校验。**不**从文本里扫描「最后一行像 JSON 的东西」：
-那样会把一段夹带 JSON 的说明文字当成结论，也没法区分「模型写错了」与「模型没写」。
+规则按原文交给模型直接执行，工具是可选手段。无法执行保留单条原因并继续；
+只有业务明确要求人工确认才等待复核。结果仅检查 JSON 结构与引用身份，不评审业务结论。
 """
 
 from __future__ import annotations
+from .. import task_csv_service
 
 import json
 import logging
@@ -59,7 +37,7 @@ LOOP_NEEDS_HUMAN = "NEEDS_HUMAN"
 LOOP_DONE = "DONE"
 
 # 需要人工复核的候选结论状态。
-HUMAN_REVIEW_STATUSES = frozenset({"PENDING_REVIEW", "EVIDENCE_INSUFFICIENT"})
+HUMAN_REVIEW_STATUSES = frozenset({"PENDING_REVIEW"})
 
 # 模型能给出的结论状态。与能力目录的规则状态口径一致：模型不是另立一套状态。
 VERDICT_STATUSES = frozenset({"PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT", "PENDING_REVIEW"})
@@ -72,7 +50,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
         "status": {"type": "string", "enum": sorted(VERDICT_STATUSES)},
         "message": {"type": "string", "minLength": 1},
         # 证据引用：本次评估的工具调用标识，或冻结快照里的事实身份。
-        # PASSED / ABNORMAL 必须至少给出一条，且必须能在本次评估里找到。
+        # 提供的引用必须能在本次评估里找到。
         "evidence": {"type": "array"},
     },
     "required": ["status", "message", "evidence"],
@@ -84,28 +62,19 @@ VERDICT_SCHEMA: dict[str, Any] = {
 # 按 `VERDICT_SCHEMA` 完整校验，不依赖供应商对 strict schema 的支持程度。
 _VERDICT_RESPONSE_FORMAT = {"type": "json_object"}
 
-_SYSTEM_PROMPT = """你是合同审核判断器。你的职责是：根据给定的规则、字段事实与可用工具，
-调用工具完成确定性核对，然后给出候选审核结论。
-
-严格约束：
-1. 金额、日期、加总与字段比较**必须**通过工具完成，不要自行心算或推断。
-   工具的返回值是确定性的真实结果，你不能改写它。
-2. inputs 里的 field_key 与 material_key 必须逐字使用提示中给出的标识，
-   不得改写、不得自行编造材料标识。
-3. 只使用本次提供的工具。不要假设存在其它工具。
-   parameters 必须与规则的固定参数完全一致，不能自行更改比较方向、阈值或审核标准。
-4. 结论只能取 PASSED、ABNORMAL、EVIDENCE_INSUFFICIENT、PENDING_REVIEW 之一。
-   证据不足时返回 EVIDENCE_INSUFFICIENT，不要凭猜测判通过。
-5. 如果工具返回「不可判定」或「能力未实现」，如实反映在结论里，不要改写成通过。
-   工具返回 FAILED 或提示需要核查时，不得给出 PASSED 或 ABNORMAL。
-6. 给出结论时用一句话说明依据（用了哪个工具、比了什么、结果是什么）。
-
-当你不再需要调用工具时，只输出一个 JSON 对象，不要输出别的文字：
-{"status": "...", "message": "...", "evidence": [{"tool_call_id": "..."}]}
-
-evidence 至少给出一项依据：调用工具时**工具结果里返回的 tool_call_id**，
-或冻结事实的身份（{"fact_code": "...", "material_key": "..."}）。
-判定为 PASSED 或 ABNORMAL 时 evidence 不得为空。"""
+_SYSTEM_PROMPT = """你是场景共用的辅助规则执行器。按本次传入的规则原文和真实输入执行，
+不审核规则的业务正确性，不替管理员修改方法、阈值或条件。
+能由 LLM 完成的计算、日期处理、比较、汇总和判断直接完成，不要求必须调用工具。
+需要额外能力时从本次工具列表选择合适工具，通过 tool_calls 执行；参数按规则原文和工具 Schema 填写。
+inputs 只使用提供的 field_key/material_key，真实数值由系统按这些身份读取，不编造数据。
+工具不可用或调用失败时保留具体错误；若已有其他真实依据足以执行，可按该依据完成并说明。
+LLM 和可用工具都不能完成时返回 EVIDENCE_INSUFFICIENT，message 明确说明“无法执行”及原因，
+不要假装通过。只有业务明确要求工作人员确认时使用 PENDING_REVIEW。
+状态使用 PASSED、ABNORMAL、EVIDENCE_INSUFFICIENT、PENDING_REVIEW。
+保留工具实际返回值，说明本次使用的原文、字段事实、计算过程或工具结果。
+最终只输出 JSON：{"status":"...","message":"...","evidence":[]}。
+evidence 可引用实际工具结果的 tool_call_id，或事实身份 {"fact_code":"...","material_key":"..."}。
+"""
 
 
 def build_rule_context(
@@ -117,17 +86,18 @@ def build_rule_context(
 ) -> str:
     """规则的评估上下文：规则要求 + 可用的字段事实。
 
-    只给**本次规则实际使用的**事实与标识。给全量事实会让模型在无关字段上做判断，
+    只给本次规则实际使用的事实与标识。给全量事实会让模型在无关字段上做判断，
     也会让它有机会引用不属于这条规则的输入。
     """
     tool_id = capabilities.capability_id_of_rule(rule)
-    published_parameters = published_tool_parameters(rule, manifest, tool_id)
+    published_parameters = dict(rule.get("parameters") or {})
     lines = [
         f"规则编号：{rule.get('rule_code') or rule.get('rule_key')}",
         f"规则名称：{rule.get('name')}",
         f"审核要求：{rule.get('requirement') or '（未填写）'}",
         f"执行能力：{tool_id}",
-        "工具固定参数：" + json.dumps(published_parameters, ensure_ascii=False, sort_keys=True),
+        "规则原始配置：" + json.dumps(rule, ensure_ascii=False, sort_keys=True),
+        "业务执行参数：" + json.dumps(published_parameters, ensure_ascii=False, sort_keys=True),
         "threshold 如为十进制字符串，工具调用时按工具 Schema 填 JSON 数字；实际计算仍采用发布原值。",
         "",
         "可用字段事实（inputs 必须逐字使用这些标识）：",
@@ -159,30 +129,25 @@ def initial_messages(
 
 
 def call_model_once(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]]) -> ModelTurn:
-    """调用模型**一次**，返回这一次的响应契约。
+    """调用模型一次，返回这一次的响应契约。
 
     这里是整个 Agent 循环里唯一的模型调用点。工具执行不由本函数完成——
     模型请求了工具就由 Graph 的 `execute_tool_calls` 节点执行，再回到 `call_model`。
     """
-    if not tools:
-        raise BusinessError(
-            "AGENT_TOOLS_EMPTY",
-            "本次评估没有任何授权工具，不能进入规则评估 Agent 循环",
-            status_code=500,
-        )
+    # 没有工具也允许模型直接执行。
     return call_chat(
         messages,
-        tools=tools,
+        tools=tools or None,
         tool_choice="auto",
         response_format=_VERDICT_RESPONSE_FORMAT,
     )
 
 
 def assistant_message_of(turn: ModelTurn) -> dict[str, Any]:
-    """把模型这一轮的响应原样并入消息历史。
+    """把模型这一轮完整组装的响应并入消息历史。
 
-    `tool_calls` 必须逐字回填模型返回的那一份：重新构造会让 `tool_call_id` 对不上，
-    供应商会拒绝或按另一条调用处理。因此这里取 `raw_message`，只补 role。
+    `tool_calls` 使用网关按流式 index 组装的原始标识和参数字符串，不重新生成标识或序列化参数。
+    这里取 `raw_message`，保留模型返回的推理内容等消息字段，只补 role。
     """
     message = dict(turn.raw_message or {})
     message["role"] = "assistant"
@@ -192,7 +157,7 @@ def assistant_message_of(turn: ModelTurn) -> dict[str, Any]:
 def pending_calls_of(turn: ModelTurn, evaluation_id: str) -> list[dict[str, Any]]:
     """本轮模型请求的工具调用，写进 State 的 `pending_tool_calls`。
 
-    **账本标识**带上评估批次前缀：供应商给的调用标识只在一次响应内唯一，
+    账本标识带上评估批次前缀：供应商给的调用标识只在一次响应内唯一，
     不同评估（重跑节点、下一条规则）之间可能重复，而账本要求 `tool_call_id`
     全局唯一且「同一次调用不重复执行」。原始标识另存为
     `provider_tool_call_id`，回填 `tool` 消息时必须用它——模型认的是自己给的那个。
@@ -216,7 +181,7 @@ def ledger_call_id(evaluation_id: str, provider_call_id: str) -> str:
 def tool_message(call: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """一次工具结果的回填消息（`append_tool_results` 用它生成）。
 
-    `tool_call_id` 用**供应商**给的标识：模型据此把结果对回它那次调用。
+    `tool_call_id` 用供应商给的标识：模型据此把结果对回它那次调用。
     结果内容里额外带上账本标识，模型引用证据时用的就是它——账本标识才是
     「哪一次真实执行」的稳定身份（见 `services/agent_tool_ledger`）。
     """
@@ -240,7 +205,7 @@ def parse_verdict(content: str | None) -> dict[str, Any] | None:
 
     要求整体是一个 JSON 对象（见 `_VERDICT_RESPONSE_FORMAT`）。
     解析不出对象时返回 None，由调用方按「模型没有给出可解析的结论」处理（BLOCKED），
-    **不**在文本里扫描「最后一行像 JSON 的东西」——那会把说明文字里的片段当成结论。
+    不在文本里扫描「最后一行像 JSON 的东西」——那会把说明文字里的片段当成结论。
     """
     if not isinstance(content, str) or not content.strip():
         return None
@@ -258,7 +223,7 @@ def _schema_error(message: str, **details: Any) -> BusinessError:
 
 
 def _assert_verdict_shape(verdict: dict[str, Any]) -> None:
-    """候选结论的**形状**校验：状态枚举、说明必填、证据必须是数组。
+    """候选结论的形状校验：状态枚举、说明必填、证据必须是数组。
 
     形状不合法是「模型没有按契约回答」，不是「模型判错了」，因此单独一类错误，
     由调用方按 BLOCKED 处理并把原因带回。
@@ -292,7 +257,7 @@ def _evidence_refs(verdict: dict[str, Any], *, tool_results: list[dict[str, Any]
 
     只认两种引用：
 
-    - `tool_call_id`：必须是本次评估**真实执行过**的工具调用；
+    - `tool_call_id`：必须是本次评估真实执行过的工具调用；
     - `(fact_code, material_key)`：必须在本此评估冻结的事实里存在。
 
     引用不到的依据一律拒绝：让模型「说一个编号」而不核对，等于证据要求形同虚设。
@@ -339,61 +304,6 @@ def _evidence_refs(verdict: dict[str, Any], *, tool_results: list[dict[str, Any]
     return resolved
 
 
-def conflicts_with_tool(verdict: dict[str, Any], tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """模型结论与确定性工具结果的冲突。
-
-    冲突的判据只有一条：工具给出了**确定的**结论（PASSED / ABNORMAL），
-    而模型的结论与它相反。此时不能采信模型——确定性结果由程序算出，
-    模型不能推翻它。
-
-    工具返回 EVIDENCE_INSUFFICIENT 不算冲突：那是「没算出结论」，
-    模型据其它证据给出判断是允许的。
-    """
-    conflicts: list[dict[str, Any]] = []
-    model_status = verdict.get("status")
-    if model_status not in {"PASSED", "ABNORMAL"}:
-        return conflicts
-    for item in tool_results:
-        tool_status = item.get("status")
-        if tool_status not in {"PASSED", "ABNORMAL"}:
-            continue
-        if tool_status != model_status:
-            tool_name = str(item.get("tool_name"))
-            tool_call_id = item.get("tool_call_id")
-            conflicts.append(
-                {
-                    "tool_name": tool_name,
-                    "tool_call_id": tool_call_id,
-                    "tool_status": tool_status,
-                    "model_status": model_status,
-                    "reason": f"工具“{tool_name}”（{tool_call_id}）判定为 {tool_status}，模型结论为 {model_status}",
-                }
-            )
-    return conflicts
-
-
-def _undecided_tools(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """本次评估里没有给出确定结论的工具调用。
-
-    `FAILED`（真实执行失败）与 `NEEDS_RECONCILE`（上次停在执行中、结果未知）都不是
-    「已核对」；模型据此判通过等于把一次未完成的核对当成通过。
-    """
-    return [
-        {
-            "tool_name": item.get("tool_name"),
-            "tool_call_id": item.get("tool_call_id"),
-            "status": item.get("status"),
-            "message": item.get("message"),
-            "reason": (
-                f"工具“{item.get('tool_name')}”本次执行失败（{item.get('status')}），"
-                "不能据此判定通过或不通过"
-            ),
-        }
-        for item in tool_results
-        if item.get("status") in {"FAILED", "NEEDS_RECONCILE"}
-    ]
-
-
 def validate_verdict(
     raw: dict[str, Any],
     *,
@@ -402,17 +312,7 @@ def validate_verdict(
     facts: list[dict[str, Any]],
     tools: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
-    """服务端校验候选结论，返回（可采信的结论, 循环状态, 未解决事项）。
-
-    不能只靠 system prompt 约束模型。这里逐条落实：
-
-    1. 状态只能取允许枚举，说明必填，形状不符即 BLOCKED（模型没有按契约回答）；
-    2. 需要确定性判定的规则（本次有授权工具）至少要有一次**成功**的工具结果；
-    3. PASSED / ABNORMAL 必须引用本次评估的工具调用或冻结事实，且引用要真实存在；
-    4. 结论不得越过 EVIDENCE_INSUFFICIENT / FAILED / NEEDS_RECONCILE：
-       工具没算出结论或执行失败时，模型不能给出确定结论；
-    5. 与确定性工具结果冲突时不采信模型，降为「无法判断」并转人工。
-    """
+    """仅检查结果形状与真实引用；业务判断照模型结果保存。"""
     _assert_verdict_shape(raw)
     refs = _evidence_refs(raw, tool_results=tool_results, facts=facts)
     verdict = {
@@ -429,68 +329,7 @@ def validate_verdict(
             {"kind": "VERDICT_NEEDS_REVIEW", "message": verdict["message"]}
         ] if status in HUMAN_REVIEW_STATUSES else []
 
-    blocked = _undecided_tools(tool_results)
-    if blocked:
-        return (
-            {
-                "status": "EVIDENCE_INSUFFICIENT",
-                "message": "本次工具调用未全部得到确定结果，模型给出的确定结论不予采信，需人工复核",
-                "model_verdict": raw,
-                "undecided_tools": blocked,
-                "rule_key": rule.get("rule_key"),
-                "rule_name": rule.get("name"),
-            },
-            LOOP_NEEDS_HUMAN,
-            [{"kind": "TOOL_RESULT_UNDECIDED", **item} for item in blocked],
-        )
-    succeeded = [
-        item for item in tool_results if item.get("status") in {"PASSED", "ABNORMAL"}
-    ]
-    if tools and not succeeded:
-        # 需要确定性判定的规则：没有一次成功的工具结果就给出确定结论，等于凭猜测判定。
-        return (
-            {
-                "status": "EVIDENCE_INSUFFICIENT",
-                "message": "本规则需要确定性判定，但本次没有产生任何成功的工具结果，不能判定通过或不通过",
-                "model_verdict": raw,
-                "rule_key": rule.get("rule_key"),
-                "rule_name": rule.get("name"),
-            },
-            LOOP_NEEDS_HUMAN,
-            [
-                {
-                    "kind": "DETERMINISTIC_EVIDENCE_MISSING",
-                    "message": "需要确定性判定的规则缺少成功的工具结果",
-                }
-            ],
-        )
-    if not refs:
-        return (
-            {
-                "status": "EVIDENCE_INSUFFICIENT",
-                "message": "模型的确定结论没有引用本次评估的工具调用或冻结事实，不予采信，需人工复核",
-                "model_verdict": raw,
-                "rule_key": rule.get("rule_key"),
-                "rule_name": rule.get("name"),
-            },
-            LOOP_NEEDS_HUMAN,
-            [{"kind": "VERDICT_EVIDENCE_MISSING", "message": "确定结论必须带证据引用"}],
-        )
-    conflicts = conflicts_with_tool(verdict, tool_results)
-    if conflicts:
-        # 模型不能推翻确定性结果：保留冲突并转人工，不采信模型结论。
-        return (
-            {
-                "status": "EVIDENCE_INSUFFICIENT",
-                "message": "模型结论与确定性工具结果冲突，本次不采信模型结论，需人工复核",
-                "model_verdict": raw,
-                "conflicts": conflicts,
-                "rule_key": rule.get("rule_key"),
-                "rule_name": rule.get("name"),
-            },
-            LOOP_NEEDS_HUMAN,
-            [{"kind": "VERDICT_CONFLICT", "message": item["reason"], **item} for item in conflicts],
-        )
+    # 工具是可选执行手段；不以调用次数或业务结论一致性否定模型结果。
     return verdict, LOOP_DONE, []
 
 
@@ -501,19 +340,22 @@ def _task_facts(
     db: Session,
     task: AuditTask,
     materials: list[dict[str, Any]],
+    *,
+    rule_inputs: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """本任务当前有效的事实集合（合同审核走字段事实，财报走统一事实）。
+    """冻结规则声明的字段事实；None 仅用于恢复历史全任务快照。
 
-    两类事实**共用同一份投影口径**（见 `domain/fact_snapshot`），差别只在取哪张表：
-
-    - 统一事实的 `fact_code` 是业务编号（FEX-… / 计算结果编号），而规则输入引用的是
-      字段身份，因此这里把编译期就确定的「业务编号 → 字段身份」索引传进去，
-      让快照里的每条事实都带上 `field_key`；
-    - 材料位状态随之冻结：算子按 `material_state` 判定依据是否可用，
-      用当前值会让结论无法复现。
+    两类事实共用同一份投影口径（见 `domain/fact_snapshot`），差别只在取哪张表：统一事实的
+    `fact_code` 是业务编号，而规则输入引用的是字段身份，因此把编译期确定的「业务编号 →
+    字段身份」索引传进去，让快照里的每条事实都带上 `field_key`；材料位状态随之冻结，
+    算子按 `material_state` 判定依据是否可用——用当前值会让结论无法复现。
     """
     from ...entity import DocumentUpload, Evidence, TaskDocument, TaskFact, TaskFieldValue
-    from sqlalchemy import select
+    from ...domain.manifest import required_field_scope
+    from sqlalchemy import and_, or_, select, tuple_
+
+    if rule_inputs == []:
+        return []
 
     material_states = {
         str(item["material_key"]): item.get("material_state")
@@ -524,28 +366,61 @@ def _task_facts(
         str(field["field_key"]): field
         for field in task.task_schema_json["fields"]
     }
+    field_scope = []
+    fact_scope = []
+    if rule_inputs is not None:
+        selected_definitions = {}
+        for reference in rule_inputs:
+            field_key = str(reference["field_key"])
+            field = field_definitions[field_key]
+            material_key = reference["material_key"]
+            if material_key != field["material_key"]:
+                raise BusinessError(
+                    "AGENT_RULE_INPUT_IDENTITY_MISMATCH",
+                    "规则输入的材料位与任务字段定义不一致，无法冻结输入",
+                    status_code=500,
+                    details={"field_key": field_key, "material_key": material_key},
+                )
+            selected_definitions[field_key] = field
+            field_scope.append((field_key, material_key))
+            fact_scope.append(and_(
+                TaskFact.fact_code == str(field.get("source_ref") or field_key),
+                TaskFact.material_key == material_key,
+                TaskFact.period_scope == required_field_scope(
+                    field, "period_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500,
+                ),
+                TaskFact.statement_scope == required_field_scope(
+                    field, "statement_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500,
+                ),
+                TaskFact.entity_scope == str(field.get("entity_scope") or "SELF"),
+            ))
+        field_definitions = selected_definitions
     field_code_index = {
-        str(field["source_ref"]): str(field["field_key"])
+        str(field.get("source_ref") or field["field_key"]): str(field["field_key"])
         for field in field_definitions.values()
-        if field.get("source_ref")
     }
-    field_rows = list(
-        db.scalars(
-            select(TaskFieldValue)
-            .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
-            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-            .where(
-                TaskFieldValue.audit_task_id == task.id,
-                TaskFieldValue.scenario_version_id == task.scenario_version_id,
-                TaskFieldValue.is_current.is_(True),
-                DocumentUpload.audit_task_id == task.id,
-                DocumentUpload.is_current.is_(True),
-                TaskDocument.audit_task_id == task.id,
-                TaskDocument.material_key == TaskFieldValue.material_key,
-                TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
-            )
-        ).all()
+    field_query = (
+        select(TaskFieldValue)
+        .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
+        .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
+        .where(
+            TaskFieldValue.audit_task_id == task.id,
+            TaskFieldValue.scenario_version_id == task.scenario_version_id,
+            TaskFieldValue.is_current.is_(True),
+            DocumentUpload.audit_task_id == task.id,
+            DocumentUpload.is_current.is_(True),
+            TaskDocument.audit_task_id == task.id,
+            TaskDocument.material_key == TaskFieldValue.material_key,
+            TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
+        )
     )
+    if rule_inputs is not None:
+        field_query = field_query.where(
+            tuple_(TaskFieldValue.field_key, TaskFieldValue.material_key).in_(field_scope),
+        ).order_by(TaskFieldValue.id)
+    field_rows = list(db.scalars(field_query).all())
+    if field_rows or rule_inputs is None:
+        field_rows = task_csv_service.from_index(db, task, TaskFieldValue, field_rows)
     field_row_ids = [row.id for row in field_rows]
     evidence_ids_by_field_value: dict[int, list[int]] = {}
     if field_row_ids:
@@ -566,14 +441,19 @@ def _task_facts(
         material_states=material_states,
         evidence_ids_by_field_value=evidence_ids_by_field_value,
     )
-    task_fact_rows = list(
-        db.scalars(
-            select(TaskFact).where(
-                TaskFact.audit_task_id == task.id,
-                TaskFact.is_current.is_(True),
-            )
-        ).all()
+    fact_query = select(TaskFact).where(
+        TaskFact.audit_task_id == task.id,
+        TaskFact.is_current.is_(True),
     )
+    if rule_inputs is not None:
+        fact_query = fact_query.where(
+            TaskFact.scenario_version_id == task.scenario_version_id,
+            TaskFact.fact_kind == "EXTRACTED",
+            or_(*fact_scope),
+        ).order_by(TaskFact.id)
+    task_fact_rows = list(db.scalars(fact_query).all())
+    if task_fact_rows or rule_inputs is None:
+        task_fact_rows = task_csv_service.from_index(db, task, TaskFact, task_fact_rows)
     task_facts = fact_snapshot.facts_of_task_fact_rows(
         task_fact_rows,
         field_code_index=field_code_index,
@@ -679,7 +559,7 @@ def _task_facts(
 
 
 def _task_materials(db: Session, task: AuditTask) -> list[dict[str, Any]]:
-    """本任务全部材料位的**冻结身份**，含未上传的材料位。
+    """本任务全部材料位的冻结身份，含未上传的材料位。
 
     未上传的材料位必须保留：材料存在性判定要区分「必传缺失」与「可选缺失」，
     只列已上传的会让必传缺失变成查不到，判不出不合格。
@@ -739,7 +619,7 @@ def _snapshot_mismatches(
 ) -> list[str]:
     """已有快照与本次冻结内容的逐项差异。
 
-    判据是**冻结时的完整内容**：事实与材料（`facts_json`）、内容指纹、工具目录身份、
+    判据是冻结时的完整内容：事实与材料（`facts_json`）、内容指纹、工具目录身份、
     策略身份、授权工具定义。任一列不同就不是同一份输入，必须显式冲突。
     """
     compared = [
@@ -757,28 +637,29 @@ def freeze_snapshot(
     db: Session,
     *,
     task: AuditTask,
+    rule: dict[str, Any],
     node_code: str,
     rule_instance_id: str,
     evaluation_id: str,
     allowed_tools: list[dict[str, Any]],
     policy: dict[str, Any],
 ) -> dict[str, Any]:
-    """冻结一条规则实例的事实快照并落库，返回（ref, hash, 冻结事实）。
+    """冻结一条规则实例的输入快照并落库，返回引用、指纹与数量。
 
-    冻结发生在评估开始时、**调模型之前**：本次评估的全部工具调用都从这份内容解析事实，
+    冻结发生在评估开始时、调模型之前：本次评估的全部工具调用都从这份内容解析事实，
     不再读「当前数据」。
 
-    幂等的口径是「先按作用域查，再逐列核对内容」：
+    新快照只读取本规则声明的字段身份，不复制其它字段或派生计算值；没有字段输入时
+    facts 为空。材料位身份仍完整保留，文件查重需要对照同任务其它上传。历史未声明
+    facts_scope 的快照仍按全任务事实范围核对，不覆盖、不自动迁移。
 
-    - 同一 (评估批次, 规则实例, 输入修订) 已有记录、且事实与材料内容、工具目录身份、
-      策略身份、授权工具定义完全一致时，**复用原记录**，不重新插入；
-    - 已有记录但内容不一致时抛 `AGENT_SNAPSHOT_SCOPE_CONFLICT`：同一次评估拿到了
-      两份不同的输入，必须显式失败而不是覆盖；
-    - 并发插入撞到作用域唯一键时，只捕获该唯一约束的冲突，回查并复用；
-      其它 `IntegrityError`（其余唯一键、外键、数据长度）原样上抛，不当成成功。
+    幂等的口径是「先按作用域查，再逐列核对内容」：同一 (评估批次, 规则实例, 输入修订) 已有
+    记录且事实与材料内容、工具目录身份、策略身份、授权工具定义完全一致时复用原记录；内容
+    不一致时抛 `AGENT_SNAPSHOT_SCOPE_CONFLICT`（同一次评估拿到两份不同的输入必须显式失败
+    而不是覆盖）；并发插入撞到作用域唯一键时只捕获该唯一约束的冲突并回查复用，其它
+    `IntegrityError` 原样上抛。
 
-    `snapshot_ref` 含评估作用域身份（见 `domain/fact_snapshot.snapshot_of`），
-    因此「两条规则的事实内容恰好相同」不会再撞全局唯一键。
+    `snapshot_ref` 含评估作用域身份，因此「两条规则的事实内容恰好相同」不会再撞全局唯一键。
     """
     # 冻结的工具定义来自发布期清单；缺失即显式报错（见 frozen_tool_definitions）。
     frozen_tool_definitions(allowed_tools)
@@ -786,8 +667,25 @@ def freeze_snapshot(
     tool_catalog_hash = str(policy.get("tool_catalog_hash") or "")
     tool_policy_version = str(policy.get("tool_policy_version") or "")
     input_revision = int(task.input_revision or 0)
+    existing = _snapshot_of_scope(
+        db, evaluation_id=evaluation_id, rule_instance_id=rule_instance_id, input_revision=input_revision,
+    )
+    rule_inputs: list[dict[str, Any]] | None = fact_snapshot.declared_inputs_of(rule)
+    if existing is not None:
+        load_snapshot(db, task=task, snapshot_ref=existing.snapshot_ref)
+        # 未声明 facts_scope 的版本 8 记录是历史全任务快照。恢复时仍按它的原有
+        # 范围核对，不能用较小的新快照替换、或把范围变化误报成业务输入变化。
+        if "facts_scope" not in existing.facts_json:
+            rule_inputs = None
+        elif existing.facts_json["facts_scope"] != "RULE_INPUTS":
+            raise BusinessError(
+                "AGENT_SNAPSHOT_INVALID",
+                "冻结事实快照的取数范围协议无法识别，本次调用未执行",
+                status_code=500,
+                details={"snapshot_ref": existing.snapshot_ref, "facts_scope": existing.facts_json["facts_scope"]},
+            )
     materials = _task_materials(db, task)
-    facts = _task_facts(db, task, materials)
+    facts = _task_facts(db, task, materials, rule_inputs=rule_inputs)
     scope = fact_snapshot.scope_of(
         evaluation_id=evaluation_id,
         rule_instance_id=rule_instance_id,
@@ -803,7 +701,9 @@ def freeze_snapshot(
         rule_instance_id=rule_instance_id,
         input_revision=input_revision,
     )
-    existing = _snapshot_of_scope(db, evaluation_id=evaluation_id, rule_instance_id=rule_instance_id, input_revision=input_revision)
+    if rule_inputs is not None:
+        payload["facts_scope"] = "RULE_INPUTS"
+        payload["declared_inputs"] = rule_inputs
     if existing is not None:
         _assert_snapshot_same(
             existing,
@@ -1045,13 +945,13 @@ def facts_of_snapshot(record: EvaluationSnapshot) -> list[dict[str, Any]]:
 
 
 def frozen_tool_definitions(allowed_tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """从冻结的授权工具清单里取出**完整工具定义**。
+    """从冻结的授权工具清单里取出完整工具定义。
 
     模型看到的函数定义必须来自发布期冻结的那一份，不能由当前 `tool_catalog`
     现场重新生成：目录升级后旧任务恢复执行时，模型看到的工具定义会与首次不同，
     历史结论因此无法复现。
 
-    清单里的条目缺少 `definition` 时**显式报错**，不静默改用当前目录——
+    清单里的条目缺少 `definition` 时显式报错，不静默改用当前目录——
     「旧任务缺少完整冻结定义」是必须被看见的事实，不是可以绕过的兼容问题。
     """
     definitions: list[dict[str, Any]] = []
@@ -1106,7 +1006,7 @@ def allowed_tools_of(
 ) -> list[dict[str, Any]]:
     """本次评估允许的工具范围（发布期冻结的那份清单，按节点与规则收窄）。
 
-    与 `tools_for_node` 的区别：这里返回**已发布配置里的原始条目**，
+    与 `tools_for_node` 的区别：这里返回已发布配置里的原始条目，
     它同时是「这些工具服务于哪条规则」的答案，随快照一起冻结。
     """
     allowed = manifest.get("allowed_tools")
@@ -1131,7 +1031,7 @@ def allowed_tools_of(
 def policy_of(manifest: dict[str, Any]) -> dict[str, Any]:
     """已发布配置里冻结的工具策略与目录身份。
 
-    三项都取自 manifest，**不回落到当前常量**：回落到当前值等于让旧任务静默改用
+    三项都取自 manifest，不回落到当前常量：回落到当前值等于让旧任务静默改用
     新目录/新策略执行，历史结论无法复现。任一项缺失即显式报错（旧格式 manifest）。
     """
     policy = {
@@ -1162,7 +1062,7 @@ def execution_context(
 ) -> ToolExecutionContext:
     """本次工具调用的运行期信封。
 
-    评估身份、快照身份、工具目录身份与策略版本全部取自**冻结记录**，
+    评估身份、快照身份、工具目录身份与策略版本全部取自冻结记录，
     不在这里重新生成、也不取当前目录常量：用当前值覆盖旧任务的冻结身份会让
     同一个 `tool_call_id` 在恢复时被判成协议冲突，本可复用的结果反而失败。
     """
@@ -1222,6 +1122,7 @@ def invoke_tool(
     inputs: list[dict[str, Any]],
     context: ToolExecutionContext,
     runtime: dict[str, Any] | None,
+    result_context: dict[str, Any],
     rule: dict[str, Any],
     manifest: dict[str, Any],
 ) -> tuple[dict[str, Any], AgentToolCall]:
@@ -1230,7 +1131,7 @@ def invoke_tool(
     恢复情形决定要不要真的执行：已成功直接复用结果、执行中进待核查、
     失败保留原错误（重试必须换新的调用标识）。身份任一列不同则账本直接报协议冲突。
 
-    事务边界：登记与 `RUNNING` 各自短事务提交，工具执行期间**不持有**行锁；
+    事务边界：登记与 `RUNNING` 各自短事务提交，工具执行期间不持有行锁；
     结果写回也是一个短事务。工具可能是真实外部调用，长时间持锁会把并发请求堵死。
     """
     record, recovery = ledger.begin_call(
@@ -1253,8 +1154,9 @@ def invoke_tool(
     # 留下的 RUNNING 正是「状态未知、必须核查」的真实表达。提交后即释放行锁。
     db.commit()
     try:
-        published_tool_id = capabilities.capability_id_of_rule(rule)
-        published_parameters = published_tool_parameters(rule, manifest, published_tool_id)
+        semantic = rule.get("operator") == "LLM_VALIDATE"
+        published_tool_id = None if semantic else capabilities.capability_id_of_rule(rule)
+        published_parameters = None if semantic else published_tool_parameters(rule, manifest, published_tool_id)
         result = tool_service.invoke(
             call["tool_name"],
             call.get("arguments"),
@@ -1264,6 +1166,9 @@ def invoke_tool(
             published_parameters=published_parameters,
             published_tool_id=published_tool_id,
         )
+        # 风险来源及实际材料由系统从同一批来源结果生成，与判定一起写入账本。
+        # 恢复时直接复用账本的原内容，不重查并替换当时的来源结论。
+        result = {**result, **result_context}
     except BusinessError as exc:
         ledger.mark_failed(db, record, exc)
         db.commit()

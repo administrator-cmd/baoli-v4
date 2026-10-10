@@ -1,26 +1,16 @@
 """工具执行服务：校验工具、参数与权限范围，然后调用真实 handler。
 
-这个模块是「模型请求调用工具」与「真实 Python 实现」之间的唯一接缝。
-模型给出的字符串**不直接**进 handler：每次调用都要先过下面这条链，
-任一项不成立就抛明确错误，不落到别的分支、不返回空结果、不静默降级：
+「模型请求调用工具」与「真实 Python 实现」之间的唯一接缝。模型给出的字符串不直接进
+handler，每次调用都要先过：解析调用 → 校验 tool_id 与版本 → 校验场景/节点范围 →
+校验参数 Schema → 解析 handler 引用 → 执行。任一项不成立就抛明确错误，不返回空结果。
 
-    解析调用 → 校验 tool_id 与版本 → 校验场景/节点范围
-      → 校验参数 Schema → 解析 handler 引用 → 执行真实 handler
+handler 引用在这里解析的原因：`domain/tool_catalog.py` 只声明 `handler_ref`，不导入
+handler——domain 层不允许依赖 `operators`。真实解析发生在 services 层，未注册任何实现时
+明确报错，不退回默认 handler。
 
-为什么 handler 引用在这里解析
------------------------------
-`domain/tool_catalog.py` 只声明 `handler_ref`（模块名 + 函数名 + 算子码），
-不导入 handler：`domain` 层不允许依赖 `operators`，否则领域层会被执行层拉进去。
-真实解析发生在本模块——它是 services 层，导入 `operators` 是允许的方向。
-
-未注册任何实现时明确报错，**不**退回默认 handler 或空结果。
-这与 `services/audit/document_ports.py` 的端口注册是同一手法。
-
-持久化边界
-----------
-本模块只负责校验并执行真实 handler，不写工具调用账本。幂等登记与结果复用由
-审核图通过 `agent_tool_ledger` 负责；绕过该调用方直接重复执行 `invoke` 会再次调用 handler。
-工具的 `idempotent=True` 只表示同一输入应得到同一结果，不表示调用不会发生两次。
+本模块只校验并执行，不写工具调用账本：幂等登记与结果复用由审核图通过 `agent_tool_ledger`
+负责；绕过该调用方直接重复执行 `invoke` 会再次调用 handler。工具的 `idempotent=True`
+只表示同一输入应得到同一结果，不表示调用不会发生两次。
 """
 
 from __future__ import annotations
@@ -30,6 +20,8 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from langchain_core.tools import BaseTool
+
 from ..domain import tool_catalog
 from ..domain.tool_context import ToolExecutionContext
 from ..common.exceptions import BusinessError
@@ -38,9 +30,9 @@ from ..common.exceptions import BusinessError
 logger = logging.getLogger(__name__)
 
 
-# 参数 Schema 里被支持的 JSON Schema 关键字。**本模块只实现这个子集**：
+# 参数 Schema 里被支持的 JSON Schema 关键字。本模块只实现这个子集：
 # `jsonschema` 不在项目依赖里（`requirements.txt` 与 conda `dd` 环境都没有），
-# 而引入一个新依赖只为校验这几项并不划算。子集之外的关键字**显式报错**，
+# 而引入一个新依赖只为校验这几项并不划算。子集之外的关键字显式报错，
 # 不静默忽略——静默忽略会让「schema 里写了约束但没生效」变成看不见的漏洞。
 _SUPPORTED_SCHEMA_KEYS = frozenset(
     {
@@ -82,7 +74,7 @@ def _schema_error(message: str, *, details: dict[str, Any] | None = None) -> Bus
 def _assert_supported_schema(schema: Any, *, path: str) -> None:
     """Schema 自身只能用受支持的子集；出现别的关键字当即报错。
 
-    这条校验针对的是**目录里的 schema**（本系统自己写的），因此失败说明
+    这条校验针对的是目录里的 schema（本系统自己写的），因此失败说明
     工具目录用了未实现的约束——那是必须修的代码问题，不是模型调用错误。
     """
     if not isinstance(schema, dict):
@@ -193,12 +185,12 @@ def _assert_spec_shape(spec: tool_catalog.ToolSpec) -> None:
 
 
 def _scene_node_types(scene_code: str) -> frozenset[str] | None:
-    """一个场景**实际配置**的节点能力类型。
+    """一个场景实际配置的节点能力类型。
 
-    场景用哪些节点由用户配置（`scenario_draft_node`），不由 Profile 声明——
-    统一模板协议定义的是系统能力全集，一个场景只用其中一部分。
+    场景用哪些节点由用户在 config_json 中配置；节点能力目录定义系统可执行类型，
+    一个场景只使用实际配置的那部分节点实例。
     这里读该场景草稿里的节点实例类型；场景不存在或没有配置节点时返回 None，
-    调用方据此**跳过**场景校验而不是当成「不允许」——把配置未就绪读成「越权」
+    调用方据此跳过场景校验而不是当成「不允许」——把配置未就绪读成「越权」
     会让一次正常的调用被误拒。
     """
     from ..entity import ScenarioDraft, ScenarioDraftNode
@@ -210,9 +202,7 @@ def _scene_node_types(scene_code: str) -> frozenset[str] | None:
             return None
         types = {
             str(item.node_type)
-            for item in session.scalars(
-                select(ScenarioDraftNode).where(ScenarioDraftNode.draft_id == draft.id)
-            ).all()
+            for item in config_store.rows(session, ScenarioDraftNode, draft.id)
             if item.node_type
         }
     return frozenset(types) if types else None
@@ -226,15 +216,12 @@ def _assert_scene_scope(
 ) -> None:
     """工具是否适用于该场景。
 
-    `allowed_scenes` 显式声明时按它判断（精确名单优先）。
+    `allowed_scenes` 显式声明时按它判断（精确名单优先）。未声明时不是「无约束」，而是按两件
+    已声明的事实推导：工具的 `allowed_nodes` 与该场景实际配置的节点类型是否相交——一个工具
+    只能挂在某几类节点上，而场景根本没配那类节点，这个工具在该场景里就没有位置，这是确定性
+    结论而不是猜测。
 
-    未声明时**不是「无约束」**，而是按已声明的两件事实推导：
-    工具的 `allowed_nodes` 与该场景**实际配置的节点类型**是否相交。
-    一个工具只能挂在某几类节点上，而某个场景根本没有配置那类节点，
-    那么这个工具在该场景里没有位置——这是确定性结论，不是猜测。
-
-    例如日期比较只挂「文件内部校验 / 文件交叉校验」，而某个场景没有配置这两类节点，
-    因此该场景不能调用日期比较工具。
+    例如日期比较只挂「文件内部校验 / 文件交叉校验」，某场景没配这两类节点，就不能调用它。
     """
     if scene_code is None:
         return
@@ -269,17 +256,15 @@ def _assert_scene_scope(
 def _resolve_policy_version(spec: tool_catalog.ToolSpec, context: ToolExecutionContext | None) -> None:
     """工具策略版本核对。
 
-    任务创建时冻结了当时那一版**工具策略**（`tool_policy_version`）。策略变化后
-    （放开或收紧工具范围、改变越权判定口径），用新策略去解释旧任务的工具调用会让
-    历史结论无法复现，因此不一致即拒绝执行。
+    任务创建时冻结了当时那一版工具策略，策略变化后（放开或收紧工具范围、改变越权判定口径）
+    用新策略解释旧任务的工具调用会让历史结论无法复现，因此不一致即拒绝执行。
 
-    比较对象只能是 `TOOL_POLICY_VERSION`。**不能**拿工具目录版本
-    （`TOOL_CATALOG_VERSION`）来比：目录可以因为与策略无关的原因升级（新增工具、
-    调整描述），拿它比会让既有任务的工具调用被整批拒掉；而真正放宽策略时又拦不住
-    按旧策略冻结的任务。目录身份是另一个维度，由 `_assert_catalog_identity` 负责。
+    比较对象只能是 `TOOL_POLICY_VERSION`，不能拿工具目录版本比：目录可以因与策略无关的原因
+    升级（新增工具、调整描述），拿它比会让既有任务的工具调用被整批拒掉，而真正放宽策略时又
+    拦不住按旧策略冻结的任务。目录身份是另一个维度，由 `_assert_catalog_identity` 负责。
 
-    `None` 表示「本次未声明策略版本」：旧任务与尚未冻结工具策略的调用属于这种情况。
-    这里**不**把它当成「按当前版本处理」——那等于让旧任务静默改用新语义。
+    `None` 表示「本次未声明策略版本」（旧任务与尚未冻结工具策略的调用），不把它当成「按当前
+    版本处理」——那等于让旧任务静默改用新语义。
     """
     if context is None or context.tool_policy_version is None:
         return
@@ -297,18 +282,16 @@ def _resolve_policy_version(spec: tool_catalog.ToolSpec, context: ToolExecutionC
 
 
 def _assert_catalog_identity(spec: tool_catalog.ToolSpec, context: ToolExecutionContext | None) -> None:
-    """工具目录身份核对：**需要真正执行**的调用必须能证明实现与冻结目录兼容。
+    """工具目录身份核对：需要真正执行的调用必须能证明实现与冻结目录兼容。
 
-    当前实现没有对 handler 做版本化（`handler_ref` 指向的是当前代码里的函数），
-    因此当冻结目录与当前目录不一致时，**无法证明**这次执行与冻结时的语义一致。
-    这种情形必须显式报版本不兼容，不能静默按当前实现执行：
+    当前实现没有对 handler 做版本化（`handler_ref` 指向的是当前代码里的函数），因此冻结目录与
+    当前目录不一致时无法证明这次执行与冻结时的语义一致，必须显式报版本不兼容，不能静默按当前
+    实现执行。已成功的旧调用不受影响：账本在真正执行之前就按 `SUCCEEDED` 复用结果，走不到这里
+    （见 `services/agent_tool_ledger.begin_call`）；冻结身份缺失（旧任务没有这一列）同样显式
+    报错，不按「无约束」处理。
 
-    - 已成功的旧调用不受影响：账本在真正执行之前就按 `SUCCEEDED` 复用结果，
-      根本走不到这里（见 `services/agent_tool_ledger.begin_call`）；
-    - 冻结身份缺失（旧任务没有这一列）同样显式报错，不按「无约束」处理。
-
-    错误码与错误信息都指明是**目录**不一致（`TOOL_CATALOG_*`），与策略不一致
-    （`TOOL_POLICY_VERSION_MISMATCH`）分开，读取方据此知道该改哪里。
+    错误码指明是目录不一致（`TOOL_CATALOG_*`），与策略不一致（`TOOL_POLICY_VERSION_MISMATCH`）
+    分开，读取方据此知道该改哪里。
     """
     if context is None:
         return
@@ -354,16 +337,15 @@ def resolve(
     scene_type: str | None = None,
     node_code: str | None = None,
 ) -> tool_catalog.ToolSpec:
-    """按标识取**可调用**的工具，并逐项校验范围。
+    """按标识取可调用的工具，并逐项校验范围。
 
-    校验顺序是刻意的：先看工具是否存在，再看版本与实现状态，最后看场景、节点与
-    策略版本。顺序反了会把「工具不存在」报成「场景不允许」，让调用方去改一个无关的地方。
+    校验顺序是刻意的：先看工具是否存在，再看版本与实现状态，最后看场景、节点与策略版本。
+    顺序反了会把「工具不存在」报成「场景不允许」，让调用方去改一个无关的地方。
 
-    - `TOOL_NOT_REGISTERED`：标识不在目录中；
-    - `TOOL_VERSION_MISMATCH`：调用方要求的版本与目录版本不一致；
-    - `TOOL_NOT_PUBLISHED`：工具存在但当前不可调用（能力未实现，或只有节点级实现）；
-    - `TOOL_SCENE_NOT_ALLOWED` / `TOOL_NODE_NOT_ALLOWED`：超出允许范围；
-    - `TOOL_POLICY_VERSION_MISMATCH`：任务冻结的工具策略版本与当前目录不一致。
+    错误码：`TOOL_NOT_REGISTERED`（标识不在目录中）、`TOOL_VERSION_MISMATCH`（版本不一致）、
+    `TOOL_NOT_PUBLISHED`（工具存在但当前不可调用：能力未实现，或只有节点级实现）、
+    `TOOL_SCENE_NOT_ALLOWED` / `TOOL_NODE_NOT_ALLOWED`（超出允许范围）、
+    `TOOL_POLICY_VERSION_MISMATCH`（任务冻结的工具策略版本与当前目录不一致）。
 
     `context` 提供时，场景与节点取自它；显式参数优先（便于尚未建任务的调用方使用）。
     """
@@ -434,7 +416,7 @@ def resolve(
 def validate_arguments(spec: tool_catalog.ToolSpec, arguments: Any) -> dict[str, Any]:
     """按工具的 `input_schema` 校验模型给出的参数。
 
-    模型给出的字符串在这里被拒绝：`inputs` 只接受字段/材料的**身份引用**，
+    模型给出的字符串在这里被拒绝：`inputs` 只接受字段/材料的身份引用，
     金额与日期一律由调用方从事实快照解析后传入，不由模型抄写。
     """
     if not isinstance(arguments, dict):
@@ -446,8 +428,8 @@ def validate_arguments(spec: tool_catalog.ToolSpec, arguments: Any) -> dict[str,
     return arguments
 
 
-def _load_handler(spec: tool_catalog.ToolSpec) -> Any:
-    """解析 `handler_ref` 并取出真实 handler。
+def _load_handler(spec: tool_catalog.ToolSpec) -> BaseTool:
+    """解析 `handler_ref`，取得标准 `@tool` 创建的工具对象。
 
     引用解析失败（模块不存在、函数改名、算子未注册）时明确报错——
     这类失败说明工具目录与实现已经漂移，必须当场暴露，不能拖到真实任务上。
@@ -463,7 +445,10 @@ def _load_handler(spec: tool_catalog.ToolSpec) -> Any:
         )
     try:
         module = importlib.import_module(ref["module"])
-        handler = getattr(module, ref["function"])
+        if "operator" in ref:
+            handler = module.REGISTRY[ref["operator"]]
+        else:
+            handler = getattr(module, ref["function"])
     except (ImportError, AttributeError, KeyError) as exc:
         raise BusinessError(
             "TOOL_HANDLER_MISSING",
@@ -474,33 +459,13 @@ def _load_handler(spec: tool_catalog.ToolSpec) -> Any:
     return handler
 
 
-def _handler_arguments(
-    spec: tool_catalog.ToolSpec,
-    parameters: dict[str, Any],
-) -> tuple[Any, ...]:
-    """按 handler 的真实签名组装位置参数。
-
-    两种 handler 形状：
-
-    - 算子工具：`execute_operator(operator, parameters, inputs)`——算子码是第一个参数，
-      由 `handler_ref` 携带，不靠猜；
-    - 上下文 adapter：`adapter(parameters, inputs, *, context)`——只有两个位置参数，
-      会话等运行期依赖经关键字传（见 `invoke`）。
-    """
-    ref = spec.handler_ref or {}
-    operator = ref.get("operator")
-    if operator is None:
-        return (parameters,)
-    return (operator, parameters)
-
-
 def _effective_parameters(
     spec: tool_catalog.ToolSpec,
     parameters: dict[str, Any],
 ) -> dict[str, Any]:
     """把 `handler_ref` 里固定的参数并入调用参数。
 
-    文件质量子项的检查项目由**工具身份**固定（`handler_ref["check_item"]`），
+    文件质量子项的检查项目由工具身份固定（`handler_ref["check_item"]`），
     模型不能自己选——选错检查项目就是调了另一个工具。这里由工具目录注入，
     而不是让模型填，避免模型用一个检查项目的标准去跑另一个项目的判定。
     """
@@ -554,12 +519,12 @@ def _assert_identity_match(
     requested: list[Any],
     resolved: list[dict[str, Any]],
 ) -> None:
-    """模型给的**身份引用**必须与调用方解析出的**事实**逐项对应。
+    """模型给的身份引用必须与调用方解析出的事实逐项对应。
 
     这是「模型给身份、系统解析取值」这条边界的落点：模型不得凭空多给一个输入，
     也不能少给——顺序与身份都要对上，否则算的是另一道题。
     事实里的取值（status / normalized_value / unit…）由调用方从快照取，
-    模型看不到也不需要提供，因此它们**不**出现在 input_schema 里。
+    模型看不到也不需要提供，因此它们不出现在 input_schema 里。
     """
     wanted = [
         (str(item.get("field_key") or ""), item.get("material_key"))
@@ -567,7 +532,10 @@ def _assert_identity_match(
         if isinstance(item, dict)
     ]
     actual = [_identity_of(item) for item in resolved]
-    if wanted != actual:
+    if len(wanted) != len(actual) or any(
+        wanted_key != actual_key or (wanted_material is not None and wanted_material != actual_material)
+        for (wanted_key, wanted_material), (actual_key, actual_material) in zip(wanted, actual)
+    ):
         raise BusinessError(
             "TOOL_INPUT_MISMATCH",
             f"工具“{spec.label}”的输入身份与系统解析出的事实不一致，本次调用未执行",
@@ -616,17 +584,13 @@ def _merge_runtime(
 ) -> dict[str, Any]:
     """把调用方注入的运行期状态并入 handler 参数。
 
-    为什么需要这一层：有些工具的输入不只是字段事实——风险规则要先知道
-    **各来源检查在当前有效执行批次里的真实结论**（`source_statuses`）与
-    **已发布配置里的成立条件**（`risk_condition`）。这些值：
+    有些工具的输入不只是字段事实——风险规则要先知道各来源检查在当前有效执行批次里的真实结论
+    （`source_results`，含取值与判断依据）与已发布配置里的成立条件（`risk_condition`）。这些值不能由模型提供
+    （它们是数据库里的真实结果与冻结的配置事实，模型自己写一个状态就等于伪造来源结论），也不能
+    由工具自己查（`domain` 层不碰数据库，handler 也不持有会话）。
 
-    - 不能由模型提供：它们是数据库里的真实结果与冻结的配置事实，
-      模型自己写一个状态就等于让模型伪造来源结论；
-    - 不能由工具自己查：`domain` 层不碰数据库，handler 也不持有会话。
-
-    因此模型只给**身份引用**（`source_rule_codes`），调用方按身份解析后经
-    `runtime` 注入。缺少必需键或出现未声明的键都明确报错——
-    静默塞进去会让「谁提供了这个值」变得无法追溯。
+    因此模型只给身份引用（`source_rule_codes`），调用方按身份解析后经 `runtime` 注入。缺少必需
+    键或出现未声明的键都明确报错——静默塞进去会让「谁提供了这个值」变得无法追溯。
     """
     provided = dict(runtime or {})
     if not provided:
@@ -662,18 +626,16 @@ def invoke(
 ) -> dict[str, Any]:
     """执行一次工具调用：校验后调真实 handler，返回它的结果。
 
-    `arguments` 是模型给出的调用参数（只含身份引用与规则配置），
-    它先过 `input_schema` 校验；`inputs` 是调用方按那些身份**解析出的真实事实**，
-    由本模块核对两者逐项对应后交给 handler；`runtime` 是需要额外运行期状态的工具
-    （如风险规则）由调用方注入的真实值；`context` 是本次调用的运行期信封
-    （任务、规则实例、材料范围、事实快照、工具策略版本、数据库会话）。
+    `arguments` 是模型给出的调用参数（只含身份引用与规则配置），先过 `input_schema` 校验；
+    `inputs` 是调用方按那些身份解析出的真实事实，由本模块核对两者逐项对应后交给 handler；
+    `runtime` 是需要额外运行期状态的工具（如风险规则）由调用方注入的真实值；`context` 是本次
+    调用的运行期信封（任务、规则实例、材料范围、事实快照、工具策略版本、数据库会话）。
 
-    取值不从模型参数里取：金额、日期、文件内容与来源检查结论一律来自事实快照
-    与已发布配置，避免模型抄错一个数字却算对了另一道题。
+    取值不从模型参数里取：金额、日期、文件内容与来源检查结论一律来自事实快照与已发布配置，
+    避免模型抄错一个数字却算对了另一道题。
 
-    返回的 dict 形状由工具的 `output_schema` 描述（至少含 `status` 与 `message`）。
-    handler 抛出的 `BusinessError` 原样上抛：它是真实的业务错误
-    （缺输入、参数非法、取值类型不对），不能在这里被吞掉或改写成空结果。
+    返回的 dict 形状由工具的 `output_schema` 描述（至少含 `status` 与 `message`）。handler
+    抛出的 `BusinessError` 原样上抛——它是真实的业务错误，不能在这里被吞掉或改写成空结果。
     """
     spec = resolve(tool_id, version, context=context, scene_type=scene_type, node_code=node_code)
     payload = validate_arguments(spec, arguments)
@@ -690,7 +652,7 @@ def invoke(
             f"工具“{spec.label}”的 parameters 必须是对象",
             details={"tool_id": spec.tool_id},
         )
-    if context is not None and context.caller_identity == "audit_agent":
+    if context is not None and context.caller_identity == "audit_agent" and published_tool_id is not None:
         if published_tool_id != spec.tool_id:
             raise BusinessError(
                 "TOOL_RULE_CAPABILITY_MISMATCH",
@@ -705,16 +667,24 @@ def invoke(
             status_code=500,
             details={"tool_id": spec.tool_id},
         )
+    by_identity = {_identity_of(item): item for item in inputs}
+    selected_inputs = []
+    for reference in requested:
+        identity = _identity_of(reference)
+        matches = [item for key, item in by_identity.items()
+                   if key[0] == identity[0] and (identity[1] is None or key[1] == identity[1])]
+        if len(matches) != 1:
+            raise BusinessError("TOOL_INPUT_INVALID", "工具引用的字段事实不存在或不能唯一定位", details={"reference": reference})
+        selected_inputs.append(matches[0])
+    inputs = selected_inputs
     _assert_identity_match(spec, requested, inputs)
     _assert_material_scope(spec, requested, context)
     effective = _merge_runtime(spec, _effective_parameters(spec, parameters), runtime)
-    # handler 的真实签名由 handler_ref 决定（见 _handler_arguments）：
-    # 算子经 execute_operator(operator, parameters, inputs) 分发；
-    # 上下文 adapter 额外接收 context（会话、任务、快照、策略版本都在里面）。
+    # 经标准工具接口执行，传入已解析的真实事实；context 是系统注入参数。
+    execution_arguments: dict[str, Any] = {"parameters": effective, "inputs": inputs}
     if (spec.handler_ref or {}).get("context") == "true":
-        result = handler(*_handler_arguments(spec, effective), inputs, context=context)
-    else:
-        result = handler(*_handler_arguments(spec, effective), inputs)
+        execution_arguments["context"] = context
+    result = handler.invoke(execution_arguments)
     if not isinstance(result, dict) or "status" not in result:
         raise BusinessError(
             "TOOL_RESULT_INVALID",
@@ -730,7 +700,7 @@ def validate_result(spec: tool_catalog.ToolSpec, result: dict[str, Any]) -> dict
     """按工具的 `output_schema` 校验真实执行结果。
 
     输入已经过 Schema 校验，输出同样要过：结论状态只能取能力目录声明的枚举、
-    必填输出键必须齐备。**未实现的输出被如实判为「工具结果不符合契约」**——
+    必填输出键必须齐备。未实现的输出被如实判为「工具结果不符合契约」——
     工具实现返回了目录里没声明的状态，说明工具目录与实现已经漂移，
     这与「模型传错参数」是两类问题，因此错误码分开（`TOOL_RESULT_INVALID`）。
     """

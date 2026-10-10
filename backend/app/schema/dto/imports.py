@@ -5,9 +5,6 @@ from pydantic import BaseModel, Field
 
 class SheetBindingItem(BaseModel):
     sheet_key: str
-    role: str | None = None
-    node_code: str | None = Field(default=None, max_length=80)
-    header_row: int | None = Field(default=None, ge=1)
     excluded: bool = False
 
 
@@ -16,7 +13,7 @@ class SheetBindingsRequest(BaseModel):
 
 
 class DecisionItem(BaseModel):
-    target_type: Literal["ISSUE", "MATERIAL", "FIELD", "RULE", "REPORT_SECTION", "SHEET"]
+    target_type: Literal["ISSUE", "MATERIAL", "FIELD", "RULE", "REPORT_SECTION", "SHEET", "CALC_RULE"]
     target_ref: str
     action: Literal["ACCEPT", "EXCLUDE", "RESOLVE"]
     value: dict[str, Any] = Field(default_factory=dict)

@@ -1,34 +1,32 @@
-"""计算节点的执行：跑 manifest 里冻结的计算规则，写统一事实与规则结果。
+"""计算节点按冻结业务方法调用 LLM，写统一事实与 CSV 规则结果。
 
-执行流程（每一步都是显式的，没有跳过分支）：
+流程：取当前有效的字段事实与已计算派生事实，按来源、编号、期间与报表口径建索引 →
+按规则依赖做拓扑序执行（保证上游先于下游）→ 每条规则求值、判定、写 `task_fact`(DERIVED)
+与 `rule_result` → 上游结果写入后立即进入索引，供同一批里的下游规则引用。
 
-1. 取本任务当前有效的字段事实和已计算派生事实，按来源、编号、期间与报表口径建索引；
-2. 按计算规则之间的依赖做**拓扑序**执行，保证上游结果先于下游产出；
-3. 每条规则求值 → 判定 → 写 `task_fact`（DERIVED）→ 写 `rule_result`；
-4. 上游结果写入后立即进入索引，供同一批里的下游规则引用。
-
-失败语义
---------
-- **求值失败**（除零、输入缺失、数值不可计算）不是异常，而是一个明确的业务状态：
-  写一条 `rule_result`，状态为 `EVIDENCE_INSUFFICIENT`，消息说明具体缺什么。
-  它不等于通过，也不等于不合格——它表示这次没算出结论。
-- **配置错误**（manifest 里的规则引用不存在、算式节点类型未知）抛 BusinessError，
-  让整个节点失败。配置错误不该被当成「这条规则没结论」掩盖过去。
+失败语义：求值失败（除零、输入缺失、数值不可计算）不是异常，而是明确的业务状态——写一条
+`rule_result`，状态 `EVIDENCE_INSUFFICIENT` 并说明缺什么；它表示这次没算出结论，不等于
+通过也不等于不合格。配置错误或模型响应违反契约时抛 BusinessError 让整个
+节点失败，不该被当成「这条规则没结论」掩盖过去。
 
 RAG 不参与本模块：数值一律来自字段事实与上游计算结果。
 """
 
 from __future__ import annotations
+from .. import task_csv_service
 
 from typing import Any
+from decimal import Decimal
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from ...domain import calculation as calc, workflow_dag
+from ...domain import calculation as calc, fact_snapshot, workflow_dag
+from ...domain.audit_vocab import SCOPE_NOT_APPLICABLE
 from ...domain.identity import public_no
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, ManualReview, NodeExecution, RuleResult, TaskFact
+from ..llm_calculation import evaluate_with_llm
 from .shared import _material_names
 
 
@@ -56,7 +54,7 @@ def _node_calculation_codes(manifest: dict[str, Any], node_code: str) -> set[str
 def _calculation_rules(manifest: dict[str, Any], enabled_codes: set[str]) -> list[dict[str, Any]]:
     """本任务范围内的计算规则，按依赖拓扑序排列。
 
-    拓扑序用**确定性的**顺序（同级按 rule_code 排序），因此同一份配置每次执行
+    拓扑序用确定性的顺序（同级按 rule_code 排序），因此同一份配置每次执行
     得到同一个顺序，重跑与首次执行的结果不会因为顺序不同而不同。
     """
     rules = [
@@ -65,6 +63,7 @@ def _calculation_rules(manifest: dict[str, Any], enabled_codes: set[str]) -> lis
         if item.get("rule_code") in enabled_codes and item.get("status") != "DISABLED"
     ]
     by_code = {item["rule_code"]: item for item in rules}
+    result_owners = {item["result_code"]: item["rule_code"] for item in rules}
     ordered: list[dict[str, Any]] = []
     state: dict[str, int] = {}
 
@@ -80,11 +79,14 @@ def _calculation_rules(manifest: dict[str, Any], enabled_codes: set[str]) -> lis
                 details={"rule_code": code},
             )
         state[code] = 1
-        rule = by_code.get(code)
-        if rule is not None:
-            for dependency in sorted(rule.get("depends_on_result_codes") or []):
-                visit(dependency)
-            ordered.append(rule)
+        rule = by_code[code]
+        for dependency in sorted(rule.get("depends_on_result_codes") or []):
+            # 依赖保存的是结果编号，必须先定位产出它的规则。其它计算节点的
+            # 上游不在本次集合中，由冻结 DAG 保证先执行，不在这里重复计算。
+            owner = result_owners.get(dependency)
+            if owner is not None:
+                visit(owner)
+        ordered.append(rule)
         state[code] = 2
 
     for code in sorted(by_code):
@@ -95,46 +97,68 @@ def _calculation_rules(manifest: dict[str, Any], enabled_codes: set[str]) -> lis
 def _field_facts(db: Session, task: AuditTask) -> dict[tuple[str, str, str, str], calc.FactValue]:
     """当前有效的字段与上游计算事实，按计算参数的定位键建索引。
 
-    EXTRACTED 只取已确认的数值事实；DERIVED 只取已经 COMPUTED 的数值事实。
+    EXTRACTED 只取已形成有效值的事实；DERIVED 只取已经 COMPUTED 的事实。
+    LLM 可读取数值、日期、文本、布尔和结构化值。
     这样分属不同计算节点的规则也能引用上游结果，未算出值的派生事实不会混入。
     """
     facts: dict[tuple[str, str, str, str], calc.FactValue] = {}
-    rows = db.scalars(
-        select(TaskFact).where(
-            TaskFact.audit_task_id == task.id,
-            TaskFact.is_current.is_(True),
-            or_(
-                and_(
-                    TaskFact.fact_kind == "EXTRACTED",
-                    TaskFact.status.in_(("PRESENT", "REVIEWED")),
-                ),
-                and_(
-                    TaskFact.fact_kind == "DERIVED",
-                    TaskFact.status == calc.CALC_STATUS_COMPUTED,
-                ),
-            ),
-            TaskFact.decimal_value.is_not(None),
-        )
-    ).all()
+    all_rows = task_csv_service.records(db, task, TaskFact)
+    by_id = {row.id: row for row in all_rows}
+    material_keys_by_id: dict[int, tuple[str, ...]] = {}
+    fields_by_code = {
+        str(field.get("source_ref") or field["field_key"]): field
+        for field in task.task_schema_json["fields"]
+    }
+
+    def source_material_keys(fact_id: int) -> tuple[str, ...]:
+        if fact_id in material_keys_by_id:
+            return material_keys_by_id[fact_id]
+        row = by_id[fact_id]
+        if row.fact_kind == "EXTRACTED":
+            keys = {row.material_key}
+        else:
+            # 读取计算当时引用的具体事实版本，包括已退出当前位的历史输入。
+            keys = {
+                key for item in row.input_snapshot_json["inputs"]
+                for key in source_material_keys(item["fact_id"])
+            }
+        material_keys_by_id[fact_id] = tuple(sorted(key for key in keys if key is not None))
+        return material_keys_by_id[fact_id]
+
+    rows = [row for row in all_rows
+            if row.is_current
+            and ((row.fact_kind == "EXTRACTED" and row.status in {"PRESENT", "REVIEWED"})
+                 or (row.fact_kind == "DERIVED" and row.status == calc.CALC_STATUS_COMPUTED))]
     for row in rows:
-        facts[
-            calc.fact_key(
-                source_type="FIELD" if row.fact_kind == "EXTRACTED" else "CALC_RESULT",
-                source_code=row.fact_code,
-                period_scope=row.period_scope,
-                statement_scope=row.statement_scope,
+        value = row.decimal_value if row.value_type in {"DECIMAL", "AMOUNT"} else fact_snapshot.task_fact_value(
+            row, field_definition=fields_by_code.get(row.fact_code),
+        )
+        if value is None:
+            continue
+        key = calc.fact_key(
+            source_type="FIELD" if row.fact_kind == "EXTRACTED" else "CALC_RESULT",
+            source_code=row.fact_code,
+            period_scope=row.period_scope,
+            statement_scope=row.statement_scope,
+        )
+        if key in facts:
+            raise BusinessError(
+                "CALC_INPUT_IDENTITY_DUPLICATE", "计算输入存在多个相同身份的当前有效事实",
+                status_code=500, details={"fact_code": row.fact_code},
             )
-        ] = calc.FactValue(
+        facts[key] = calc.FactValue(
             fact_id=row.id,
             fact_code=row.fact_code,
             revision_no=row.revision_no,
-            value=row.decimal_value,
+            value=value,
             unit=row.unit,
             currency=row.currency,
             source_execution_id=row.source_execution_id,
             period_scope=row.period_scope,
             statement_scope=row.statement_scope,
             material_key=row.material_key,
+            source_material_keys=source_material_keys(row.id),
+            value_type=row.value_type,
         )
     return facts
 
@@ -145,23 +169,31 @@ def _compiled_rule(payload: dict[str, Any]) -> calc.CalculationRule:
     还原失败说明这份 manifest 的计算段不完整或版本不兼容——明确报错，
     不尝试用缺省的字段补出一份「能跑」的规则。
     """
+    calc.assert_llm_engine(str(payload.get("rule_code") or ""), payload.get("execution_engine"))
     try:
         definition = calc.CalculationDefinition.model_validate(
             {
                 "rule_code": payload["rule_code"],
                 "rule_name": payload["rule_name"],
                 "calculation_type": payload["calculation_type"],
+                "execution_engine": payload["execution_engine"],
+                "judgement_instruction": payload.get("judgement_instruction", ""),
+                "execution_mode": payload.get("execution_mode", "CHECK"),
                 "formula": payload["formula"],
                 "result_code": payload["result_code"],
                 "result_type": payload["result_type"],
                 "unit": payload.get("unit"),
                 "currency": payload.get("currency"),
-                "period_policy": payload["period_policy"],
-                # 报表口径与「结果期间」一样是执行契约的必填项：派生事实按它落库，
-                # 下游按它定位。漏传会让任何已发布配置在这里直接还原失败。
-                "statement_scope": payload["statement_scope"],
+                # 口径仅在业务实际涉及时有具体值；历史或省略配置统一按不适用还原。
+                "period_policy": payload.get("period_policy") or SCOPE_NOT_APPLICABLE,
+                "statement_scope": payload.get("statement_scope") or SCOPE_NOT_APPLICABLE,
                 "status": payload.get("status") or "CLEAR",
                 "remark": payload.get("remark") or "",
+                "description": payload.get("description") or "",
+                "verification_logic": payload.get("verification_logic") or "",
+                "bands_text": payload.get("bands_text") or "",
+                "risk_level_text": payload.get("risk_level_text") or "",
+                "review_advice": payload.get("review_advice") or "",
             }
         )
         parameters = [
@@ -179,8 +211,6 @@ def _compiled_rule(payload: dict[str, Any]) -> calc.CalculationRule:
         definition=definition,
         parameters=parameters,
         bands=bands,
-        ast=payload["ast"],
-        expression_hash=payload.get("expression_hash") or "",
         # 参数定位口径随编译产物冻结，运行期直接读它建立字段事实的定位键。
         # 漏还原会让每个参数都取不到事实（报「输入缺失」而看不出原因）。
         parameter_scopes={
@@ -200,7 +230,6 @@ def _write_fact(
     *,
     rule: calc.CalculationRule,
     result: calc.EvaluationResult,
-    judgement: calc.JudgementResult | None,
 ) -> TaskFact:
     """写入一条计算派生事实。
 
@@ -238,13 +267,13 @@ def _write_fact(
         # 硬编码成「合并报表」会让声明了母公司口径的计算结果被下游按合并口径取走。
         period_scope=definition.period_policy,
         statement_scope=definition.statement_scope,
-        value_type="DECIMAL",
+        value_type="AMOUNT" if definition.result_type == "AMOUNT" else "DECIMAL",
         decimal_value=result.value,
         unit=definition.unit,
         currency=definition.currency,
         source_execution_id=execution.id,
         input_snapshot_json=calc.input_snapshot(rule=rule, result=result),
-        judgement_json=judgement.to_payload() if judgement is not None else None,
+        judgement_json=result.llm_result,
         calculation_status=result.status,
         calculation_rule_code=definition.rule_code,
         revision_no=revision_no,
@@ -260,38 +289,80 @@ def _result_payload(
     *,
     rule: calc.CalculationRule,
     result: calc.EvaluationResult,
-    judgement: calc.JudgementResult | None,
+    manifest: dict[str, Any],
 ) -> dict[str, Any]:
     definition = rule.definition
+    input_names = {
+        ("FIELD", item.get("source_ref") or item["field_key"]): item["name"]
+        for item in manifest["fields"]
+    }
+    input_names.update({
+        ("CALC_RESULT", item["result_code"]): item["rule_name"] for item in manifest.get("calculations", [])
+    })
+    material_names = _material_names(manifest)
+    value_only = definition.execution_mode == "VALUE_ONLY"
     payload: dict[str, Any] = {
         "rule_code": definition.rule_code,
         "result_code": definition.result_code,
+        "result_type": definition.result_type,
+        "unit": definition.unit,
+        "currency": definition.currency,
         "calculation_type": definition.calculation_type,
+        "execution_mode": definition.execution_mode,
+        "execution_engine": definition.execution_engine,
+        "judgement_instruction": definition.judgement_instruction,
         "formula": definition.formula,
         "calculation_status": result.status,
+        "inputs": [
+            {
+                "fact_id": item.fact_id,
+                "fact_code": item.fact_code,
+                "revision_no": item.revision_no,
+                "material_key": key,
+                "material_name": material_names[key],
+                "field_name": input_names[("FIELD" if item.material_key is not None else "CALC_RESULT", item.fact_code)],
+                "source_type": "FIELD" if item.material_key is not None else "CALC_RESULT",
+                "value_type": item.value_type,
+                "unit": item.unit,
+                "currency": item.currency,
+                "normalized_value": format(item.value, "f") if isinstance(item.value, Decimal) else item.value,
+            }
+            for item in result.inputs
+            for key in item.source_material_keys
+        ],
         "standard": {
             "operator_label": "计算",
             "requirement": definition.formula,
-            "comparison_label": "计算结果与判定区间比较" if rule.bands else "本条计算没有配置判定区间",
-            "clear": bool(rule.bands),
-            **({} if rule.bands else {"missing": "该计算规则没有配置判定区间，无法形成业务结论"}),
+            "comparison_label": "仅计算中间值，不判断合格或异常" if value_only else "按规则库要求由 AI 辅助判断",
+            "clear": True,
         },
         "comparison": {
             "kind": "CALCULATION",
             "left_label": "计算结果",
             "left_value": None if result.value is None else format(result.value, "f"),
-            "right_label": "判定区间",
-            "right_value": "；".join(band.describe() for band in rule.bands) or "未配置",
             "expression": definition.formula,
-            "mode_label": "落在哪个判定区间内",
+            "mode_label": "仅计算中间值" if value_only else "按业务标准判断",
         },
     }
-    if judgement is not None:
-        payload["judgement"] = judgement.to_payload()
+    if not value_only:
+        payload["comparison"].update({
+            "right_label": "判断标准",
+            "right_value": definition.judgement_instruction or "；".join(
+                f"{'结果' if band.comparison_basis == 'RESULT' else '结果绝对值'} "
+                f"{band.describe()}：{band.judgement}"
+                for band in rule.bands
+            ),
+        })
     if result.reason:
         payload["reason"] = result.reason
     if result.missing_parameters:
         payload["missing_parameters"] = list(result.missing_parameters)
+    payload.update(origin="LLM", llm_result=result.llm_result,
+                   calculation_steps=result.llm_result["calculation_steps"])
+    if not value_only:
+        payload["judgement"] = result.llm_result
+        payload["risk_level"] = result.llm_result["risk_level"]
+        payload["action"] = result.llm_result["action"]
     return payload
 
 
@@ -332,10 +403,10 @@ def _calculation(
 ) -> dict[str, Any]:
     """计算节点的主入口。
 
-    `node_code` 是本节点在场景里的**实例码**，由 `flow._dispatch` 传入。规则按它归属：
-    同一份计算规则可以被多个计算节点引用，各自按自己的上游事实执行。
-    拿不到实例码即明确报错，**不用能力类型顶替**——用能力类型当实例码会让过滤条件
-    恒为假，节点返回「本模板未配置计算规则」并记为 SKIPPED，而模板其实配了计算。
+    `node_code` 是本节点在场景里的实例码，由 `flow._dispatch` 传入。规则按它归属：
+    不同场景与节点实例共用此执行入口，每次按当前节点的冻结计划选择计算规则。
+    拿不到实例码即明确报错，不用能力类型顶替——用能力类型当实例码会让过滤条件
+    恒为假，将已配置规则误记为 SKIPPED。
     """
     if not node_code:
         raise BusinessError(
@@ -344,7 +415,7 @@ def _calculation(
             status_code=500,
             details={"node": task.current_node},
         )
-    # 本次执行的计算规则范围取自**节点计划里冻结的** `calculation_rule_codes`
+    # 本次执行的计算规则范围取自节点计划里冻结的 `calculation_rule_codes`
     # （发布期由 build_node_plan 按该节点实例固化）。不读 task_schema_json 里的
     # `enabled_rule_codes`：那个键没有任何写入方，回退到 `enabled_rule_keys`
     # 又拿稳定规则键去比计算规则的业务编号，两者永不相交。
@@ -364,43 +435,21 @@ def _calculation(
             "status_counts": {},
             "check_configured": False,
             "skipped": True,
-            "skip_reason": "本方案未启用计算规则" if configured else "本模板未配置计算规则",
+            "skip_reason": "本方案未启用计算规则" if configured else "当前节点未配置计算规则",
         }
+    compiled_rules = [_compiled_rule(payload) for payload in rules]
     facts = _field_facts(db, task)
     material_names = _material_names(manifest)
     counts: dict[str, int] = {}
     computed = 0
-    for payload in rules:
-        rule = _compiled_rule(payload)
-        result = calc.evaluate_rule(rule=rule, facts=facts)
-        judgement: calc.JudgementResult | None = None
-        if result.status == calc.CALC_STATUS_COMPUTED and result.value is not None:
-            judgement = calc.judge(result.value, rule.bands)
-        fact = _write_fact(db, task, execution, rule=rule, result=result, judgement=judgement)
+    for rule in compiled_rules:
+        result = evaluate_with_llm(rule=rule, facts=facts)
+        _write_fact(db, task, execution, rule=rule, result=result)
         if result.status == calc.CALC_STATUS_COMPUTED:
             computed += 1
-            # 上游结果立即进入索引：同一批里的下游规则要按它取值，
-            # 用 result_code 定位，与计算参数的 CALC_RESULT 来源一一对应。
-            facts[
-                calc.fact_key(
-                    source_type="CALC_RESULT",
-                    source_code=rule.definition.result_code,
-                    period_scope=rule.definition.period_policy,
-                    statement_scope=rule.definition.statement_scope,
-                )
-            ] = calc.FactValue(
-                fact_id=fact.id,
-                fact_code=rule.definition.result_code,
-                revision_no=fact.revision_no,
-                value=result.value,
-                unit=rule.definition.unit,
-                currency=rule.definition.currency,
-                source_execution_id=execution.id,
-                period_scope=rule.definition.period_policy,
-                statement_scope=rule.definition.statement_scope,
-                material_key=None,
-            )
-        status = _rule_status_of(result, judgement)
+            # 同一批下游计算也重新读取 CSV，不能直接沿用内存计算值跳过中间存取。
+            facts = _field_facts(db, task)
+        status = result.llm_result["status"]
         counts[status] = counts.get(status, 0) + 1
         record = RuleResult(
             audit_task_id=task.id,
@@ -412,8 +461,8 @@ def _calculation(
             legacy_rule_key=None,
             rule_name=rule.definition.rule_name,
             status=status,
-            message=_message_of(result, judgement),
-            result_json=_result_payload(rule=rule, result=result, judgement=judgement),
+            message=result.llm_result["message"],
+            result_json=_result_payload(rule=rule, result=result, manifest=manifest),
         )
         db.add(record)
         if status == "PENDING_REVIEW":
@@ -440,7 +489,8 @@ def _calculation(
                         "result_code": rule.definition.result_code,
                         "calculation_status": result.status,
                         "calculated_value": None if result.value is None else format(result.value, "f"),
-                        "judgement": judgement.to_payload() if judgement is not None else None,
+                        "judgement": result.llm_result,
+                        "llm_result": result.llm_result,
                     },
                     business_note=record.message,
                 )
@@ -454,42 +504,3 @@ def _calculation(
         "skip_reason": None,
         "material_names": material_names,
     }
-
-
-def _rule_status_of(result: calc.EvaluationResult, judgement: calc.JudgementResult | None) -> str:
-    """计算结果 → 规则结果状态。
-
-    映射只读命中区间显式配置的结果状态，不做任何「好/坏」推断：
-
-    - 没算出来（除零 / 输入缺失 / 数值不可计算）→ `EVIDENCE_INSUFFICIENT`，
-      具体原因在消息里。它不是合格，也不是不合格。
-    - 算出结果但没有命中任何判定区间 → `EVIDENCE_INSUFFICIENT`。配置
-      留下的空隙没有业务结论，不能当成通过或异常。
-    - 命中判定区间 → 使用该区间配置的 `PASSED` / `ABNORMAL` /
-      `PENDING_REVIEW`。判定文本仍只用于展示。
-    """
-    if result.status != calc.CALC_STATUS_COMPUTED or judgement is None:
-        return "EVIDENCE_INSUFFICIENT"
-    if judgement.status == calc.JUDGEMENT_UNMATCHED:
-        return "EVIDENCE_INSUFFICIENT"
-    if judgement.band is None:
-        raise BusinessError(
-            "CALC_JUDGEMENT_BAND_MISSING",
-            "计算结果显示已命中判定区间，但没有返回对应区间",
-            status_code=500,
-        )
-    return judgement.band.result_status
-
-
-def _message_of(result: calc.EvaluationResult, judgement: calc.JudgementResult | None) -> str:
-    if result.status == calc.CALC_STATUS_DIVISION_BY_ZERO:
-        return result.reason or "计算出现除数为 0，该指标本次没有定义"
-    if result.status == calc.CALC_STATUS_INPUT_MISSING:
-        return result.reason or "计算缺少必要的输入事实，本次无法计算"
-    if result.status == calc.CALC_STATUS_UNDECIDABLE:
-        return result.reason or "计算无法完成，本次没有结论"
-    if judgement is None:
-        return "计算已完成，但没有配置判定区间，未形成业务结论"
-    if judgement.status == calc.JUDGEMENT_UNMATCHED:
-        return f"计算结果 {judgement.compared_value} 没有命中任何判定区间"
-    return f"计算结果 {judgement.compared_value} 命中判定“{judgement.band.judgement}”"

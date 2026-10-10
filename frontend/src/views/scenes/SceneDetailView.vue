@@ -1,25 +1,26 @@
 <script setup lang="ts">
-import { computed, h, reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CircleCheck, FileUp, Pencil, Plus, Power, Rocket, RotateCcw, Save, Trash2 } from "lucide-vue-next";
+import { CircleCheck, FileUp, Pencil, Plus, Power, Rocket, Save, Trash2 } from "lucide-vue-next";
 
 import type {
   ConfigSyncError,
   DraftDisabledSourceRow,
-  DraftDisabledSourceRowActivationPreview,
+  DraftSourceActivationPreview,
+  DraftSourceActivationPreviewData,
   ScenarioDetail,
   ScenarioDraftView,
 } from "@/api/contracts";
-import { getProfileSheets } from "@/api/imports";
+import { operationIdempotencyKey } from "@/api/http";
+import { useOperationTracker } from "@/composables/useOperationTracker";
 import {
-  activateDisabledSourceRow,
   deleteScene,
   getScene,
   getSceneDraft,
-  previewDisabledRuleGroup,
+  previewSourceActivation,
+  confirmSourceActivation,
   publishSceneDraft,
-  restoreScene,
   setSceneEnabled,
   updateScene,
   updateDisabledSourceRow,
@@ -48,14 +49,13 @@ const configError = ref<string | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
+const deleting = ref(false);
 const refreshToken = ref(0);
 const acknowledgedGaps = ref<string[]>([]);
 let loadSequence = 0;
-let editSequence = 0;
-let activationSequence = 0;
 
 /**
- * 场景详情分区。**`?tab=` 是当前分区的唯一真相源**：URL 变分区就变，分区变就写回 URL。
+ * 场景详情分区。`?tab=` 是当前分区的唯一真相源：URL 变分区就变，分区变就写回 URL。
  */
 const TAB_NAMES = ["basic", "source", "materials", "fields", "rules", "calculations", "flow", "sections"];
 
@@ -70,19 +70,106 @@ const tabs = computed({
   },
 });
 
-const isDeleted = computed(() => detail.value?.deleted === true);
-const canEditBasic = computed(() => detail.value !== null && !isDeleted.value);
+const canEditBasic = computed(() => detail.value !== null);
 const calculations = computed(() => configDraft.value?.calculations ?? []);
 const disabledSourceRows = computed(() => configDraft.value?.disabled_source_rows ?? []);
-const ruleGroupRoles = new Set(["MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK"]);
+const sourceSheets = computed(() => {
+  const draft = configDraft.value;
+  if (!draft) return [];
+  const items = [
+    ...draft.materials.map((item) => ({ kind: "材料", name: item.name, origin: item.origin })),
+    ...draft.fields.map((item) => ({ kind: "字段", name: item.name, origin: item.origin })),
+    ...draft.rules.filter((item) => !item.system).map((item) => ({ kind: "审核规则", name: item.name, origin: item.origin })),
+    ...draft.calculations.map((item) => ({ kind: "计算规则", name: item.name, origin: item.origin })),
+    ...draft.sections.map((item) => ({ kind: "报告章节", name: item.title, origin: item.origin })),
+  ];
+  return draft.sheets.map((sheet) => ({
+    ...sheet,
+    items: items.filter((item) => item.origin && item.origin.sheet_key === sheet.sheet_key),
+  }));
+});
 const editDisabledVisible = ref(false);
 const editDisabledSaving = ref(false);
-const activatingDisabledKey = ref<string | null>(null);
 const editingDisabledRow = ref<DraftDisabledSourceRow | null>(null);
 const editingDisabledScene = ref("");
 const editingDisabledRevision = ref(0);
 const disabledValues = ref<Record<string, string>>({});
-const disabledColumnDefinitions = ref<Record<string, Record<string, unknown>>>({});
+const selectedSourceRows = ref<DraftDisabledSourceRow[]>([]);
+const sourcePreview = ref<DraftSourceActivationPreview | null>(null);
+const sourcePreviewVisible = ref(false);
+const sourcePreviewLoading = ref(false);
+const sourceConfirmLoading = ref(false);
+const sourcePreviewScene = ref("");
+const { track: trackSourceOperation, reset: resetSourceOperation } = useOperationTracker();
+
+function selectSourceRows(rows: DraftDisabledSourceRow[]): void {
+  selectedSourceRows.value = rows;
+}
+
+async function parseSourceRows(rows: DraftDisabledSourceRow[]): Promise<void> {
+  const revision = configDraft.value?.revision_no;
+  if (revision === undefined || !rows.length) return;
+  const code = scenarioCode.value;
+  sourcePreviewLoading.value = true;
+  sourcePreview.value = null;
+  sourcePreviewVisible.value = false;
+  resetSourceOperation();
+  try {
+    const operation = await previewSourceActivation(
+      code,
+      rows.map((row) => row.row_key),
+      revision,
+      operationIdempotencyKey(code, "source_activation_preview"),
+    );
+    trackSourceOperation(operation, {
+      onFinished: async (finished) => {
+        if (code !== scenarioCode.value) return;
+        sourcePreviewLoading.value = false;
+        if (finished.status !== "SUCCEEDED") {
+          throw new Error(finished.failure_message || finished.message || "解析失败");
+        }
+        const result = finished.result as unknown as DraftSourceActivationPreviewData | null;
+        if (!result || typeof result.preview_id !== "string" || typeof result.revision_no !== "number"
+          || !Array.isArray(result.rows) || !Array.isArray(result.items) || !Array.isArray(result.questions)) {
+          throw new Error("后台解析完成，但没有返回有效的预览结果");
+        }
+        sourcePreview.value = { ...result, request_id: finished.request_id };
+        sourcePreviewScene.value = code;
+        sourcePreviewVisible.value = true;
+      },
+      onError: (error) => {
+        if (code === scenarioCode.value) {
+          sourcePreviewLoading.value = false;
+          ElMessage.error(error instanceof Error ? error.message : "解析状态查询失败");
+        }
+      },
+    });
+  } catch (error) {
+    if (code === scenarioCode.value) {
+      sourcePreviewLoading.value = false;
+      ElMessage.error(error instanceof Error ? error.message : "解析受理失败");
+    }
+  }
+}
+
+async function confirmParsedSources(): Promise<void> {
+  const preview = sourcePreview.value;
+  const code = sourcePreviewScene.value;
+  if (!preview?.can_activate || code !== scenarioCode.value) return;
+  sourceConfirmLoading.value = true;
+  try {
+    await confirmSourceActivation(code, preview.preview_id, preview.revision_no);
+    if (code !== scenarioCode.value) return;
+    sourcePreviewVisible.value = false;
+    selectedSourceRows.value = [];
+    ElMessage.success("解析配置已追加到场景草稿");
+    await load();
+  } catch (error) {
+    if (code === scenarioCode.value) ElMessage.error(error instanceof Error ? error.message : "启用失败");
+  } finally {
+    sourceConfirmLoading.value = false;
+  }
+}
 
 const basicForm = reactive({ scenario_name: "", category: "", description: "", enabled: true });
 
@@ -178,52 +265,29 @@ function toggleGap(key: string, checked: boolean): void {
 
 watch(() => scenarioCode.value, () => void load(), { immediate: true });
 watch(() => scenarioCode.value, () => {
-  editSequence += 1;
-  activationSequence += 1;
-  activatingDisabledKey.value = null;
   editDisabledVisible.value = false;
   editingDisabledRow.value = null;
+  resetSourceOperation();
+  sourcePreviewLoading.value = false;
+  sourceConfirmLoading.value = false;
+  sourcePreview.value = null;
+  sourcePreviewVisible.value = false;
+  sourcePreviewScene.value = "";
+  selectedSourceRows.value = [];
 });
 
-function disabledColumnOptions(key: string): string[] {
-  const definition = disabledColumnDefinitions.value[key];
-  const allowed = definition?.allowed_values;
-  if (!Array.isArray(allowed)) return [];
-  const labels = definition.value_labels;
-  const named = labels && typeof labels === "object" ? labels as Record<string, string> : {};
-  return [...new Set(allowed.filter((value): value is string => typeof value === "string").map((value) => named[value] ?? value))];
-}
-
-async function editDisabledRow(row: DraftDisabledSourceRow): Promise<void> {
-  const sequence = ++editSequence;
-  const code = scenarioCode.value;
-  const revision = configDraft.value?.revision_no ?? 0;
-  try {
-    const profile = await getProfileSheets(scenarioCode.value || undefined);
-    if (sequence !== editSequence || code !== scenarioCode.value) return;
-    const sheet = profile.sheets.find((item) => item.sheet_role === row.sheet_role);
-    if (!sheet) throw new Error(`模板协议中找不到工作表角色 ${row.sheet_role}`);
-    disabledColumnDefinitions.value = Object.fromEntries(sheet.columns.map((column) => [String(column.key), column]));
-    disabledValues.value = Object.fromEntries(row.columns.map((column) => [column.key, column.value]));
-    editingDisabledRow.value = row;
-    editingDisabledScene.value = code;
-    editingDisabledRevision.value = revision;
-    editDisabledVisible.value = true;
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "模板协议读取失败");
-  }
+function editDisabledRow(row: DraftDisabledSourceRow): void {
+  disabledValues.value = Object.fromEntries(row.columns.map((column) => [column.key, column.value]));
+  editingDisabledRow.value = row;
+  editingDisabledScene.value = scenarioCode.value;
+  editingDisabledRevision.value = configDraft.value?.revision_no ?? 0;
+  editDisabledVisible.value = true;
 }
 
 async function saveDisabledRow(): Promise<void> {
   const row = editingDisabledRow.value;
   if (!row || editingDisabledScene.value !== scenarioCode.value) return;
-  const values = Object.fromEntries(
-    Object.entries(disabledValues.value).filter(([key]) =>
-      key !== "enabled" && !(
-        key === "rule_code" && (row.sheet_role === "CALC_PARAMETER" || row.sheet_role === "CALC_JUDGEMENT")
-      ),
-    ),
-  );
+  const values = { ...disabledValues.value };
   editDisabledSaving.value = true;
   try {
     await updateDisabledSourceRow(editingDisabledScene.value, row.row_key, {
@@ -239,77 +303,6 @@ async function saveDisabledRow(): Promise<void> {
   } finally {
     editDisabledSaving.value = false;
   }
-}
-
-async function activateSourceRow(row: DraftDisabledSourceRow): Promise<void> {
-  const code = scenarioCode.value;
-  const revision = configDraft.value?.revision_no;
-  if (!canActivateSourceRow(row) || revision === undefined) return;
-  const sequence = ++activationSequence;
-  const isCalculation = row.sheet_role === "CALC_DEFINITION";
-  const isRuleGroup = ruleGroupRoles.has(row.sheet_role);
-  const ruleCode = row.columns.find((column) => column.key === "rule_code")?.value;
-  const linkedCount = isCalculation ? disabledSourceRows.value.filter((item) =>
-    (item.sheet_role === "CALC_PARAMETER" || item.sheet_role === "CALC_JUDGEMENT")
-    && item.columns.some((column) => column.key === "rule_code" && column.value === ruleCode),
-  ).length : 0;
-  activatingDisabledKey.value = row.row_key;
-  try {
-    let preview: DraftDisabledSourceRowActivationPreview | null = null;
-    if (isRuleGroup) {
-      preview = await previewDisabledRuleGroup(code, row.row_key);
-      if (code !== scenarioCode.value) return;
-      if (preview.revision_no !== revision) {
-        ElMessage.warning("场景草稿已变化，请核对最新配置后重试");
-        await load();
-        return;
-      }
-    }
-    const confirmation = preview
-      ? h("div", {
-        style: { whiteSpace: "pre-line", maxHeight: "260px", overflowY: "auto", overflowWrap: "anywhere" },
-      }, [
-        `本次将处理以下 ${preview.rows.length} 行来源配置：\n`,
-        ...preview.rows.map((item) => `${item.sheet_name} · 第 ${item.row_no} 行 · ${item.source_id || "未编号"}\n`),
-        preview.updated_risk_codes.length
-          ? `同时更新已有风险的来源：${preview.updated_risk_codes.join("、")}`
-          : "",
-      ])
-      : isCalculation
-        ? `确认启用计算规则「${ruleCode || "未编号"}」及其关联的 ${linkedCount} 行参数和判定？`
-        : `确认启用「${row.source_id || "未编号"}」？`;
-    try {
-      await ElMessageBox.confirm(
-        confirmation,
-        isCalculation ? "启用计算规则" : isRuleGroup ? "启用关联规则" : "启用来源行",
-        { confirmButtonText: "启用", cancelButtonText: "取消" },
-      );
-    } catch {
-      return;
-    }
-    if (code !== scenarioCode.value) return;
-    await activateDisabledSourceRow(code, row.row_key, revision);
-    if (code !== scenarioCode.value) return;
-    ElMessage.success("来源行已写入场景草稿");
-    await load();
-  } catch (error) {
-    if (code === scenarioCode.value) {
-      ElMessage.error(error instanceof Error ? error.message : "启用失败");
-    }
-  } finally {
-    if (sequence === activationSequence) activatingDisabledKey.value = null;
-  }
-}
-
-function canActivateSourceRow(row: DraftDisabledSourceRow): boolean {
-  return ruleGroupRoles.has(row.sheet_role)
-    || ["MATERIAL_LIST", "FIELD_EXTRACTION", "CALC_DEFINITION", "REPORT_TEMPLATE"].includes(row.sheet_role);
-}
-
-function activateSourceRowLabel(row: DraftDisabledSourceRow): string {
-  if (row.sheet_role === "CALC_DEFINITION") return "启用计算定义及关联参数、判定";
-  if (ruleGroupRoles.has(row.sheet_role)) return "启用关联检查与风险";
-  return "启用来源行";
 }
 
 async function publishScene(): Promise<void> {
@@ -388,32 +381,22 @@ async function removeScenario(): Promise<void> {
   }
   try {
     await ElMessageBox.confirm(
-      `确认删除场景「${detail.value.scenario_name}」？删除为逻辑删除：历史任务、报告与证据全部保留。`,
+      `确认永久删除场景「${detail.value.scenario_name}」及其草稿？删除后无法恢复，已有方案和任务不受影响。`,
       "删除场景",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
   } catch {
     return;
   }
+  deleting.value = true;
   try {
     await deleteScene(detail.value.scenario_code);
-    ElMessage.success("场景已移入已删除列表");
-    await load();
+    ElMessage.success("场景已删除");
+    await router.replace({ name: "scene-config" });
   } catch (failure) {
     ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
-  }
-}
-
-async function restoreScenario(): Promise<void> {
-  if (!detail.value) {
-    return;
-  }
-  try {
-    await restoreScene(detail.value.scenario_code);
-    ElMessage.success("场景已恢复");
-    await load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "恢复失败");
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -429,7 +412,7 @@ function openImports(): void {
 }
 
 function openPlanCreation(): void {
-  if (!detail.value || isDeleted.value || !detail.value.enabled || detail.value.latest_version_no <= 0) {
+  if (!detail.value || !detail.value.enabled || detail.value.latest_version_no <= 0) {
     return;
   }
   void router.push({ name: "plan-new", query: { scenario: detail.value.scenario_code } });
@@ -455,7 +438,6 @@ function openPlanCreation(): void {
                 <el-tag :type="detail.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
                   {{ detail.enabled ? "已启用" : "已停用" }}
                 </el-tag>
-                <el-tag v-if="isDeleted" type="danger" size="small" effect="light" disable-transitions>已删除</el-tag>
               </div>
             </div>
           </div>
@@ -465,17 +447,13 @@ function openPlanCreation(): void {
               label="返回导入作业"
               @click="router.push({ name: 'scene-import-detail', params: { jobNo: returnImportJobNo } })"
             />
-            <el-button v-if="!isDeleted" plain @click="toggleEnabled">
+            <el-button plain @click="toggleEnabled">
               <template #icon><Power :size="15" /></template>
               {{ detail.enabled ? "停用场景" : "启用场景" }}
             </el-button>
-            <el-button v-if="!isDeleted" type="danger" plain @click="removeScenario">
+            <el-button type="danger" plain :loading="deleting" @click="removeScenario">
               <template #icon><Trash2 :size="15" /></template>
               删除场景
-            </el-button>
-            <el-button v-else type="primary" @click="restoreScenario">
-              <template #icon><RotateCcw :size="15" /></template>
-              恢复场景
             </el-button>
           </div>
         </div>
@@ -489,12 +467,12 @@ function openPlanCreation(): void {
             <span v-if="detail.draft?.sync_error || configError" class="text-danger">{{ detail.draft?.sync_error?.message || configError }}</span>
           </div>
           <div class="app-toolbar__right">
-            <el-button :disabled="isDeleted" @click="openImports">
+            <el-button @click="openImports">
               <template #icon><FileUp :size="15" /></template>
               规则库导入
             </el-button>
             <el-button
-              v-if="!isDeleted && detail.draft"
+              v-if="detail.draft"
               type="primary"
               :loading="publishing"
               :disabled="Boolean(publishBlockedReason)"
@@ -503,7 +481,7 @@ function openPlanCreation(): void {
               <template #icon><Rocket :size="15" /></template>
               发布场景
             </el-button>
-            <el-button v-if="!isDeleted && detail.enabled && detail.latest_version_no > 0" @click="openPlanCreation">
+            <el-button v-if="detail.enabled && detail.latest_version_no > 0" @click="openPlanCreation">
               <template #icon><Plus :size="15" /></template>
               创建方案
             </el-button>
@@ -556,9 +534,48 @@ function openPlanCreation(): void {
           </el-tab-pane>
 
           <el-tab-pane label="来源配置" name="source">
+            <el-alert v-if="configError" type="error" show-icon :closable="false" :title="configError" />
+            <template v-else>
+              <h3 class="app-section-title">已导入工作表（{{ sourceSheets.length }}）</h3>
+              <el-table :data="sourceSheets" border empty-text="当前草稿没有 Excel 来源工作表">
+                <el-table-column type="expand" width="48">
+                  <template #default="{ row }">
+                    <el-table :data="row.items" border empty-text="该工作表没有写入材料、字段、规则或报告章节">
+                      <el-table-column prop="kind" label="配置类型" width="110" />
+                      <el-table-column prop="name" label="配置名称" min-width="170" />
+                      <el-table-column label="来源行" width="90">
+                        <template #default="{ row: item }">{{ item.origin.row_no }}</template>
+                      </el-table-column>
+                      <el-table-column label="来源原文" min-width="300">
+                        <template #default="{ row: item }">
+                          <span v-for="cell in item.origin.cells" :key="cell" class="source-cell">
+                            {{ cell }}：{{ item.origin.texts[cell] }}
+                          </span>
+                        </template>
+                      </el-table-column>
+                    </el-table>
+                  </template>
+                </el-table-column>
+                <el-table-column label="工作表" min-width="240">
+                  <template #default="{ row }">{{ row.sheet_name || row.sheet_role_label }}</template>
+                </el-table-column>
+                <el-table-column label="已写入配置数" width="140">
+                  <template #default="{ row }">{{ row.items.length }}</template>
+                </el-table-column>
+              </el-table>
+            </template>
             <div v-if="disabledSourceRows.length" class="block-gap">
               <h3 class="app-section-title">停用来源行（{{ disabledSourceRows.length }}）</h3>
-              <el-table :data="disabledSourceRows" row-key="row_key" border>
+              <div class="gap-row">
+                <span class="app-muted">可以选中关联来源行交给模型一起解析，预览后追加到草稿。</span>
+                <el-button
+                  :disabled="!selectedSourceRows.length || sourcePreviewLoading || sourceConfirmLoading"
+                  :loading="sourcePreviewLoading"
+                  @click="parseSourceRows(selectedSourceRows)"
+                >解析所选来源（{{ selectedSourceRows.length }}）</el-button>
+              </div>
+              <el-table :data="disabledSourceRows" row-key="row_key" border @selection-change="selectSourceRows">
+                <el-table-column type="selection" width="42" />
                 <el-table-column type="expand">
                   <template #default="{ row }">
                     <el-descriptions :column="2" border>
@@ -578,17 +595,16 @@ function openPlanCreation(): void {
                 <el-table-column label="操作" width="110" fixed="right">
                   <template #default="{ row }">
                     <el-tooltip content="编辑停用来源行">
-                      <el-button link :disabled="isDeleted" aria-label="编辑停用来源行" @click="editDisabledRow(row)">
+                      <el-button link aria-label="编辑停用来源行" @click="editDisabledRow(row)">
                         <Pencil :size="16" />
                       </el-button>
                     </el-tooltip>
-                    <el-tooltip v-if="canActivateSourceRow(row)" :content="activateSourceRowLabel(row)">
+                    <el-tooltip content="解析并预览启用配置">
                       <el-button
                         link
-                        :disabled="isDeleted || activatingDisabledKey !== null"
-                        :loading="activatingDisabledKey === row.row_key"
-                        :aria-label="activateSourceRowLabel(row)"
-                        @click="activateSourceRow(row)"
+                        :disabled="sourcePreviewLoading || sourceConfirmLoading"
+                        aria-label="解析并预览启用配置"
+                        @click="parseSourceRows([row])"
                       >
                         <CircleCheck :size="16" />
                       </el-button>
@@ -618,8 +634,15 @@ function openPlanCreation(): void {
               </el-table-column>
               <el-table-column prop="rule_code" label="规则编号" min-width="120" />
               <el-table-column prop="name" label="名称" min-width="160" />
+              <el-table-column label="计算方式" min-width="220">
+                <template #default="{ row }">{{ row.execution_engine === 'LLM' ? 'AI 辅助计算与判断' : '旧程序计算，需重新解析规则库' }}</template>
+              </el-table-column>
+              <el-table-column label="计算用途" min-width="160">
+                <template #default="{ row }">{{ row.execution_mode === 'VALUE_ONLY' ? '仅计算中间值' : '计算并判定' }}</template>
+              </el-table-column>
               <el-table-column prop="node_code" label="节点实例" min-width="140" />
-              <el-table-column prop="formula" label="公式" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="formula" label="计算方法" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="judgement_instruction" label="判断标准" min-width="220" show-overflow-tooltip />
               <el-table-column prop="result_code" label="结果编号" min-width="120" />
               <el-table-column prop="unit" label="单位" width="90" />
               <el-table-column prop="currency" label="币种" width="90" />
@@ -651,26 +674,29 @@ function openPlanCreation(): void {
         <div class="text-muted">{{ editingDisabledRow.sheet_name }} · 第 {{ editingDisabledRow.source.row_no }} 行</div>
         <el-form label-position="top" class="disabled-row-form">
           <el-form-item v-for="column in editingDisabledRow.columns" :key="column.key" :label="column.cell ? `${column.label}（${column.cell}）` : column.label">
-            <el-select
-              v-if="disabledColumnOptions(column.key).length"
-              v-model="disabledValues[column.key]"
-              clearable
-              filterable
-              :disabled="column.key === 'enabled' || ((editingDisabledRow.sheet_role === 'CALC_PARAMETER' || editingDisabledRow.sheet_role === 'CALC_JUDGEMENT') && column.key === 'rule_code')"
-            >
-              <el-option v-for="option in disabledColumnOptions(column.key)" :key="option" :label="option" :value="option" />
-            </el-select>
-            <el-input
-              v-else
-              v-model="disabledValues[column.key]"
-              :disabled="(editingDisabledRow.sheet_role === 'CALC_PARAMETER' || editingDisabledRow.sheet_role === 'CALC_JUDGEMENT') && column.key === 'rule_code'"
-            />
+            <el-input v-model="disabledValues[column.key]" />
           </el-form-item>
         </el-form>
       </template>
       <template #footer>
         <el-button @click="editDisabledVisible = false">取消</el-button>
         <el-button type="primary" :loading="editDisabledSaving" @click="saveDisabledRow">保存</el-button>
+      </template>
+    </el-dialog>
+    <el-dialog v-model="sourcePreviewVisible" title="来源解析预览" width="min(1100px, 94vw)" :close-on-click-modal="false">
+      <template v-if="sourcePreview">
+        <p>本次解析 {{ sourcePreview.rows.length }} 行，生成 {{ sourcePreview.items.length }} 项配置。</p>
+        <el-alert v-if="sourcePreview.questions.length" type="warning" :closable="false" title="以下说明不阻断已有候选追加；未导入的原始来源会保留。" />
+        <p v-for="question in sourcePreview.questions" :key="question">{{ question }}</p>
+        <el-table :data="sourcePreview.items" border max-height="480">
+          <el-table-column prop="kind" label="类型" width="100" />
+          <el-table-column prop="name" label="名称" min-width="200" />
+          <el-table-column prop="description" label="业务定义" min-width="440" />
+        </el-table>
+      </template>
+      <template #footer>
+        <el-button :disabled="sourceConfirmLoading" @click="sourcePreviewVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="sourceConfirmLoading" :disabled="!sourcePreview?.can_activate || sourcePreviewScene !== scenarioCode" @click="confirmParsedSources">确认追加到草稿</el-button>
       </template>
     </el-dialog>
   </div>
@@ -783,5 +809,10 @@ function openPlanCreation(): void {
   max-height: 58vh;
   overflow-y: auto;
   margin-top: 16px;
+}
+
+.source-cell {
+  display: inline-block;
+  margin-right: 16px;
 }
 </style>

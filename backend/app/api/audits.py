@@ -33,6 +33,7 @@ from ..services import (
 )
 from ..services.audit import correct_field_value, reconcile_ocr
 from ..services.audit.commands import reconcile_external_artifact, recover_failed_checkpoint_node
+from ..services.audit.evidence import retrieval_content_view
 from ..services.audit import evidence_view, report_view, risks_view
 from ..services.background_service import operation_view
 from ..services.operation_gateway import submit_manual_reviews, submit_node_execution
@@ -66,7 +67,7 @@ from ..schema.vo import (
 from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 
-router = APIRouter(prefix="/audit-tasks", tags=["合同审核"])
+router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
 
 
 @router.get("", response_model=PagedResponse)
@@ -157,6 +158,15 @@ def export_tasks(
     )
 
 
+@router.get("/{task_no}/intermediate/download")
+def download_intermediate_csv(task_no: str, db: Session = Depends(get_db)) -> FileResponse:
+    """下载当前已提交的中间 CSV，包含抽取原文、规范值、计算结果与校验结论。"""
+    from ..services.task_csv_service import download_path
+    task = task_or_404(db, task_no)
+    return FileResponse(download_path(task), media_type="text/csv; charset=utf-8",
+                        filename=f"{task.task_name}-审核中间结果.csv")
+
+
 @router.get("/{task_no}", response_model=AuditTaskResponse)
 def get_task(task_no: str, request: Request, db: Session = Depends(get_db)) -> AuditTaskResponse:
     """任务详情：当前节点、材料位、字段、规则、待办与最近一次后台操作。"""
@@ -172,7 +182,7 @@ def update_task(task_no: str, payload: TaskUpdateRequest, request: Request, db: 
 
 @router.post("/{task_no}/copy", response_model=AuditTaskResponse, status_code=201)
 def copy_task_endpoint(task_no: str, payload: TaskCopyRequest, request: Request, db: Session = Depends(get_db)) -> AuditTaskResponse:
-    """按源任务所属方案的**当前范围**重新创建任务。
+    """按源任务所属方案的当前范围重新创建任务。
 
     明确不是「复制原任务的执行快照」：新任务冻结的是方案此刻的范围。没有方案或
     方案、场景已失效时拒绝。同一幂等标识 + 同一请求内容的重发返回原任务。
@@ -275,7 +285,7 @@ async def upload_task_document(
     """上传或替换材料位的当前文件，返回本次输入修订的真实影响范围。
 
     `material_type` 必填：用户从 8018 支持目录中选择的材料类型，随本次上传保存。
-    材料位本身不再声明类型（见 01_材料位 的列协议），因此这里不能留空。
+    材料位配置不代替本次文件的类型声明，因此这里不能留空。
     """
     record, impact = await upload_document(
         db, task_no, document_no, file, material_type=material_type, replace=replace
@@ -541,7 +551,12 @@ def get_evidence_index(task_no: str, request: Request, db: Session = Depends(get
 def list_task_retrievals(task_no: str, request: Request, db: Session = Depends(get_db)) -> dict:
     """本任务的检索记录：查询内容、限定范围、模型与索引版本、候选与采用结果。"""
     task = task_or_404(db, task_no)
-    return {**rag_service.retrieval_history_view(db, task), "request_id": request.state.request_id}
+    result = rag_service.retrieval_history_view(db, task)
+    return {
+        **result,
+        "items": [retrieval_content_view(item) for item in result["items"]],
+        "request_id": request.state.request_id,
+    }
 
 
 @router.post("/{task_no}/retrievals", response_model=RetrievalResponse)
@@ -557,6 +572,7 @@ def create_task_retrieval(
     相似度只用于候选排序，不构成主体一致的结论，结论由工作人员另行提交。
     """
     task, result = retrieval_service.retrieve(db, task_no, payload.model_dump())
+    result = retrieval_content_view(result)
     return RetrievalResponse.model_validate(
         {
             "task_no": task.task_no,

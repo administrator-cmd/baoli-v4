@@ -1,7 +1,9 @@
 """字段抽取策略及结构化值契约。
 
-Excel 只声明业务字段类型。普通文本与确定性类型由系统自动选择策略；只有需要
-多属性结果的字段才由场景或方案显式声明 STRUCTURED，并提供受支持的 JSON Schema。
+Excel 只声明业务字段类型。普通字段默认由系统选择原文或确定性策略；只有需要
+多属性结果的字段才显式声明 STRUCTURED，并提供受支持的 JSON Schema。
+普通字段由执行端按 value_type 处理原文，RAW_TEXT 与 DETERMINISTIC 不限制类型配对；
+STRUCTURED 使用声明的 Schema 处理 JSON 对象，与普通字段分开。
 """
 
 from __future__ import annotations
@@ -17,9 +19,7 @@ DETERMINISTIC = "DETERMINISTIC"
 STRUCTURED = "STRUCTURED"
 EXTRACTION_STRATEGIES = frozenset({RAW_TEXT, DETERMINISTIC, STRUCTURED})
 
-_RAW_VALUE_TYPES = frozenset({"STRING", "CLAUSE", "DECIMAL_CN"})
-_DETERMINISTIC_VALUE_TYPES = frozenset({"DECIMAL", "DATE", "BOOLEAN"})
-_STRUCTURED_VALUE_TYPES = frozenset({"STRING", "CLAUSE"})
+_TEXT_VALUE_TYPES = frozenset({"STRING", "CLAUSE", "DECIMAL_CN"})
 _JSON_TYPES = frozenset({"object", "array", "string", "number", "integer", "boolean", "null"})
 _SCHEMA_KEYS = frozenset(
     {
@@ -42,7 +42,22 @@ _SCHEMA_KEYS = frozenset(
 
 
 def default_extraction_strategy(value_type: str) -> str:
-    return RAW_TEXT if value_type in _RAW_VALUE_TYPES else DETERMINISTIC
+    return RAW_TEXT if value_type in _TEXT_VALUE_TYPES else DETERMINISTIC
+
+
+def contract_payload() -> dict[str, Any]:
+    """转换请求直接使用字段执行端支持的类型与 Schema 关键字。"""
+    return {
+        "strategies": {
+            RAW_TEXT: "LLM 抽取原文，后端按字段 value_type 形成规范值；不限制类型配对",
+            DETERMINISTIC: "LLM 抽取原文，后端按字段 value_type 形成规范值；不限制类型配对",
+            STRUCTURED: "LLM 返回符合 structure_schema 的 JSON 对象及属性证据；不限制类型配对",
+        },
+        "structured_root_type": "object",
+        "structured_properties_required": True,
+        "supported_schema_keywords": sorted(_SCHEMA_KEYS),
+        "supported_json_types": sorted(_JSON_TYPES),
+    }
 
 
 def strategy_of(field: dict[str, Any]) -> str:
@@ -64,21 +79,6 @@ def validate_field_strategy(
             f"字段“{field_name}”的抽取策略不受支持",
             details={"strategy": strategy, "allowed": sorted(EXTRACTION_STRATEGIES)},
         )
-    compatible_types = {
-        RAW_TEXT: _RAW_VALUE_TYPES,
-        DETERMINISTIC: _DETERMINISTIC_VALUE_TYPES,
-        STRUCTURED: _STRUCTURED_VALUE_TYPES,
-    }[strategy]
-    if value_type not in compatible_types:
-        raise BusinessError(
-            "FIELD_EXTRACTION_STRATEGY_TYPE_MISMATCH",
-            f"字段“{field_name}”的数据类型与抽取策略不匹配",
-            details={
-                "value_type": value_type,
-                "strategy": strategy,
-                "allowed_value_types": sorted(compatible_types),
-            },
-        )
     if strategy != STRUCTURED:
         if structure_schema not in (None, {}):
             raise BusinessError(
@@ -91,6 +91,13 @@ def validate_field_strategy(
             "FIELD_STRUCTURE_SCHEMA_REQUIRED",
             f"字段“{field_name}”使用结构化抽取时必须配置结构 Schema",
         )
+    try:
+        json.dumps(structure_schema, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise BusinessError(
+            "FIELD_STRUCTURE_SCHEMA_INVALID",
+            f"字段“{field_name}”的结构 Schema 不是有效 JSON：{exc}",
+        ) from exc
     _assert_schema(structure_schema, path="$", field_name=field_name)
     if structure_schema.get("type") != "object":
         raise BusinessError(
@@ -114,6 +121,11 @@ def normalize_structured_value(value: Any, schema: dict[str, Any]) -> dict[str, 
             raise ValueError(f"结构化字段不是有效 JSON：{exc.msg}") from exc
     if not isinstance(value, dict):
         raise ValueError("结构化字段的值必须是 JSON 对象")
+    # 同时核对未限制 items 或允许附加属性的内容；这些部分不会进入属性 Schema 校验。
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"结构化字段不是有效 JSON：{exc}") from exc
     _validate_value(value, schema, path="$")
     return value
 
@@ -232,12 +244,27 @@ def _matches_type(value: Any, declared: str) -> bool:
     return checks[declared](value)
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    """JSON 枚举相等：布尔值与数字分开，数字 1 和 1.0 等价。"""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_json_equal(a, b) for a, b in zip(left, right, strict=True))
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_json_equal(item, right[key]) for key, item in left.items())
+    return left == right
+
+
 def _validate_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
     declared = schema["type"]
     declared_types = [declared] if isinstance(declared, str) else declared
     if not any(_matches_type(value, item) for item in declared_types):
         raise ValueError(f"{path} 的类型应为 {' 或 '.join(declared_types)}")
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(_json_equal(value, allowed) for allowed in schema["enum"]):
         raise ValueError(f"{path} 的值不在允许范围内")
     if isinstance(value, dict):
         properties = schema.get("properties") or {}

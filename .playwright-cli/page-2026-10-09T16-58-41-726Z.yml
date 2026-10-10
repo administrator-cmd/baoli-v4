@@ -1,0 +1,104 @@
+- generic [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - complementary [ref=f1e4]:
+      - strong [ref=f1e12]: 保理合同审核系统
+      - menubar [ref=f1e13]:
+        - menuitem "场景管理" [expanded] [ref=f1e14]:
+          - menu [ref=f1e25]:
+            - menuitem "场景列表" [ref=f1e26] [cursor=pointer]
+            - menuitem "规则库导入" [ref=f1e27] [cursor=pointer]
+            - menuitem "场景配置" [ref=f1e28] [cursor=pointer]
+        - menuitem "方案管理" [ref=f1e29]
+        - menuitem "审核管理" [ref=f1e39]
+        - menuitem "资料管理" [ref=f1e49]
+        - menuitem "报告管理" [ref=f1e58]
+        - menuitem "系统管理" [ref=f1e67]
+    - generic [ref=f1e77]:
+      - button "折叠菜单" [ref=f1e80] [cursor=pointer]
+      - main [ref=f1e86]:
+        - generic [ref=f1e88]:
+          - generic [ref=f1e89]:
+            - generic [ref=f1e92]:
+              - button "场景管理" [ref=f1e93] [cursor=pointer]
+              - separator [ref=f1e95]
+              - heading "规则库导入" [level=1] [ref=f1e97]
+            - generic [ref=f1e98]: 当前场景 SCN_b85b11d5ec6761a5 的规则库作业
+          - generic [ref=f1e100]:
+            - generic [ref=f1e101]:
+              - generic [ref=f1e102]: 文件名称
+              - textbox "文件名称" [ref=f1e106]:
+                - /placeholder: 请输入文件名称
+            - generic [ref=f1e108]:
+              - generic [ref=f1e109]: 导入状态
+              - generic [ref=f1e112] [cursor=pointer]:
+                - generic:
+                  - combobox "导入状态" [ref=f1e114]
+                  - generic [ref=f1e115]: 全部
+            - group "创建时间" [ref=f1e120]:
+              - generic [ref=f1e122]:
+                - combobox "开始日期" [ref=f1e129]
+                - generic [ref=f1e130]: 至
+                - combobox "结束日期" [ref=f1e137]
+            - button "查询" [ref=f1e140] [cursor=pointer]
+          - button "新增导入" [ref=f1e144] [cursor=pointer]
+          - generic [ref=f1e147]:
+            - table [ref=f1e149]:
+              - rowgroup [ref=f1e158]:
+                - row [ref=f1e159]:
+                  - columnheader "序号" [ref=f1e160]
+                  - columnheader "文件名称" [ref=f1e162]
+                  - columnheader "所属场景" [ref=f1e164]
+                  - columnheader "导入状态" [ref=f1e166]
+                  - columnheader "待处理数" [ref=f1e168]
+                  - columnheader "创建时间" [ref=f1e170]
+                  - columnheader "操作" [ref=f1e172]
+            - table [ref=f1e178]:
+              - rowgroup [ref=f1e187]:
+                - row [ref=f1e188]:
+                  - cell "1" [ref=f1e189]
+                  - cell [ref=f1e192]:
+                    - button "删除按钮联调.xlsx" [ref=f1e194] [cursor=pointer]
+                  - cell "合同审核场景_Excel联调_1010" [ref=f1e196]
+                  - cell "已读取" [ref=f1e198]
+                  - cell "0" [ref=f1e202]
+                  - cell "2026-10-10 00:58:17" [ref=f1e204]
+                  - cell [ref=f1e206]:
+                    - generic [ref=f1e207]:
+                      - button "进入处理" [ref=f1e208] [cursor=pointer]
+                      - button "删除" [ref=f1e210] [cursor=pointer]
+                - row [ref=f1e212]:
+                  - cell "2" [ref=f1e213]
+                  - cell [ref=f1e216]:
+                    - button "合同审核智能体规则库01.xlsx" [ref=f1e218] [cursor=pointer]
+                  - cell "合同审核场景_Excel联调_1010" [ref=f1e220]
+                  - cell "已读取" [ref=f1e222]
+                  - cell "0" [ref=f1e226]
+                  - cell "2026-10-10 00:55:39" [ref=f1e228]
+                  - cell [ref=f1e230]:
+                    - generic [ref=f1e231]:
+                      - button "进入处理" [ref=f1e232] [cursor=pointer]
+                      - button "中止" [ref=f1e234] [cursor=pointer]
+                      - button "删除" [ref=f1e236] [cursor=pointer]
+          - generic [ref=f1e244]:
+            - generic [ref=f1e245]: 共 2 条
+            - generic [ref=f1e248] [cursor=pointer]:
+              - generic:
+                - combobox [ref=f1e250]
+                - generic [ref=f1e251]: 20条/页
+            - button "上一页" [disabled] [ref=f1e256]
+            - list [ref=f1e257]:
+              - listitem "第 1 页" [ref=f1e258]: "1"
+            - button "下一页" [disabled] [ref=f1e259]
+            - generic [ref=f1e260]:
+              - generic [ref=f1e261]: 前往
+              - spinbutton "页" [ref=f1e264]: "1"
+              - generic [ref=f1e265]: 页
+  - dialog "删除导入作业" [ref=f1e267]:
+    - generic [ref=f1e268]:
+      - generic [ref=f1e269]:
+        - generic [ref=f1e270]: 删除导入作业
+        - button "关闭此对话框" [ref=f1e271] [cursor=pointer]
+      - paragraph [ref=f1e281]: 确认删除导入作业「删除按钮联调.xlsx」？已写入场景或已发布的作业不可删除；正在转换的作业请先中止。
+      - generic [ref=f1e282]:
+        - button "取消" [ref=f1e283] [cursor=pointer]
+        - button "删除" [active] [ref=f1e285] [cursor=pointer]

@@ -57,6 +57,7 @@ class CapabilityItem(BaseModel):
     kind: str
     parent: str | None = None
     nodes: list[str] = Field(default_factory=list)
+    new_rule_nodes: list[str]
     input_kind: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     output_keys: list[str] = Field(default_factory=list)
@@ -108,13 +109,10 @@ class ToolCatalogItem(BaseModel):
 class CapabilityCatalogResponse(ApiResponse):
     """审核能力目录。
 
-    这是后端能力的单一事实来源：前端从这里取算子选项、节点约束与参数口径，
-    版本随能力语义一起变化。目录里 implemented=false 的能力可以配置，
-    但发布前必须逐条确认，运行时明确返回不可判定——不会伪装成通过。
-
-    `tools` 是同一份目录的工具视图：模型可调用的工具及其参数 Schema。
-    只有 `implemented=true` 的工具才会出现在模型请求的 `tools` 里，
-    不可调用的工具仍如实列出并写明原因，页面据此不把它们显示成可执行选项。
+    后端能力的单一事实来源：前端从这里取算子选项、节点约束与参数口径。implemented=false
+    的能力可以配置，但发布前必须逐条确认，运行时明确返回不可判定。`tools` 是同一份目录的
+    工具视图，只有 `implemented=true` 的工具才会进模型请求的 `tools`，不可调用的工具仍如实
+    列出并写明原因。
     """
 
     capability_version: str

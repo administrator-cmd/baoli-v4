@@ -36,13 +36,15 @@ class BackgroundOperation(Base, TimestampMixin):
     # 规范化请求摘要：同一幂等标识必须比较它才能判断是重发还是新请求。
     request_hash: Mapped[str | None] = mapped_column(CHAR(64))
     # 命令当前停在哪一步（COMMAND_ACCEPTED / EXTERNAL_SUBMITTED / RESULT_UNKNOWN /
-    # BUSINESS_COMMITTED / GRAPH_ADVANCED / INTERRUPT_WAITING）。恢复时按它决定唯一推进动作。
+    # BUSINESS_COMMITTED / GRAPH_ADVANCED / INTERRUPT_WAITING / RESULT_READY）。恢复时按它决定唯一推进动作。
     phase: Mapped[str | None] = mapped_column(String(40))
     # 外部作业引用（例如 OCR jobId）：本地超时后只能续查同一个作业，不能重新提交。
     external_job_ref: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 相对于 data 根目录；原始模型返回独立保存，业务校验失败仍保留索引。
+    raw_response_path: Mapped[str | None] = mapped_column(String(500))
     failure_code: Mapped[str | None] = mapped_column(String(80))
     failure_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))

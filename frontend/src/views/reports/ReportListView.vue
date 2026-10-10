@@ -152,7 +152,7 @@ const detailReasons = computed(() => {
     unfinished_rules: "存在未执行、证据不足或待复核的规则",
     pending_reviews: "存在待处理的人工复核项",
     material_type_mismatches: "存在材料类型待复核项",
-    risk_not_configured: "本模板未配置风险评级规则",
+    risk_not_configured: "当前场景未配置风险评级规则",
     risk_inconclusive: "已配置的风险规则尚未全部形成可用结论",
     missing_rule_keys: "有已启用规则尚未形成任何结果",
     missing_required_materials: "存在尚未上传的必传材料",

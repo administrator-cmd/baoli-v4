@@ -50,7 +50,7 @@ def list_material_types() -> list[dict[str, Any]]:
     材料识别类型必须从该目录选择，不能由业务自由输入：8018 的 doc_type 是严格枚举，
     自由输入的值会在执行文件处理时被服务端直接拒绝，问题要到运行时才暴露。
 
-    目录是**外部服务的事实**，本函数不缓存、不内置任何默认清单，也不把
+    目录是外部服务的事实，本函数不缓存、不内置任何默认清单，也不把
     8018 的取值与业务材料名称做映射。
     """
 
@@ -333,7 +333,7 @@ def detect_seals(
             for seal in seals:
                 if not isinstance(seal, dict):
                     raise TypeError
-                # 供应商字段：class_name=印章类型，text=该印章识别出的**主体名称**。
+                # 供应商字段：class_name=印章类型，text=该印章识别出的主体名称。
                 # 代码内部统一称之为主体名称；下方 content.artifact_subject 说明这一归一化，
                 # 供下游按语义读取，不需要重新猜哪个字段是主体。
                 class_name = _non_empty_string(seal["class_name"])
@@ -451,11 +451,11 @@ def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmis
 
 
 def poll_ocr_job(*, job_id: str, deadline_at: datetime) -> ExternalServiceResult:
-    """查询并下载一个**此前已提交**的 PaddleOCR 作业，不重新提交。
+    """查询并下载一个此前已提交的 PaddleOCR 作业，不重新提交。
 
     超时语义区分两类，绝不含糊：
       - 单次 HTTP 请求超时：由 `_request` 抛出，消息为“……外部服务请求超时”，只说明这一次调用没等到响应；
-      - 本地等待预算耗尽（deadline_at 到期）：抛 EXTERNAL_SERVICE_TIMEOUT，消息明确说明**没有证据**表明
+      - 本地等待预算耗尽（deadline_at 到期）：抛 EXTERNAL_SERVICE_TIMEOUT，消息明确说明没有证据表明
         供应商作业已失效，系统不会自动重新提交，需要人工对账。本地停止等待不等于供应商作业失败。
     """
 
@@ -706,9 +706,9 @@ def _validate_download_url(value: str, service_code: str, operation: str) -> str
     """校验下载地址的 URL 形式，并原样返回。
 
     当前只校验 URL 形式：scheme 限定 http/https、必须有主机、不允许携带凭据、不允许片段、端口可解析。
-    **本函数不限制目标主机**，也不做"禁止内网地址"的启发式阻断：允许域名集合应来自真实供应商契约，
+    本函数不限制目标主机，也不做"禁止内网地址"的启发式阻断：允许域名集合应来自真实供应商契约，
     在拿到真实响应样本前不硬编码白名单、不猜测域名。
-    "供应商是否保证返回的地址只能指向其可控主机"属于**待核实**外部契约事项（见最终报告）。
+    "供应商是否保证返回的地址只能指向其可控主机"属于待核实外部契约事项（见最终报告）。
     """
     try:
         normalized = value.strip()
@@ -797,15 +797,12 @@ def _provider_page_index(item: dict[str, Any]) -> int | None:
 def _parse_ocr_ndjson(value: str) -> tuple[list[dict[str, Any]], float | None, str]:
     """解析 PaddleOCR NDJSON 结果，保留全部结果项（含空页）并显式标注页号来源。
 
-    本函数无法确认供应商是否存在真实页号字段（参考客户端 OCR-Demo 与现有实现都按结果项顺序计数，
-    没有任何页号字段），因此生成的 page_no 是**合成的稳定顺序号**，并在每个 page 上用
-    page_no_source 显式标注为 SYNTHETIC_SEQUENCE——合成页号是显式标注的，不是伪装成真实页号。
-    只有在 _OCR_PROVIDER_PAGE_INDEX_FIELDS 填入已核实的字段名后，才会改用 PROVIDER 页号。
+    供应商是否有真实页号字段无法确认（参考客户端与现有实现都按结果项顺序计数），因此生成的
+    page_no 是合成的稳定顺序号，并在每个 page 上用 page_no_source 标注为 SYNTHETIC_SEQUENCE。
+    只有在 `_OCR_PROVIDER_PAGE_INDEX_FIELDS` 填入已核实的字段名后才会改用 PROVIDER 页号。
 
-    合成页号按结果项顺序覆盖**全部**项（含空页），所以不会出现"第 1 页为空、第 2 页被前移"的错位。
-    空页保留在 pages 里（text 为空字符串、empty=True），page_count 因此等于总项数。
-
-    返回值第三项为顶层语义：SYNTHETIC_SEQUENCE（合成页号）或 PROVIDER（供应商页号）。
+    合成页号按结果项顺序覆盖全部项（含空页），所以不会出现「第 1 页为空、第 2 页被前移」的
+    错位；空页保留在 pages 里（text 为空字符串、empty=True），page_count 因此等于总项数。
     """
     pages: list[dict[str, Any]] = []
     confidences: list[float] = []

@@ -8,24 +8,26 @@ from fastapi import UploadFile
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from ..repositories import configuration_store as config_store
+
 from ..config import get_settings
 from ..domain.manifest import (
-    NODE_DEFINITIONS,
     RESOLVABLE_PROPERTIES,
+    calculation_decision_aliases,
     draft_config_of_import,
     excluded_targets,
     import_origin_of,
+    normalize_decision_targets,
+    normalize_resolution_value,
     resolved_targets,
     resolve_saved_decisions,
     rule_comparison_view,
 )
-from ..domain.proposals import ProposalBundle
+from ..domain.proposals import ProposalBundle, report_property_target_refs
 from ..domain.workbook import WorkbookIR
 from ..common.exceptions import BusinessError
 from ..graphs.import_graph import (
     import_decision_signature,
-    node_note_target_ref,
-    resume_import_decision,
     run_sheet_conversion,
     run_workbook_read,
 )
@@ -42,14 +44,11 @@ from .background_service import ACTIVE_STATUSES, assert_no_active_operation, lat
 from ..domain.identity import public_no
 from .operation_types import OBJECT_IMPORT_JOB
 from .operation_log_service import record_operation
-from ..domain import scenario_schema, unified_profile
+from ..domain import scenario_schema, node_profile
 from .storage_service import RULEBOOK_EXTENSIONS, save_upload
 
 
-NODE_LABELS = dict(NODE_DEFINITIONS)
-
-# 模板说明页（元数据 Sheet）在 import_sheet 里的**唯一**状态值。
-# 保存绑定与转换必须统一使用该值，否则元数据 Sheet 会被误当成待绑定业务表。
+# 工作表不参与解析时的状态值，保存选择与转换共用。
 METADATA_SHEET_STATUS = "EXCLUDED"
 
 
@@ -97,8 +96,6 @@ def _job_schema(job: ImportJob) -> dict[str, Any]:
     return schema
 
 
-def _job_profile(job: ImportJob) -> dict[str, Any]:
-    return scenario_schema.effective_profile(_job_schema(job))
 
 
 def _ensure_import_mutable(db: Session, job: ImportJob) -> None:
@@ -136,32 +133,24 @@ def _record_import_checkpoint_failure(db: Session, job: ImportJob, error: Busine
 
 
 def _is_template_metadata_sheet(sheet: ImportSheet) -> bool:
-    """模板元数据 Sheet（说明页）。
+    """只有空表由系统排除；说明内容由模型按真实单元格识别。"""
+    return sheet.snapshot_json["state"] == "EMPTY"
 
-    判据只有一条：**名称命中统一协议声明的说明页**（`instruction_sheet`）。
-    模板生成、导出与导入读的是同一个声明，因此这里是确定性判断。
 
-    不再使用「隐藏且没有业务表头」作判据：隐藏只是 Excel 的展示属性，
-    任何一张隐藏的业务 Sheet 都会被它误判成元数据，随后因为
-    「保存绑定写 HIDDEN、转换要求 EXCLUDED」而必然转换失败。
-    """
-    name = unified_profile.instruction_sheet_name(unified_profile.load_unified_profile())
-    return sheet.sheet_name == name
 
 
 async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: str) -> ImportJob:
-    """在**指定场景**下上传规则库、读取工作簿并建立导入作业。
+    """在指定场景下上传规则库、读取工作簿并建立导入作业。
 
     `scenario_code` 是必填的：上传流程以场景为起点（用户先建场景、再在该场景下上传），
-    场景不由 Excel 表头推断。猜错场景会拿另一套列协议去解释这份文件，
-    报出一堆与真实问题无关的缺列错误，而用户手里的文件根本没变。
+    场景不由 Excel 表头推断；解析使用该场景的实际节点与能力目录。
 
     场景必须真实存在且未删除：写一个不存在的场景编号会让作业挂在一个查不到的场景上。
     """
     settings = get_settings()
     # 场景必须真实存在且未删除：写一个不存在的场景编号会让作业挂在一个查不到的场景上。
     template = db.scalar(select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == scenario_code))
-    if template is None or template.deleted_at is not None:
+    if template is None:
         raise BusinessError(
             "IMPORT_SCENARIO_NOT_FOUND",
             "导入作业必须属于一个已创建的场景，请先在场景管理里建立场景再上传",
@@ -210,14 +199,14 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
             source_path=relative_path,
             source_sha256=sha256,
             source_size=size,
-            # 统一模板协议：系统只有一份协议，这里记录按哪一版协议解释这份文件。
+            # 记录内部节点能力与历史参考格式版本，不约束上传文件的业务表头。
             profile_version=workbook_ir.profile_version,
             # 上传入口的场景身份：作业明确属于哪个场景，不从 Excel 内容猜。
             scenario_code=scenario_code,
             schema_key=schema["schema_key"],
             schema_version=schema["schema_version"],
             schema_json=schema,
-            profile_display_version=unified_profile.UNIFIED_PROFILE_VERSION,
+            profile_display_version=node_profile.NODE_PROFILE_VERSION,
             status="PARSED",
             workbook_ir_json=workbook_ir.model_dump(mode="json"),
             decisions_json={
@@ -231,22 +220,9 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
         )
         db.add(job)
         db.flush()
-        # 上传时**只记录读取到的事实**，不预设绑定：绑定关系（Sheet → 节点实例）
-        # 必须由用户在绑定步骤确认。系统给出的 suggested_role 只作页面预选，
-        # 不写进 bound_role、也不据此生成节点——未确认的绑定等于替用户做了决定。
+        # 默认选择所有非空表；布局与业务语义交由 LLM 理解。
         for sheet in workbook_ir.sheets:
-            # 只有表头、没有业务数据行的 Sheet 仍然保留：表头是确定的列协议，
-            # 当前业务行没有数据不等于这张表不该被读取。
-            # 真正的 EMPTY（连表头都没有）无法确定列，按无业务数据处理。
-            if sheet.state in {"EMPTY", "NO_BUSINESS_DATA"}:
-                status = sheet.state
-            else:
-                status = "PARSED"
-            # 名称命中协议声明的说明页时，它就是模板元数据：固定排除，状态用
-            # METADATA_SHEET_STATUS（转换期读同一个值）。**隐藏与否不参与判断**：
-            # 隐藏只是 Excel 展示属性，隐藏的业务 Sheet 仍由用户绑定与导入。
-            if sheet.name == unified_profile.instruction_sheet_name(scenario_schema.effective_profile(schema)):
-                status = METADATA_SHEET_STATUS
+            status = "EXCLUDED" if sheet.state == "EMPTY" else "BOUND"
             db.add(
                 ImportSheet(
                     import_job_id=job.id,
@@ -254,10 +230,6 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
                     sheet_name=sheet.name,
                     visible=sheet.visible,
                     status=status,
-                    bound_role=None,
-                    bound_node_code=None,
-                    # 表头行要等用户确认。候选留在 snapshot_json.header_candidates，不把第一行写成已确认表头。
-                    header_row=None,
                     snapshot_json=sheet.model_dump(mode="json"),
                 )
             )
@@ -278,6 +250,8 @@ def _proposal_business_view(
     job: ImportJob,
     sheet_names: dict[str, str],
     open_targets: set[tuple[str, str]],
+    node_names: dict[str, str],
+    node_types: dict[str, str],
 ) -> dict[str, Any] | None:
     """业务候选视图。
 
@@ -288,8 +262,10 @@ def _proposal_business_view(
     proposals = job.proposals_json
     if not isinstance(proposals, dict):
         return None
-    decisions = [item for item in (job.decisions_json or {}).get("items", []) if isinstance(item, dict)]
-    effective = resolve_saved_decisions(proposals, decisions)
+    decisions = normalize_decision_targets(
+        proposals, [item for item in (job.decisions_json or {}).get("items", []) if isinstance(item, dict)],
+    )
+    effective = resolve_saved_decisions(proposals, decisions, node_types=node_types)
     excluded_sheets, excluded_refs = excluded_targets(decisions)
     resolved_refs = resolved_targets(decisions)
 
@@ -333,6 +309,13 @@ def _proposal_business_view(
         for sheet in effective.get("sheets", [])
         for field in sheet.get("fields", [])
     }
+    calculation_meta = {
+        item["result_code"]: {
+            "rule_name": item["rule_name"],
+            "node_name": node_names.get(item["node_code"]),
+        }
+        for item in effective.get("calculations", [])
+    }
     sheets: list[dict[str, Any]] = []
     # 原始候选用于保留来源事实；两者按 candidate_ref 一一对应。
     origins = {
@@ -349,14 +332,18 @@ def _proposal_business_view(
         origin_rules = {item["candidate_ref"]: item for item in origin.get("rules", [])}
         rule_views: list[dict[str, Any]] = []
         for item in sheet.get("rules", []):
-            comparison = rule_comparison_view(item, material_names, field_labels, rule_names, field_meta)
+            comparison = rule_comparison_view(
+                item, material_names, field_labels, rule_names, field_meta,
+                calculation_meta=calculation_meta,
+            )
             rule_views.append(
                 {
                     "candidate_ref": item["candidate_ref"],
                     "name": item["name"],
                     "node": item["node"],
-                    "node_name": NODE_LABELS.get(item["node"], item["node"]),
+                    "node_name": node_names.get(item["node"]),
                     "operator": item["operator"],
+                    "config_status": item.get("config_status"),
                     "decision_state": decision_state("RULE", item["candidate_ref"], sheet_key),
                     "original": _origin_view(origin_rules.get(item["candidate_ref"]), ("name", "node", "operator")),
                     "comparison": comparison,
@@ -419,7 +406,7 @@ def _proposal_business_view(
                 "report_sections": [
                     {"section_name": item["section_name"]} for item in sheet.get("report_sections", [])
                 ],
-                "question_count": len(sheet.get("questions", [])),
+                "question_count": 0,
             }
         )
     original_calculations = {
@@ -473,10 +460,14 @@ def _proposal_business_view(
                 "candidate_ref": candidate_ref,
                 "rule_code": rule_code,
                 "rule_name": item["rule_name"],
+                "execution_mode": item.get("execution_mode", "CHECK"),
+                "execution_engine": item.get("execution_engine", "PROGRAM"),
+                "judgement_instruction": item.get("judgement_instruction", ""),
                 "formula": item["formula"],
                 "result_code": item["result_code"],
                 "result_type": item["result_type"],
                 "node_code": item["node_code"],
+                "node_name": node_names.get(item["node_code"]),
                 "status": item["status"],
                 "parameters": item["parameters"],
                 "bands": item["bands"],
@@ -534,20 +525,17 @@ def _unprocessed_note(snapshot: dict[str, Any]) -> str | None:
     settings = get_settings()
     notes: list[str] = []
     if snapshot.get("rows_truncated"):
-        notes.append(f"本表共 {snapshot['max_row']} 行，只读取了前 {settings.workbook_preview_rows} 行")
+        notes.append(f"本表共 {snapshot['max_row']} 行，预览仅显示前 {settings.workbook_preview_rows} 行，解析读取完整内容")
     if snapshot.get("columns_truncated"):
-        notes.append(f"本表共 {snapshot['max_column']} 列，只读取了前 {settings.workbook_preview_columns} 列")
+        notes.append(f"本表共 {snapshot['max_column']} 列，预览仅显示前 {settings.workbook_preview_columns} 列，解析读取完整内容")
     if snapshot.get("cells_truncated"):
-        notes.append(f"部分单元格内容超过 {settings.workbook_cell_chars} 字，超出部分没有被读取")
+        notes.append(f"部分单元格内容超过 {settings.workbook_cell_chars} 字，超出部分仅在预览中省略，解析读取完整原文")
     return "；".join(notes) if notes else None
 
 
 def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
-    """保持原有 profile 摘要形状，同时按作业的场景 schema 展示 Sheet 协议。"""
-    profile = _job_profile(job)
-    summary = unified_profile.profile_summary(profile)
-    # 角色目录是完整协议，不是场景草稿里已经确认的 Sheet。
-    # 新场景还没有 scenario_draft_sheet 时也必须能选择角色。
+    """返回节点能力摘要与作业所属场景身份。"""
+    summary = node_profile.node_summary()
     scenario_name: str | None = None
     if job.scenario_code:
         template = db.scalar(select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == job.scenario_code))
@@ -564,14 +552,13 @@ def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
 def _ordered_sheets_of(db: Session, job_id: int) -> list[ImportSheet]:
     """按上传顺序（也就是 Excel 里的 Sheet 顺序）读取本作业的工作表。
 
-    **先只排 id，再按 id 取行**，不直接对带 `snapshot_json` 的行做排序：
-    `import_sheet` 每行带着这张表的整份读取快照（实测单表 261 KB），而 MySQL 的
-    filesort 要求**整行**放进 `sort_buffer_size`（本机 256 KB）。行一旦大于缓冲，
-    查询直接报 1038 Out of sort memory，整个导入详情页 500。
-    只排 id 时参与排序的是 8 字节的整数，与行大小无关，因此不受缓冲限制。
+    先只排 id，再按 id 取行，不直接对带 `snapshot_json` 的行做排序：`import_sheet` 每行带着
+    这张表的整份读取快照（实测单表 261 KB），而 MySQL 的 filesort 要求整行放进
+    `sort_buffer_size`（本机 256 KB），行一旦大于缓冲，查询直接报 1038 Out of sort memory，
+    整个导入详情页 500。只排 id 时参与排序的是 8 字节整数，与行大小无关。
 
-    这不是「调大缓冲」能根治的：快照大小由上传文件决定，没有上界；
-    换一个更大的缓冲只是把同一个错误推到更大的文件上。
+    这不是「调大缓冲」能根治的：快照大小由上传文件决定，没有上界，换更大的缓冲只是把同一个
+    错误推到更大的文件上。
     """
     ordered_ids = db.scalars(
         select(ImportSheet.id).where(ImportSheet.import_job_id == job_id).order_by(ImportSheet.id)
@@ -585,19 +572,35 @@ def _ordered_sheets_of(db: Session, job_id: int) -> list[ImportSheet]:
 def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
     """导入作业的业务视图：工作表、问题、候选、草稿修订号与最新后台操作。"""
     sheets = _ordered_sheets_of(db, job.id)
-    issues = db.scalars(select(ImportIssue).where(ImportIssue.import_job_id == job.id).order_by(ImportIssue.id)).all()
+    # 历史业务审批记录仍保留，不再作为作答事项或候选待处理状态返回。
+    issues = db.scalars(select(ImportIssue).where(
+        ImportIssue.import_job_id == job.id,
+        ImportIssue.category.notin_(["BUSINESS_AMBIGUITY", "BUSINESS_CONFIRMATION"]),
+    ).order_by(ImportIssue.id)).all()
     sheet_names = {item.sheet_key: item.sheet_name for item in sheets}
-    open_targets = {
-        (item.source_json.get("target_type"), item.source_json.get("target_ref"))
-        for item in issues
-        if item.status == "OPEN" and isinstance(item.source_json, dict)
+    report_sections = {
+        section["candidate_ref"]: section
+        for sheet in (job.proposals_json or {}).get("sheets", [])
+        for section in sheet.get("report_sections", [])
     }
+    open_targets = set()
+    for item in issues:
+        if item.status != "OPEN" or not isinstance(item.source_json, dict):
+            continue
+        source = item.source_json
+        if source.get("resolution_notice"):
+            continue
+        target_type, target_ref = source.get("target_type"), source.get("target_ref")
+        target_refs = (
+            report_property_target_refs(report_sections, target_ref, source.get("property"))
+            if target_type == "REPORT_SECTION" else [target_ref]
+        )
+        open_targets.update((target_type, ref) for ref in target_refs)
     # 暂存作答只用于回填未决问题；已裁决的问题以 decision_json 为准。
     draft_answers = (job.decisions_json or {}).get("draft_answers")
     draft_answers = draft_answers if isinstance(draft_answers, dict) else {}
     manifest_draft = job.manifest_draft_json if isinstance(job.manifest_draft_json, dict) else {}
-    profile = _job_profile(job)
-    profile_roles = set(unified_profile.sheet_index(profile))
+    draft_nodes = _draft_nodes_of_scenario(db, job.scenario_code)
     return {
         "job_no": job.job_no,
         "source_filename": job.source_filename,
@@ -606,7 +609,7 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
         "schema_key": job.schema_key,
         "schema_version": job.schema_version,
         "schema_json": _job_schema(job),
-        # 作业所属场景与统一模板协议摘要；具体场景只使用系统能力全集中的一部分 Sheet。
+        # 作业所属场景及节点能力摘要；解析范围来自实际工作表选择。
         "profile": _job_profile_summary(db, job),
         "draft_revision": job.draft_revision,
         "sheets": [
@@ -615,31 +618,8 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
                 "name": item.sheet_name,
                 "visible": item.visible,
                 "status": item.status,
-                # 固定排除只用于模板元数据（填写说明、隐藏元数据页）。
-                # 「只有表头没有业务行」的业务表仍然参与转换（产生零行业务集合），
-                # 不是固定排除；把它标成固定排除会让页面显示成“已跳过”，与转换实际行为不符。
+                # 只有空表标为系统排除；说明页和隐藏表不因名称或展示属性被排除。
                 "fixed_excluded": _is_template_metadata_sheet(item),
-                # 已确认的绑定：Sheet 角色 + 所属**节点实例**。两者都由用户确认后落库，
-                # 刷新页面时直接读它们，不重新按表头推导。
-                #
-                # 历史作业可能保存协议旧角色名。
-                # 旧 role 会同时命中多张表，单独一个旧名不足以确定角色，因此这里
-                # **如实标出它无法解释**，由页面提示用户重新确认绑定；
-                # 不静默按第一个同名角色解释。
-                "role": item.bound_role,
-                "role_legacy_unmapped": (
-                    item.bound_role is not None
-                    and item.bound_role not in profile_roles
-                    and unified_profile.role_of_legacy_role(profile, item.bound_role) is None
-                ),
-                "node_code": item.bound_node_code,
-                # 建议值：只用于页面预选。它**不是**绑定结果，页面必须让用户确认后保存。
-                "suggested_role": item.snapshot_json.get("suggested_role"),
-                "suggested_role_label": unified_profile.sheet_role_label(
-                    profile, item.snapshot_json.get("suggested_role")
-                ),
-                "role_label": unified_profile.sheet_role_label(profile, item.bound_role),
-                "header_row": item.header_row,
                 "header_candidates": list(item.snapshot_json.get("header_candidates") or []),
                 "summary": {
                     "max_row": item.snapshot_json["max_row"],
@@ -673,6 +653,7 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
                 "source": _issue_business_source(item, sheet_names),
                 # 作答形式：选择题用 options；数值/文本输入题没有候选选项，页面需要渲染输入控件。
                 "input_kind": (item.source_json or {}).get("input_kind") or "SELECT",
+                "resolution_notice": (item.source_json or {}).get("resolution_notice"),
                 "options": item.options_json,
                 # 未决问题优先回填暂存作答，其次才是上一次的裁决记录。
                 "decision": draft_answers.get(item.issue_no)
@@ -681,7 +662,11 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
             }
             for item in issues
         ],
-        "proposals": _proposal_business_view(job, sheet_names, open_targets),
+        "proposals": _proposal_business_view(
+            job, sheet_names, open_targets,
+            {code: node.name for code, node in draft_nodes.items()},
+            {code: node.node_type for code, node in draft_nodes.items()},
+        ),
         "manifest_draft": _manifest_business_view(job),
         # 每条来源业务记录的处置（候选 / 明确排除 / 待处理问题）。
         "coverage": job.coverage_json,
@@ -696,21 +681,15 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
 def abort_import_job(db: Session, job_no: str) -> BackgroundOperation:
     """中止该导入作业尚未结束的后台操作。
 
-    只把命令本身标成终态 INTERRUPTED 并释放活跃占用，让作业回到可重试 / 可删除的状态。
-    这是「释放占用」而不是「回滚」：作业状态与草稿数据一概不改，重试时由 retry_conversion
-    按自己的草稿修订整体重建。没有活跃操作时明确报错，不静默成功。
+    只把命令本身标成终态 INTERRUPTED 并释放活跃占用，让作业回到可重试 / 可删除的状态。这是
+    「释放占用」而不是「回滚」：作业状态与草稿数据一概不改，重试时由 retry_conversion 按自己
+    的草稿修订整体重建。没有活跃操作时明确报错，不静默成功。
 
-    执行线程不被强杀，所以语义要说清：
-    - 线程还没认领命令（PENDING，或刚受理就被中止）：它启动时看到的已不是活跃状态，直接退出，转换不会发生；
-    - 线程已经在跑：它可能正处在一次 MySQL 写入中，强行打断比让它自己跑完更危险。它会跑完并
-      按真实结果覆盖状态——中止不是回滚，服务端不会为了配合「已中止」而使假状态。
-      两个线程写同一份草稿由作业行锁串行化（retry_conversion 全程持有），不会并发写。
-
-    这里刻意**不取作业行锁**：retry_conversion 会在整个转换期间持有它（含 LLM 调用），
-    取锁会让中止请求一等等到转换自己结束，那正好是用户点「中止」要避免的情况。
-    本函数只改 background_operation，不碰 import_job，因此无需该锁。
+    不强杀正在等待模型的线程；模型返回后写入前必须重新检查命令状态，中止结果不能覆盖草稿。
+    模型调用期间不持有数据库事务。中止与转换落库都按「作业、命令」顺序加锁，
+    保证中止提交以后，旧转换不能再写入候选或覆盖中止状态。
     """
-    _job_or_404(db, job_no)
+    job = _job_or_404(db, job_no, lock=True)
     operation = db.scalar(
         select(BackgroundOperation)
         .where(
@@ -728,7 +707,6 @@ def abort_import_job(db: Session, job_no: str) -> BackgroundOperation:
             status_code=409,
             details={"job_no": job_no},
         )
-    job = db.scalar(select(ImportJob).where(ImportJob.job_no == job_no))
     previous_status = operation.status
     operation.status = "INTERRUPTED"
     operation.failure_code = "OPERATION_ABORTED"
@@ -738,7 +716,7 @@ def abort_import_job(db: Session, job_no: str) -> BackgroundOperation:
         db,
         object_type=OBJECT_IMPORT_JOB,
         object_no=job_no,
-        object_name=job.source_filename if job else job_no,
+        object_name=job.source_filename,
         operation_type="ABORT",
         detail={"job_no": job_no, "operation_no": operation.operation_no, "previous_status": previous_status},
     )
@@ -769,9 +747,7 @@ def import_job_summaries(db: Session) -> list[dict[str, Any]]:
 def _draft_nodes_of_scenario(db: Session, scenario_code: str | None) -> dict[str, Any]:
     """作业所属场景草稿里用户配置的节点实例（node_code → 节点行）。
 
-    绑定必须指向**用户真实建立的节点实例**：允许绑定到一个不存在的 node_code，
-    等于让这条绑定在发布时无处落地，而页面会显示成绑定成功。
-    作业没有记录场景时返回空字典，由调用方按「无可绑定节点」明确报错。
+    用于模型能力目录、候选归属展示和节点引用核对；没有场景或草稿时返回空字典。
     """
     if not scenario_code:
         return {}
@@ -780,147 +756,28 @@ def _draft_nodes_of_scenario(db: Session, scenario_code: str | None) -> dict[str
         return {}
     return {
         item.node_code: item
-        for item in db.scalars(select(ScenarioDraftNode).where(ScenarioDraftNode.draft_id == draft.id)).all()
+        for item in config_store.rows(db, ScenarioDraftNode, draft.id)
     }
 
 
 def update_sheet_bindings(db: Session, job_no: str, request: SheetBindingsRequest) -> ImportJob:
-    """保存 Sheet → 节点实例的绑定（含 Sheet 角色与表头行）。
-
-    绑定是**本次场景配置的明确输入**：只有已绑定的 Sheet 才按对应节点协议进行校验、
-    导入、发布并进入任务工作流；未绑定或被排除的 Sheet 不自动推断用途，也不进入执行范围。
-
-    一张 Sheet 只能绑定一个节点（本函数的入参就是单值），一个节点可以绑定多张 Sheet
-    （财报的计算定义/参数/判定三表都绑到同一个 CALCULATION 实例上）。
-    绑定必须指向用户真实建立的节点实例，且该节点类型必须在这张 Sheet 的
-    `node_types` 声明范围内——绑定到不相干的节点类型会让这张表按错误的协议被解释。
-    """
+    """保存本次参与解析的工作表；用途、表头和业务引用由 LLM 理解。"""
     job = _job_or_404(db, job_no, lock=True)
-    # 改绑定与后台转换互斥：转换进行中不能改动工作表用途（锁后检查，避免竞态）。
     assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
     _ensure_import_mutable(db, job)
     sheets = {item.sheet_key: item for item in db.scalars(select(ImportSheet).where(ImportSheet.import_job_id == job.id))}
-    profile = _job_profile(job)
-    supported_roles = set(unified_profile.sheet_index(profile))
-    nodes = _draft_nodes_of_scenario(db, job.scenario_code)
-    request_keys = [item.sheet_key for item in request.bindings]
-    if len(request_keys) != len(set(request_keys)):
-        raise BusinessError("SHEET_BINDING_DUPLICATE", "工作表绑定包含重复项")
-    missing_sheet_keys = set(sheets) - set(request_keys)
-    if missing_sheet_keys:
-        raise BusinessError(
-            "SHEET_BINDING_INCOMPLETE",
-            "请为当前导入作业的全部工作表提交绑定结果",
-            details={"missing_sheet_count": len(missing_sheet_keys)},
-        )
+    keys = [item.sheet_key for item in request.bindings]
+    if len(keys) != len(set(keys)) or set(keys) != set(sheets):
+        raise BusinessError("SHEET_BINDING_INCOMPLETE", "工作表选择必须包含全部实际工作表，且不能重复")
     for binding in request.bindings:
-        sheet = sheets.get(binding.sheet_key)
-        if not sheet:
-            raise BusinessError("SHEET_NOT_FOUND", "绑定引用了不存在的工作表", details={"sheet_key": binding.sheet_key})
-        if _is_template_metadata_sheet(sheet):
-            if not binding.excluded or binding.role is not None or binding.header_row is not None or binding.node_code is not None:
-                raise BusinessError(
-                    "TEMPLATE_METADATA_IMMUTABLE",
-                    "模板说明页不能绑定为业务工作表",
-                    status_code=409,
-                    details={"sheet_name": sheet.sheet_name},
-                )
-            sheet.status = METADATA_SHEET_STATUS
-            sheet.bound_role = None
-            sheet.bound_node_code = None
-            sheet.header_row = None
-            continue
-        if binding.excluded:
-            sheet.status = "EXCLUDED"
-            sheet.bound_role = None
-            sheet.bound_node_code = None
-            continue
-        if binding.role is None:
-            raise BusinessError(
-                "SHEET_ROLE_REQUIRED",
-                "业务工作表必须选择用途或排除该工作表",
-                details={"sheet_name": sheet.sheet_name},
-            )
-        if binding.role not in supported_roles:
-            raise BusinessError("SHEET_ROLE_INVALID", "工作表用途不受支持", details={"role": binding.role})
-        if binding.node_code is None:
-            raise BusinessError(
-                "SHEET_NODE_REQUIRED",
-                "业务工作表必须绑定到一个业务节点；未绑定的 Sheet 不进入执行范围",
-                details={"sheet_name": sheet.sheet_name},
-            )
-        node = nodes.get(binding.node_code)
-        if node is None:
-            raise BusinessError(
-                "SHEET_NODE_UNKNOWN",
-                "工作表绑定的业务节点不在当前场景的节点配置里：请先在场景配置里建立该节点",
-                details={
-                    "sheet_name": sheet.sheet_name,
-                    "node_code": binding.node_code,
-                    "configured_nodes": sorted(nodes),
-                },
-            )
-        if not node.enabled:
-            raise BusinessError(
-                "SHEET_NODE_DISABLED",
-                f"工作表不能绑定到已停用的节点“{node.node_code}”",
-                status_code=409,
-                details={"sheet_name": sheet.sheet_name, "node_code": node.node_code},
-            )
-        allowed_types = unified_profile.node_types_of_sheet_role(profile, binding.role)
-        if node.node_type not in allowed_types:
-            raise BusinessError(
-                "SHEET_NODE_TYPE_MISMATCH",
-                f"工作表用途「{unified_profile.sheet_role_label(profile, binding.role)}」"
-                f"不能绑定到节点类型「{node.node_type}」上",
-                details={
-                    "sheet_name": sheet.sheet_name,
-                    "role": binding.role,
-                    "node_code": binding.node_code,
-                    "node_type": node.node_type,
-                    "allowed_node_types": list(allowed_types),
-                },
-            )
-        if binding.header_row is None:
-            raise BusinessError("SHEET_HEADER_REQUIRED", "业务工作表必须选择表头行", details={"sheet_name": sheet.sheet_name})
-        convertible_rows = {row["row_no"] for row in sheet.snapshot_json["preview_rows"]}
-        if binding.header_row not in convertible_rows:
-            raise BusinessError(
-                "SHEET_HEADER_INVALID",
-                "所选表头行不在当前工作表的可转换范围内，请重新选择表头行",
-                details={"sheet_name": sheet.sheet_name, "header_row": binding.header_row},
-            )
-        sheet.bound_role = binding.role
-        sheet.bound_node_code = binding.node_code
-        sheet.header_row = binding.header_row
-        sheet.status = "BOUND"
-    # 统一协议里一个 sheet_role 只声明一次，它描述的是「这张表是什么」。
-    # 两张实际 Sheet 同时绑同一个 role 会让转换器按同一份列协议读两份不同的表，
-    # 后读到的覆盖先读到的，而页面看起来两张都绑好了。这里显式拒绝，
-    # 不依赖前端单选，也不静默只保留其中一张。
-    role_owners: dict[str, list[str]] = {}
-    for sheet in sheets.values():
-        if sheet.status == "BOUND" and sheet.bound_role:
-            role_owners.setdefault(sheet.bound_role, []).append(sheet.sheet_name)
-    duplicated = {role: names for role, names in role_owners.items() if len(names) > 1}
-    if duplicated:
-        labels = [
-            f"{unified_profile.sheet_role_label(profile, role)}（{'、'.join(names)}）"
-            for role, names in sorted(duplicated.items())
-        ]
-        raise BusinessError(
-            "SHEET_ROLE_DUPLICATED",
-            "同一个 Sheet 用途被多张工作表占用：一张用途只能对应一张表，请改为只保留一张，"
-            "或给其余工作表选择各自的用途。冲突项：" + "；".join(labels),
-            status_code=409,
-            details={"duplicated_roles": sorted(duplicated)},
-        )
+        sheet = sheets[binding.sheet_key]
+        sheet.status = "EXCLUDED" if binding.excluded else "BOUND"
     db.execute(delete(FieldCandidate).where(FieldCandidate.import_job_id == job.id))
     db.execute(delete(ImportIssue).where(ImportIssue.import_job_id == job.id))
     job.proposals_json = None
     job.decisions_json = None
     job.manifest_draft_json = None
-    # 历史作业可能留有导入发布检查绑定；绑定变化后必须作废。
+    # 解析范围变化后，历史导入发布检查记录不再有效。
     job.precheck_json = None
     job.draft_revision = job.draft_revision + 1
     job.status = "PARSED"
@@ -930,114 +787,92 @@ def update_sheet_bindings(db: Session, job_no: str, request: SheetBindingsReques
     return job
 
 
-def retry_conversion(db: Session, job_no: str) -> ImportJob:
-    """提交规则转换前的校验与准备；模板元数据工作表必须保持排除状态。"""
+
+
+def _conversion_job_for_write(
+    db: Session, job_no: str, operation_no: str, *, draft_revision: int | None = None,
+) -> ImportJob:
+    """短事务内确认转换仍有效；与中止共用加锁顺序，拒绝旧线程写回。"""
     job = _job_or_404(db, job_no, lock=True)
+    operation = db.scalar(
+        select(BackgroundOperation).where(
+            BackgroundOperation.operation_no == operation_no,
+            BackgroundOperation.object_type == OBJECT_IMPORT_JOB,
+            BackgroundOperation.object_no == job_no,
+        ).with_for_update().execution_options(populate_existing=True)
+    )
+    if operation is None:
+        raise BusinessError("OPERATION_NOT_FOUND", "转换操作不存在", status_code=404)
+    if operation.status != "RUNNING":
+        raise BusinessError(
+            "OPERATION_NOT_ACTIVE", "转换操作已结束或被中止，拒绝写入旧结果", status_code=409,
+            details={"operation_no": operation_no, "status": operation.status},
+        )
+    if draft_revision is not None and job.draft_revision != draft_revision:
+        raise BusinessError(
+            "IMPORT_DRAFT_REVISION_CONFLICT", "导入配置已变化，拒绝写入旧转换结果", status_code=409,
+            details={"job_no": job_no},
+        )
     _ensure_import_mutable(db, job)
-    sheets = db.scalars(select(ImportSheet).where(ImportSheet.import_job_id == job.id)).all()
-    bindings: dict[str, dict[str, Any]] = {}
-    for item in sheets:
-        if _is_template_metadata_sheet(item):
-            if item.bound_role is not None:
-                raise BusinessError(
-                    "TEMPLATE_METADATA_IMMUTABLE",
-                    "模板说明页不能绑定为业务工作表",
-                    status_code=409,
-                    details={"sheet_name": item.sheet_name},
-                )
-            if item.status != METADATA_SHEET_STATUS:
-                # 历史导入作业把说明页记成过别的值（HIDDEN）。说明页身份由名称确定性
-                # 判定，含义与 METADATA_SHEET_STATUS 完全相同，因此这里显式归一，
-                # 而不是让它带着旧值进入「不是 EXCLUDED 就报错」的检查。
-                item.status = METADATA_SHEET_STATUS
-            bindings[item.sheet_key] = {
-                "role": None,
-                "node_code": None,
-                "header_row": None,
-                "excluded": True,
-            }
-            continue
-        bindings[item.sheet_key] = {
-            "role": item.bound_role,
-            # 节点实例码随绑定一起进转换：转换器据此把这张表归到用户配置的那个节点实例上。
-            "node_code": item.bound_node_code,
-            "header_row": item.header_row,
-            "excluded": item.status == "EXCLUDED",
-        }
+    return job
+
+
+def _reset_conversion_candidates(db: Session, job: ImportJob) -> None:
+    """新结果与旧候选的替换在同一短事务中提交。"""
     db.execute(delete(FieldCandidate).where(FieldCandidate.import_job_id == job.id))
     db.execute(delete(ImportIssue).where(ImportIssue.import_job_id == job.id))
     job.proposals_json = None
     job.decisions_json = None
     job.manifest_draft_json = None
     job.coverage_json = None
-    # 重新转换会整体替换候选配置，历史导入发布检查绑定随之失效。
     job.precheck_json = None
     job.draft_revision = job.draft_revision + 1
+
+
+def retry_conversion(db: Session, job_no: str, *, operation_no: str) -> ImportJob:
+    """读取输入后释放事务，模型返回时再锁定作业并提交结果。"""
+    job = _conversion_job_for_write(db, job_no, operation_no)
+    sheets = _ordered_sheets_of(db, job.id)
+    nodes = [
+        {"node_code": node.node_code, "node_type": node.node_type, "name": node.name,
+         "enabled": node.enabled, "depends_on": node.depends_on}
+        for node in _draft_nodes_of_scenario(db, job.scenario_code).values()
+    ]
+    bindings = {item.sheet_key: {"excluded": item.status == "EXCLUDED", "available_nodes": nodes} for item in sheets}
+    draft_revision = job.draft_revision
+    workbook_ir = job.workbook_ir_json
+    scenario_code = job.scenario_code
+    schema_json = _job_schema(job)
+    # 此前只有读取：显式结束事务并释放行锁，后续不得访问已过期的 ORM 输入。
+    db.rollback()
     try:
         checkpoint_ns = f"import:conversion:{public_no('CKPT')}"
         graph_state = run_sheet_conversion(
-            job_no=job.job_no,
+            job_no=job_no,
+            operation_no=operation_no,
             checkpoint_ns=checkpoint_ns,
-            workbook_ir=job.workbook_ir_json,
+            workbook_ir=workbook_ir,
             bindings=bindings,
-            scenario_code=job.scenario_code,
-            schema_json=_job_schema(job),
+            scenario_code=scenario_code,
+            schema_json=schema_json,
         )
+        job = _conversion_job_for_write(db, job_no, operation_no, draft_revision=draft_revision)
+        _reset_conversion_candidates(db, job)
         bundle = ProposalBundle.model_validate(graph_state["proposals"])
         proposal_json = bundle.model_dump(mode="json")
         coverage_json = _bundle_coverage(bundle)
         node_notes = [note for note in (graph_state.get("node_notes") or []) if isinstance(note, dict)]
-        # 可作答的待确认事项：每条进入裁决集合，与 import_graph._node_note_targets 的取舍一致。
-        resolvable_notes = [note for note in node_notes if note.get("resolve")]
+        # 导入不生成业务审批事项；技术说明仅随覆盖信息留存。
         if coverage_json is not None:
             coverage_json["notices"] = [
-                {
-                    "code": note["code"],
-                    "message": note["message"],
-                    "sheet_name": note["sheet_name"],
-                    "row_no": note["row_no"],
-                }
-                for note in node_notes if not note.get("resolve")
+                {"code": note["code"], "message": note["message"],
+                 "sheet_name": note["sheet_name"], "row_no": note["row_no"]}
+                for note in node_notes
             ]
-        for note in resolvable_notes:
-            resolve = note["resolve"]
-            # 落库的裁决目标身份与 import_decision_signature 同口径（真实业务对象 + 被裁决属性）：
-            # 另造一套合成身份会让转换期与恢复期算出两个不同的 decision_signature。
-            target_ref = node_note_target_ref(note)
-            db.add(
-                ImportIssue(
-                    import_job_id=job.id,
-                    issue_no=public_no("ISS"),
-                    category="BUSINESS_CONFIRMATION",
-                    severity="BLOCKER",
-                    status="OPEN",
-                    title=note["question_title"],
-                    description=note["message"],
-                    source_json={
-                        "source": {
-                            "sheet_key": note["sheet_key"],
-                            "row_no": note["row_no"],
-                            "cells": [note["cell"]] if note.get("cell") else [],
-                        },
-                        "target_type": resolve["target_type"],
-                        "target_ref": resolve["target_ref"],
-                        "property": resolve["property"],
-                        "input_kind": note.get("input_kind") or "SELECT",
-                        "resolve": resolve,
-                        "node_note_code": note["code"],
-                        "node_note_target": target_ref,
-                    },
-                    options_json=note.get("question_options") or [],
-                )
-            )
-        needs_decision = any(sheet.questions for sheet in bundle.sheets) or bool(resolvable_notes)
+        needs_decision = False
         decision_count = graph_state.get("decision_count")
         decision_signature = graph_state.get("decision_signature")
-        # 待裁决集合由「模型问题 + 可作答的节点版待确认事项」共同决定，两者在同一份
-        # 契约下统计。只统计 sheet.questions 会让节点版待确认事项的存在被漏判。
-        # 计数与 import_decision_signature 的条目数口径一致：每条可作答事项算一条，
-        # 不按目标身份去重（同一业务对象上的两个属性是两条独立待确认事项）。
-        expected_decision_count = sum(len(sheet.questions) for sheet in bundle.sheets) + len(resolvable_notes)
+        expected_decision_count = 0
         if graph_state.get("needs_decision") != needs_decision:
             raise BusinessError("IMPORT_GRAPH_STATE_INVALID", "导入图的待裁决状态与转换结果不一致", status_code=500)
         if not isinstance(decision_count, int) or decision_count != expected_decision_count:
@@ -1059,29 +894,6 @@ def retry_conversion(db: Session, job_no: str) -> ImportJob:
                         status="PROPOSED",
                     )
                 )
-            for question in sheet.questions:
-                db.add(
-                    ImportIssue(
-                        import_job_id=job.id,
-                        issue_no=public_no("ISS"),
-                        category="BUSINESS_AMBIGUITY",
-                        severity="BLOCKER",
-                        status="OPEN",
-                        title=question.title,
-                        description=question.description,
-                        source_json={
-                            "source": question.source.model_dump(mode="json"),
-                            "target_type": question.target_type,
-                            "target_ref": question.target_ref,
-                            "property": question.property,
-                            # 作答形式与“作答值如何落到候选属性”必须随问题一起保存，
-                            # 否则缺少阈值这类输入题会被当成选择题处理。
-                            "input_kind": question.input_kind,
-                            "resolve": question.resolve.model_dump(mode="json") if question.resolve else None,
-                        },
-                        options_json=[item.model_dump(mode="json") for item in question.options],
-                    )
-                )
         job.proposals_json = proposal_json
         job.coverage_json = coverage_json
         job.decisions_json = {
@@ -1100,6 +912,10 @@ def retry_conversion(db: Session, job_no: str) -> ImportJob:
         db.commit()
         return job
     except BusinessError as exc:
+        # 撤销本次未提交的候选；只给仍在执行且输入未变化的命令记录转换失败。
+        db.rollback()
+        job = _conversion_job_for_write(db, job_no, operation_no, draft_revision=draft_revision)
+        _reset_conversion_candidates(db, job)
         job.status = "EXTERNAL_FAILED" if exc.code in {
             "LLM_CONFIG_MISSING",
             "LLM_TIMEOUT",
@@ -1124,10 +940,10 @@ def _input_answer_value(issue_no: str, input_kind: str, value: Any) -> Any:
             numeric = Decimal(str(value).strip())
         except (InvalidOperation, ValueError) as exc:
             raise BusinessError("IMPORT_ISSUE_VALUE_INVALID", "该问题需要填写数值", details={"issue_no": issue_no}) from exc
-        if not numeric.is_finite() or numeric < 0:
+        if not numeric.is_finite():
             raise BusinessError(
                 "IMPORT_ISSUE_VALUE_INVALID",
-                "该问题需要填写不小于 0 的有限数值",
+                "该问题需要填写有限数值",
                 details={"issue_no": issue_no},
             )
         return str(numeric)
@@ -1143,7 +959,7 @@ def _input_answer_value(issue_no: str, input_kind: str, value: Any) -> Any:
 
 
 def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) -> ImportJob:
-    """提交问题裁决或候选修正；问题提交仍须一次处理全部未决项。"""
+    """提交可选的业务补充或候选修正，允许分批保存。"""
     job = _job_or_404(db, job_no, lock=True)
     # 裁决与后台转换互斥：转换进行中不能提交业务结论。锁后检查，消除「先查后锁」的竞态。
     assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
@@ -1157,11 +973,32 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
             details={"expected": request.expected_revision, "actual": job.draft_revision},
         )
     # 只要作业未发布且已完成转换就允许提交：零问题的作业也要能做候选原地修正，
-    # 不再要求作业恰好停在 PENDING_DECISION。仍有未决问题时由下面的完整性校验兜底。
+    # 新作业解析完成即可补充业务说明；历史等待作业也可分批保存答案。
     if not job.proposals_json:
         raise BusinessError("IMPORT_PROPOSALS_MISSING", "规则尚未完成转换")
-    issue_refs = {item.issue_no: item for item in db.scalars(select(ImportIssue).where(ImportIssue.import_job_id == job.id))}
-    submitted_targets = [(item.target_type, item.target_ref) for item in request.decisions]
+    aliases = calculation_decision_aliases(job.proposals_json)
+    current_proposals = resolve_saved_decisions(
+        job.proposals_json, (job.decisions_json or {}).get("items", []),
+        node_types={code: node.node_type for code, node in _draft_nodes_of_scenario(db, job.scenario_code).items()},
+    )
+    report_sections = {
+        section["candidate_ref"]: section
+        for sheet in current_proposals["sheets"] for section in sheet.get("report_sections", [])
+    }
+    excluded_sheets, excluded_refs = excluded_targets((job.decisions_json or {}).get("items", []))
+    excluded_report_refs = {
+        ref for ref, section in report_sections.items()
+        if section["source"]["sheet_key"] in excluded_sheets or ("REPORT_SECTION", ref) in excluded_refs
+    }
+
+    def target_key(target_type: str, target_ref: str) -> tuple[str, str]:
+        return target_type, aliases.get(target_ref, target_ref) if target_type == "CALC_RULE" else target_ref
+
+    issue_refs = {item.issue_no: item for item in db.scalars(select(ImportIssue).where(
+        ImportIssue.import_job_id == job.id,
+        ImportIssue.category.notin_(["BUSINESS_AMBIGUITY", "BUSINESS_CONFIRMATION"]),
+    ))}
+    submitted_targets = [target_key(item.target_type, item.target_ref) for item in request.decisions]
     if len(submitted_targets) != len(set(submitted_targets)):
         raise BusinessError("IMPORT_DECISION_DUPLICATE", "同一业务对象不能提交多个裁决")
     open_issue_nos = {
@@ -1169,20 +1006,7 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
         for item in issue_refs.values()
         if item.status == "OPEN"
     }
-    pending_question_sources: list[dict[str, Any]] = []
-    pending_targets: set[tuple[str, str]] = set()
-    for issue_no in open_issue_nos:
-        source = issue_refs[issue_no].source_json
-        if not isinstance(source, dict):
-            raise BusinessError("IMPORT_ISSUE_TARGET_INVALID", "待裁决问题缺少来源信息")
-        pending_question_sources.append(source)
-        pending_targets.add((source.get("target_type"), source.get("target_ref")))
-    pending_signature = import_decision_signature(pending_question_sources) if pending_question_sources else None
     submitted_issue_nos = {item.target_ref for item in request.decisions if item.target_type == "ISSUE"}
-    if submitted_issue_nos and submitted_issue_nos != open_issue_nos:
-        raise BusinessError("IMPORT_ISSUE_DECISIONS_INCOMPLETE", "必须一次处理当前全部待裁决问题")
-    if open_issue_nos and not request.decisions:
-        raise BusinessError("IMPORT_ISSUE_DECISIONS_INCOMPLETE", "必须一次处理当前全部待裁决问题")
     direct_decisions: list[dict[str, Any]] = []
     resolved_by_target: dict[tuple[str, str], dict[str, Any]] = {}
     resolved_parameter_keys: dict[tuple[str, str], set[str]] = {}
@@ -1197,6 +1021,11 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
             if decision["action"] != "RESOLVE" or "selected" not in decision["value"]:
                 raise BusinessError("IMPORT_ISSUE_DECISION_INVALID", "问题裁决内容不完整")
             source = issue.source_json or {}
+            if source.get("resolution_notice"):
+                raise BusinessError(
+                    "IMPORT_ISSUE_READ_ONLY", source["resolution_notice"],
+                    details={"issue_no": issue.issue_no},
+                )
             input_kind = source.get("input_kind") or "SELECT"
             resolve = source.get("resolve") if isinstance(source.get("resolve"), dict) else None
             selected = decision["value"]["selected"]
@@ -1232,15 +1061,15 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
                 raise BusinessError("IMPORT_ISSUE_TARGET_INVALID", "歧义问题缺少可裁决的业务对象")
             if target_ref not in proposal_refs[target_type]:
                 raise BusinessError("IMPORT_ISSUE_TARGET_INVALID", "歧义问题引用的业务对象不存在")
-            target_key = (target_type, target_ref)
+            resolved_key = target_key(target_type, target_ref)
             resolved = resolved_by_target.setdefault(
-                target_key,
-                {"target_type": target_type, "target_ref": target_ref, "action": "RESOLVE", "value": {}},
+                resolved_key,
+                {"target_type": target_type, "target_ref": resolved_key[1], "action": "RESOLVE", "value": {}},
             )
             existing = resolved["value"].get(property_name)
             if resolve and resolve.get("mode") == "SET_PARAMETER":
                 parameter_key = resolve["parameter_key"]
-                answered_keys = resolved_parameter_keys.setdefault(target_key, set())
+                answered_keys = resolved_parameter_keys.setdefault(resolved_key, set())
                 if parameter_key in answered_keys:
                     raise BusinessError(
                         "IMPORT_ISSUE_RESOLUTION_CONFLICT",
@@ -1265,18 +1094,11 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
         else:
             if decision["target_ref"] not in proposal_refs[decision["target_type"]]:
                 raise BusinessError("IMPORT_DECISION_TARGET_NOT_FOUND", "裁决引用的业务对象不存在", details={"target_ref": decision["target_ref"]})
-            if (decision["target_type"], decision["target_ref"]) in pending_targets:
-                raise BusinessError(
-                    "IMPORT_TARGET_HAS_OPEN_ISSUE",
-                    "该候选仍有待处理的业务问题，请先提交对应结论后再修改或排除",
-                    status_code=409,
-                    details={"target_type": decision["target_type"], "target_ref": decision["target_ref"]},
-                )
             if decision["action"] == "RESOLVE":
                 if decision["target_type"] == "SHEET" and "suggested_role" in decision["value"]:
                     raise BusinessError(
                         "IMPORT_SHEET_REBIND_REQUIRED",
-                        "工作表用途只能在绑定步骤修改，请重新绑定并转换规则库",
+                        "历史表级用途不能通过候选裁决修改，请重新选择参与解析的工作表并解析规则库",
                         status_code=409,
                         details={"sheet_key": decision["target_ref"]},
                     )
@@ -1291,43 +1113,49 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
                         details={"target_type": decision["target_type"], "property": invalid},
                     )
             direct_decisions.append(decision)
+    # 报告共享属性只需作答一次，存储为同报告各章节的明确裁决，不修改模型原始返回。
+    resolved_by_target = {
+        target_key(item["target_type"], item["target_ref"]): item
+        for item in _expand_report_resolutions(
+            report_sections, list(resolved_by_target.values()), excluded_report_refs=excluded_report_refs,
+        )
+    }
+    # 仅当该候选的全部问题已有答案时清除待确认说明；未答问题不阻断导入。
+    # 显式状态作答优先。
+    candidate_statuses = {
+        (target_type, item["candidate_ref"]): item.get("config_status")
+        for sheet in job.proposals_json["sheets"]
+        for collection, target_type in (
+            ("materials", "MATERIAL"), ("fields", "FIELD"),
+            ("rules", "RULE"), ("report_sections", "REPORT_SECTION"),
+        )
+        for item in sheet.get(collection, [])
+    }
+    for item in job.proposals_json.get("calculations", []):
+        for ref in (item["candidate_ref"], item["rule_code"]):
+            candidate_statuses[("CALC_RULE", ref)] = item["status"]
+    remaining_targets = {
+        target_key((issue.source_json or {}).get("target_type"), (issue.source_json or {}).get("target_ref"))
+        for issue_no, issue in issue_refs.items()
+        if issue_no in open_issue_nos - submitted_issue_nos
+    }
+    for resolved_key, resolved in resolved_by_target.items():
+        if candidate_statuses.get(resolved_key) == "PENDING" and resolved_key not in remaining_targets:
+            status_property = "status" if resolved_key[0] == "CALC_RULE" else "config_status"
+            resolved["value"].setdefault(status_property, "CLEAR")
     workflow = (job.decisions_json or {}).get("workflow")
     merged_decisions = _merge_decision_items(
-        job.decisions_json, [*direct_decisions, *resolved_by_target.values()], workflow
+        job.decisions_json,
+        _expand_report_resolutions(
+            report_sections, [*direct_decisions, *resolved_by_target.values()], excluded_report_refs=excluded_report_refs,
+        ), workflow,
+        proposals=job.proposals_json,
     )
     # 先校验本轮裁决的候选类型，再恢复不可由数据库回滚的图检查点。
-    resolve_saved_decisions(job.proposals_json, merged_decisions["items"])
-    if submitted_issue_nos:
-        if not isinstance(workflow, dict):
-            error = BusinessError("IMPORT_CHECKPOINT_MISSING", "导入裁决流程检查点不存在，不能恢复裁决", status_code=409)
-            _record_import_checkpoint_failure(db, job, error)
-            raise error
-        checkpoint_ns = workflow.get("checkpoint_ns")
-        if not isinstance(checkpoint_ns, str) or not checkpoint_ns or workflow.get("status") != "WAITING":
-            error = BusinessError("IMPORT_CHECKPOINT_MISSING", "导入裁决流程检查点不存在或已失效，不能恢复裁决", status_code=409)
-            _record_import_checkpoint_failure(db, job, error)
-            raise error
-        decision_count = len(pending_question_sources)
-        try:
-            graph_state = resume_import_decision(
-                job_no=job.job_no,
-                checkpoint_ns=checkpoint_ns,
-                decision_signature=pending_signature or "",
-                decision_count=decision_count,
-                decisions=[item.model_dump(mode="json") for item in request.decisions],
-            )
-        except BusinessError as exc:
-            if exc.code == "IMPORT_CHECKPOINT_MISSING":
-                _record_import_checkpoint_failure(db, job, exc)
-            raise
-        workflow = {
-            "checkpoint_ns": checkpoint_ns,
-            "decision_signature": pending_signature,
-            "decision_count": decision_count,
-            "status": "RESUMED",
-            "stage_history": graph_state.get("stage_history", []),
-        }
-        merged_decisions["workflow"] = workflow
+    resolve_saved_decisions(
+        job.proposals_json, merged_decisions["items"],
+        node_types={code: node.node_type for code, node in _draft_nodes_of_scenario(db, job.scenario_code).items()},
+    )
     for issue, decision_value in issue_updates:
         issue.status = "RESOLVED"
         issue.decision_json = decision_value
@@ -1338,34 +1166,92 @@ def save_decisions(db: Session, job_no: str, request: ImportDecisionsRequest) ->
     # 会话未启用 autoflush，必须先落盘本轮的裁决状态，否则这里统计到的仍是裁决前的未决数量。
     db.flush()
     unresolved = db.scalar(
-        select(func.count()).select_from(ImportIssue).where(ImportIssue.import_job_id == job.id, ImportIssue.status == "OPEN")
+        select(func.count()).select_from(ImportIssue).where(
+            ImportIssue.import_job_id == job.id,
+            ImportIssue.status == "OPEN",
+            ImportIssue.category.notin_(["BUSINESS_AMBIGUITY", "BUSINESS_CONFIRMATION"]),
+        )
     )
-    job.status = "CONFIRMED" if unresolved == 0 else "PENDING_DECISION"
+    job.status = "CONFIRMED" if unresolved == 0 else "PROPOSED"
     db.commit()
     return job
+
+
+def _expand_report_resolutions(
+    sections: dict[str, dict[str, Any]], submissions: list[dict[str, Any]],
+    *, excluded_report_refs: set[str],
+) -> list[dict[str, Any]]:
+    """同批报告共享属性应用于全部同编号章节；冲突答案明确失败，章节启停不传播。"""
+    # 本轮明确修改报告编号时，按修改后的归属同步共享属性，不把它传回原报告。
+    sections = {ref: dict(section) for ref, section in sections.items()}
+    for item in submissions:
+        if item["target_type"] == "REPORT_SECTION" and item["action"] == "RESOLVE" and "report_code" in item["value"]:
+            sections[item["target_ref"]]["report_code"] = item["value"]["report_code"]
+    others = [item for item in submissions if item["target_type"] != "REPORT_SECTION"]
+    reports: dict[str, dict[str, Any]] = {}
+
+    def merge(target_ref: str, action: str, values: dict[str, Any]) -> None:
+        existing = reports.get(target_ref)
+        if existing is None:
+            reports[target_ref] = {
+                "target_type": "REPORT_SECTION", "target_ref": target_ref,
+                "action": action, "value": dict(values),
+            }
+            return
+        conflicts = [key for key, value in values.items() if key in existing["value"] and existing["value"][key] != value]
+        if existing["action"] != action or conflicts:
+            raise BusinessError(
+                "IMPORT_ISSUE_RESOLUTION_CONFLICT", "同一报告的共享属性或章节裁决相互冲突",
+                details={"target_ref": target_ref, "report_code": sections[target_ref].get("report_code"),
+                         "conflicts": conflicts},
+            )
+        existing["value"].update(values)
+
+    for item in submissions:
+        if item["target_type"] != "REPORT_SECTION":
+            continue
+        target_ref = item["target_ref"]
+        merge(target_ref, item["action"], {})
+        if item["action"] != "RESOLVE":
+            merge(target_ref, item["action"], item["value"])
+            continue
+        for property_name, value in item["value"].items():
+            value = normalize_resolution_value("REPORT_SECTION", property_name, value)
+            for ref in report_property_target_refs(sections, target_ref, property_name):
+                # 排除状态只由该章节自己的显式裁决改变，不能被其它章节的答案恢复。
+                if ref in excluded_report_refs and ref != target_ref:
+                    continue
+                merge(ref, "RESOLVE", {property_name: value})
+    return [*others, *reports.values()]
 
 
 def _merge_decision_items(
     previous: dict[str, Any] | None,
     submissions: list[dict[str, Any]],
     workflow: Any,
+    *,
+    proposals: dict[str, Any],
 ) -> dict[str, Any]:
     """按目标合并裁决：RESOLVE 按属性更新，其他动作替换目标状态。
 
     直接裁决与问题裁决可能分多批提交，整体替换会把此前批次的非 ISSUE 直接裁决丢掉。
-    合并键是 (target_type, target_ref)；同一候选分批修改不同属性时保留先前属性。
+    计算的候选引用与业务编号先统一为候选引用；同一候选分批修改不同属性时保留先前属性。
     parameters 是完整的业务参数对象，按属性整体替换；同一轮的参数问题已在上游汇总。
     被覆盖的旧值连同替换时间写入 history，不静默丢弃。
     直接裁决的属性白名单仍由 manifest.RESOLVABLE_PROPERTIES 在编译期统一校验。
     """
     payload = dict(previous) if isinstance(previous, dict) else {"items": []}
+    aliases = calculation_decision_aliases(proposals)
     merged: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in payload.get("items", []):
-        if isinstance(item, dict) and item.get("target_type") and item.get("target_ref"):
-            merged[(item["target_type"], item["target_ref"])] = item
+    saved = [item for item in payload.get("items", [])
+             if isinstance(item, dict) and item.get("target_type") and item.get("target_ref")]
     history = [item for item in payload.get("history", []) if isinstance(item, dict)]
     replaced_at = datetime.now(UTC).isoformat()
-    for item in submissions:
+    for raw in [*saved, *submissions]:
+        target_ref = raw["target_ref"]
+        if raw["target_type"] == "CALC_RULE":
+            target_ref = aliases.get(target_ref, target_ref)
+        item = {**raw, "target_ref": target_ref}
         key = (item["target_type"], item["target_ref"])
         replaced = merged.get(key)
         effective = item
@@ -1420,7 +1306,7 @@ def save_decision_draft(db: Session, job_no: str, answers: dict[str, Any]) -> Im
 
 def _proposal_refs(proposals: dict[str, Any]) -> dict[str, set[str]]:
     result = {"MATERIAL": set(), "FIELD": set(), "RULE": set(), "REPORT_SECTION": set(), "SHEET": set(), "CALC_RULE": set()}
-    # 计算规则候选跨 Sheet（定义 / 参数 / 判定三张表按编号关联），因此挂在 bundle 顶层，
+    # 计算规则候选的定义、参数和判定来源可跨表，因此挂在 bundle 顶层，
     # 不在 sheets 里；漏了它会让 CALC_RULE 的裁决在校验阶段直接 KeyError。
     for item in proposals.get("calculations", []) or []:
         if item.get("candidate_ref"):
@@ -1440,165 +1326,45 @@ def _proposal_refs(proposals: dict[str, Any]) -> dict[str, set[str]]:
     return result
 
 
-# 「配置可保存」不等于「规则可执行」。覆盖结果由 domain.capabilities 计算，
-# 并随已发布版本一起冻结进 manifest（参与 manifest_hash）。这里把未实现的
-# 覆盖项转换为场景发布检查的阻断项。
-def _capability_blockers(
-    coverage: dict[str, Any],
-    acknowledged: list[str],
-) -> list[dict[str, Any]]:
-    """能力缺口默认阻断发布；只有被逐条确认的规则键才放行。
-
-    确认过的缺口随版本冻结（见 manifest.capability_gaps 与 manifest.capability_coverage），
-    报告与任务范围里继续可见；未列出的缺口继续阻断。
-    确认不是“忽略全部缺口”的开关：它逐条列出使用者已看过并接受的规则键。
-    """
-    acknowledged_keys = set(acknowledged)
-    gaps = [row for row in coverage.get("rules", []) if not row.get("implemented")]
-    blockers: list[dict[str, Any]] = []
-    for row in gaps:
-        if row.get("rule_key") in acknowledged_keys:
-            continue
-        blockers.append(
-            {
-                "code": "CAPABILITY_UNIMPLEMENTED",
-                "message": (
-                    f"规则“{row['rule_name']}”引用的能力"
-                    f"“{row.get('capability_label') or row.get('capability_id')}”当前没有判定实现，"
-                    "发布后运行时会明确报“不可判定”，不会给出结论"
-                    f"（{row.get('unimplemented_reason') or '未说明'}）"
-                ),
-                "details": {
-                    "rule_key": row.get("rule_key"),
-                    "rule_name": row.get("rule_name"),
-                    "capability_id": row.get("capability_id"),
-                    "capability_version": row.get("capability_version"),
-                    "unimplemented_reason": row.get("unimplemented_reason"),
-                },
-            }
-        )
-    stale = sorted(acknowledged_keys - {row.get("rule_key") for row in gaps})
-    if stale:
-        # 确认集合里出现本次并不存在的缺口，说明确认基于另一份配置，必须显式阻断。
-        blockers.append(
-            {
-                "code": "CAPABILITY_ACKNOWLEDGEMENT_STALE",
-                "message": "确认的能力缺口与本次配置不一致，请重新执行发布检查后再确认",
-                "details": {"rule_keys": stale},
-            }
-        )
-    return blockers
-
-
 def _validated_bound_sheets(
-    db: Session,
-    job: ImportJob,
-    template: ScenarioTemplate,
-    sheets: list[ImportSheet],
+    db: Session, job: ImportJob, template: ScenarioTemplate, sheets: list[ImportSheet],
 ) -> list[dict[str, Any]]:
-    """写草稿前**重新校验**每个已绑定 Sheet，返回本次选用的 Sheet 清单。
-
-    绑定是在导入工作台确认的，而写草稿发生在之后：这期间用户可能删掉节点、停用节点、
-    改掉节点能力类型，或新导入一份规则库。此时按**过期绑定**编译会把一份对不上的配置
-    写进草稿。因此这里按提交时刻的有效状态逐项复核，任何一项不通过就整次拒绝——
-    调用方在替换草稿之前调用它，草稿不会被覆盖成半成品。
-
-    校验项（与 `update_sheet_bindings` 的确认口径一致）：
-
-    - role 属于统一协议；
-    - header_row 仍在可转换范围内；
-    - node_code 仍存在、仍启用、且其能力类型仍在该 Sheet 允许的类型中；
-    - role 没有重复（两张表争同一个用途）。
-    """
-    profile = _job_profile(job)
-    supported_roles = set(unified_profile.sheet_index(profile))
+    """核对选入表与候选来源，复核裁决后保留候选的节点仍然有效。"""
+    selected = [{"sheet_key": item.sheet_key, "sheet_name": item.sheet_name,
+                 "sheet_role": "RULE_LIBRARY:" + item.sheet_key, "node_code": None}
+                for item in sheets if item.status == "BOUND"]
+    keys = {item["sheet_key"] for item in selected}
+    if keys != {item["sheet_key"] for item in job.proposals_json["sheets"]}:
+        raise BusinessError("IMPORT_SHEET_SELECTION_CHANGED", "参与的工作表已改变，请重新解析", status_code=409)
+    decisions = normalize_decision_targets(job.proposals_json, (job.decisions_json or {}).get("items", []))
     nodes = _draft_nodes_of_scenario(db, template.scenario_code)
-    selected: list[dict[str, Any]] = []
-    role_owners: dict[str, list[str]] = {}
-    for item in sheets:
-        if item.status != "BOUND":
-            continue
-        if not item.bound_role or not item.bound_node_code:
-            raise BusinessError(
-                "IMPORT_BINDING_INCOMPLETE",
-                f"工作表“{item.sheet_name}”标记为已绑定，却缺少用途或节点",
-                status_code=409,
-                details={"sheet_name": item.sheet_name, "job_no": job.job_no},
-            )
-        role = item.bound_role
-        if role not in supported_roles:
-            raise BusinessError(
-                "SHEET_ROLE_INVALID",
-                f"工作表“{item.sheet_name}”的用途“{role}”不在统一模板协议里，请重新确认绑定",
-                status_code=409,
-                details={"sheet_name": item.sheet_name, "role": role},
-            )
-        header_row = item.header_row
-        convertible_rows = {row["row_no"] for row in item.snapshot_json["preview_rows"]}
-        if not isinstance(header_row, int) or header_row not in convertible_rows:
-            raise BusinessError(
-                "SHEET_HEADER_INVALID",
-                f"工作表“{item.sheet_name}”确认的表头行已不在可转换范围内，请重新确认表头行",
-                status_code=409,
-                details={"sheet_name": item.sheet_name, "header_row": header_row},
-            )
-        node = nodes.get(item.bound_node_code)
-        if node is None:
-            raise BusinessError(
-                "SHEET_NODE_UNKNOWN",
-                f"工作表“{item.sheet_name}”绑定的节点“{item.bound_node_code}”已不在当前场景的节点配置里，"
-                "请重新确认绑定",
-                status_code=409,
-                details={
-                    "sheet_name": item.sheet_name,
-                    "node_code": item.bound_node_code,
-                    "configured_nodes": sorted(nodes),
-                },
-            )
-        if not node.enabled:
-            raise BusinessError(
-                "SHEET_NODE_DISABLED",
-                f"工作表“{item.sheet_name}”绑定的节点“{node.node_code}”已停用，请重新确认绑定",
-                status_code=409,
-                details={"sheet_name": item.sheet_name, "node_code": node.node_code},
-            )
-        allowed_types = unified_profile.node_types_of_sheet_role(profile, role)
-        if node.node_type not in allowed_types:
-            raise BusinessError(
-                "SHEET_NODE_TYPE_MISMATCH",
-                f"工作表用途「{unified_profile.sheet_role_label(profile, role)}」与节点“{node.node_code}”"
-                f"的能力类型“{node.node_type}”不再匹配，请重新确认绑定",
-                status_code=409,
-                details={
-                    "sheet_name": item.sheet_name,
-                    "role": role,
-                    "node_code": node.node_code,
-                    "node_type": node.node_type,
-                    "allowed_node_types": list(allowed_types),
-                },
-            )
-        role_owners.setdefault(role, []).append(item.sheet_name)
-        selected.append({"sheet_key": item.sheet_key, "sheet_name": item.sheet_name, "sheet_role": role, "node_code": node.node_code})
-    duplicated = {role: names for role, names in role_owners.items() if len(names) > 1}
-    if duplicated:
-        labels = [
-            f"{unified_profile.sheet_role_label(profile, role)}（{'、'.join(names)}）"
-            for role, names in sorted(duplicated.items())
-        ]
-        raise BusinessError(
-            "SHEET_ROLE_DUPLICATED",
-            "同一个 Sheet 用途被多张工作表占用：一张用途只能对应一张表。冲突项：" + "；".join(labels),
-            status_code=409,
-            details={"duplicated_roles": sorted(duplicated)},
-        )
+    effective = resolve_saved_decisions(
+        job.proposals_json, decisions,
+        node_types={code: node.node_type for code, node in nodes.items()},
+    )
+    excluded_sheets, excluded_refs = excluded_targets(decisions)
+    active_sheets = [sheet for sheet in effective["sheets"] if sheet["sheet_key"] not in excluded_sheets]
+    candidates = [
+        *[rule for sheet in active_sheets for rule in sheet["rules"]
+          if ("RULE", rule["candidate_ref"]) not in excluded_refs],
+        *[{**field, "node_type": "FIELD_EXTRACTION"}
+          for sheet in active_sheets for field in sheet["fields"]
+          if ("FIELD", field["candidate_ref"]) not in excluded_refs],
+        *[item for item in effective["calculations"]
+          if item["source"]["sheet_key"] not in excluded_sheets
+          and ("CALC_RULE", item["candidate_ref"]) not in excluded_refs],
+    ]
+    for candidate in candidates:
+        code = candidate.get("node") or candidate["node_code"]
+        node = nodes.get(code)
+        disabled_rule = candidate.get("config_status") == "DISABLED" and "operator" in candidate
+        if node is None or node.node_type != candidate["node_type"] or (not node.enabled and not disabled_rule):
+            raise BusinessError("IMPORT_NODE_CHANGED", "配置引用的节点已删除、停用或改变类型，请重新解析", status_code=409, details={"node_code": code})
     if not selected:
-        raise BusinessError(
-            "SCENARIO_SHEET_REQUIRED",
-            "本次导入没有已确认绑定的 Sheet，不能写入场景草稿",
-            status_code=409,
-            details={"job_no": job.job_no},
-        )
+        raise BusinessError("SCENARIO_SHEET_REQUIRED", "本次没有选择工作表", status_code=409)
     return selected
+
+
 
 
 def apply_import_to_draft(
@@ -1606,14 +1372,12 @@ def apply_import_to_draft(
 ) -> ImportJob:
     """把已确认的导入结果写入场景草稿，不生成或发布场景版本。
 
-    不创建场景。场景身份以上传时记录的 scenario_code 为准，
-    不从文件名、Sheet 名或表头另找一个场景。写入会替换该场景当前草稿里的
-    材料、字段、规则、报告、选用 Sheet 与计算候选；节点实例保留
+    不创建场景：场景身份以上传时记录的 scenario_code 为准，不从文件名、Sheet 名或表头另找。
+    写入会替换该场景当前草稿里的材料、字段、规则、报告、选用 Sheet 与计算候选；节点实例保留
     场景草稿，不会按 Excel 另造一套流程。
 
-    **写草稿前先按提交时刻的有效绑定复校**（`_validated_bound_sheets`）：
-    绑定确认之后节点可能被删除、停用或改类型，按过期绑定编译会把一份对不上的配置
-    写进草稿。任一校验失败时整次拒绝，草稿不会被覆盖后只留下一个 `sync_error`。
+    写草稿前重新核对所选工作表及候选引用的实际节点（`_validated_bound_sheets`）；
+    解析后节点可能被删除、停用或改类型。任一校验失败时整次拒绝，不覆盖原草稿。
     """
     from .operation_types import OBJECT_SCENARIO
     from .scenario_admin_service import (
@@ -1652,13 +1416,6 @@ def apply_import_to_draft(
             details={"job_no": job.job_no},
         )
     template = template_or_404(db, job.scenario_code, lock=True)
-    if template.deleted_at is not None:
-        raise BusinessError(
-            "SCENARIO_DELETED",
-            "场景已删除，不能写入草稿",
-            status_code=409,
-            details={"scenario_code": job.scenario_code},
-        )
     job_schema = _job_schema(job)
     template_schema = scenario_schema.normalize_schema(template.schema_json)
     if job_schema != template_schema or job.schema_key != template.schema_key or job.schema_version != template.schema_version:
@@ -1672,17 +1429,7 @@ def apply_import_to_draft(
         raise BusinessError("IMPORT_STATUS_NOT_READY", "导入作业尚未成功完成规则转换", status_code=409)
     if not job.proposals_json:
         raise BusinessError("PROPOSALS_MISSING", "规则尚未转换", status_code=409)
-    unresolved = db.scalar(
-        select(func.count()).select_from(ImportIssue).where(ImportIssue.import_job_id == job.id, ImportIssue.status == "OPEN")
-    )
-    if unresolved:
-        raise BusinessError(
-            "ISSUES_UNRESOLVED",
-            f"仍有 {unresolved} 个问题未处理，不能写入场景草稿",
-            status_code=409,
-            details={"unresolved": int(unresolved)},
-        )
-    sheets = db.scalars(select(ImportSheet).where(ImportSheet.import_job_id == job.id)).all()
+    sheets = _ordered_sheets_of(db, job.id)
     selected_sheets = _validated_bound_sheets(db, job, template, list(sheets))
     try:
         draft = ensure_draft(db, template)
@@ -1714,8 +1461,11 @@ def apply_import_to_draft(
             namespace=template.scenario_code,
             selected_sheets=selected_sheets,
             import_job_no=job.job_no,
+            node_types={code: node.node_type for code, node in _draft_nodes_of_scenario(db, job.scenario_code).items()},
         )
         load_import_config_into_draft(db, draft, config, profile_version=job.profile_version)
+        draft.config_json = {**draft.config_json, "import_proposals": job.proposals_json,
+                             "import_job_no": job.job_no}
         draft.source = "EXCEL"
         latest = _latest_published_version(db, template.scenario_code)
         if latest is not None and draft.base_version_no is None:
@@ -1750,7 +1500,7 @@ def apply_import_to_draft(
 def publish_import(db: Session, job_no: str, request: PublishRequest) -> ScenarioVersion:
     """历史作业若已经产生场景版本，重复调用仍返回该版本。
 
-    **只读行为**：本函数不修改作业状态、不写任何状态机，也不产生新版本。
+    只读行为：本函数不修改作业状态、不写任何状态机，也不产生新版本。
     新的导入不在导入页发布场景——可执行的场景版本只由管理员在场景页显式发布。
 
     已有版本时核对本次请求与当时的发布检查绑定一致（草稿修订、场景身份、逐条确认的

@@ -27,14 +27,12 @@ import { apiFileUrl, request, uploadWithProgress, type OperationView } from "./h
 import { toQuery } from "./query";
 
 /**
- * 字段结果视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
- * - field_key / material_key：字段纠错接口必须用稳定标识，不能用展示用的中文名；
- * - fact_revision_no / origin / evidence_locator_status：人工纠错与文档抽取要分开呈现，
- *   证据定位未核实要显式标注；
- * - material_uploaded / material_required：页面显示「材料未上传」状态时需要。
- * 这些都是服务端已持久化的事实，不是前端推断出来的。
+ * 字段结果视图。契约文件不改写，这里只补 contracts.ts 尚未声明的字段。
+ * 都是服务端已持久化的事实，不是前端推断的。
  */
 export type AuditFieldView = AuditField & {
+  /** 本任务是否启用该字段的自动抽取，独立于已有人工或历史有效值。 */
+  extraction_enabled?: boolean;
   material_uploaded?: boolean;
   material_required?: boolean;
   field_key?: string | null;
@@ -42,8 +40,6 @@ export type AuditFieldView = AuditField & {
   fact_revision_no?: number | null;
   /** 事实来源：人工纠错 / 文档抽取。 */
   origin?: string | null;
-  /** 证据定位核对状态：VERIFIED / UNVERIFIED / UNLOCATABLE。 */
-  evidence_locator_status?: string | null;
 };
 
 /**
@@ -91,9 +87,7 @@ export interface ExternalArtifactReconcileResponse {
 }
 
 /**
- * 节点视图。契约文件不在这里改写，只补齐后端已返回、而 contracts.ts 尚未声明的字段：
- * result_summary 与 failure_code 是页面显示节点真实产物、失败原因所需的，
- * 不是前端推断出来的。
+ * 节点视图。契约文件不改写，这里只补 contracts.ts 尚未声明的字段。
  */
 export type AuditNodeView = AuditNode & {
   failure_code?: string | null;
@@ -102,7 +96,7 @@ export type AuditNodeView = AuditNode & {
 
 /** 当前复核批次的身份（服务端给出，页面只读不自己算）。 */
 export interface PendingReviewBatch {
-  /** 本批全部待办编号：**页面只能提交这些**。 */
+  /** 本批全部待办编号：页面只能提交这些。 */
   review_nos: string[];
   count: number;
   /** 本批哈希。它与服务端提交校验、检查点校验用的是同一个值。 */
@@ -123,7 +117,7 @@ export type AuditTaskView = AuditTask & {
   nodes: AuditNodeView[];
   fields: AuditFieldView[];
   /**
-   * 全部待办（含不属于本批的批次）。`pending_reviews` 是**当前批次**，
+   * 全部待办（含不属于本批的批次）。`pending_reviews` 是当前批次，
    * 只有它允许提交；这个字段只用于展示「还有多少项在排队」。
    */
   all_pending_reviews?: TaskReviewRow[];
@@ -200,9 +194,9 @@ export function updateAuditTask(taskNo: string, payload: { task_name?: string; r
 }
 
 /**
- * 复制为新任务：按源任务所属方案的**当前范围**重新创建。
+ * 复制为新任务：按源任务所属方案的当前范围重新创建。
  *
- * 它不是「保留原任务执行快照」——新任务冻结的是方案此刻的范围，材料与结果重新开始。
+ * 不是保留原任务的执行快照——新任务冻结的是方案此刻的范围，材料与结果重新开始。
  * `idempotencyKey` 与新建任务同一口径：响应丢失后重发返回原任务。
  */
 export function copyAuditTask(taskNo: string, taskName: string, idempotencyKey: string): Promise<AuditTaskView> {
@@ -415,7 +409,7 @@ export function getTaskReport(taskNo: string): Promise<Report> {
   return request<Report>(`/audit-tasks/${encodeURIComponent(taskNo)}/reports`);
 }
 
-/** 单条证据详情：引用原文与定位核对结论。 */
+/** 单条证据详情：引用原文、来源、字段属性与内容核对结论。 */
 export function getTaskEvidence(taskNo: string, evidenceNo: string): Promise<Evidence> {
   return request<Evidence>(`/audit-tasks/${encodeURIComponent(taskNo)}/evidence/${encodeURIComponent(evidenceNo)}`);
 }
@@ -470,7 +464,7 @@ export function getTaskEvidenceIndex(taskNo: string): Promise<TaskEvidenceIndex>
 /**
  * Agent 工具调用账本（只读）：模型请求了哪些工具、依据哪一版事实与工具定义、返回了什么。
  *
- * 规则详情要展示的「确定性比较结果」以它为准，**不由页面重新计算比较过程**。
+ * 规则详情要展示的「确定性比较结果」以它为准，不由页面重新计算比较过程。
  * `evaluationId` 给出时只取该评估批次。
  */
 export function listAgentToolCalls(

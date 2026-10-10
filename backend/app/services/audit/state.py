@@ -1,16 +1,16 @@
 """任务执行状态、当前有效批次与流程检查点的读写。
 
-三个「当前」口径在这里定义，其他地方不得自行重算：
+三个「当前」口径在这里定义，其他地方不得自行重算：当前上传版本是
+`TaskDocument.current_upload_id` 指向的那一份（历史上传保留为历史，不进入当前结果）；
+当前有效执行批次是每个节点最新且未被 INVALIDATED 的执行（报告、风险与规则输入都从这里取结果，
+节点执行先后由 DAG 的 `depends_on` 决定，不能用只用于展示排序的 `sequence_no` 截断）；当前事实版本
+是字段事实按 (任务, 字段, 材料位) 唯一的那条 `is_current`。
 
-- **当前上传版本**：`TaskDocument.current_upload_id` 指向的那一份。历史上传保留为历史，
-  不进入当前结果。
-- **当前有效执行批次**：节点序号不晚于任务当前节点、且未被 INVALIDATED 的每个节点的
-  最新一条执行。报告、风险与规则输入都从这里取结果，避免读到更早批次或未来节点。
-- **当前事实版本**：字段事实按 (任务, 字段, 材料位) 只有一条 `is_current`。
-
-检查点写在这里，是为了让「业务事务」与「图等待点」的提交顺序只有一处实现：
+检查点写在这里是为了让「业务事务」与「图等待点」的提交顺序只有一处实现：
 `_set_task_checkpoint` 只改内存，`_save_flow_checkpoint` 落 WorkflowCheckpoint，
 真正的 commit 由命令层负责。"""
+
+from .. import task_csv_service
 
 from ...domain.audit_vocab import is_type_unavailable, read_material_type_status
 from ...domain.manifest import rule_node_type_of
@@ -38,14 +38,16 @@ def _material_classify_result(content: dict[str, Any] | None) -> dict[str, Any] 
 def _current_node_executions(db: Session, task: AuditTask) -> dict[str, NodeExecution]:
     """每个节点的“当前有效执行批次”。
 
-    口径：只取节点序号不晚于任务当前节点的节点，且每个节点只取最新一条未失效的执行。
-    这样报告、风险列表与规则输入都不会读到更早批次或未来节点的结果；同一节点被重跑但旧执行
-    尚未失效时也能取到最新批次。无法覆盖的情况：任务当前节点之前存在两条都未失效的同一节点执行
-    且较新的一条尚未写入任何结果（此时按该节点没有有效结果处理），以及图执行在提交业务结果前中断
-    导致最新执行停留在 RUNNING（同样按没有有效结果处理）。
+    每个节点只取最新一条未失效的执行。DAG 的 ``depends_on`` 才是执行依据，
+    ``sequence_no`` 只用于展示和确定性排序；如果允许高序号节点先于低序号节点执行，
+    按当前节点序号截断会漏掉真实的依赖结果。因此这里保留任务场景中的所有节点，
+    再按节点实例码选最新批次。
+
+    同一节点被重跑但旧执行尚未失效时也能取到最新批次。最新执行若停留在 RUNNING，
+    仍按该节点没有可用终态结果处理；这是执行中断时的显式状态，不用旧批次冒充当前结果。
     """
-    _, nodes, current_index = _scenario_nodes(db, task)
-    allowed = {item["node_code"] for item in nodes[: current_index + 1]}
+    _, nodes, _ = _scenario_nodes(db, task)
+    allowed = {item["node_code"] for item in nodes}
     latest: dict[str, NodeExecution] = {}
     for execution in db.scalars(
         select(NodeExecution)
@@ -63,14 +65,13 @@ def _material_states(db: Session, task: AuditTask) -> dict[str, str | None]:
     """材料位的当前状态，供算子判断依赖依据是否有效。
 
     TYPE_REVIEW=类型待复核（尚未由人定案）；TYPE_REJECTED=人工已确认与材料位不符；
-    PREPARED=文件处理完成；ONLY_UPLOADED=只有上传、尚未形成处理产物；
-    未上传返回 None（缺输入由字段状态表达）。
+    PREPARED=文件处理完成；ONLY_UPLOADED=只有上传、尚未形成处理产物；未上传返回 None
+    （缺输入由字段状态表达）。
 
-    这两种状态传给算子的**后果不同**，必须分开：
-      TYPE_REJECTED 是人工确定结论，依赖它的检查缺少有效依据；
-      TYPE_REVIEW 不是对材料内容的否定（识别结论来自已下线为仅供参考的自动识别），
-      依赖它的检查照常按材料中的真实原文判定，类型本身另行作为待确认事项暴露。
-    历史记录里由旧自动识别写下的 `TYPE_MISMATCH` 按待复核读取（见 `domain.audit_vocab.read_material_type_status`）。
+    这两种状态传给算子的后果不同：TYPE_REJECTED 是人工确定结论，依赖它的检查缺少有效依据；
+    TYPE_REVIEW 不是对材料内容的否定（识别结论来自已下线为仅供参考的自动识别），依赖它的检查
+    照常按材料中的真实原文判定，类型本身另行作为待确认事项暴露。历史记录里由旧自动识别写下的
+    `TYPE_MISMATCH` 按待复核读取（见 `domain.audit_vocab.read_material_type_status`）。
     """
     states: dict[str, str | None] = {}
     for document, upload in _current_uploads(db, task):
@@ -92,7 +93,7 @@ def _task_field_value_of_current_upload(db: Session, task: AuditTask, field_valu
     会让已经被重新抽取或人工纠错替换的旧事实仍可被提交，随后覆盖新事实。
     历史事实仍保留给审计读取，但不能再作为待办裁决的写入目标。
     """
-    return db.scalar(
+    row = db.scalar(
         select(TaskFieldValue)
         .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
         .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
@@ -108,14 +109,17 @@ def _task_field_value_of_current_upload(db: Session, task: AuditTask, field_valu
             TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
         )
     )
+    return task_csv_service.from_index(db, task, TaskFieldValue, [row])[0] if row is not None else None
+
 
 def _result_material_keys(record: Any) -> set[str]:
-    """一条检查/风险结果**实际涉及**的材料 key。
+    """一条检查/风险结果实际涉及的材料 key。
 
     来源是执行时保存的输入摘要（每条输入都带 material_key），而不是规则声明的适用材料：
     规则可能适用于三种材料，但这次异常只发生在其中一种，报告按实际发生的材料筛选。
     文件质量检查没有字段输入，它的归属写在同一结构里的 `inputs` 摘要中
-    （由 `_quality_material_inputs` 按逐份材料的判定结果生成）。
+    （由 `_quality_material_inputs` 按逐份材料的判定结果生成）。Agent 工具的逐份判定
+    保存于 tool_calls.per_material；存在性检查显式保存 checked_material_keys。
     """
     payload = record.result_json if isinstance(record.result_json, dict) else {}
     keys = {
@@ -123,6 +127,14 @@ def _result_material_keys(record: Any) -> set[str]:
         for item in (payload.get("inputs") or [])
         if isinstance(item, dict) and item.get("material_key")
     }
+    # 材料工具没有字段事实，不从配置猜归属；只读取执行结果实际检查过的材料。
+    for result in [payload, *(payload.get("tool_calls") or [])]:
+        keys.update(str(key) for key in result.get("checked_material_keys", []))
+        keys.update(
+            str(item["material_key"])
+            for item in result.get("per_material", [])
+            if item.get("material_key") and item.get("status") != "NOT_APPLICABLE"
+        )
     if not keys:
         # 风险规则本身没有输入字段：它的材料归属只能来自当前有效的来源检查实例。
         # 只用规则声明的适用材料会把范围外材料算进来，也说明不了这条风险实际发生在哪份材料。
@@ -166,15 +178,15 @@ def _scope_results(
             in_scope.append(record)
     return in_scope, cross, unattributed
 
-def _risk_rule_keys(manifest: dict[str, Any]) -> set[str]:
+def _risk_rule_refs(manifest: dict[str, Any]) -> set[tuple[str, str]]:
     return {
-        item["rule_key"]
+        (item["node"], item["rule_key"])
         for item in manifest.get("rules", [])
         if rule_node_type_of(item) == "RISK_RATING"
     }
 
 def _node_codes_of_type(manifest: dict[str, Any], node_type: str) -> list[str]:
-    """任务场景里某一**能力类型**的全部节点实例码。
+    """任务场景里某一能力类型的全部节点实例码。
 
     节点实例码由用户配置，同一类型可以有多个实例（两张报表各一个字段抽取节点）。
     按能力类型查询执行记录、产物或结果时必须先解析成实例码集合，不能写死一个
@@ -191,12 +203,12 @@ def _node_codes_of_type(manifest: dict[str, Any], node_type: str) -> list[str]:
 
 
 def _is_node_of_type(manifest: dict[str, Any], node_code: str | None, node_type: str) -> bool:
-    """`node_code` 是不是该**能力类型**的节点。
+    """`node_code` 是不是该能力类型的节点。
 
-    用 `_node_codes_of_type` 做成员判断，**不用** `_single_node_code_of_type`：
-    一个场景可以完全没有配置某一类节点（「本模板未配置此类检查」是配置事实），
-    此时「当前节点是这类节点吗」的答案是**否**，而不是「配置缺失」。
-    拿 `_single_node_code_of_type` 做判断会让这类场景在**每一个节点**上都执行失败，
+    用 `_node_codes_of_type` 做成员判断，不用 `_single_node_code_of_type`：
+    一个场景可以完全没有配置某一类节点（「当前场景未配置此类检查」是配置事实），
+    此时「当前节点是这类节点吗」的答案是否，而不是「配置缺失」。
+    拿 `_single_node_code_of_type` 做判断会让这类场景在每一个节点上都执行失败，
     报出「没有配置人工复核节点」——与当前真正要做的事毫无关系。
     """
     if not node_code:
@@ -205,7 +217,7 @@ def _is_node_of_type(manifest: dict[str, Any], node_code: str | None, node_type:
 
 
 def _single_node_code_of_type(manifest: dict[str, Any], node_type: str, *, purpose: str) -> str:
-    """某一能力类型**唯一**的节点实例码；没有配置或配置了多个时明确报错。
+    """某一能力类型唯一的节点实例码；没有配置或配置了多个时明确报错。
 
     用于系统需要定位到一个具体节点的场合（人工复核等待点、退回重判的落点）。
     多个实例时无法确定该用哪一个，静默取第一个会让行为取决于用户配置顺序。

@@ -12,7 +12,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
 /**
  * 风险结果：只展示当前有效执行批次的风险规则结果。
  * 命中只统计 ABNORMAL；证据不足、不适用、未执行分别展示，
- * “没有风险数据”和“报告完成”都不等于合同无风险。
+ * “没有风险数据”和“报告完成”都不等于审核对象无风险。
  */
 const router = useRouter();
 
@@ -43,8 +43,7 @@ const hitCount = computed(() => page_.value?.hit_count ?? 0);
 /**
  * 风险等级筛选选项来自服务端返回的真实取值，不在这里硬编码。
  *
- * 两套等级标签并存：旧格式「高/中/低/待确认」与节点版「最高/一级/二级/三级」。
- * 硬编码任何一份都会让另一套一条都筛不出来，而页面看起来一切正常。
+ * 各场景使用自己的等级名称，展示与筛选都保留实际取值。
  * 当前已选中的等级即使不在返回集合里也保留，避免选定后下拉项消失。
  */
 const riskLevels = computed(() => {
@@ -66,11 +65,7 @@ const statusOptions = [
   { value: "PENDING_REVIEW", label: "待复核" },
 ];
 
-function levelTagType(level: string | null): "danger" | "warning" | "info" {
-  if (level === "高") return "danger";
-  if (level === "中") return "warning";
-  return "info";
-}
+
 
 function exportUrl(): string {
   return riskExportUrl({
@@ -185,7 +180,7 @@ onMounted(async () => {
       </el-table-column>
       <el-table-column label="风险等级" width="100">
         <template #default="{ row }">
-          <el-tag v-if="row.risk_level" :type="levelTagType(row.risk_level)" size="small" effect="light" disable-transitions>
+          <el-tag v-if="row.risk_level" type="info" size="small" effect="light" disable-transitions>
             {{ row.risk_level }}
           </el-tag>
           <span v-else>—</span>

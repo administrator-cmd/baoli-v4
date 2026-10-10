@@ -1,18 +1,17 @@
 """审核场景的后台管理：基本资料、配置草稿与发布。
 
-业务模型：
-- 场景身份 = scenario_template（名称/业务类型/说明/启停/逻辑删除 + 版本计数器）。
-- 配置草稿 = scenario_draft 及其材料/字段/规则/报告章节；每次写入递增 revision_no，
-  发布必须携带当前修订号。
-- 发布 = 用 compile_form_manifest 把草稿编译成与导入流程同构的 manifest，
-  形成不可覆盖的 scenario_version（source=FORM/REVISION），并写入关系投影。
-- 已发布版本是不可变的执行快照；后续修改当前草稿并发布新快照。
-- 页面来源不伪造 Excel 作业与工作表行号：import_job_id 为空，source 明确标为页面来源。
+业务模型：场景身份 = scenario_template（名称/业务类型/说明/启停 + 版本计数器）；
+配置草稿 = scenario_draft 及其材料/字段/规则/报告章节，每次写入递增 revision_no，发布必须
+携带当前修订号；发布 = 用 compile_form_manifest 把草稿编译成与导入流程同构的 manifest，
+形成不可覆盖的 scenario_version 并写入关系投影；已发布版本是不可变的执行快照，后续修改当前
+草稿并发布新快照。规则库导入草稿的首次发布保留 import_job_id/source=IMPORT，后续修订才标为
+REVISION；页面直接建立的版本不伪造 Excel 作业。
 
-所有写操作都在同一事务内追加 operation_log；删除材料/字段前先返回引用清单，
-不自动换对象、不级联删除规则。
+所有写操作都在同一事务内追加 operation_log；删除材料/字段前先返回引用清单，不自动换对象、
+不级联删除规则。
 """
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -21,14 +20,14 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..repositories import configuration_store as config_store
+
 from ..domain import (
-    currency,
+    capabilities,
     field_strategy,
-    financial_report,
     manifest as manifest_module,
-    node_rulebook,
     scenario_schema,
-    unified_profile,
+    node_profile,
 )
 from ..domain.audit_vocab import SCOPE_NOT_APPLICABLE
 from ..domain.node_registry import legacy_node_type_of
@@ -37,13 +36,12 @@ from ..domain.manifest import (
     OPERATOR_NODE_CONSTRAINTS,
     SOURCE_NODE_RULE_NODES,
     compile_form_manifest,
-    detect_unsupported_capability,
     manifest_scope_hash,
-    validate_rule_parameters,
 )
 from ..common.exceptions import SAFE_DETAIL_KEYS, BusinessError
 from ..entity import (
     AuditPlan,
+    ImportJob,
     ScenarioDraft,
     ScenarioDraftField,
     ScenarioDraftNode,
@@ -66,13 +64,12 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_OPERATORS = manifest_module.SYSTEM_OPERATORS
 # 草稿字段允许的数据类型：与 manifest 的表单契约共用同一份定义，
-# 包含大写金额（03_字段 的「数据类型」下拉本来就有这一项）。
+# 包含大写金额（DECIMAL_CN），不绑定 Excel 模板列。
 DRAFT_VALUE_TYPES = FORM_VALUE_TYPES
 # 字段的产物来源取值：当前只有印章识别一种。
 FIELD_ARTIFACT_SOURCES = {"SEAL"}
-# 字段的取数期间与报表口径：**由字段自己声明**，计算参数按这两项定位字段事实
-# （参数表不再声明它们）。合同场景没有这些概念，因此**允许声明「不适用」**，
-# 页面留空即落成它；但被计算参数引用的字段不能用「不适用」（发布期会拦）。
+# 字段的取数期间与报表口径：由字段自己声明，计算参数按这两项定位字段事实
+# 不涉及这些口径的业务声明「不适用」，计算参数沿用来源字段的相同定位键。
 FIELD_PERIOD_SCOPES = ("CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", SCOPE_NOT_APPLICABLE)
 FIELD_STATEMENT_SCOPES = ("CONSOLIDATED", "PARENT", SCOPE_NOT_APPLICABLE)
 DRAFT_SOURCE_LABELS = {"FORM": "页面编辑", "EXCEL": "规则库导入", "COPY": "复制场景", "REVISION": "版本修订"}
@@ -81,12 +78,9 @@ def template_or_404(
     scenario_code: str,
     *,
     lock: bool = False,
-    include_deleted: bool = False,
 ) -> ScenarioTemplate:
-    """按场景编码取模板；取不到即 404。lock 供写路径先锁行，include_deleted 供恢复与历史查看。"""
+    """按场景编码取场景；取不到即 404，写路径可先锁行。"""
     statement = select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == scenario_code)
-    if not include_deleted:
-        statement = statement.where(ScenarioTemplate.deleted_at.is_(None))
     if lock:
         statement = statement.with_for_update()
     template = db.scalar(statement)
@@ -142,34 +136,16 @@ def _draft_rows(
 ]:
     """草稿的全部业务行：节点实例、选用的 Sheet、材料、字段、规则、报告章节。
 
-    节点实例排在最前：规则的节点归属与 Sheet 绑定都要按它校验，
+    节点实例排在最前：字段、规则和计算的节点归属都要按它校验，
     缺了它连「这条规则挂在哪个节点上」都无法回答。
     """
-    sheets = db.scalars(
-        select(ScenarioDraftSheet)
-        .where(ScenarioDraftSheet.draft_id == draft_id)
-        .order_by(ScenarioDraftSheet.sort_no, ScenarioDraftSheet.id)
-    ).all()
-    nodes = db.scalars(
-        select(ScenarioDraftNode)
-        .where(ScenarioDraftNode.draft_id == draft_id)
-        .order_by(ScenarioDraftNode.sequence_no, ScenarioDraftNode.id)
-    ).all()
-    materials = db.scalars(
-        select(ScenarioDraftMaterial).where(ScenarioDraftMaterial.draft_id == draft_id).order_by(ScenarioDraftMaterial.sort_no, ScenarioDraftMaterial.id)
-    ).all()
-    fields = db.scalars(
-        select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft_id).order_by(ScenarioDraftField.sort_no, ScenarioDraftField.id)
-    ).all()
-    rules = db.scalars(
-        select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft_id).order_by(ScenarioDraftRule.sort_no, ScenarioDraftRule.id)
-    ).all()
-    sections = db.scalars(
-        select(ScenarioDraftSection).where(ScenarioDraftSection.draft_id == draft_id).order_by(ScenarioDraftSection.sort_no, ScenarioDraftSection.id)
-    ).all()
+    sheets = sorted(config_store.rows(db, ScenarioDraftSheet, draft_id), key=lambda item: (item.sort_no, item.id,))
+    nodes = sorted(config_store.rows(db, ScenarioDraftNode, draft_id), key=lambda item: (item.sequence_no, item.id,))
+    materials = sorted(config_store.rows(db, ScenarioDraftMaterial, draft_id), key=lambda item: (item.sort_no, item.id,))
+    fields = sorted(config_store.rows(db, ScenarioDraftField, draft_id), key=lambda item: (item.sort_no, item.id,))
+    rules = sorted(config_store.rows(db, ScenarioDraftRule, draft_id), key=lambda item: (item.sort_no, item.id,))
+    sections = sorted(config_store.rows(db, ScenarioDraftSection, draft_id), key=lambda item: (item.sort_no, item.id,))
     return list(nodes), list(sheets), list(materials), list(fields), list(rules), list(sections)
-
-
 
 
 def ensure_draft(db: Session, template: ScenarioTemplate) -> ScenarioDraft:
@@ -201,19 +177,17 @@ def ensure_draft(db: Session, template: ScenarioTemplate) -> ScenarioDraft:
     else:
         # 没有可派生的已发布版本，这是一份空配置，必然不能发布。
         # 与 create_scenario 同一口径：配置视图里的「能不能发布」必须是真实状态。
-        # 这里**不产生版本**，只刷新阻断原因。
+        # 这里不产生版本，只刷新阻断原因。
         _refresh_publish_readiness(db, template, draft)
     db.flush()
     return draft
 
 
-
-
 def _field_scope(payload: dict[str, Any], key: str, label: str, allowed: tuple[str, ...]) -> str:
     """表单提交的取数期间 / 报表口径。
 
-    **留空 = 「不适用」**：合同场景本来就没有期间与合并/母公司的概念，这两列对它没有
-    可填的值。留空落成显式取值而不是 NULL——统一事实表的当前版本唯一键由这几个口径
+    表单留空表示「不适用」，涉及相应口径的业务应显式选择真实值。
+    留空落成显式取值而不是 NULL——统一事实表的当前版本唯一键由这几个口径
     拼成，NULL 会让唯一键整体失效（见 `domain.audit_vocab`）。
 
     填了不在允许取值内的值仍然明确报错：那不叫「没填」，叫填错了，不静默改成「不适用」。
@@ -235,27 +209,16 @@ def _item_ref() -> str:
     return public_no("ref")
 
 
-
-
 def _node_type_label(node_type: str) -> str:
     """节点能力类型的中文名。取不到时如实返回类型码，不猜一个名字。"""
-    for node in unified_profile.load_unified_profile()["node_types"]:
+    for node in node_profile.load_node_profile()["node_types"]:
         if node["node_type"] == node_type:
             return str(node.get("display_name") or node_type)
     return node_type
 
 
 def _next_sort_no(db: Session, model: type, draft_id: int) -> int:
-    current = db.scalar(select(func.max(model.sort_no)).where(model.draft_id == draft_id))
-    return int(current or 0) + 1
-
-
-def _origin_of_source_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **({"import_job_no": row["import_job_no"]} if row.get("import_job_no") else {}),
-        "sheet_name": row["sheet_name"],
-        **row["source"],
-    }
+    return config_store.next_sort_no(db, model, draft_id)
 
 
 def _load_manifest_into_draft(db: Session, draft: ScenarioDraft, manifest: dict[str, Any]) -> None:
@@ -278,15 +241,15 @@ def _load_manifest_into_draft(db: Session, draft: ScenarioDraft, manifest: dict[
     draft.schema_version = schema["schema_version"]
     draft.schema_json = schema
     _write_config_into_draft(db, draft, config, replace_nodes=True)
+    if "import_proposals" in manifest:
+        draft.config_json = {**draft.config_json, "import_proposals": manifest["import_proposals"]}
 
 
 def load_import_config_into_draft(
     db: Session, draft: ScenarioDraft, config: dict[str, Any], *, profile_version: str
 ) -> None:
-    """导入替换 Excel 业务配置，并保留同一字段在场景内维护的抽取策略。"""
-    existing_fields = db.scalars(
-        select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft.id)
-    ).all()
+    """导入替换业务配置；新规则库声明的抽取策略优先于旧配置。"""
+    existing_fields = config_store.rows(db, ScenarioDraftField, draft.id)
     strategies: dict[str, tuple[str, dict[str, Any] | None]] = {}
     strategy_owners: dict[str, str] = {}
     for existing in existing_fields:
@@ -308,7 +271,7 @@ def load_import_config_into_draft(
         strategies[source_ref] = (existing.extraction_strategy, existing.structure_schema_json)
     for item in config.get("fields") or []:
         preserved = strategies.get(str(item.get("source_ref") or ""))
-        if preserved is not None:
+        if preserved is not None and item.get("extraction_strategy") is None:
             item["extraction_strategy"], item["structure_schema_json"] = preserved
         extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
             value_type=str(item.get("value_type") or ""),
@@ -330,24 +293,24 @@ def _write_config_into_draft(
     if replace_nodes:
         old_rows.extend(nodes)
     for row in old_rows:
-        db.delete(row)
+        config_store.delete(row)
     db.flush()
     # 以下每一段都带顺序：原样恢复用户配置的顺序，不重排。
     if replace_nodes:
         for index, node in enumerate(config["nodes"], start=1):
-            db.add(ScenarioDraftNode(draft_id=draft.id, sort_no=index, **node))
+            config_store.add_mapping(db, ScenarioDraftNode, draft.id, node, index)
     for index, sheet in enumerate(config["sheets"], start=1):
-        db.add(ScenarioDraftSheet(draft_id=draft.id, sort_no=index, **sheet))
+        config_store.add_mapping(db, ScenarioDraftSheet, draft.id, sheet, index)
     for index, material in enumerate(config["materials"], start=1):
-        db.add(ScenarioDraftMaterial(draft_id=draft.id, sort_no=index, **material))
+        config_store.add_mapping(db, ScenarioDraftMaterial, draft.id, material, index)
     for index, field in enumerate(config["fields"], start=1):
-        db.add(ScenarioDraftField(draft_id=draft.id, sort_no=index, **field))
+        config_store.add_mapping(db, ScenarioDraftField, draft.id, field, index)
     # 系统规则（字段抽取、报告生成）不进草稿——它们在发布时按同一确定性规则重新派生。
     draft_rules = [item for item in config["rules"] if not item["is_system"]]
     for index, rule in enumerate(draft_rules, start=1):
-        db.add(ScenarioDraftRule(draft_id=draft.id, sort_no=index, **{k: v for k, v in rule.items() if k != "is_system"}))
+        config_store.add_mapping(db, ScenarioDraftRule, draft.id, {k: v for k, v in rule.items() if k != "is_system"}, index)
     for index, section in enumerate(config["sections"], start=1):
-        db.add(ScenarioDraftSection(draft_id=draft.id, sort_no=index, **section))
+        config_store.add_mapping(db, ScenarioDraftSection, draft.id, section, index)
     draft.disabled_source_rows = list(config.get("disabled_source_rows") or [])
     draft.calculation_json = config["calculation_json"]
     db.flush()
@@ -370,7 +333,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
     material_names = {item.material_key: item.name for item in materials}
     field_map = {item.field_key: item for item in fields}
     rule_names = {item.rule_key: item.name for item in rules}
-    # 节点实例：用户配置的流程。页面据此渲染流程编排，并作为 Sheet 绑定的可选节点来源。
+    # 节点实例：用户配置的流程，供流程编排及字段、规则、计算引用。
     node_items = [
         {
             "node_code": item.node_code,
@@ -405,6 +368,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
             "material_name": material_names.get(item.material_key),
             "name": item.name,
             "value_type": item.value_type,
+            "node_code": getattr(item, "node_code", None),
             "extraction_strategy": item.extraction_strategy,
             "structure_schema": item.structure_schema_json,
             "unit": item.unit,
@@ -428,17 +392,17 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
     explicit_extraction_outputs = {
         key
         for rule in rules
-        if rule.enabled and rule.operator_code == "LLM_EXTRACT"
+        if rule.operator_code == "LLM_EXTRACT"
         for key in (rule.rule_json or {}).get("outputs", [])
         if key in field_map
     }
     # 系统规则（字段抽取、报告生成）按发布时的同一确定性规则派生，只读展示。
-    # 归属必须是**用户配置的实例码**，与 compile_form_manifest 的派生口径一致：
+    # 归属必须是用户配置的实例码，与 compile_form_manifest 的派生口径一致：
     # 这里写能力类型会让预览与真实发布结果不一致。
     nodes, _, _, _, _, _ = _draft_rows(db, draft.id)
     # 同一能力类型可以有多个节点实例，不能用普通字典让后一个实例覆盖前一个。
-    # 字段抽取优先沿用唯一的 Sheet 绑定；没有唯一绑定时，只有场景本身恰好
-    # 只有一个同类节点才有确定归属。多个实例且没有唯一绑定时保持 None，
+    # 字段按自身配置归属节点；未指定时只有场景恰好只有一个同类节点才有确定归属。
+    # 多个实例且字段未指定时保持 None，
     # 让发布校验明确报告“无法确定”，不在草稿视图里编造一个归属。
     node_codes_by_type: dict[str, list[str]] = {}
     for node in nodes:
@@ -448,15 +412,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
         for node_type, codes in node_codes_by_type.items()
         if len(codes) == 1
     }
-    extraction_sheet_nodes = {
-        sheet.node_code
-        for sheet in sheets
-        if sheet.sheet_role == "FIELD_EXTRACTION" and sheet.node_code
-    }
-    if len(extraction_sheet_nodes) == 1:
-        extraction_node_code = next(iter(extraction_sheet_nodes))
-    else:
-        extraction_node_code = instance_by_type.get("FIELD_EXTRACTION")
+    extraction_node_code = instance_by_type.get("FIELD_EXTRACTION")
     for item in fields:
         if item.field_key in explicit_extraction_outputs:
             continue
@@ -465,7 +421,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
             {
                 "rule_key": stable_key("rule", draft.scenario_code, f"extract:{item.field_key}"),
                 "name": f"抽取{item.name}",
-                "node": extraction_node_code,
+                "node": getattr(item, "node_code", None) or extraction_node_code,
                 "operator": "LLM_EXTRACT",
                 "enabled": True,
                 "system": True,
@@ -527,13 +483,13 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
             "section_order": item.section_order,
             "content_type": item.content_type,
             "result_sort": item.result_sort,
+            "risk_level_order": list(getattr(item, "risk_level_order", None) or []),
             "config_status": item.config_status,
             "origin": item.origin_json,
             "updated_at": item.updated_at,
         }
         for item in sections
     ]
-    profile = scenario_schema.effective_profile(draft.schema_json)
     return {
         "scenario_code": draft.scenario_code,
         "revision_no": draft.revision_no,
@@ -543,22 +499,22 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
         "schema_key": draft.schema_key,
         "schema_version": draft.schema_version,
         "schema_json": draft.schema_json,
-        # 草稿的来源格式版本：页面据此说明这份配置按哪种格式导出。
+        # 草稿记录的节点能力版本身份。
         "profile_version": draft.profile_version,
-        # 当前配置是否已生效：NULL 表示已生效；非空时页面显示“尚未生效 + 原因”。
-        # 编译未通过不阻断保存（建配置过程中必然不完整），但绝不能被当成已生效。
-        "sync_error": draft.sync_error,
+        # 与场景详情使用同一份当前发布条件，避免代码修复后仍显示历史错误。
+        # 可发布不代表已发布，生效版本由场景版本号表示。
+        "sync_error": _publish_readiness_error(db, template_or_404(db, draft.scenario_code), draft),
         "updated_at": draft.updated_at,
         # 节点实例：用户配置的流程（存在、顺序、依赖、启停）。
-        # 页面的流程编排读它。Sheet 绑定的真源是导入成功写入后的 sheets，不在这里另改。
+        # 页面流程编排读取节点；来源工作表清单由导入成功写入，不在节点面板另改。
         "nodes": node_items,
-        # 场景**选用**的 Sheet：这个场景用统一模板协议里的哪几张表、每张归哪个节点。
-        # 页面据此渲染「Sheet 选择与绑定」，模板下载也按它取值——
-        # 不再从草稿里已有材料/字段/规则反推（反推区分不了合同版与财报版的同名 Sheet）。
+        # 来源表清单保存真实表名；历史模板保留其角色和节点绑定。
         "sheets": [
             {
                 "sheet_role": item.sheet_role,
-                "sheet_role_label": unified_profile.sheet_role_label(profile, item.sheet_role),
+                "sheet_role_label": getattr(item, "sheet_name", None) or "未记录工作表名称",
+                "sheet_key": getattr(item, "sheet_key", None),
+                "sheet_name": getattr(item, "sheet_name", None),
                 "node_code": item.node_code,
                 "sort_no": item.sort_no,
             }
@@ -569,7 +525,7 @@ def _draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
         "rules": rule_items,
         "sections": section_items,
         "disabled_source_rows": list(draft.disabled_source_rows or []),
-        # 计算三表写入草稿后的核对视图。没有计算规则时为空列表，不编一份。
+        # 场景计算定义的核对视图。没有计算规则时为空列表，不编一份。
         "calculations": _calculation_view_rows(draft.calculation_json),
         "business_rule_count": len(rules),
         "system_rule_count": len(field_items) - len(explicit_extraction_outputs) + 1,
@@ -662,8 +618,6 @@ def _draft_rule_view(
     }
 
 
-
-
 def list_scenarios_page(
     db: Session,
     *,
@@ -672,14 +626,11 @@ def list_scenarios_page(
     enabled: bool | None,
     published_from: datetime | None,
     published_to: datetime | None,
-    deleted: bool,
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
     """场景分页列表（真实后端筛选与 total）。"""
-    conditions = [
-        ScenarioTemplate.deleted_at.is_not(None) if deleted else ScenarioTemplate.deleted_at.is_(None)
-    ]
+    conditions = []
     if name:
         conditions.append(ScenarioTemplate.scenario_name.like(f"%{name.strip()}%"))
     if category:
@@ -717,35 +668,12 @@ def list_scenarios_page(
                 latest_versions[scenario_code] = (version_no, published_at)
         for draft in db.scalars(select(ScenarioDraft).where(ScenarioDraft.scenario_code.in_(codes))).all():
             draft_by_code[draft.scenario_code] = draft
-        draft_ids = [draft.id for draft in draft_by_code.values()]
-        if draft_ids:
-            material_counts = dict(
-                db.execute(
-                    select(ScenarioDraftMaterial.draft_id, func.count())
-                    .where(ScenarioDraftMaterial.draft_id.in_(draft_ids))
-                    .group_by(ScenarioDraftMaterial.draft_id)
-                ).all()
-            )
-            field_counts = dict(
-                db.execute(
-                    select(ScenarioDraftField.draft_id, func.count())
-                    .where(ScenarioDraftField.draft_id.in_(draft_ids))
-                    .group_by(ScenarioDraftField.draft_id)
-                ).all()
-            )
-            rule_counts = dict(
-                db.execute(
-                    select(ScenarioDraftRule.draft_id, func.count())
-                    .where(ScenarioDraftRule.draft_id.in_(draft_ids))
-                    .group_by(ScenarioDraftRule.draft_id)
-                ).all()
-            )
-            for scenario_code, draft in draft_by_code.items():
-                draft_counts[scenario_code] = {
-                    "material": int(material_counts.get(draft.id, 0)),
-                    "field": int(field_counts.get(draft.id, 0)),
-                    "rule": int(rule_counts.get(draft.id, 0)),
-                }
+        for scenario_code, draft in draft_by_code.items():
+            draft_counts[scenario_code] = {
+                "material": len(draft.config_json["materials"]),
+                "field": len(draft.config_json["fields"]),
+                "rule": len(draft.config_json["rules"]),
+            }
 
     items = []
     for template in templates:
@@ -759,7 +687,6 @@ def list_scenarios_page(
                 "category": template.category,
                 "description": template.description,
                 "enabled": template.enabled,
-                "deleted": template.deleted_at is not None,
                 "published_version_no": latest[0] if latest else None,
                 "published_at": latest[1] if latest else None,
                 "latest_version_no": template.latest_version_no,
@@ -779,13 +706,13 @@ def list_scenarios_page(
 
 
 def list_admin_scenario_options(db: Session) -> list[dict[str, Any]]:
-    """**管理员**用的场景下拉：未删除的全部场景及其实时状态。
+    """管理员用的场景下拉：未删除的全部场景及其实时状态。
 
-    导入页与场景管理页需要在场景**发布之前**就选中它（先建场景、再上传规则库），
+    导入页与场景管理页需要在场景发布之前就选中它（先建场景、再上传规则库），
     因此这里不能按「已发布」过滤——那会让管理员无法在新建场景下上传。
     """
     templates = db.scalars(
-        select(ScenarioTemplate).where(ScenarioTemplate.deleted_at.is_(None)).order_by(ScenarioTemplate.scenario_name)
+        select(ScenarioTemplate).order_by(ScenarioTemplate.scenario_name)
     ).all()
     latest: dict[str, int] = {}
     if templates:
@@ -809,7 +736,7 @@ def list_admin_scenario_options(db: Session) -> list[dict[str, Any]]:
 
 
 def list_scenario_options(db: Session) -> list[dict[str, Any]]:
-    """**业务用户可用的场景**下拉选项（方案、任务等选择器）。
+    """业务用户可用的场景下拉选项（方案、任务等选择器）。
 
     只列出「未删除 + 已启用 + 已有已发布版本」的场景：草稿、未发布、停用或已删除的
     场景不能用于创建方案。把不可用的场景也列出来、再在创建时报错，
@@ -819,7 +746,7 @@ def list_scenario_options(db: Session) -> list[dict[str, Any]]:
     并让接口在将来放宽条件时不必改契约。
     """
     templates = db.scalars(
-        select(ScenarioTemplate).where(ScenarioTemplate.deleted_at.is_(None)).order_by(ScenarioTemplate.scenario_name)
+        select(ScenarioTemplate).order_by(ScenarioTemplate.scenario_name)
     ).all()
     latest: dict[str, int] = {}
     if templates:
@@ -843,25 +770,23 @@ def list_scenario_options(db: Session) -> list[dict[str, Any]]:
     ]
 
 
-def _default_draft_nodes(draft_id: int, schema: dict[str, Any]) -> list[ScenarioDraftNode]:
-    """统一模板协议声明的标准节点集：每种能力类型一个实例。
+def _default_draft_nodes(draft_id: int) -> list[ScenarioDraftNode]:
+    """节点能力目录声明的标准节点集：每种能力类型一个实例。
 
-    节点实例码直接用能力类型名（`MATERIAL_CHECK`、`DOCUMENT_PREPARE`……），顺序取协议
-    声明顺序，依赖取协议声明的 `depends_on_types`。新建场景因此一开始就带着一条完整流程，
-    导入时的「绑定节点」是纯下拉选择，不必先手工把节点建一遍。
+    节点实例码直接用能力类型名，顺序与默认依赖来自节点能力目录。
+    LLM 生成的字段、规则和计算各自引用场景中的实际节点实例。
 
-    这只是**预置的起点**，不是固定结构：预置后用户仍可增删节点、改实例码、改顺序与依赖
+    这只是预置的起点，不是固定结构：预置后用户仍可增删节点、改实例码、改顺序与依赖
     （同一能力类型配多个实例也照旧支持）。本函数只在新建场景时调用一次，不覆盖已有配置。
     """
-    profile = scenario_schema.effective_profile(schema)
+    profile = node_profile.load_node_profile()
     rows: list[ScenarioDraftNode] = []
     for sequence_no, node in enumerate(profile["node_types"], start=1):
         node_type = node["node_type"]
         rows.append(
             ScenarioDraftNode(
                 draft_id=draft_id,
-                # 实例码 = 能力类型名：与旧场景（node_code 就是能力类型）同一口径，
-                # 也让「这张 Sheet 该绑哪个节点」在预置后只有一个显而易见的答案。
+                # 默认每种能力一个实例，管理员可修改实例码及其依赖。
                 node_code=node_type,
                 node_type=node_type,
                 name=str(node.get("display_name") or node_type),
@@ -907,11 +832,11 @@ def create_scenario(db: Session, payload: dict[str, Any]) -> ScenarioTemplate:
     db.flush()
     # 节点是流程的必填输入（编译时缺失即报错）。新场景直接带上协议声明的标准节点集：
     # 空着会让导入的「绑定节点」没有东西可选，用户得先把 9 个节点手工建一遍。
-    for row in _default_draft_nodes(draft.id, schema):
-        db.add(row)
+    for row in _default_draft_nodes(draft.id):
+        config_store.add(db, row)
     db.flush()
     # 新建场景是空配置，必然不能发布（没有材料位）。这里就写下真实的阻断原因，
-    # 否则页面会把一个空场景谎报成「可以发布」。**不产生任何版本**。
+    # 否则页面会把一个空场景谎报成「可以发布」。不产生任何版本。
     _refresh_publish_readiness(db, template, draft)
     record_operation(
         db,
@@ -946,14 +871,6 @@ def update_scenario(db: Session, scenario_code: str, payload: dict[str, Any]) ->
         schema = scenario_schema.normalize_schema(payload["schema_json"])
         current = scenario_schema.normalize_schema(template.schema_json)
         if schema != current:
-            if (schema["schema_key"], schema["schema_version"]) == (
-                current["schema_key"], current["schema_version"]
-            ):
-                raise BusinessError(
-                    "SCENARIO_SCHEMA_VERSION_UNCHANGED",
-                    "场景字段映射已变化，必须修改 schema_key 或 schema_version",
-                    status_code=409,
-                )
             template.schema_key = schema["schema_key"]
             template.schema_version = schema["schema_version"]
             template.schema_json = schema
@@ -1018,49 +935,29 @@ def set_scenario_enabled(db: Session, scenario_code: str, enabled: bool) -> Scen
     return template
 
 
-def delete_scenario(db: Session, scenario_code: str) -> ScenarioTemplate:
-    """逻辑删除场景；历史版本与任务保留。"""
+def delete_scenario(db: Session, scenario_code: str) -> None:
+    """实际删除场景身份和 JSON 草稿；独立方案、任务与已发布执行快照不级联删除。"""
     template = template_or_404(db, scenario_code, lock=True)
-    if template.deleted_at is not None:
-        raise BusinessError("SCENARIO_ALREADY_DELETED", "该场景已在已删除列表中", status_code=409)
-    template.deleted_at = datetime.now(UTC)
+    draft = db.scalar(
+        select(ScenarioDraft).where(ScenarioDraft.scenario_code == scenario_code).with_for_update()
+    )
     record_operation(
         db,
         object_type=OBJECT_SCENARIO,
         object_no=scenario_code,
         object_name=template.scenario_name,
         operation_type="DELETE",
-        detail={"scenario_code": scenario_code},
+        detail={"scenario_code": scenario_code, "deletion_mode": "PHYSICAL"},
     )
+    if draft is not None:
+        db.delete(draft)
+    db.delete(template)
     db.commit()
-    db.refresh(template)
-    return template
-
-
-def restore_scenario(db: Session, scenario_code: str) -> ScenarioTemplate:
-    """恢复已逻辑删除的场景。"""
-    template = template_or_404(db, scenario_code, lock=True, include_deleted=True)
-    if template.deleted_at is None:
-        raise BusinessError("SCENARIO_NOT_DELETED", "该场景未被删除，无需恢复", status_code=409)
-    template.deleted_at = None
-    record_operation(
-        db,
-        object_type=OBJECT_SCENARIO,
-        object_no=scenario_code,
-        object_name=template.scenario_name,
-        operation_type="RESTORE",
-        detail={"scenario_code": scenario_code},
-    )
-    db.commit()
-    db.refresh(template)
-    return template
-
-
 
 
 def scenario_detail(db: Session, scenario_code: str) -> dict[str, Any]:
     """场景详情：基本资料、当前发布版本号与配置状态。"""
-    template = template_or_404(db, scenario_code, include_deleted=True)
+    template = template_or_404(db, scenario_code)
     draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == scenario_code))
     plan_count = db.scalar(
         select(func.count()).select_from(AuditPlan).where(AuditPlan.scenario_code == scenario_code, AuditPlan.deleted_at.is_(None))
@@ -1074,7 +971,6 @@ def scenario_detail(db: Session, scenario_code: str) -> dict[str, Any]:
         "category": template.category,
         "description": template.description,
         "enabled": template.enabled,
-        "deleted": template.deleted_at is not None,
         "latest_version_no": template.latest_version_no,
         "created_at": template.created_at,
         "updated_at": template.updated_at,
@@ -1084,8 +980,8 @@ def scenario_detail(db: Session, scenario_code: str) -> dict[str, Any]:
             "source": draft.source,
             "source_label": DRAFT_SOURCE_LABELS.get(draft.source, draft.source),
             "base_version_no": draft.base_version_no,
-            # 当前配置是否已生效：页面据此显示“尚未生效 + 原因”。
-            "sync_error": draft.sync_error,
+            # 按当前编译逻辑显示发布条件，不能用历史错误锁住发布按钮。
+            "sync_error": _publish_readiness_error(db, template, draft),
             "updated_at": draft.updated_at,
         }
         if draft
@@ -1106,8 +1002,6 @@ def update_draft_disabled_source_row(
     db: Session, scenario_code: str, row_key: str, payload: dict[str, Any]
 ) -> ScenarioDraft:
     template, draft = _locked_draft(db, scenario_code)
-    if template.deleted_at is not None:
-        raise BusinessError("SCENARIO_DELETED", "场景已删除，不能修改草稿", status_code=409)
     expected_revision = payload["expected_revision"]
     if expected_revision != draft.revision_no:
         raise BusinessError(
@@ -1122,17 +1016,9 @@ def update_draft_disabled_source_row(
         raise BusinessError("DISABLED_SOURCE_ROW_NOT_FOUND", "停用来源行不存在", status_code=404)
     row = dict(rows[index])
     role = row["sheet_role"]
-    profile = scenario_schema.effective_profile(draft.schema_json)
-    definition = unified_profile.sheet_definition(profile, role)
-    profile_columns = {column["key"]: column for column in definition["columns"]}
     stored_columns = {column["key"]: column for column in row["columns"]}
-    if set(stored_columns) != set(profile_columns) or len(stored_columns) != len(row["columns"]):
-        raise BusinessError(
-            "DISABLED_SOURCE_ROW_PROFILE_CHANGED",
-            "停用来源行的列结构与当前模板协议不同，不能按旧列定义编辑",
-            status_code=409,
-            details={"row_key": row_key, "sheet_role": role},
-        )
+    if len(stored_columns) != len(row["columns"]):
+        raise BusinessError("DISABLED_SOURCE_ROW_COLUMN_DUPLICATE", "停用来源行存在重复列标识", status_code=409)
     values = payload["values"]
     unknown = sorted(set(values) - set(stored_columns))
     if unknown:
@@ -1141,64 +1027,11 @@ def update_draft_disabled_source_row(
             "修改内容包含当前工作表不存在的列",
             details={"row_key": row_key, "columns": unknown},
         )
-    if "enabled" in values and values["enabled"].strip() != "否":
-        raise BusinessError(
-            "DISABLED_SOURCE_ROW_ENABLE_REQUIRED",
-            "编辑停用来源行不能直接改变是否生效；启用时须转换为业务配置并校验引用",
-            status_code=409,
-        )
-    if role in {"CALC_PARAMETER", "CALC_JUDGEMENT"} and "rule_code" in values:
-        if values["rule_code"].strip() != stored_columns["rule_code"]["value"]:
-            raise BusinessError(
-                "DISABLED_CALC_REFERENCE_LOCKED",
-                "计算参数和判定的规则编号由停用计算定义维护，不能单独改写",
-                status_code=409,
-            )
     updated_columns = [
         {**column, "value": values[column["key"]].strip()} if column["key"] in values else dict(column)
         for column in row["columns"]
     ]
-    updated_values = {column["key"]: column["value"] for column in updated_columns}
-    if role == "CALC_DEFINITION" and updated_values["rule_code"] != stored_columns["rule_code"]["value"]:
-        old_code = stored_columns["rule_code"]["value"]
-        new_code = updated_values["rule_code"]
-        children = [
-            (child_index, child)
-            for child_index, child in enumerate(rows)
-            if child["sheet_role"] in {"CALC_PARAMETER", "CALC_JUDGEMENT"}
-            and any(column["key"] == "rule_code" and column["value"] == old_code for column in child["columns"])
-        ]
-        if children and not new_code:
-            raise BusinessError(
-                "DISABLED_CALC_CODE_REQUIRED",
-                "该计算定义仍有关联参数或判定，不能清空规则编号",
-                status_code=409,
-            )
-        calculation_candidates, frozen_calculations = _calculation_store(draft.calculation_json)
-        if new_code and any(
-            item.get("rule_code") == new_code
-            for item in (frozen_calculations if frozen_calculations is not None else calculation_candidates)
-        ):
-            raise BusinessError("DISABLED_CALC_CODE_DUPLICATE", "规则编号与现有计算规则重复", status_code=409)
-        if any(
-            item["sheet_role"] == "CALC_DEFINITION" and item["row_key"] != row_key
-            and any(column["key"] == "rule_code" and column["value"] == new_code for column in item["columns"])
-            for item in rows
-        ):
-            raise BusinessError("DISABLED_CALC_CODE_DUPLICATE", "停用计算定义的规则编号重复", status_code=409)
-        for child_index, child in children:
-            rows[child_index] = {
-                **child,
-                "source_id": new_code or None,
-                "columns": [
-                    {**column, "value": new_code} if column["key"] == "rule_code" else column
-                    for column in child["columns"]
-                ],
-            }
     row["columns"] = updated_columns
-    identity_key = next((key for key in ("source_id", "report_code", "rule_code") if key in updated_values), None)
-    if identity_key is not None:
-        row["source_id"] = updated_values[identity_key] or None
     rows[index] = row
     draft.disabled_source_rows = rows
     _save_draft(
@@ -1213,757 +1046,11 @@ def update_draft_disabled_source_row(
     return draft
 
 
-def activate_disabled_source_row(
-    db: Session, scenario_code: str, row_key: str, *, expected_revision: int
-) -> ScenarioDraft:
-    """按角色解析停用来源行，核对引用后写入同一份场景草稿。"""
-    template, draft = _locked_draft(db, scenario_code)
-    if template.deleted_at is not None:
-        raise BusinessError("SCENARIO_DELETED", "场景已删除，不能修改草稿", status_code=409)
-    if expected_revision != draft.revision_no:
-        raise BusinessError(
-            "SCENARIO_DRAFT_REVISION_CONFLICT",
-            f"配置在本次编辑期间已被修改（当前修订 {draft.revision_no}），请刷新后重试",
-            status_code=409,
-            details={"scenario_code": scenario_code, "expected": expected_revision, "actual": draft.revision_no},
-        )
-    rows = list(draft.disabled_source_rows or [])
-    source_row = next((row for row in rows if row["row_key"] == row_key), None)
-    if source_row is None:
-        raise BusinessError("DISABLED_SOURCE_ROW_NOT_FOUND", "停用来源行不存在", status_code=404)
-    if source_row["sheet_role"] == "CALC_DEFINITION":
-        return _activate_disabled_calculation_locked(db, template, draft, source_row, rows)
-    if source_row["sheet_role"] in {"MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK"}:
-        return _activate_disabled_rule_group_locked(db, template, draft, source_row, rows)
-    role = source_row["sheet_role"]
-    if role not in {"MATERIAL_LIST", "FIELD_EXTRACTION", "REPORT_TEMPLATE"}:
-        raise BusinessError(
-            "DISABLED_SOURCE_ROW_ROLE_UNSUPPORTED",
-            "该工作表的停用行尚无直接启用转换路径",
-            status_code=409,
-            details={"sheet_role": role},
-        )
-    nodes, sheets, materials, fields, _rules, sections = _draft_rows(db, draft.id)
-    binding = next((sheet for sheet in sheets if sheet.sheet_role == role), None)
-    node = next((item for item in nodes if binding is not None and item.node_code == binding.node_code), None)
-    profile = scenario_schema.effective_profile(draft.schema_json)
-    definition = unified_profile.sheet_definition(profile, role)
-    if node is None or not node.enabled or node.node_type not in definition["node_types"]:
-        raise BusinessError(
-            "DISABLED_SOURCE_ROW_NODE_INVALID",
-            "停用来源行所属工作表未绑定可用的业务节点，不能启用",
-            status_code=409,
-            details={"sheet_role": role, "node_code": binding.node_code if binding else None},
-        )
-    values = {column["key"]: column["value"] for column in source_row["columns"]}
-    if values.get("enabled") != "否":
-        raise BusinessError("DISABLED_SOURCE_ROW_STATE_INVALID", "来源行不是停用状态，不能重复启用", status_code=409)
-    effective_row = json.loads(json.dumps(source_row))
-    effective_row["columns"] = [
-        {**column, "value": "是"} if column["key"] == "enabled" else column
-        for column in effective_row["columns"]
-    ]
-    material_items: list[dict[str, Any]] = []
-    for material in (materials if role in {"FIELD_EXTRACTION", "REPORT_TEMPLATE"} else []):
-        if not material.source_ref:
-            continue
-        material_items.append({
-            "candidate_ref": material.material_key,
-            "source_id": material.source_ref,
-            "name": material.name,
-        })
-    material_by_code = node_rulebook._reference_index(material_items, kind="材料")
-    field_by_code: dict[str, dict[str, Any]] = {}
-    if role == "REPORT_TEMPLATE":
-        for field in fields:
-            if not field.source_ref:
-                continue
-            if field.source_ref in field_by_code:
-                raise BusinessError(
-                    "DISABLED_FIELD_CODE_DUPLICATE",
-                    "现有字段编号重复，报告章节无法唯一解析展示字段",
-                    status_code=409,
-                    details={"source_ref": field.source_ref},
-                )
-            field_by_code[field.source_ref] = {
-                "candidate_ref": field.field_key,
-                "source_id": field.source_ref,
-                "name": field.name,
-                "material_ref": field.material_key,
-            }
-    conversion = node_rulebook.convert_disabled_config_row(
-        effective_row,
-        profile_version=draft.profile_version or "",
-        material_by_code=material_by_code,
-        field_by_code=field_by_code,
-        profile=profile,
-    )
-    if conversion.notes:
-        raise BusinessError(
-            "DISABLED_SOURCE_ROW_ISSUES_UNRESOLVED",
-            "来源行仍有未确认的业务口径，请先补齐后再启用",
-            status_code=409,
-            details={"row_key": row_key, "issues": [note.to_payload() for note in conversion.notes]},
-        )
-    candidate_type = {
-        "MATERIAL_LIST": "materials",
-        "FIELD_EXTRACTION": "fields",
-        "REPORT_TEMPLATE": "report_sections",
-    }[role]
-    candidates = conversion.proposals[candidate_type]
-    if len(candidates) != 1:
-        raise BusinessError(
-            "DISABLED_SOURCE_ROW_CONVERSION_INVALID",
-            "来源行未能转换成唯一业务配置，草稿未修改",
-            status_code=409,
-            details={"row_key": row_key, "sheet_role": role},
-        )
-    candidate = candidates[0]
-    code = candidate["report_code"] if role == "REPORT_TEMPLATE" else candidate["source_id"]
-    if role == "MATERIAL_LIST":
-        key = stable_key("mat", scenario_code, code)
-        if any(item.material_key == key or item.source_ref == code or item.name == candidate["name"] for item in materials):
-            raise BusinessError(
-                "DISABLED_MATERIAL_DUPLICATE", "材料编号或名称已存在，不能重复启用", status_code=409,
-                details={"source_ref": code, "name": candidate["name"]},
-            )
-        db.add(ScenarioDraftMaterial(
-            draft_id=draft.id,
-            material_key=key,
-            name=candidate["name"],
-            required=candidate["required"],
-            description=candidate["description"],
-            source_ref=code,
-            origin_json=_origin_of_source_row(source_row),
-            sort_no=_next_sort_no(db, ScenarioDraftMaterial, draft.id),
-        ))
-    elif role == "FIELD_EXTRACTION":
-        key = stable_key("fld", scenario_code, code)
-        material_key = candidate["material_ref"]
-        if any(
-            item.field_key == key or item.source_ref == code
-            or (item.material_key == material_key and item.name == candidate["name"])
-            for item in fields
-        ):
-            raise BusinessError(
-                "DISABLED_FIELD_DUPLICATE", "字段编号或同材料下的字段名称已存在，不能重复启用", status_code=409,
-                details={"source_ref": code, "name": candidate["name"], "material_key": material_key},
-            )
-        db.add(ScenarioDraftField(
-            draft_id=draft.id,
-            field_key=key,
-            material_key=material_key,
-            name=candidate["name"],
-            value_type=candidate["value_type"],
-            extraction_strategy=field_strategy.default_extraction_strategy(candidate["value_type"]),
-            structure_schema_json=None,
-            unit=candidate["unit"],
-            currency=candidate["currency"],
-            artifact_source=candidate["artifact_source"],
-            period_scope=candidate["period_scope"],
-            statement_scope=candidate["statement_scope"],
-            required=candidate["required"],
-            instruction=candidate["instruction"],
-            source_ref=code,
-            origin_json=_origin_of_source_row(source_row),
-            sort_no=_next_sort_no(db, ScenarioDraftField, draft.id),
-        ))
-    else:
-        section_identity = json.dumps(
-            [code, candidate["section_order"]], ensure_ascii=False, separators=(",", ":")
-        )
-        key = stable_key("sec", scenario_code, section_identity)
-        if any(item.section_key == key or (
-            item.report_code == code and item.section_order == candidate["section_order"]
-        ) for item in sections):
-            raise BusinessError(
-                "DISABLED_REPORT_SECTION_DUPLICATE",
-                "同一报告编号下的章节顺序已存在，不能重复启用",
-                status_code=409,
-                details={"report_code": code, "section_order": candidate["section_order"]},
-            )
-        for item in sections:
-            if item.report_code != code and item.report_name == candidate["report_name"]:
-                raise BusinessError(
-                    "DISABLED_REPORT_NAME_DUPLICATE",
-                    "不同报告编号使用了相同报告名称，不能启用该章节",
-                    status_code=409,
-                    details={"report_code": code, "existing_report_code": item.report_code},
-                )
-            if item.report_code != code:
-                continue
-            if (
-                item.report_name != candidate["report_name"]
-                or list(item.material_keys or []) != candidate["material_refs"]
-                or list(item.formats or []) != candidate["formats"]
-                or item.result_sort != candidate["result_sort"]
-            ):
-                raise BusinessError(
-                    "DISABLED_REPORT_GROUP_CONFLICT",
-                    "同一报告编号的报告名称、材料范围、输出格式或结果排序与现有章节不一致",
-                    status_code=409,
-                    details={"report_code": code, "existing_section_key": item.section_key},
-                )
-        db.add(ScenarioDraftSection(
-            draft_id=draft.id,
-            section_key=key,
-            title=candidate["section_name"],
-            content_instruction=candidate["content_instruction"],
-            field_keys=candidate["field_refs"],
-            report_code=code,
-            report_name=candidate["report_name"],
-            material_keys=candidate["material_refs"],
-            formats=candidate["formats"],
-            section_order=candidate["section_order"],
-            content_type=candidate["content_type"],
-            result_sort=candidate["result_sort"],
-            config_status=candidate["config_status"],
-            origin_json=_origin_of_source_row(source_row),
-            sort_no=_next_sort_no(db, ScenarioDraftSection, draft.id),
-        ))
-    draft.disabled_source_rows = [row for row in rows if row["row_key"] != row_key]
-    _save_draft(
-        db,
-        template,
-        draft,
-        operation_type="DRAFT_SOURCE_ROW_ACTIVATE",
-        object_name=template.scenario_name,
-        detail={
-            "row_key": row_key,
-            "sheet_role": role,
-            "target_key": key,
-            "original_source": source_row["source"],
-            "effective_columns": effective_row["columns"],
-        },
-    )
-    db.refresh(draft)
-    return draft
-
-
-def _draft_risks_by_code(stored_rules: list[ScenarioDraftRule]) -> dict[str, ScenarioDraftRule]:
-    risks: dict[str, ScenarioDraftRule] = {}
-    for item in stored_rules:
-        if item.operator_code != "RISK_TRIGGER" or not item.source_ref:
-            continue
-        if item.source_ref in risks:
-            raise BusinessError("DISABLED_RISK_CODE_DUPLICATE", "现有风险编号重复，无法确定检查规则的关联风险", status_code=409)
-        risks[item.source_ref] = item
-    return risks
-
-
-def _disabled_rule_group_rows(
-    source_row: dict[str, Any], rows: list[dict[str, Any]], existing_risks: dict[str, ScenarioDraftRule]
-) -> tuple[list[dict[str, Any]], set[str]]:
-    """按 02/04/05 的风险引用求检查与风险的完整停用行闭包。"""
-    check_roles = {"MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE"}
-    disabled_checks = [item for item in rows if item["sheet_role"] in check_roles]
-    disabled_risks: dict[str, list[dict[str, Any]]] = {}
-    for item in rows:
-        if item["sheet_role"] == "RISK" and item.get("source_id"):
-            disabled_risks.setdefault(item["source_id"], []).append(item)
-    risk_code_by_reference: dict[str, str] = {}
-    def add_reference(value: str, code: str) -> None:
-        if not value:
-            return
-        previous = risk_code_by_reference.get(value)
-        if previous is not None and previous != code:
-            raise BusinessError(
-                "RISK_REFERENCE_AMBIGUOUS", f"风险引用“{value}”同时对应多个风险，不能确定关联关系",
-                status_code=409, details={"value": value, "risk_codes": [previous, code]},
-            )
-        risk_code_by_reference[value] = code
-
-    for code, risk in existing_risks.items():
-        add_reference(code, code)
-        add_reference(risk.name, code)
-    for code, risk_rows in disabled_risks.items():
-        add_reference(code, code)
-        for risk_row in risk_rows:
-            name = next((column["value"] for column in risk_row["columns"] if column["key"] == "name"), "")
-            add_reference(name, code)
-    check_by_key = {item["row_key"]: item for item in disabled_checks}
-    check_risks: dict[str, list[str]] = {}
-    # 只用原文定位可能相关的行；进入本组的行再按正式清单规则校验。
-    possible_risks = {
-        item["row_key"]: [
-            part.strip()
-            for column in item["columns"] if column["key"] == "risk_refs"
-            for part in column["value"].split(node_rulebook.LIST_SEPARATOR)
-            if part.strip()
-        ]
-        for item in disabled_checks
-    }
-
-    def risks_of(row_key: str) -> list[str]:
-        if row_key not in check_risks:
-            references = node_rulebook.disabled_check_risk_codes(check_by_key[row_key])
-            check_risks[row_key] = [risk_code_by_reference.get(value, value) for value in references]
-        return check_risks[row_key]
-    selected_checks: set[str] = set()
-    selected_risks: set[str] = set()
-    if source_row["sheet_role"] == "RISK":
-        code = source_row.get("source_id")
-        if not code:
-            raise BusinessError("DISABLED_RISK_CODE_REQUIRED", "请先填写风险编号，再启用关联检查", status_code=409)
-        if code in existing_risks:
-            raise BusinessError("DISABLED_RISK_CODE_DUPLICATE", "停用风险编号与现有风险重复", status_code=409, details={"risk_code": code})
-        selected_risks.add(code)
-    else:
-        selected_checks.add(source_row["row_key"])
-    while True:
-        before = (len(selected_checks), len(selected_risks))
-        for row_key in tuple(selected_checks):
-            for code in risks_of(row_key):
-                matches = disabled_risks.get(code, [])
-                if len(matches) > 1:
-                    raise BusinessError("DISABLED_RISK_CODE_DUPLICATE", "停用风险编号重复，无法确定关联风险", status_code=409, details={"risk_code": code})
-                if matches and code in existing_risks:
-                    raise BusinessError("DISABLED_RISK_CODE_DUPLICATE", "停用风险编号与现有风险重复", status_code=409, details={"risk_code": code})
-                if not matches and code not in existing_risks:
-                    raise BusinessError("RISK_REF_UNKNOWN", "检查规则引用的风险名称或编号不存在", status_code=409, details={"risk_code": code, "row_key": row_key})
-                if not matches and not existing_risks[code].enabled:
-                    raise BusinessError("DISABLED_RISK_NOT_ENABLED", "关联风险未启用，不能写入来源检查", status_code=409, details={"risk_code": code})
-                selected_risks.add(code)
-        for code in tuple(selected_risks):
-            for row_key, references in possible_risks.items():
-                if any(risk_code_by_reference.get(value, value) == code for value in references) and code in risks_of(row_key):
-                    selected_checks.add(row_key)
-        if before == (len(selected_checks), len(selected_risks)):
-            break
-    if source_row["sheet_role"] == "RISK" and not selected_checks:
-        raise BusinessError("RISK_SOURCE_MISSING", "风险没有关联的检查规则，不能启用", status_code=409)
-
-    selected_rows = [
-        item for item in rows
-        if item["row_key"] in selected_checks
-        or (item["sheet_role"] == "RISK" and item.get("source_id") in selected_risks)
-    ]
-    return selected_rows, selected_risks
-
-
-def preview_disabled_rule_group(db: Session, scenario_code: str, row_key: str) -> dict[str, Any]:
-    """只读预览一次成组启用会触及哪些原始行及已有风险。"""
-    template = template_or_404(db, scenario_code)
-    draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == template.scenario_code))
-    if draft is None:
-        raise BusinessError("DISABLED_SOURCE_ROW_NOT_FOUND", "停用来源行不存在", status_code=404)
-    rows = list(draft.disabled_source_rows or [])
-    source_row = next((item for item in rows if item["row_key"] == row_key), None)
-    if source_row is None:
-        raise BusinessError("DISABLED_SOURCE_ROW_NOT_FOUND", "停用来源行不存在", status_code=404)
-    if source_row["sheet_role"] not in {"MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE", "RISK"}:
-        raise BusinessError("DISABLED_SOURCE_ROW_ROLE_UNSUPPORTED", "该来源行不属于检查与风险组", status_code=409)
-    stored_rules = list(db.scalars(select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft.id)).all())
-    existing_risks = _draft_risks_by_code(stored_rules)
-    selected_rows, risk_codes = _disabled_rule_group_rows(source_row, rows, existing_risks)
-    return {
-        "revision_no": draft.revision_no,
-        "rows": [
-            {
-                "row_key": item["row_key"],
-                "sheet_role": item["sheet_role"],
-                "sheet_name": item["sheet_name"],
-                "row_no": item["source"]["row_no"],
-                "source_id": item.get("source_id"),
-            }
-            for item in selected_rows
-        ],
-        "updated_risk_codes": sorted(risk_codes.intersection(existing_risks)),
-    }
-
-
-def _activate_disabled_rule_group_locked(
-    db: Session,
-    template: ScenarioTemplate,
-    draft: ScenarioDraft,
-    source_row: dict[str, Any],
-    rows: list[dict[str, Any]],
-) -> ScenarioDraft:
-    """启用检查与风险的关联闭包，并在同一修订中更新风险来源。"""
-    check_roles = {"MATERIAL_QUALITY", "INTERNAL_VALIDATE", "CROSS_VALIDATE"}
-    nodes, sheets, materials, fields, stored_rules, _sections = _draft_rows(db, draft.id)
-    node_by_code = {item.node_code: item for item in nodes}
-    binding_by_role = {item.sheet_role: item for item in sheets}
-    profile = scenario_schema.effective_profile(draft.schema_json)
-    profile_version = draft.profile_version or ""
-    existing_risks = _draft_risks_by_code(stored_rules)
-    selected_rows, selected_risks = _disabled_rule_group_rows(source_row, rows, existing_risks)
-    risk_codes_by_reference = {code: code for code in selected_risks}
-    risk_codes_by_reference.update({item.name: code for code, item in existing_risks.items() if code in selected_risks})
-    for item in selected_rows:
-        if item["sheet_role"] != "RISK" or not item.get("source_id"):
-            continue
-        name = next((column["value"] for column in item["columns"] if column["key"] == "name"), "")
-        if name:
-            risk_codes_by_reference[name] = item["source_id"]
-
-    material_items: list[dict[str, Any]] = []
-    for item in materials:
-        if not item.source_ref:
-            continue
-        material_items.append({
-            "candidate_ref": item.material_key, "source_id": item.source_ref, "name": item.name,
-        })
-    material_by_code = node_rulebook._reference_index(material_items, kind="材料")
-    field_by_code: dict[str, dict[str, Any]] = {}
-    field_names: set[tuple[str, str]] = set()
-    field_catalog: dict[tuple[str, str], dict[str, Any]] = {}
-    material_codes_by_key = {item["candidate_ref"]: item["source_id"] for item in material_items}
-    for item in fields:
-        material_code = material_codes_by_key.get(item.material_key)
-        if material_code is None:
-            continue
-        identity = (material_code, item.name)
-        if identity in field_names:
-            raise BusinessError("DISABLED_FIELD_NAME_DUPLICATE", "同一材料下的字段名称重复，无法解析内部校验引用", status_code=409)
-        field_names.add(identity)
-        field_catalog[identity] = {
-            "candidate_ref": item.field_key,
-            "name": item.name,
-            "material_ref": item.material_key,
-            "value_type": item.value_type,
-            "unit": item.unit,
-            "currency": item.currency,
-            "artifact_source": item.artifact_source,
-        }
-        if item.source_ref:
-            if item.source_ref in field_by_code:
-                raise BusinessError("DISABLED_FIELD_CODE_DUPLICATE", "现有字段编号重复，无法解析交叉校验引用", status_code=409)
-            field_by_code[item.source_ref] = {
-                "candidate_ref": item.field_key,
-                "source_id": item.source_ref,
-                "name": item.name,
-                "material_ref": item.material_key,
-                "value_type": item.value_type,
-                "unit": item.unit,
-                "currency": item.currency,
-                "artifact_source": item.artifact_source,
-            }
-
-    converted: list[tuple[dict[str, Any], dict[str, Any], str]] = []
-    effective_rows: list[dict[str, Any]] = []
-    for item in selected_rows:
-        role = item["sheet_role"]
-        binding = binding_by_role.get(role)
-        node = node_by_code.get(binding.node_code) if binding is not None else None
-        definition = unified_profile.sheet_definition(profile, role)
-        if node is None or not node.enabled or node.node_type not in definition["node_types"]:
-            raise BusinessError(
-                "DISABLED_SOURCE_ROW_NODE_INVALID", "停用来源行所属工作表未绑定可用的业务节点",
-                status_code=409, details={"sheet_role": role, "row_key": item["row_key"]},
-            )
-        values = {column["key"]: column["value"] for column in item["columns"]}
-        if values.get("enabled") != "否":
-            raise BusinessError("DISABLED_SOURCE_ROW_STATE_INVALID", "关联来源行不是停用状态，无法整组启用", status_code=409)
-        effective = {
-            **item,
-            "columns": [
-                {**column, "value": "是"} if column["key"] == "enabled" else dict(column)
-                for column in item["columns"]
-            ],
-        }
-        conversion = node_rulebook.convert_disabled_config_row(
-            effective,
-            profile_version=profile_version,
-            material_by_code=material_by_code,
-            field_by_code=field_by_code,
-            field_catalog=field_catalog,
-            profile=profile,
-        )
-        if conversion.notes:
-            raise BusinessError(
-                "DISABLED_SOURCE_ROW_ISSUES_UNRESOLVED", "关联来源行仍有未确认的业务口径，请先补齐后再启用",
-                status_code=409,
-                details={"row_key": item["row_key"], "issues": [note.to_payload() for note in conversion.notes]},
-            )
-        candidates = conversion.proposals["rules"]
-        if not candidates or any(outcome.disposition != "CANDIDATE" for outcome in conversion.outcomes):
-            raise BusinessError("DISABLED_SOURCE_ROW_CONVERSION_INVALID", "关联来源行未形成业务规则", status_code=409)
-        converted.extend((candidate, item, node.node_code) for candidate in candidates)
-        effective_rows.append(effective)
-
-    new_rules: list[dict[str, Any]] = []
-    source_keys_by_risk: dict[str, list[str]] = {code: [] for code in selected_risks}
-    for candidate, item, node_code in converted:
-        role = item["sheet_role"]
-        code = candidate["source_id"]
-        material_code: str | None = None
-        if role == "INTERNAL_VALIDATE":
-            branch_refs = {entry["material_ref"] for entry in candidate["inputs"]}
-            if len(branch_refs) != 1:
-                raise BusinessError("IMPORT_RULE_BRANCH_INVALID", "内部校验分支必须且只能对应一个材料", status_code=409)
-            material_code = material_codes_by_key.get(next(iter(branch_refs)))
-        rule_key = manifest_module.business_rule_key(
-            template.scenario_code, node_by_code[node_code].node_type, code, material_code=material_code
-        )
-        inputs = [
-            {"field_key": entry["field_ref"], "material_key": entry["material_ref"]}
-            for entry in candidate.get("inputs", [])
-        ]
-        material_scope = list(candidate.get("material_refs") or [])
-        new_rules.append({
-            "rule_key": rule_key,
-            "rule_code": code,
-            "name": candidate["name"],
-            "node": node_code,
-            "node_type": node_by_code[node_code].node_type,
-            "operator": candidate["operator"],
-            "enabled": True,
-            "inputs": inputs,
-            "outputs": list(candidate.get("output_field_refs") or []),
-            "materials": material_scope,
-            "parameters": dict(candidate.get("parameters") or {}),
-            "requirement": candidate.get("requirement") or "",
-            "description": (candidate.get("requirement") or "") if role == "RISK" else "",
-            "applicability": {"kind": "ALWAYS", "material_keys": list(dict.fromkeys([
-                *(entry["material_key"] for entry in inputs), *material_scope,
-            ]))},
-            "source_node": candidate.get("source_node"),
-            "source_rule_key": None,
-            "source_rule_keys": [],
-            "source_rule_codes": list(candidate.get("source_rule_codes") or []),
-            "check_level": candidate.get("check_level"),
-            "check_operator": candidate.get("check_operator"),
-            "risk_level_value": candidate.get("risk_level_value"),
-            "risk_condition": candidate.get("risk_condition"),
-            "config_status": candidate.get("config_status"),
-            "quality_supported": candidate.get("quality_supported"),
-            "source_ref": code,
-            "origin": _origin_of_source_row(item),
-        })
-        if role in check_roles:
-            for reference in candidate.get("risk_names") or []:
-                risk_code = risk_codes_by_reference.get(reference)
-                if risk_code is None:
-                    raise BusinessError(
-                        "RISK_REF_UNKNOWN", "检查规则引用的风险名称或编号不存在", status_code=409,
-                        details={"risk_reference": reference, "row_key": item["row_key"]},
-                    )
-                source_keys_by_risk[risk_code].append(rule_key)
-
-    existing_keys = {item.rule_key for item in stored_rules}
-    new_keys = [item["rule_key"] for item in new_rules]
-    if len(set(new_keys)) != len(new_keys) or existing_keys.intersection(new_keys):
-        raise BusinessError("DISABLED_RULE_IDENTITY_DUPLICATE", "关联规则的业务身份与现有草稿或本组其他规则冲突", status_code=409)
-    missing_nodes = sorted({item.node_code for item in stored_rules if item.node_code not in node_by_code})
-    if missing_nodes:
-        raise BusinessError("DISABLED_RULE_NODE_MISSING", "现有规则所属节点不存在，无法核对业务编号", status_code=409, details={"node_codes": missing_nodes})
-    manifest_module.ensure_unique_rule_codes([
-        {
-            "rule_key": item.rule_key,
-            "rule_code": item.source_ref or (item.rule_json or {}).get("rule_code"),
-            "node": item.node_code,
-            "node_type": node_by_code[item.node_code].node_type,
-            "operator": item.operator_code,
-            "inputs": (item.rule_json or {}).get("inputs") or [],
-            "materials": (item.rule_json or {}).get("materials") or [],
-        }
-        for item in stored_rules
-    ] + new_rules)
-
-    rule_by_key = {item["rule_key"]: item for item in new_rules}
-    node_positions = {item.node_code: item.sequence_no for item in nodes}
-    for code in selected_risks:
-        new_risk = next((item for item in new_rules if item["operator"] == "RISK_TRIGGER" and item["rule_code"] == code), None)
-        existing_risk = existing_risks.get(code)
-        if new_risk is not None and existing_risk is not None:
-            raise BusinessError("DISABLED_RISK_CODE_DUPLICATE", "风险编号与现有草稿重复", status_code=409, details={"risk_code": code})
-        if new_risk is None and (existing_risk is None or not existing_risk.enabled):
-            raise BusinessError("DISABLED_RISK_NOT_ENABLED", "关联风险未启用，不能写入来源检查", status_code=409, details={"risk_code": code})
-        source_keys = list(dict.fromkeys(source_keys_by_risk[code]))
-        if new_risk is not None and not source_keys:
-            raise BusinessError("RISK_SOURCE_MISSING", "风险没有关联的检查规则，不能启用", status_code=409, details={"risk_code": code})
-        risk_node = new_risk["node"] if new_risk is not None else existing_risk.node_code
-        source_node = new_risk.get("source_node") if new_risk is not None else (existing_risk.rule_json or {}).get("source_node")
-        if risk_node not in node_positions or (source_node and source_node not in SOURCE_NODE_RULE_NODES):
-            raise BusinessError("DISABLED_RISK_NODE_INVALID", "关联风险的节点配置无效", status_code=409, details={"risk_code": code, "node_code": risk_node, "source_node": source_node})
-        for key in source_keys:
-            check = rule_by_key[key]
-            if node_positions[risk_node] <= node_positions[check["node"]]:
-                raise BusinessError("MANIFEST_NODE_ORDER_INVALID", "风险节点必须位于关联检查节点之后", status_code=409, details={"risk_code": code, "rule_key": key})
-            if source_node and check["node_type"] not in SOURCE_NODE_RULE_NODES[source_node]:
-                raise BusinessError("MANIFEST_RISK_SOURCE_NODE_MISMATCH", "关联检查不属于风险声明的来源节点类型", status_code=409, details={"risk_code": code, "rule_key": key})
-        if new_risk is not None:
-            new_risk["source_rule_key"] = source_keys[0]
-            new_risk["source_rule_keys"] = source_keys
-        else:
-            definition = dict(existing_risk.rule_json or {})
-            merged = list(dict.fromkeys([
-                *(definition.get("source_rule_keys") or []),
-                *([definition["source_rule_key"]] if definition.get("source_rule_key") else []),
-                *source_keys,
-            ]))
-            definition["source_rule_key"] = merged[0] if merged else None
-            definition["source_rule_keys"] = merged
-            existing_risk.rule_json = definition
-
-    editable = manifest_module.editable_config_of({"rules": new_rules}, namespace=template.scenario_code)
-    for index, item in enumerate(editable["rules"], start=_next_sort_no(db, ScenarioDraftRule, draft.id)):
-        db.add(ScenarioDraftRule(
-            draft_id=draft.id,
-            sort_no=index,
-            **{key: value for key, value in item.items() if key != "is_system"},
-        ))
-    activated_keys = {item["row_key"] for item in selected_rows}
-    draft.disabled_source_rows = [item for item in rows if item["row_key"] not in activated_keys]
-    _save_draft(
-        db, template, draft,
-        operation_type="DRAFT_SOURCE_ROW_ACTIVATE",
-        object_name=template.scenario_name,
-        detail={
-            "row_keys": sorted(activated_keys),
-            "rule_keys": new_keys,
-            "risk_codes": sorted(selected_risks),
-            "source_rows": [
-                {"row_key": item["row_key"], "original_source": item["source"], "effective_columns": effective["columns"]}
-                for item, effective in zip(selected_rows, effective_rows, strict=True)
-            ],
-        },
-    )
-    db.refresh(draft)
-    return draft
-
-
-def _activate_disabled_calculation_locked(
-    db: Session,
-    template: ScenarioTemplate,
-    draft: ScenarioDraft,
-    definition: dict[str, Any],
-    rows: list[dict[str, Any]],
-) -> ScenarioDraft:
-    """将停用的 06 定义与同编号的 07/08 行一起转换。"""
-    row_key = definition["row_key"]
-    values = {column["key"]: column["value"] for column in definition["columns"]}
-    rule_code = values.get("rule_code", "").strip()
-    if not rule_code:
-        raise BusinessError("DISABLED_CALC_CODE_REQUIRED", "先填写计算定义的规则编号，再启用", status_code=409)
-    if values.get("enabled") != "否":
-        raise BusinessError("DISABLED_CALC_STATE_INVALID", "来源行不是停用状态，不能重复启用", status_code=409)
-    if any(
-        row["sheet_role"] == "CALC_DEFINITION" and row["row_key"] != row_key
-        and any(column["key"] == "rule_code" and column["value"] == rule_code for column in row["columns"])
-        for row in rows
-    ):
-        raise BusinessError(
-            "DISABLED_CALC_CODE_DUPLICATE",
-            "停用计算定义的规则编号重复，无法确定参数和判定归属",
-            status_code=409,
-            details={"rule_code": rule_code},
-        )
-    children = [
-        row for row in rows
-        if row["sheet_role"] in {"CALC_PARAMETER", "CALC_JUDGEMENT"}
-        and any(column["key"] == "rule_code" and column["value"] == rule_code for column in row["columns"])
-    ]
-    selected_rows = [json.loads(json.dumps(definition)), *json.loads(json.dumps(children))]
-    selected_rows[0]["columns"] = [
-        {**column, "value": "是"} if column["key"] == "enabled" else column
-        for column in selected_rows[0]["columns"]
-    ]
-    nodes, sheets, _materials, fields, _rules, _sections = _draft_rows(db, draft.id)
-    node_by_code = {node.node_code: node for node in nodes}
-    node_codes = {sheet.sheet_role: sheet.node_code for sheet in sheets if sheet.node_code}
-    node_code = node_codes.get("CALC_DEFINITION")
-    node = node_by_code.get(node_code)
-    if node is None or node.node_type != "CALCULATION" or not node.enabled:
-        raise BusinessError(
-            "DISABLED_CALC_NODE_INVALID",
-            "计算定义绑定的计算节点不存在或未启用，不能启用这组来源行",
-            status_code=409,
-            details={"node_code": node_code},
-        )
-    converted = financial_report.convert_disabled_calculation_rows(
-        selected_rows,
-        scenario_code=template.scenario_code,
-        node_codes=node_codes,
-        profile_version=draft.profile_version or "",
-        profile=scenario_schema.effective_profile(draft.schema_json),
-    )
-    activated = converted["calculations"]
-    if len(activated) != 1 or activated[0]["rule_code"] != rule_code:
-        raise BusinessError(
-            "DISABLED_CALC_CONVERSION_INVALID",
-            "停用计算定义未能转换成唯一计算规则，草稿未修改",
-            status_code=409,
-            details={"row_key": row_key, "rule_code": rule_code},
-        )
-    source_rows = {
-        (row["sheet_role"], row["source"]["row_no"]): row for row in selected_rows
-    }
-    activated[0]["origin"] = _origin_of_source_row(definition)
-    for role, key in (("CALC_PARAMETER", "parameters"), ("CALC_JUDGEMENT", "bands")):
-        for item in activated[0].get(key) or []:
-            source_row = source_rows[(role, item["source"]["row_no"])]
-            item["origin"] = _origin_of_source_row(source_row)
-    candidates, frozen = _calculation_store(draft.calculation_json)
-    if frozen:
-        raise BusinessError(
-            "DISABLED_CALC_FROZEN_DRAFT",
-            "当前草稿只有历史计算编译产物，不能与新计算候选混合",
-            status_code=409,
-        )
-    if any(item.get("rule_code") == rule_code for item in candidates):
-        raise BusinessError(
-            "DISABLED_CALC_CODE_DUPLICATE", "规则编号与现有计算规则重复", status_code=409,
-            details={"rule_code": rule_code},
-        )
-    field_codes = [field.source_ref for field in fields if field.source_ref]
-    if len(field_codes) != len(set(field_codes)):
-        raise BusinessError(
-            "DISABLED_CALC_FIELD_CODE_DUPLICATE",
-            "字段业务编号重复，计算参数无法唯一定位字段",
-            status_code=409,
-        )
-    activated[0]["activated_source_rows"] = [
-        {"row_key": row["row_key"], "sheet_role": row["sheet_role"], "source": row["source"], "columns": row["columns"]}
-        for row in selected_rows
-    ]
-    merged = [*candidates, activated[0]]
-    manifest_module.compile_calculations(
-        merged,
-        field_code_index={
-            field.source_ref: {
-                "field_key": field.field_key,
-                "name": field.name,
-                "value_type": field.value_type,
-                "unit": field.unit,
-                "currency": field.currency,
-                "material_key": field.material_key,
-                "period_scope": field.period_scope,
-                "statement_scope": field.statement_scope,
-            }
-            for field in fields if field.source_ref
-        },
-        node_instances=[
-            {"node_code": node.node_code, "node_type": node.node_type, "enabled": node.enabled}
-            for node in nodes
-        ],
-    )
-    activated_keys = {row["row_key"] for row in selected_rows}
-    draft.disabled_source_rows = [row for row in rows if row["row_key"] not in activated_keys]
-    draft.calculation_json = merged
-    _save_draft(
-        db,
-        template,
-        draft,
-        operation_type="DRAFT_CALC_ACTIVATE",
-        object_name=template.scenario_name,
-        detail={"rule_code": rule_code, "source_row_keys": sorted(activated_keys)},
-    )
-    db.refresh(draft)
-    return draft
-
-
 # 节点实例（用户配置的流程）
 
 
 def _draft_node_or_404(db: Session, draft_id: int, node_code: str) -> ScenarioDraftNode:
-    node = db.scalar(
-        select(ScenarioDraftNode).where(
-            ScenarioDraftNode.draft_id == draft_id,
-            ScenarioDraftNode.node_code == node_code,
-        )
-    )
+    node = next(iter([item for item in config_store.rows(db, ScenarioDraftNode, draft_id) if (item.node_code == node_code)]), None)
     if node is None:
         raise BusinessError(
             "SCENARIO_NODE_NOT_FOUND",
@@ -1975,18 +1062,13 @@ def _draft_node_or_404(db: Session, draft_id: int, node_code: str) -> ScenarioDr
 
 
 def _node_type_of_draft_node(db: Session, draft_id: int, node_code: str) -> str:
-    """草稿里某个节点实例的**能力类型**。
+    """草稿里某个节点实例的能力类型。
 
     规则表单提交的 `node` 是实例码，算子约束与节点专属校验比的是能力类型。
     实例不存在时明确报错：允许一条规则挂到并不存在的节点上，发布期才会以
     「规则指向不存在的节点」报出，那时已经看不出真实原因。
     """
-    node = db.scalar(
-        select(ScenarioDraftNode).where(
-            ScenarioDraftNode.draft_id == draft_id,
-            ScenarioDraftNode.node_code == node_code,
-        )
-    )
+    node = next(iter([item for item in config_store.rows(db, ScenarioDraftNode, draft_id) if (item.node_code == node_code)]), None)
     if node is None:
         raise BusinessError(
             "RULE_NODE_UNKNOWN",
@@ -1998,26 +1080,26 @@ def _node_type_of_draft_node(db: Session, draft_id: int, node_code: str) -> str:
 
 
 def select_draft_sheets(scenario_code: str, selections: list[dict[str, Any]]) -> ScenarioDraft:
-    """拒绝在流程节点页单独改写 Sheet 绑定。
+    """拒绝在流程节点页单独改写来源工作表清单。
 
-    `scenario_draft_sheet` 只在「写入场景草稿」整体成功时，与材料、字段、规则、
+    草稿 JSON 的来源工作表清单只在「写入场景草稿」整体成功时，与材料、字段、规则、
     计算和报告一起替换。单独保存一份 Sheet 选择会和 `import_sheet` 形成两套真源。
     """
     raise BusinessError(
         "SHEET_BINDING_VIA_IMPORT",
-        "场景的 Sheet 绑定只能在导入作业确认后，由「写入所属场景草稿」整体替换，不能在流程节点页单独改选",
+        "场景来源工作表清单只能在导入作业确认后，由「写入所属场景草稿」整体替换，不能在流程节点页单独改选",
         status_code=409,
         details={"scenario_code": scenario_code, "submitted_count": len(selections)},
     )
 
 
 def _assert_node_type_known(node_type: str) -> str:
-    """节点能力类型必须来自统一模板协议。"""
-    known = {node["node_type"] for node in unified_profile.load_unified_profile()["node_types"]}
+    """节点能力类型必须来自系统能力目录。"""
+    known = {node["node_type"] for node in node_profile.load_node_profile()["node_types"]}
     if node_type not in known:
         raise BusinessError(
             "SCENARIO_NODE_TYPE_UNKNOWN",
-            f"节点类型“{node_type}”不在统一模板协议里",
+            f"节点类型“{node_type}”不在系统能力目录中",
             details={"node_type": node_type, "known": sorted(known)},
         )
     return node_type
@@ -2046,39 +1128,54 @@ def _assert_depends_on(nodes: list[ScenarioDraftNode], node_code: str, depends_o
 
 
 def _assert_node_removable(db: Session, draft_id: int, node_code: str) -> None:
-    """被规则或下游节点依赖的节点不能删除。
-
-    删除它会让规则指向不存在的节点、或让下游节点的依赖悬空，而两者在页面上
-    都只表现为「配置看起来还在」。因此这里明确报出引用清单，由用户先处理引用。
-    """
+    """删除前核对业务配置和流程依赖；不能把 JSON 中的字段或计算归属留成悬空引用。"""
     referencing_rules = [
-        item.rule_key
-        for item in db.scalars(
-            select(ScenarioDraftRule).where(
-                ScenarioDraftRule.draft_id == draft_id, ScenarioDraftRule.node_code == node_code
-            )
-        ).all()
+        item for item in config_store.rows(db, ScenarioDraftRule, draft_id)
+        if item.node_code == node_code
+    ]
+    referencing_fields = [
+        item for item in config_store.rows(db, ScenarioDraftField, draft_id)
+        if getattr(item, "node_code", None) == node_code
+    ]
+    referencing_sheets = [
+        item.sheet_role for item in config_store.rows(db, ScenarioDraftSheet, draft_id)
+        if item.node_code == node_code
     ]
     downstream = [
-        item.node_code
-        for item in db.scalars(select(ScenarioDraftNode).where(ScenarioDraftNode.draft_id == draft_id)).all()
+        item for item in config_store.rows(db, ScenarioDraftNode, draft_id)
         if node_code in (item.depends_on or [])
     ]
-    if referencing_rules or downstream:
+    draft = db.get(ScenarioDraft, draft_id)
+    candidates, frozen = _calculation_store(draft.calculation_json)
+    referencing_calculations = [
+        item for item in (frozen if frozen is not None else candidates)
+        if (item.get("node_instance_code") or item.get("node_code")) == node_code
+    ]
+    if referencing_rules or referencing_fields or referencing_calculations or referencing_sheets or downstream:
+        references = [
+            *[f"规则：{item.name}" for item in referencing_rules],
+            *[f"字段：{item.name}" for item in referencing_fields],
+            *[f"计算：{item['rule_name']}" for item in referencing_calculations],
+            *[f"下游节点：{item.name}" for item in downstream],
+            *(["历史工作表绑定"] if referencing_sheets else []),
+        ]
         raise BusinessError(
             "SCENARIO_NODE_IN_USE",
-            "该节点仍被引用，不能删除：请先把引用它的规则与下游节点改到别的节点上",
+            "该节点仍被引用，不能删除：" + "；".join(references),
             details={
                 "node_code": node_code,
-                "rule_keys": sorted(referencing_rules),
-                "downstream_nodes": sorted(downstream),
+                "rule_keys": sorted(item.rule_key for item in referencing_rules),
+                "field_keys": sorted(item.field_key for item in referencing_fields),
+                "calculation_rules": sorted(item["rule_code"] for item in referencing_calculations),
+                "sheet_roles": sorted(referencing_sheets),
+                "downstream_nodes": sorted(item.node_code for item in downstream),
             },
         )
 
 
 def create_draft_node(db: Session, scenario_code: str, payload: dict[str, Any]) -> ScenarioDraft:
     template, draft = _locked_draft(db, scenario_code)
-    nodes = list(db.scalars(select(ScenarioDraftNode).where(ScenarioDraftNode.draft_id == draft.id)).all())
+    nodes = list(config_store.rows(db, ScenarioDraftNode, draft.id))
     node_code = str(payload["node_code"]).strip()
     if any(item.node_code == node_code for item in nodes):
         raise BusinessError(
@@ -2090,8 +1187,8 @@ def create_draft_node(db: Session, scenario_code: str, payload: dict[str, Any]) 
     depends_on = [str(item) for item in (payload.get("depends_on") or [])]
     _assert_depends_on(nodes, node_code, depends_on)
     sequence_no = int(payload.get("sequence_no") or (max((item.sequence_no for item in nodes), default=0) + 1))
-    db.add(
-        ScenarioDraftNode(
+    config_store.add(
+        db, ScenarioDraftNode(
             draft_id=draft.id,
             node_code=node_code,
             node_type=node_type,
@@ -2118,7 +1215,7 @@ def create_draft_node(db: Session, scenario_code: str, payload: dict[str, Any]) 
 def update_draft_node(db: Session, scenario_code: str, node_code: str, payload: dict[str, Any]) -> ScenarioDraft:
     template, draft = _locked_draft(db, scenario_code)
     node = _draft_node_or_404(db, draft.id, node_code)
-    nodes = list(db.scalars(select(ScenarioDraftNode).where(ScenarioDraftNode.draft_id == draft.id)).all())
+    nodes = list(config_store.rows(db, ScenarioDraftNode, draft.id))
     if "node_type" in payload and payload["node_type"] is not None:
         node.node_type = _assert_node_type_known(str(payload["node_type"]))
     if "name" in payload and payload["name"] is not None:
@@ -2150,7 +1247,7 @@ def delete_draft_node(db: Session, scenario_code: str, node_code: str) -> Scenar
     template, draft = _locked_draft(db, scenario_code)
     node = _draft_node_or_404(db, draft.id, node_code)
     _assert_node_removable(db, draft.id, node_code)
-    db.delete(node)
+    config_store.delete(node)
     _save_draft(
         db,
         template,
@@ -2195,12 +1292,16 @@ def _commit_config_change(db: Session, template: ScenarioTemplate, draft: Scenar
 
 def _calculation_view_rows(raw: Any) -> list[dict[str, Any]]:
     """草稿计算配置的核对行。冻结产物与导入候选都按同一组字段展示。"""
+    # 未声明执行方式的旧记录仅在只读视图标为 PROGRAM，执行入口会明确拒绝。
     candidates, frozen = _calculation_store(raw)
     source = frozen if frozen is not None else candidates
     return [
         {
             "rule_code": item.get("rule_code"),
             "name": item.get("rule_name") or item.get("name"),
+            "execution_mode": item.get("execution_mode", "CHECK"),
+            "execution_engine": item.get("execution_engine", "PROGRAM"),
+            "judgement_instruction": item.get("judgement_instruction", ""),
             "node_code": item.get("node_code") or item.get("node_instance_code"),
             "formula": item.get("formula") or item.get("expression"),
             "result_code": item.get("result_code"),
@@ -2247,72 +1348,24 @@ def assess_publish(
     失败抛出 BusinessError，不创建版本。保存草稿的调用方捕获该错误并写入
     `sync_error`；真正发布时原样抛出。
     """
-    from .import_service import _capability_blockers
-
-    acknowledged = list(acknowledged_capability_gaps or [])
     nodes, sheets, _materials, _fields, rules, _sections = _draft_rows(db, draft.id)
-    profile = scenario_schema.effective_profile(draft.schema_json)
-    known_types = {str(item["node_type"]) for item in profile["node_types"]}
+    known_types = {str(item["node_type"]) for item in node_profile.load_node_profile()["node_types"]}
     node_by_code = {item.node_code: item for item in nodes}
     if not sheets:
         raise BusinessError(
             "SCENARIO_SHEET_REQUIRED",
-            "场景尚未确认任何 Sheet 绑定，配置未生效：请先导入规则库，确认 Sheet 与节点绑定",
+            "场景尚未选入规则库工作表，请先导入规则库",
             status_code=409,
             details={"scenario_code": template.scenario_code},
         )
-    for sheet in sheets:
-        label = unified_profile.sheet_role_label(profile, sheet.sheet_role)
-        if not sheet.node_code:
-            raise BusinessError(
-                "SCENARIO_SHEET_NODE_REQUIRED",
-                f"Sheet“{label}”尚未绑定节点，不能发布",
-                status_code=409,
-                details={"scenario_code": template.scenario_code, "sheet_role": sheet.sheet_role},
-            )
-        node = node_by_code.get(sheet.node_code)
-        if node is None:
-            raise BusinessError(
-                "SCENARIO_SHEET_NODE_UNKNOWN",
-                f"Sheet“{label}”绑定的节点“{sheet.node_code}”不在当前场景节点清单里",
-                status_code=409,
-                details={
-                    "scenario_code": template.scenario_code,
-                    "sheet_role": sheet.sheet_role,
-                    "node_code": sheet.node_code,
-                },
-            )
-        if not node.enabled:
-            raise BusinessError(
-                "SCENARIO_SHEET_NODE_DISABLED",
-                f"Sheet“{label}”绑定的节点“{node.node_code}”已停用，不能发布",
-                status_code=409,
-                details={
-                    "scenario_code": template.scenario_code,
-                    "sheet_role": sheet.sheet_role,
-                    "node_code": node.node_code,
-                },
-            )
-        allowed = unified_profile.node_types_of_sheet_role(profile, sheet.sheet_role)
-        if node.node_type not in allowed:
-            raise BusinessError(
-                "SCENARIO_SHEET_NODE_TYPE_MISMATCH",
-                f"Sheet“{label}”不能绑定到节点类型“{node.node_type}”上",
-                status_code=409,
-                details={
-                    "sheet_role": sheet.sheet_role,
-                    "node_code": node.node_code,
-                    "node_type": node.node_type,
-                },
-            )
-    # 每个节点的能力类型都必须在统一协议里：只校验「被 Sheet 或规则引用到的节点」
+    # 每个节点的能力类型都必须在节点能力目录里：只校验「被 Sheet 或规则引用到的节点」
     # 会漏掉用户建好但暂时没挂规则的节点，而它的类型一旦是自由文本，
     # 节点注册表在运行期找不到 handler，发布却已经放行。
     for node in nodes:
         if str(node.node_type) not in known_types:
             raise BusinessError(
                 "MANIFEST_NODE_TYPE_INVALID",
-                f"节点“{node.node_code}”的能力类型“{node.node_type}”不在统一模板协议里",
+                f"节点“{node.node_code}”的能力类型“{node.node_type}”不在节点能力目录里",
                 status_code=409,
                 details={"node_code": node.node_code, "node_type": node.node_type},
             )
@@ -2335,7 +1388,7 @@ def assess_publish(
                 details={"node_code": node.node_code, "rule_key": rule.rule_key, "name": rule.name},
             )
     manifest = compile_draft_manifest(
-        db, template, draft, acknowledged_capability_gaps=acknowledged
+        db, template, draft, acknowledged_capability_gaps=[]
     )
     instance_type = {item.node_code: item.node_type for item in nodes}
     enabled_nodes = {item.node_code for item in nodes if item.enabled}
@@ -2374,7 +1427,7 @@ def assess_publish(
             continue
         code = str(item.get("node_instance_code") or item.get("node_code") or "")
         node = node_by_code.get(code)
-        # 计算规则必须落在**存在、启用、且能力类型为 CALCULATION** 的节点上：
+        # 计算规则必须落在存在、启用、且能力类型为 CALCULATION 的节点上：
         # 只看「存在且启用」会让一条计算规则挂到字段抽取节点上，运行期才暴露。
         if node is None or not node.enabled or node.node_type != "CALCULATION":
             raise BusinessError(
@@ -2383,21 +1436,7 @@ def assess_publish(
                 status_code=409,
                 details={"node_code": code, "rule": item.get("rule_code")},
             )
-    coverage = manifest.get("capability_coverage") if isinstance(manifest.get("capability_coverage"), dict) else {}
-    blockers = _capability_blockers(coverage, acknowledged)
-    if blockers:
-        first = blockers[0]
-        rule_keys = [
-            entry.get("details", {}).get("rule_key")
-            for entry in blockers
-            if isinstance(entry.get("details"), dict) and entry.get("details", {}).get("rule_key")
-        ]
-        raise BusinessError(
-            str(first.get("code") or "CAPABILITY_UNIMPLEMENTED"),
-            "；".join(str(entry.get("message") or "") for entry in blockers),
-            status_code=409,
-            details={"rule_keys": rule_keys, "blockers": blockers},
-        )
+    # 能力覆盖是执行说明，不作为辅助场景发布的业务审批条件。
     return manifest
 
 
@@ -2406,10 +1445,18 @@ def _refresh_publish_readiness(
 ) -> bool:
     """重新计算「这份草稿现在能不能发布」，把阻断原因写进 `draft.sync_error`。
 
-    与 `publish_draft` 调用同一个 `assess_publish`。确认列表为空：未逐条确认的
-    能力缺口也是阻断原因。本函数不产生任何版本；保存草稿必须成功，因此只捕获
+    与 `publish_draft` 调用同一个 `assess_publish`。业务问题与能力缺口不阻断发布。
+    本函数不产生任何版本；保存草稿必须成功，因此只捕获
     BusinessError。其它异常继续抛出。
     """
+    draft.sync_error = _publish_readiness_error(db, template, draft)
+    return draft.sync_error is None
+
+
+def _publish_readiness_error(
+    db: Session, template: ScenarioTemplate, draft: ScenarioDraft,
+) -> dict[str, Any] | None:
+    """按当前配置和编译逻辑计算发布原因，不写数据库或创建版本。"""
     try:
         assess_publish(db, template, draft, acknowledged_capability_gaps=[])
     except BusinessError as failure:
@@ -2419,10 +1466,8 @@ def _refresh_publish_readiness(
             failure.code,
             failure.message,
         )
-        draft.sync_error = _sync_error_detail(failure)
-        return False
-    draft.sync_error = None
-    return True
+        return _sync_error_detail(failure)
+    return None
 
 
 def _sync_error_detail(failure: BusinessError) -> dict[str, Any]:
@@ -2464,9 +1509,36 @@ def _publish_manifest(
 
     base_version = version_or_404(db, template.scenario_code, draft.base_version_no) if draft.base_version_no else None
     source = "REVISION" if base_version is not None else "FORM"
+    import_job_id: int | None = None
+    # 导入得到的草稿第一次发布必须保留 Excel 作业溯源；否则动态字段和规则虽然
+    # 已进入 manifest，却会在版本层被错误标成页面创建，且无法回到原始规则库。
+    # 同一个作业只能关联一个版本，后续基于该草稿的页面修订统一记为 REVISION。
+    if draft.source == "EXCEL":
+        import_job_no = draft.config_json.get("import_job_no") if isinstance(draft.config_json, dict) else None
+        if not isinstance(import_job_no, str) or not import_job_no:
+            raise BusinessError(
+                "DRAFT_IMPORT_PROVENANCE_MISSING",
+                "规则库导入草稿缺少原始导入作业编号，不能发布为可追溯版本",
+                status_code=409,
+                details={"scenario_code": template.scenario_code},
+            )
+        import_job = db.scalar(select(ImportJob).where(ImportJob.job_no == import_job_no))
+        if import_job is None or import_job.scenario_code != template.scenario_code:
+            raise BusinessError(
+                "DRAFT_IMPORT_PROVENANCE_INVALID",
+                "规则库导入草稿引用的原始导入作业不存在或不属于当前场景",
+                status_code=409,
+                details={"scenario_code": template.scenario_code, "import_job_no": import_job_no},
+            )
+        existing_import_version = db.scalar(
+            select(ScenarioVersion.id).where(ScenarioVersion.import_job_id == import_job.id)
+        )
+        if existing_import_version is None:
+            source = "IMPORT"
+            import_job_id = import_job.id
     version_no = allocate_version(db, template.scenario_code, template.scenario_name)
     version = ScenarioVersion(
-        import_job_id=None,
+        import_job_id=import_job_id,
         scenario_code=template.scenario_code,
         scenario_name=template.scenario_name,
         schema_key=draft.schema_key,
@@ -2537,27 +1609,6 @@ def _publish_manifest(
     return version, False
 
 
-def _assert_material_source_ref_available(
-    db: Session, draft_id: int, source_ref: str | None, *, material_key: str | None = None
-) -> None:
-    if source_ref is None:
-        return
-    statement = select(ScenarioDraftMaterial).where(
-        ScenarioDraftMaterial.draft_id == draft_id,
-        ScenarioDraftMaterial.source_ref == source_ref,
-    )
-    if material_key is not None:
-        statement = statement.where(ScenarioDraftMaterial.material_key != material_key)
-    existing = db.scalar(statement.limit(1))
-    if existing is not None:
-        raise BusinessError(
-            "MATERIAL_CODE_DUPLICATE",
-            f"材料编号“{source_ref}”已由材料“{existing.name}”使用",
-            status_code=409,
-            details={"source_ref": source_ref, "material_key": existing.material_key},
-        )
-
-
 def create_draft_material(db: Session, scenario_code: str, payload: dict[str, Any]) -> ScenarioDraft:
     """在草稿中新增材料位。已保存到草稿，发布后才供新方案使用。"""
     template, draft = _locked_draft(db, scenario_code)
@@ -2565,10 +1616,9 @@ def create_draft_material(db: Session, scenario_code: str, payload: dict[str, An
     if not name:
         raise BusinessError("MATERIAL_NAME_REQUIRED", "材料名称不能为空", status_code=400)
     source_ref = _normalized_source_ref(payload.get("source_ref"))
-    _assert_material_source_ref_available(db, draft.id, source_ref)
     material_key = stable_key("mat", scenario_code, _item_ref())
-    db.add(
-        ScenarioDraftMaterial(
+    config_store.add(
+        db, ScenarioDraftMaterial(
             draft_id=draft.id,
             material_key=material_key,
             name=name,
@@ -2590,12 +1640,7 @@ def create_draft_material(db: Session, scenario_code: str, payload: dict[str, An
 
 
 def _draft_material_or_404(db: Session, draft_id: int, material_key: str) -> ScenarioDraftMaterial:
-    item = db.scalar(
-        select(ScenarioDraftMaterial).where(
-            ScenarioDraftMaterial.draft_id == draft_id,
-            ScenarioDraftMaterial.material_key == material_key,
-        )
-    )
+    item = next(iter([item for item in config_store.rows(db, ScenarioDraftMaterial, draft_id) if (item.material_key == material_key)]), None)
     if not item:
         raise BusinessError("DRAFT_MATERIAL_NOT_FOUND", "材料配置不存在", status_code=404, details={"material_key": material_key})
     return item
@@ -2616,7 +1661,6 @@ def update_draft_material(db: Session, scenario_code: str, material_key: str, pa
         item.description = str(payload["description"])
     if "source_ref" in payload:
         source_ref = _normalized_source_ref(payload.get("source_ref"))
-        _assert_material_source_ref_available(db, draft.id, source_ref, material_key=material_key)
         item.source_ref = source_ref
     _save_draft(
         db,
@@ -2633,10 +1677,8 @@ def delete_draft_material(db: Session, scenario_code: str, material_key: str) ->
     """删除草稿中的材料位；仍被字段或规则引用时 409，不级联删除。"""
     template, draft = _locked_draft(db, scenario_code)
     item = _draft_material_or_404(db, draft.id, material_key)
-    fields = db.scalars(
-        select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft.id, ScenarioDraftField.material_key == material_key)
-    ).all()
-    rules = db.scalars(select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft.id)).all()
+    fields = [item for item in config_store.rows(db, ScenarioDraftField, draft.id) if (item.material_key == material_key)]
+    rules = config_store.rows(db, ScenarioDraftRule, draft.id)
     referencing_rules = [
         rule.name
         for rule in rules
@@ -2654,7 +1696,7 @@ def delete_draft_material(db: Session, scenario_code: str, material_key: str) ->
                 "rule_keys": referencing_rules,
             },
         )
-    db.delete(item)
+    config_store.delete(item)
     _save_draft(
         db,
         template,
@@ -2669,21 +1711,18 @@ def delete_draft_material(db: Session, scenario_code: str, material_key: str) ->
 def _assert_field_source_ref_available(
     db: Session, draft_id: int, source_ref: str | None, *, field_key: str | None = None
 ) -> None:
-    if source_ref is None:
+    code = source_ref or field_key
+    if code is None:
         return
-    statement = select(ScenarioDraftField).where(
-        ScenarioDraftField.draft_id == draft_id,
-        ScenarioDraftField.source_ref == source_ref,
-    )
-    if field_key is not None:
-        statement = statement.where(ScenarioDraftField.field_key != field_key)
-    existing = db.scalar(statement.limit(1))
+    existing = next((item for item in config_store.rows(db, ScenarioDraftField, draft_id)
+                     if (_normalized_source_ref(item.source_ref) or item.field_key) == code
+                     and (field_key is None or item.field_key != field_key)), None)
     if existing is not None:
         raise BusinessError(
             "FIELD_CODE_DUPLICATE",
-            f"字段编号“{source_ref}”已由字段“{existing.name}”使用",
+            f"字段编号“{code}”已由字段“{existing.name}”使用",
             status_code=409,
-            details={"source_ref": source_ref, "field_key": existing.field_key},
+            details={"source_ref": code, "field_key": existing.field_key},
         )
 
 
@@ -2712,8 +1751,9 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
     source_ref = _normalized_source_ref(payload.get("source_ref"))
     _assert_field_source_ref_available(db, draft.id, source_ref)
     field_key = stable_key("fld", scenario_code, _item_ref())
-    db.add(
-        ScenarioDraftField(
+    node_code = _field_extraction_node(db, draft.id, payload.get("node_code"))
+    field = config_store.add(
+        db, ScenarioDraftField(
             draft_id=draft.id,
             field_key=field_key,
             material_key=material_key,
@@ -2736,6 +1776,7 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
             sort_no=_next_sort_no(db, ScenarioDraftField, draft.id),
         )
     )
+    field.node_code = node_code
     _save_draft(
         db,
         template,
@@ -2748,16 +1789,27 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
 
 
 def _draft_field_or_404(db: Session, draft_id: int, field_key: str) -> ScenarioDraftField:
-    item = db.scalar(
-        select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft_id, ScenarioDraftField.field_key == field_key)
-    )
+    item = next(iter([item for item in config_store.rows(db, ScenarioDraftField, draft_id) if (item.field_key == field_key)]), None)
     if not item:
         raise BusinessError("DRAFT_FIELD_NOT_FOUND", "字段配置不存在", status_code=404, details={"field_key": field_key})
     return item
 
 
+def _field_extraction_node(db: Session, draft_id: int, node_code: str | None) -> str | None:
+    """显式归属只接受当前有效抽取节点；未指定时由发布编译核对唯一归属。"""
+    if node_code is None:
+        return None
+    node = _draft_node_or_404(db, draft_id, node_code)
+    if not node.enabled or node.node_type != "FIELD_EXTRACTION":
+        raise BusinessError(
+            "MANIFEST_FIELD_NODE_INVALID", "字段须引用已启用的字段抽取节点",
+            details={"node_code": node_code, "node_type": node.node_type},
+        )
+    return node.node_code
+
+
 def _rules_referencing_field(db: Session, draft_id: int, field_key: str) -> list[str]:
-    rules = db.scalars(select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft_id)).all()
+    rules = config_store.rows(db, ScenarioDraftRule, draft_id)
     return [
         rule.name
         for rule in rules
@@ -2770,6 +1822,24 @@ def update_draft_field(db: Session, scenario_code: str, field_key: str, payload:
     """修改草稿中的字段（只覆盖提交的字段）。"""
     template, draft = _locked_draft(db, scenario_code)
     item = _draft_field_or_404(db, draft.id, field_key)
+    if "node_code" in payload:
+        node_code = _field_extraction_node(db, draft.id, payload["node_code"])
+        extraction_rules = [
+            rule for rule in config_store.rows(db, ScenarioDraftRule, draft.id)
+            if rule.enabled and rule.operator_code == "LLM_EXTRACT"
+            and field_key in ((rule.rule_json or {}).get("outputs") or [])
+            and node_code is not None and rule.node_code != node_code
+        ]
+        if extraction_rules:
+            raise BusinessError(
+                "FIELD_EXTRACTION_NODE_CONFLICT",
+                "字段由已有抽取规则产出，请先调整该抽取规则的节点归属："
+                + "、".join(rule.name for rule in extraction_rules),
+                status_code=409,
+                details={"field_key": field_key, "node_code": node_code,
+                         "rule_keys": [rule.rule_key for rule in extraction_rules]},
+            )
+        item.node_code = node_code
     if "material_key" in payload and payload["material_key"] is not None and payload["material_key"] != item.material_key:
         referencing = _rules_referencing_field(db, draft.id, field_key)
         if referencing:
@@ -2844,6 +1914,12 @@ def update_draft_field(db: Session, scenario_code: str, field_key: str, payload:
     if "source_ref" in payload:
         source_ref = _normalized_source_ref(payload.get("source_ref"))
         _assert_field_source_ref_available(db, draft.id, source_ref, field_key=field_key)
+        previous_code = _normalized_source_ref(item.source_ref) or field_key
+        next_code = source_ref or field_key
+        if previous_code != next_code:
+            draft.calculation_json = _remap_calculation_field_codes(
+                draft.calculation_json, {previous_code: next_code},
+            )
         item.source_ref = source_ref
     _save_draft(
         db,
@@ -2857,20 +1933,24 @@ def update_draft_field(db: Session, scenario_code: str, field_key: str, payload:
 
 
 def delete_draft_field(db: Session, scenario_code: str, field_key: str) -> ScenarioDraft:
-    """删除草稿中的字段；仍被规则或报告章节引用时 409，不级联删除。"""
+    """删除草稿中的字段；仍被规则、计算或报告引用时 409，不级联删除。"""
     template, draft = _locked_draft(db, scenario_code)
     item = _draft_field_or_404(db, draft.id, field_key)
     referencing = _rules_referencing_field(db, draft.id, field_key)
-    sections = db.scalars(select(ScenarioDraftSection).where(ScenarioDraftSection.draft_id == draft.id)).all()
+    calculations = _calculations_referencing_field(
+        draft.calculation_json, _normalized_source_ref(item.source_ref) or field_key,
+    )
+    sections = config_store.rows(db, ScenarioDraftSection, draft.id)
     referencing_sections = [section.title for section in sections if field_key in (section.field_keys or [])]
-    if referencing or referencing_sections:
+    if referencing or calculations or referencing_sections:
         raise BusinessError(
             "FIELD_REFERENCED",
-            "该字段仍被以下规则或报告章节引用，请先移除引用后再删除",
+            "该字段仍被规则、计算或报告章节引用，请先移除引用后再删除",
             status_code=409,
-            details={"field_name": item.name, "rule_keys": referencing, "section_names": referencing_sections},
+            details={"field_name": item.name, "rule_keys": referencing,
+                     "calculation_rules": calculations, "section_names": referencing_sections},
         )
-    db.delete(item)
+    config_store.delete(item)
     _save_draft(
         db,
         template,
@@ -2895,13 +1975,12 @@ def _normalize_rule_payload(
 ) -> dict[str, Any]:
     """把页面提交的规则定义规范化为草稿存储结构，并做逐项校验。
 
-    这里校验的是“这条规则自身”的引用完整性与参数合法性；发布时还会用
-    compile_form_manifest 做一次全量编译校验（同一套参数契约、能力判定与类型检查）。
+    这里只检查结构、节点和真实引用；业务方法与缺项按原文保存，交执行器处理。
 
-    `previous` 是该规则草稿里已有的定义。页面表单只呈现它支持的字段，因此保存时
-    必须把表单不呈现、但属于业务配置事实的键原样保留（检查等级、合格要求原文、
-    风险等级原文与成立条件、风险多来源、配置状态）：整块替换 rule_json 会把它们
-    永久丢掉，打开既有规则再保存就改变了审核条件。
+    `previous` 是该规则草稿里已有的定义。页面表单只呈现它支持的字段，因此保存时必须把表单不
+    呈现、但属于业务配置事实的键原样保留（检查等级、合格要求原文、风险等级原文与成立条件、
+    风险多来源、配置状态）——整块替换 rule_json 会把它们永久丢掉，打开既有规则再保存就改变了
+    审核条件。
     """
     name = str(payload.get("name") or "").strip()
     if not name:
@@ -2919,7 +1998,7 @@ def _normalize_rule_payload(
     )
     if operator in SYSTEM_OPERATORS and not existing_extraction:
         raise BusinessError("RULE_SYSTEM_READONLY", "字段抽取与报告生成规则由系统自动派生，不能手工创建", status_code=409)
-    # `node` 是用户配置的**节点实例码**，算子约束比的是**能力类型**：
+    # `node` 是用户配置的节点实例码，算子约束比的是能力类型：
     # 实例码是用户自己起的名字，拿它去比能力类型约束会让所有规则都存不下来。
     node_type = _node_type_of_draft_node(db, draft.id, node)
     if operator not in OPERATOR_NODE_CONSTRAINTS or node_type not in OPERATOR_NODE_CONSTRAINTS[operator]:
@@ -2929,9 +2008,15 @@ def _normalize_rule_payload(
             status_code=400,
             details={"operator": operator, "node": node, "node_type": node_type},
         )
-    materials = db.scalars(select(ScenarioDraftMaterial).where(ScenarioDraftMaterial.draft_id == draft.id)).all()
+    if (node_type not in capabilities.capability_of(operator).new_rule_nodes
+            and not (existing_key is not None and isinstance(previous, dict) and previous.get("operator") == operator)):
+        raise BusinessError(
+            "RULE_BUSINESS_OPERATOR_INVALID", "新业务校验使用智能判断，请在判断方法中填写规则库的完整要求",
+            status_code=400,
+        )
+    materials = config_store.rows(db, ScenarioDraftMaterial, draft.id)
     material_keys = {item.material_key for item in materials}
-    fields = db.scalars(select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft.id)).all()
+    fields = config_store.rows(db, ScenarioDraftField, draft.id)
     field_map = {item.field_key: item for item in fields}
 
     inputs: list[dict[str, str]] = []
@@ -2976,66 +2061,6 @@ def _normalize_rule_payload(
 
     parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
     parameters = dict(parameters)
-    validate_rule_parameters(name, operator, parameters)
-    unsupported = detect_unsupported_capability(payload.get("requirement"), parameters.get("instruction"))
-    if unsupported:
-        raise BusinessError(
-            "RULE_CAPABILITY_UNSUPPORTED",
-            f"当前系统不支持：{unsupported[2]}（命中“{unsupported[1]}”），请改为可支持的检查方式",
-            status_code=400,
-            details={"rule": name, "capability": unsupported[0], "matched": unsupported[1]},
-        )
-
-    if operator in {"MATERIAL_EXISTS", "FILE_QUALITY_CHECK"} and not scope:
-        raise BusinessError("RULE_MATERIAL_REQUIRED", "材料规则必须选择适用材料", status_code=400, details={"rule": name})
-    comparison_operators = {"FIELD_EQUAL", "FIELD_NOT_EQUAL", "DATE_COMPARE", "DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"}
-    if operator in comparison_operators:
-        if len(inputs) < 2 or (operator != "DECIMAL_SUM_COMPARE" and len(inputs) != 2):
-            raise BusinessError("RULE_INPUT_COUNT_INVALID", "加总比较至少需要左侧字段与一个加数" if operator == "DECIMAL_SUM_COMPARE" else "比较规则必须恰好选择两个输入字段", status_code=400, details={"rule": name})
-        if node_type == "INTERNAL_VALIDATE" and len({item["material_key"] for item in inputs}) != 1:
-            raise BusinessError("RULE_INTERNAL_MATERIAL_MISMATCH", "文件内部校验的左右字段必须属于同一份材料", status_code=400, details={"rule": name})
-        input_types = [field_map[item["field_key"]].value_type for item in inputs]
-        if operator == "DATE_COMPARE" and any(value_type != "DATE" for value_type in input_types):
-            raise BusinessError("RULE_TYPE_INVALID", "日期比较只能选择日期类型字段", status_code=400, details={"rule": name})
-        if operator in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} and any(value_type != "DECIMAL" for value_type in input_types):
-            raise BusinessError("RULE_TYPE_INVALID", "金额比较只能选择金额类型字段", status_code=400, details={"rule": name})
-        if operator in {"FIELD_EQUAL", "FIELD_NOT_EQUAL"} and input_types[0] != input_types[1]:
-            raise BusinessError("RULE_TYPE_INVALID", "字段比较的两个字段类型必须一致", status_code=400, details={"rule": name})
-        units = {(field_map[item["field_key"]].unit or "").strip() for item in inputs} - {""}
-        if len(units) > 1:
-            raise BusinessError(
-                "RULE_UNIT_MISMATCH",
-                f"比较字段的单位不一致（{' / '.join(sorted(units))}），系统不做单位换算，请先统一单位或改用智能判断",
-                status_code=400,
-                details={"rule": name},
-            )
-        if operator in {"DECIMAL_COMPARE", "DECIMAL_SUM_COMPARE"} or "DECIMAL" in input_types or "DECIMAL_CN" in input_types:
-            currencies = [
-                currency.canonical_currency(field_map[item["field_key"]].currency)
-                for item in inputs
-            ]
-            if any(not value for value in currencies):
-                raise BusinessError(
-                    "RULE_CURRENCY_MISSING",
-                    "金额比较字段必须全部声明币种，系统不默认人民币",
-                    status_code=400,
-                    details={"rule": name},
-                )
-            if len(set(currencies)) > 1:
-                raise BusinessError(
-                    "RULE_CURRENCY_MISMATCH",
-                    f"比较字段的币种不一致（{' / '.join(sorted(set(currencies)))}），系统不做汇率换算",
-                    status_code=400,
-                    details={"rule": name},
-                )
-    if operator == "LLM_VALIDATE":
-        if not inputs:
-            raise BusinessError("RULE_INPUT_COUNT_INVALID", "智能判断必须选择至少一个输入字段", status_code=400, details={"rule": name})
-        if node_type == "INTERNAL_VALIDATE" and len(inputs) > 1:
-            raise BusinessError("RULE_INPUT_COUNT_INVALID", "文件内部校验的智能判断最多只能引用一个字段", status_code=400, details={"rule": name})
-    if node_type == "CROSS_VALIDATE" and (len(inputs) < 2 or (operator != "DECIMAL_SUM_COMPARE" and len(inputs) != 2)):
-        raise BusinessError("RULE_INPUT_COUNT_INVALID", "文件交叉校验必须左右各引用一个字段", status_code=400, details={"rule": name})
-
     applicability_raw = payload.get("applicability") if isinstance(payload.get("applicability"), dict) else {}
     applicability_kind = str(applicability_raw.get("kind") or "ALWAYS")
     if applicability_kind not in {"ALWAYS", "MATERIALS_UPLOADED"}:
@@ -3063,8 +2088,6 @@ def _normalize_rule_payload(
             (previous.get("source_rule_codes") or []) if same_operator else []
         )
         source_rule_codes = list(dict.fromkeys(str(code) for code in declared_codes if str(code)))
-        if not source_rule_keys and not source_rule_codes:
-            raise BusinessError("RULE_RISK_SOURCE_REQUIRED", "风险规则必须选择来源检查或计算结果", status_code=400, details={"rule": name})
         declared_node = payload.get("source_node") if "source_node" in payload else (
             previous.get("source_node") if same_operator else None
         )
@@ -3072,13 +2095,13 @@ def _normalize_rule_payload(
         if source_node is not None and source_node not in SOURCE_NODE_RULE_NODES:
             raise BusinessError("RULE_RISK_SOURCE_NODE_INVALID", "风险规则的来源节点类型无效", status_code=400, details={"rule": name, "source_node": source_node})
         draft_nodes = list(
-            db.scalars(select(ScenarioDraftNode).where(ScenarioDraftNode.draft_id == draft.id)).all()
+            config_store.rows(db, ScenarioDraftNode, draft.id)
         )
         node_positions = {item.node_code: item.sequence_no for item in draft_nodes}
         node_type_by_code = {item.node_code: item.node_type for item in draft_nodes}
         siblings = {
             item.rule_key: item
-            for item in db.scalars(select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft.id)).all()
+            for item in config_store.rows(db, ScenarioDraftRule, draft.id)
         }
         for key in source_rule_keys:
             sibling = siblings.get(key)
@@ -3100,11 +2123,9 @@ def _normalize_rule_payload(
         "materials": scope,
         "parameters": parameters,
         "requirement": str(payload.get("requirement") or ""),
-        # 「检查等级」在列协议里是必填业务口径（导入期缺失直接报 RULE_CHECK_LEVEL_REQUIRED）。
-        # 页面表单也接受它：否则页面新建的规则没有等级，导出后重新导入必然被拒——
-        # 「导出再导入完整保留」在页面路径上就永远不成立。
+        # 检查等级按业务原文保存，不使用固定等级表。
         "check_level": str((payload["check_level"] if "check_level" in payload else previous.get("check_level") if same_operator else None) or "").strip() or None,
-        # 风险的成立条件同样是列协议里的必填枚举（页面表单可提交，见 DraftRuleRequest）。
+        # 风险成立条件保留完整业务要求，不压缩成固定枚举。
         "risk_condition": str((payload["risk_condition"] if "risk_condition" in payload else previous.get("risk_condition") if same_operator else None) or "").strip() or None,
         "applicability": {"kind": applicability_kind},
         "source_node": source_node,
@@ -3137,28 +2158,24 @@ def _normalize_rule_payload(
                 details={"rule_key": existing_key, "published_codes": sorted(published_codes), "source_ref": source_ref},
             )
     if source_ref:
-        duplicates = db.scalars(
-            select(ScenarioDraftRule).where(
-                ScenarioDraftRule.draft_id == draft.id,
-                ScenarioDraftRule.source_ref == source_ref,
-            )
-        ).all()
-        branch_material = manifest_module.internal_rule_branch_material(definition)
+        duplicates = [item for item in config_store.rows(db, ScenarioDraftRule, draft.id) if (item.source_ref == source_ref)]
+        branch_materials = manifest_module.validation_rule_branch_materials(definition, node_type=node_type)
         for duplicate in duplicates:
             if duplicate.rule_key == existing_key:
                 continue
-            other_material = manifest_module.internal_rule_branch_material(duplicate.rule_json or {})
+            other_materials = manifest_module.validation_rule_branch_materials(
+                duplicate.rule_json or {}, node_type=node_type,
+            )
             if (
-                node_type == "INTERNAL_VALIDATE"
-                and duplicate.node_code == node
-                and branch_material is not None
-                and other_material is not None
-                and branch_material != other_material
+                duplicate.node_code == node
+                and branch_materials is not None
+                and other_materials is not None
+                and branch_materials != other_materials
             ):
                 continue
             raise BusinessError(
                 "RULE_CODE_DUPLICATE",
-                "规则编号重复；只有同一内部校验规则的不同材料分支可共用编号",
+                "规则编号重复；只有同一校验规则的不同材料分支可共用编号",
                 status_code=409,
                 details={"source_ref": source_ref, "rule_key": duplicate.rule_key},
             )
@@ -3180,6 +2197,7 @@ PRESERVED_RULE_KEYS = (
     "description",
     "config_status",
     "quality_supported",
+    "unsupported_capability",
 )
 
 
@@ -3191,13 +2209,11 @@ def _preserve_untouched_rule_keys(
 ) -> dict[str, Any]:
     """把本次提交未覆盖的业务配置事实从既有草稿定义里带过来。
 
-    参数合并按「谁拥有这个键」区分，不能一律 merged.update：
-
-      - **表单拥有的键**（方向、允许差值、差值单位、抽取要求等）：本次提交就是权威取值。
-        提交里没有这个键，表示用户把它清空了——必须真的删掉。
-        若在这里用旧值兜底，「清空允许差值」会变成界面显示已清空、执行仍用旧容差。
-      - **表单不呈现的键**（文件检查的检查项目、合格要求、标准值、单位、检查口径）：
-        它们只能由导入或人工裁决产生，页面保存时原样保留。
+    参数合并按「谁拥有这个键」区分，不能一律 merged.update。表单拥有的键（方向、允许差值、
+    差值单位、抽取要求等）以本次提交为权威取值：提交里没有这个键表示用户把它清空了，必须真的
+    删掉——若在这里用旧值兜底，「清空允许差值」会变成界面显示已清空、执行仍用旧容差。表单不
+    呈现的键（文件检查的检查项目、合格要求、标准值、单位、检查口径）只能由导入或人工裁决产生，
+    页面保存时原样保留。
     """
     if not isinstance(previous, dict) or previous.get("operator") != operator:
         return definition
@@ -3221,7 +2237,7 @@ def _preserve_untouched_rule_keys(
     return definition
 
 
-# 页面表单**直接呈现并可清空**的参数键。它们的权威取值来自本次提交：
+# 页面表单直接呈现并可清空的参数键。它们的权威取值来自本次提交：
 # 提交里缺失即表示清空，后端不得用旧值兜底。
 FORM_OWNED_PARAMETER_KEYS: dict[str, frozenset[str]] = {
     "DATE_COMPARE": frozenset({"operator", "threshold", "threshold_unit"}),
@@ -3245,8 +2261,8 @@ def create_draft_rule(db: Session, scenario_code: str, payload: dict[str, Any]) 
     template, draft = _locked_draft(db, scenario_code)
     definition = _normalize_rule_payload(db, draft, payload, existing_key=None)
     rule_key = stable_key("rule", scenario_code, _item_ref())
-    db.add(
-        ScenarioDraftRule(
+    config_store.add(
+        db, ScenarioDraftRule(
             draft_id=draft.id,
             rule_key=rule_key,
             name=definition["name"],
@@ -3270,9 +2286,7 @@ def create_draft_rule(db: Session, scenario_code: str, payload: dict[str, Any]) 
 
 
 def _draft_rule_or_404(db: Session, draft_id: int, rule_key: str) -> ScenarioDraftRule:
-    item = db.scalar(
-        select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft_id, ScenarioDraftRule.rule_key == rule_key)
-    )
+    item = next(iter([item for item in config_store.rows(db, ScenarioDraftRule, draft_id) if (item.rule_key == rule_key)]), None)
     if not item:
         raise BusinessError("DRAFT_RULE_NOT_FOUND", "规则配置不存在", status_code=404, details={"rule_key": rule_key})
     return item
@@ -3300,7 +2314,7 @@ def update_draft_rule(db: Session, scenario_code: str, rule_key: str, payload: d
         existing_key=rule_key,
         previous={**item.rule_json, "source_ref": item.source_ref} if isinstance(item.rule_json, dict) else None,
     )
-    dependents = db.scalars(select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft.id)).all()
+    dependents = config_store.rows(db, ScenarioDraftRule, draft.id)
     downstream = _downstream_rule_names(dependents, rule_key)
     item.name = definition["name"]
     item.node_code = definition["node"]
@@ -3345,7 +2359,7 @@ def delete_draft_rule(db: Session, scenario_code: str, rule_key: str) -> Scenari
     """删除草稿中的规则。"""
     template, draft = _locked_draft(db, scenario_code)
     item = _draft_rule_or_404(db, draft.id, rule_key)
-    dependents = db.scalars(select(ScenarioDraftRule).where(ScenarioDraftRule.draft_id == draft.id)).all()
+    dependents = config_store.rows(db, ScenarioDraftRule, draft.id)
     downstream = _downstream_rule_names(dependents, rule_key)
     if downstream:
         raise BusinessError(
@@ -3354,7 +2368,7 @@ def delete_draft_rule(db: Session, scenario_code: str, rule_key: str) -> Scenari
             status_code=409,
             details={"rule_name": item.name, "rule_keys": downstream},
         )
-    db.delete(item)
+    config_store.delete(item)
     _save_draft(
         db,
         template,
@@ -3370,13 +2384,11 @@ def _section_group_fields(db: Session, draft_id: int, payload: dict[str, Any]) -
     """报告章节的分组属性：报告编号、报告名称、材料范围、输出格式、结果排序、
     章节顺序、内容类型与业务配置状态。
 
-    节点版（contract_review_v3）的报告是「按编号分组的一组章节」；这些属性必须能
+    场景报告是「按编号分组的一组章节」；这些属性必须能
     通过页面维护并保存，否则保存一次就会退回旧的附加展示章节语义。
     缺省值为 None：旧格式章节本来就没有这些属性，不替它编造分组。
     """
-    materials = db.scalars(
-        select(ScenarioDraftMaterial).where(ScenarioDraftMaterial.draft_id == draft_id)
-    ).all()
+    materials = config_store.rows(db, ScenarioDraftMaterial, draft_id)
     known_materials = {item.material_key for item in materials}
     result: dict[str, Any] = {}
     if "report_code" in payload:
@@ -3410,6 +2422,8 @@ def _section_group_fields(db: Session, draft_id: int, payload: dict[str, Any]) -
     if "result_sort" in payload:
         value = payload.get("result_sort")
         result["result_sort"] = str(value).strip() or None if value is not None else None
+    if "risk_level_order" in payload:
+        result["risk_level_order"] = list(payload.get("risk_level_order") or [])
     if "config_status" in payload:
         value = payload.get("config_status")
         result["config_status"] = str(value).strip() or None if value is not None else None
@@ -3424,8 +2438,8 @@ def create_draft_section(db: Session, scenario_code: str, payload: dict[str, Any
         raise BusinessError("SECTION_TITLE_REQUIRED", "章节名称不能为空", status_code=400)
     field_keys = _validate_section_fields(db, draft.id, payload.get("field_keys"))
     section_key = stable_key("sec", scenario_code, _item_ref())
-    db.add(
-        ScenarioDraftSection(
+    config_store.add(
+        db, ScenarioDraftSection(
             draft_id=draft.id,
             section_key=section_key,
             title=title,
@@ -3447,7 +2461,7 @@ def create_draft_section(db: Session, scenario_code: str, payload: dict[str, Any
 
 
 def _validate_section_fields(db: Session, draft_id: int, field_keys: Any) -> list[str]:
-    fields = db.scalars(select(ScenarioDraftField).where(ScenarioDraftField.draft_id == draft_id)).all()
+    fields = config_store.rows(db, ScenarioDraftField, draft_id)
     known = {item.field_key for item in fields}
     result: list[str] = []
     for key in field_keys or []:
@@ -3462,9 +2476,7 @@ def _validate_section_fields(db: Session, draft_id: int, field_keys: Any) -> lis
 def update_draft_section(db: Session, scenario_code: str, section_key: str, payload: dict[str, Any]) -> ScenarioDraft:
     """修改草稿中的报告章节。"""
     template, draft = _locked_draft(db, scenario_code)
-    item = db.scalar(
-        select(ScenarioDraftSection).where(ScenarioDraftSection.draft_id == draft.id, ScenarioDraftSection.section_key == section_key)
-    )
+    item = next(iter([item for item in config_store.rows(db, ScenarioDraftSection, draft.id) if (item.section_key == section_key)]), None)
     if not item:
         raise BusinessError("DRAFT_SECTION_NOT_FOUND", "报告章节不存在", status_code=404, details={"section": section_key})
     if "title" in payload and payload["title"] is not None:
@@ -3494,12 +2506,10 @@ def update_draft_section(db: Session, scenario_code: str, section_key: str, payl
 def delete_draft_section(db: Session, scenario_code: str, section_key: str) -> ScenarioDraft:
     """删除草稿中的报告章节。"""
     template, draft = _locked_draft(db, scenario_code)
-    item = db.scalar(
-        select(ScenarioDraftSection).where(ScenarioDraftSection.draft_id == draft.id, ScenarioDraftSection.section_key == section_key)
-    )
+    item = next(iter([item for item in config_store.rows(db, ScenarioDraftSection, draft.id) if (item.section_key == section_key)]), None)
     if not item:
         raise BusinessError("DRAFT_SECTION_NOT_FOUND", "报告章节不存在", status_code=404, details={"section": section_key})
-    db.delete(item)
+    config_store.delete(item)
     _save_draft(
         db,
         template,
@@ -3527,6 +2537,33 @@ def _calculation_store(raw: Any) -> tuple[list[dict[str, Any]], list[dict[str, A
     return [], None
 
 
+def _calculations_referencing_field(raw: Any, field_code: str) -> list[str]:
+    """候选与历史编译结构均按精确字段来源编号查引用，停用定义也保留依赖。"""
+    candidates, frozen = _calculation_store(raw)
+    return [
+        item.get("rule_name") or item["rule_code"]
+        for item in (frozen if frozen is not None else candidates)
+        if any(parameter.get("source_type") == "FIELD" and parameter.get("source_code") == field_code
+               for parameter in item.get("parameters") or [])
+        or field_code in (item.get("depends_on_field_codes") or [])
+    ]
+
+
+def _remap_calculation_field_codes(raw: Any, code_changes: dict[str, str]) -> Any:
+    """同一字段改编号时同步当前计算引用；一次映射支持批量交换编号。"""
+    updated = deepcopy(raw)
+    candidates, frozen = _calculation_store(updated)
+    for item in (frozen if frozen is not None else candidates):
+        for parameter in item.get("parameters") or []:
+            if parameter.get("source_type") == "FIELD" and parameter.get("source_code") in code_changes:
+                parameter["source_code"] = code_changes[parameter["source_code"]]
+        if "depends_on_field_codes" in item:
+            item["depends_on_field_codes"] = [
+                code_changes.get(code, code) for code in item["depends_on_field_codes"]
+            ]
+    return updated
+
+
 def compile_draft_manifest(
     db: Session,
     template: ScenarioTemplate,
@@ -3550,10 +2587,10 @@ def compile_draft_manifest(
         sections=sections,
         nodes=nodes,
         sheets=sheets,
-        profile_version=draft.profile_version or unified_profile.UNIFIED_PROFILE_VERSION,
+        profile_version=draft.profile_version or node_profile.NODE_PROFILE_VERSION,
         scenario_schema_config=draft.schema_json,
     )
-    return compile_form_manifest(
+    manifest = compile_form_manifest(
         scene_code=template.scenario_code,
         scene_name=template.scenario_name,
         namespace=template.scenario_code,
@@ -3563,28 +2600,32 @@ def compile_draft_manifest(
         frozen_calculations=frozen_calculations,
         disabled_source_rows=list(draft.disabled_source_rows or []),
         acknowledged_capability_gaps=acknowledged_capability_gaps,
+        import_proposals=draft.config_json.get("import_proposals"),
     )
+    # 报告与版本详情需要区分「Excel 规则库导入」和页面配置；动态配置本身
+    # 虽然已经编译成统一 manifest，但来源不能在编译时被改写成 FORM。
+    manifest["source_kind"] = "EXCEL" if draft.source == "EXCEL" else "FORM"
+    canonical = json.dumps(
+        {key: value for key, value in manifest.items() if key != "manifest_hash"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    manifest["manifest_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return manifest
 
 
 def publish_draft(db: Session, scenario_code: str, payload: dict[str, Any]) -> tuple[ScenarioVersion, bool]:
     """把当前完整配置编译成不可变版本；也供能力缺口确认使用。
 
-    发布前的检查全部由 `assess_publish` 承担，与草稿就绪状态是同一套逻辑。
-    任一项不通过即原样抛错，且在抛错前不创建 `ScenarioVersion`。
+    发布前的检查全部由 `assess_publish` 承担，与草稿就绪状态是同一套逻辑；任一项不通过即原样
+    抛错，且在抛错前不创建 `ScenarioVersion`。
 
-    - expected_revision 必须与草稿当前修订一致，否则明确冲突（刷新后重试）。
-    - 内容与最新已发布版本完全一致（同范围指纹、同名称）时返回该版本，不制造重复版本。
-    - 版本号由 allocate_version 的行锁与原子计数器分配，同一事务内完成。
-    - 已发布版本不可修改：发布只新增版本，不改写任何既有版本。
+    expected_revision 必须与草稿当前修订一致，否则明确冲突（刷新后重试）；内容与最新已发布
+    版本完全一致（同范围指纹、同名称）时返回该版本，不制造重复版本；版本号由 allocate_version
+    的行锁与原子计数器在同一事务内分配；已发布版本不可修改，发布只新增版本。
     """
     template = template_or_404(db, scenario_code, lock=True)
-    if template.deleted_at is not None:
-        raise BusinessError(
-            "SCENARIO_DELETED",
-            "场景已删除，不能发布",
-            status_code=409,
-            details={"scenario_code": scenario_code},
-        )
     draft = ensure_draft(db, template)
     expected_revision = payload.get("expected_revision")
     if expected_revision is not None and int(expected_revision) != draft.revision_no:
@@ -3603,10 +2644,7 @@ def publish_draft(db: Session, scenario_code: str, payload: dict[str, Any]) -> t
     )
     change_summary = (str(payload.get("change_summary")).strip() or None) if payload.get("change_summary") else None
     version, reused = _publish_manifest(db, template, draft, manifest, change_summary=change_summary)
-    # 发布成功后**不能**无条件清空 draft.sync_error：本次确认过的能力缺口只是这一次
-    # 发布接受了它们，缺口本身仍然存在。这里用**空确认集合**重新执行一次就绪检查，
-    # 让仍未实现的能力继续显示为「需要本次确认」——否则页面刷新后确认复选框消失，
-    # 而再次发布必然失败（没有可确认项，缺口仍然阻断）。
+    # 发布后按当前结构与引用重新计算草稿状态。
     _refresh_publish_readiness(db, template, draft)
     if not reused:
         record_operation(

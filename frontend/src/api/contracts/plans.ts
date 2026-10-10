@@ -64,7 +64,7 @@ export interface PlanConfig extends ApiResponse {
     enabled: boolean;
   }>;
   /** 只读：本方案选用了哪些 Sheet。 */
-  selected_sheets: Array<{ sheet_role: string; node_code: string | null }>;
+  selected_sheets: Array<{ sheet_role: string; node_code: string | null; sheet_key?: string; sheet_name?: string }>;
 }
 
 export interface PlanMaterialItem {
@@ -79,6 +79,7 @@ export interface PlanMaterialItem {
 export interface PlanFieldItem {
   field_key: string;
   material_key: string;
+  node_code?: string | null;
   name: string;
   value_type: string;
   extraction_strategy: "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED";
@@ -108,6 +109,11 @@ export interface PlanRuleItem {
 }
 
 export interface PlanCalculationRuleItem extends Pick<DraftCalculationItem, "origin" | "parameter_sources" | "band_sources"> {
+  // PROGRAM 仅用于展示旧配置，已不支持发布或执行。
+  execution_engine: "PROGRAM" | "LLM";
+  formula: string;
+  judgement_instruction: string;
+  execution_mode: "CHECK" | "VALUE_ONLY";
   rule_code: string;
   rule_name: string;
   node_code: string | null;
@@ -146,6 +152,7 @@ export interface PlanSectionItem {
   section_order?: number | null;
   content_type?: string | null;
   result_sort?: string | null;
+  risk_level_order?: string[] | null;
   config_status?: string | null;
   sort_no?: number;
 }

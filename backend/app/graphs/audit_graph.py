@@ -4,10 +4,9 @@ from typing import Any, Protocol, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
-from sqlalchemy.exc import SQLAlchemyError
 
 from ..common.exceptions import BusinessError, exception_summary
-from ..runtime.checkpoint import mysql_saver
+from ..runtime.checkpoint import is_storage_unavailable, mysql_saver
 
 
 logger = logging.getLogger(__name__)
@@ -20,26 +19,15 @@ CHECKPOINT_STORAGE_UNAVAILABLE = "CHECKPOINT_STORAGE_UNAVAILABLE"
 class AuditGraphState(TypedDict, total=False):
     """图 state 只放可持久化、可 JSON 序列化的流程引用，不放业务对象或数据库会话。
 
-    三组字段职责分明：
+    字段分三组：流程控制（任务加载、节点确认、人工复核等待点、结果保存）；节点执行
+    （「开始 → 执行 → 收尾 → 推进」四步，执行模式在执行之前确定，因此任务当前节点在
+    Agent 评估期间不会被提前推进）；Agent 运行契约（规则评估子图的「模型—工具—结果」
+    循环状态）。
 
-    - **流程控制**（task_no…last_error）：图的固定生命周期——任务加载、节点确认、
-      人工复核等待点、结果保存。
-    - **节点执行**（execution_id/execution_mode/node_result…）：一次节点执行的
-      「开始 → 执行 → 收尾 → 推进」四步。执行模式在**执行之前**确定，因此
-      任务当前节点在 Agent 评估期间不会被提前推进。
-    - **Agent 运行契约**（evaluation_id…last_model_response）：规则评估子图的
-      「模型—工具—结果」循环状态，记录本轮评估属于哪条规则实例、依据哪一版事实与工具目录、
-      模型看到哪些消息、请求了哪些工具、拿到什么结果、形成了什么候选结论。
-
-    三条硬约束：
-
-    - **可序列化**：全部字段都是 JSON 可表达的标量与列表/字典。数据库会话、
-      HTTP 客户端、密钥、ORM 对象一律不进 State（它们在 `AuditGraphContext`
-      与 `ToolExecutionContext.database_session` 里）；
-    - **可恢复**：恢复时读的是同一份引用（评估批次、快照 ref/hash、工具调用 ID），
-      不通过查询「最新对象」改变历史执行，也不重新生成评估身份；
-    - **单一归属**：消息与工具结果属于**当前这一条规则实例**。切到下一条规则时
-      它们被重置，多条规则因此不会混进同一个无归属列表。
+    三条硬约束：可序列化——数据库会话、HTTP 客户端、密钥、ORM 对象一律不进 State
+    （它们在 `AuditGraphContext` 与 `ToolExecutionContext.database_session` 里）；
+    可恢复——恢复时读同一份引用，不通过查询「最新对象」改变历史执行；单一归属——
+    消息与工具结果属于当前这一条规则实例，切到下一条时被重置。
     """
 
     task_no: str
@@ -59,7 +47,7 @@ class AuditGraphState(TypedDict, total=False):
     # 节点执行
     # 本次节点执行记录。开始执行时建立并提交，收尾时按它写终态。
     execution_id: int | None
-    # DETERMINISTIC / AGENT / MANUAL_REVIEW_PREPARE。执行**之前**由冻结配置确定。
+    # DETERMINISTIC / AGENT / MANUAL_REVIEW_PREPARE。执行之前由冻结配置确定。
     execution_mode: str | None
     # 确定性路径的执行结果（供收尾写执行记录）。
     node_result: dict[str, Any] | None
@@ -123,7 +111,7 @@ class AuditNodeRunner(Protocol):
     """图与节点实现之间的契约。
 
     图只负责状态推进、interrupt、resume 与节点调度；节点内部的业务规则在
-    `services.audit.flow` 里，由调用方在**调用时**注入，图模块因此不导入服务层，
+    `services.audit.flow` 里，由调用方在调用时注入，图模块因此不导入服务层，
     `graphs` 与 `services` 之间没有模块级依赖，也没有循环。
 
     这里把全部节点入口写成显式协议，而不是 `Any`：函数改名、缺一个入口或签名变化
@@ -185,7 +173,7 @@ class AuditNodeRunner(Protocol):
 
     # 规则评估 Agent 的生命周期入口
     # 与上面同一手法：图只调度，实现由调用方注入。
-    # 每个入口只走**一步**：一次加载、一次模型调用、一批工具执行、一次结论校验。
+    # 每个入口只走一步：一次加载、一次模型调用、一批工具执行、一次结论校验。
     # 没有函数内部循环——循环由图的条件边表达，因此每一步都可 checkpoint。
 
     def graph_load_evaluation(
@@ -375,16 +363,55 @@ def _await_node_confirmation(state: AuditGraphState) -> dict[str, Any]:
 def _execute_current_node(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
     """开始执行当前节点：建执行记录、确定执行模式。
 
-    **不执行**节点本身：执行由 `run_deterministic_node` 或规则评估 Agent 路径完成。
+    不执行节点本身：执行由 `run_deterministic_node` 或规则评估 Agent 路径完成。
     """
     flow = _flow(runtime)
-    return flow.graph_execute_current_node(
+    started = flow.graph_execute_current_node(
         _db(runtime),
         state["task_no"],
         state["graph_namespace"],
         state["current_node"],
         state.get("confirmed_node"),
     )
+    # StateGraph 会保留未被本次返回值覆盖的字段。每个业务节点必须从自己的
+    # 执行状态开始，否则前一 Agent 节点会改变后续确定性节点的收尾与复核路由。
+    # 人工复核恢复直接进入 apply_*_reviews，不经过这里，继续使用原评估状态。
+    return {
+        "execution_id": None,
+        "execution_mode": None,
+        "node_result": None,
+        "last_execution": None,
+        "manual_review_result": None,
+        "review_hash": None,
+        "review_count": None,
+        "review_decisions": None,
+        "deterministic_result": None,
+        "agent_mode": False,
+        "evaluation_plan": None,
+        "rule_cursor": None,
+        "rule_instance": None,
+        "evaluation_id": None,
+        "fact_snapshot_ref": None,
+        "fact_snapshot_hash": None,
+        "tool_catalog_version": None,
+        "tool_catalog_hash": None,
+        "tool_policy_version": None,
+        "allowed_tools": None,
+        "messages": None,
+        "pending_tool_calls": [],
+        "tool_results": [],
+        "candidate_verdict": None,
+        "unresolved_items": [],
+        "loop_status": None,
+        "loop_count": 0,
+        "last_model_response": None,
+        "rule_outcomes": [],
+        "agent_done": False,
+        "agent_review_pending": False,
+        "agent_review_restore": None,
+        "agent_review_recalculate": False,
+        **started,
+    }
 
 
 def _run_deterministic_node(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
@@ -401,7 +428,7 @@ def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraph
     """收尾当前节点执行：两条路径的终态都写在这一处。
 
     Agent 路径的节点结果由逐规则结论汇总而来，因此在这里生成，不由某个中途节点预写。
-    判定用 `agent_mode`（评估路径**实际**跑了）而不是 `execution_mode`（执行**之前**的
+    判定用 `agent_mode`（评估路径实际跑了）而不是 `execution_mode`（执行之前的
     预判）：收尾要写的是真实发生的事。
     """
     flow = _flow(runtime)
@@ -491,18 +518,13 @@ def _save_node_result(state: AuditGraphState, runtime: Runtime[AuditGraphContext
     )
 
 
-# 规则评估 Agent 循环
+# 规则评估 Agent 循环：图负责确定性生命周期（加载评估 → 冻结规则实例 → 准备上下文 →
+# 调用模型 → 路由响应 → 执行工具 → 回填结果 → 形成候选结论 → 必要时人工复核 →
+# 保存结果 → 推进游标 → 收尾节点），Agent 只负责在授权范围内选择工具。
 #
-# 图负责**确定性生命周期**：加载评估 → 冻结规则实例 → 准备上下文 → 调用模型 →
-# 路由响应 → 执行工具 → 回填结果 → （继续取证）→ 形成候选结论 →
-# 必要时人工复核 → 保存结果 → 推进游标 → 收尾节点。
-# Agent 只负责在授权范围内选择工具；任务加载、模型调用、人工审核、保存结果、
-# 报告渲染仍由 Graph 控制。
-#
-# 关键约束：**每一步都是一个图节点**。call_model 每次只调一次模型，
-# execute_tool_calls 每次只执行 State 里那一批待执行调用，append_tool_results
-# 只负责生成 tool 消息。因此每个节点结束后 State 都可 checkpoint，
-# interrupt / resume 能停在循环中间，恢复后也不会重复执行已登记的工具调用。
+# 每一步都是一个图节点：call_model 每次只调一次模型，execute_tool_calls 每次只执行 State
+# 里那一批待执行调用，append_tool_results 只生成 tool 消息。因此每个节点结束后 State 都可
+# checkpoint，interrupt / resume 能停在循环中间，恢复后不会重复执行已登记的工具调用。
 
 
 def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
@@ -561,7 +583,7 @@ def _route_prepared_context(state: AuditGraphState) -> str:
 
 
 def _call_model(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
-    """调用模型**一次**，把这一轮的响应写回 State。
+    """调用模型一次，把这一轮的响应写回 State。
 
     模型请求了工具就由 `execute_tool_calls` 执行；只输出结论就由
     `produce_candidate_verdict` 校验。本节点不执行工具、不解析结论。
@@ -594,7 +616,7 @@ def _call_model(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> 
 def _execute_tool_calls(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
     """执行 State 中的这一批待执行工具调用。
 
-    本轮结果**追加**进 `tool_results`：模型引用证据时可以指向前几轮的任何一次调用，
+    本轮结果追加进 `tool_results`：模型引用证据时可以指向前几轮的任何一次调用，
     只保留最后一轮会让「结论是哪几次工具调用得到的」丢掉一半。
     """
     flow = _flow(runtime)
@@ -743,7 +765,7 @@ def _after_load(state: AuditGraphState) -> str:
 def _after_execute(state: AuditGraphState) -> str:
     """执行模式决定走哪条路径。
 
-    模式在 `execute_current_node` 里、执行**之前**就已确定，因此这里只是分发：
+    模式在 `execute_current_node` 里、执行之前就已确定，因此这里只是分发：
     人工复核节点先去准备待办；Agent 模式进入规则评估循环；其余进入确定性节点实现。
     """
     if state.get("last_error") is not None:
@@ -764,7 +786,7 @@ def _after_prepare_manual_review(state: AuditGraphState) -> str:
 def _after_await_manual_review(state: AuditGraphState) -> str:
     """本次等待是 Agent 复核批还是人工复核节点批。
 
-    Agent 复核发生在某个校验节点**执行期间**：提交后要回到该节点继续评估，
+    Agent 复核发生在某个校验节点执行期间：提交后要回到该节点继续评估，
     不能像人工复核节点那样推进到下一个节点。两条路径共用同一个等待节点与 interrupt，
     因此 `probe_interrupt` 与复核提交入口对两者完全一致。
     """
@@ -953,20 +975,18 @@ def _storage_unavailable(exc: Exception) -> BusinessError:
 
 
 def _graph_failure(exc: Exception) -> BusinessError:
-    """把从图里抛出的非业务异常分成两类，**不再一律包装成「检查点不可达」**。
+    """把从图里抛出的非业务异常分成两类，不再一律包装成「检查点不可达」。
 
-    只有真正的存储层故障（`sqlalchemy.exc.SQLAlchemyError`：连接断了、语句失败、
-    写检查点失败）才是「检查点存储暂时不可达」——它的语义是「可稍后重试」。
+    只有驱动或 SQLAlchemy 的连接、数据库运行故障才是
+    「检查点存储暂时不可达」，语义是「可稍后重试」。其余异常是执行本身的缺陷（快照唯一键
+    冲突、JSON 序列化失败、工具参数错误、代码 bug），包装成 `CHECKPOINT_STORAGE_UNAVAILABLE`
+    会指错方向——用户以为过一会儿重试就好，真实原因被藏起来。因此保留独立错误码，并把异常
+    类型与出错位置（`exception_summary`）一起带回。
 
-    其余异常是执行本身的缺陷（快照唯一键冲突、JSON 序列化失败、工具参数错误、
-    代码 bug）。它们被包装成 `CHECKPOINT_STORAGE_UNAVAILABLE` 会指错方向：
-    用户会以为过一会儿重试就好，而真实原因被藏起来。因此这里保留独立错误码，
-    并把异常类型与出错位置（`exception_summary`）一起带回。
-
-    业务错误不经过本函数：调用方先 `except BusinessError: raise`，
-    快照冲突、输入缺失、工具参数非法等都保留各自原本的错误码。
+    业务错误不经过本函数：调用方先 `except BusinessError: raise`，快照冲突、输入缺失、
+    工具参数非法等都保留各自原本的错误码。
     """
-    if isinstance(exc, SQLAlchemyError):
+    if is_storage_unavailable(exc):
         logger.exception("审核流程检查点/数据库操作失败", exc_info=exc)
         return _storage_unavailable(exc)
     logger.exception("审核流程图执行发生未处理异常", exc_info=exc)
@@ -992,7 +1012,7 @@ def probe_interrupt(thread_id: str, expected_node: str) -> str:
     except BusinessError:
         raise
     except Exception as exc:  # noqa: BLE001 - 这里是分类函数，存储故障收敛为可识别结果
-        if not isinstance(exc, SQLAlchemyError):
+        if not is_storage_unavailable(exc):
             # 非存储层异常不能报成「检查点存储不可达」：那是可重试的临时故障，
             # 而这类异常是执行本身的缺陷，必须按真实原因抛出。
             raise _graph_failure(exc) from exc

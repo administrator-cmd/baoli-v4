@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ...domain.parameter_contract import ReportContentType, ReportResultSort
+
 
 class ScenarioCreateRequest(BaseModel):
     scenario_name: str = Field(min_length=1, max_length=255)
@@ -62,8 +64,15 @@ class DraftDisabledSourceRowUpdateRequest(BaseModel):
     values: dict[str, str]
 
 
-class DraftDisabledSourceRowActivateRequest(BaseModel):
+class DraftSourceActivationPreviewRequest(BaseModel):
     expected_revision: int = Field(ge=0)
+    row_keys: list[str] = Field(min_length=1)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+
+
+class DraftSourceActivationConfirmRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    preview_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
 class DraftMaterialRequest(BaseModel):
@@ -82,8 +91,9 @@ class DraftMaterialUpdateRequest(BaseModel):
 
 class DraftFieldRequest(BaseModel):
     material_key: str = Field(min_length=1, max_length=40)
+    node_code: str | None = Field(default=None, min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=255)
-    value_type: Literal["STRING", "DECIMAL", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"] = "STRING"
+    value_type: Literal["STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"] = "STRING"
     extraction_strategy: Literal["RAW_TEXT", "DETERMINISTIC", "STRUCTURED"] | None = None
     structure_schema: dict[str, Any] | None = None
     unit: str | None = Field(default=None, max_length=40)
@@ -98,8 +108,9 @@ class DraftFieldRequest(BaseModel):
 
 class DraftFieldUpdateRequest(BaseModel):
     material_key: str | None = Field(default=None, min_length=1, max_length=40)
+    node_code: str | None = Field(default=None, min_length=1, max_length=80)
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    value_type: Literal["STRING", "DECIMAL", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"] | None = None
+    value_type: Literal["STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"] | None = None
     extraction_strategy: Literal["RAW_TEXT", "DETERMINISTIC", "STRUCTURED"] | None = None
     structure_schema: dict[str, Any] | None = None
     unit: str | None = Field(default=None, max_length=40)
@@ -123,7 +134,7 @@ class DraftRuleApplicability(BaseModel):
 
 class DraftRuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    node: str = Field(min_length=1, max_length=40)
+    node: str = Field(min_length=1, max_length=80)
     operator: str = Field(min_length=1, max_length=40)
     enabled: bool = True
     inputs: list[DraftRuleInput] = Field(default_factory=list)
@@ -132,7 +143,7 @@ class DraftRuleRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     requirement: str = Field(default="", max_length=4000)
     check_level: str | None = Field(default=None, max_length=40)
-    risk_condition: str | None = Field(default=None, max_length=40)
+    risk_condition: str | None = None
     applicability: DraftRuleApplicability = Field(default_factory=DraftRuleApplicability)
     source_node: str | None = Field(default=None, max_length=40)
     source_rule_key: str | None = Field(default=None, max_length=40)
@@ -154,8 +165,9 @@ class DraftSectionRequest(BaseModel):
     material_keys: list[str] = Field(default_factory=list)
     formats: list[str] = Field(default_factory=list)
     section_order: int | None = Field(default=None, ge=1)
-    content_type: Literal["FIELD_DETAIL", "AUDIT_RESULT", "FIELD_AND_RESULT", "RISK_LIST", "CONCLUSION"] | None = None
-    result_sort: Literal["RISK_LEVEL_DESC", "MATERIAL_ORDER", "MATERIAL_ORDER_RISK_LEVEL_DESC"] | None = None
+    content_type: ReportContentType | None = None
+    result_sort: ReportResultSort | None = None
+    risk_level_order: list[str] = Field(default_factory=list)
     config_status: Literal["CLEAR", "PENDING", "DISABLED"] | None = None
 
 
@@ -168,8 +180,9 @@ class DraftSectionUpdateRequest(BaseModel):
     material_keys: list[str] | None = None
     formats: list[str] | None = None
     section_order: int | None = Field(default=None, ge=1)
-    content_type: Literal["FIELD_DETAIL", "AUDIT_RESULT", "FIELD_AND_RESULT", "RISK_LIST", "CONCLUSION"] | None = None
-    result_sort: Literal["RISK_LEVEL_DESC", "MATERIAL_ORDER", "MATERIAL_ORDER_RISK_LEVEL_DESC"] | None = None
+    content_type: ReportContentType | None = None
+    result_sort: ReportResultSort | None = None
+    risk_level_order: list[str] | None = None
     config_status: Literal["CLEAR", "PENDING", "DISABLED"] | None = None
 
 

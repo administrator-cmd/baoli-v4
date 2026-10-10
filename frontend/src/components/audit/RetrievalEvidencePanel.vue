@@ -100,7 +100,7 @@ function candidateKey(candidate: RetrievalCandidate): string {
     <el-skeleton v-if="loading" :rows="4" animated />
 
     <el-alert v-else-if="errorMessage" type="error" show-icon :closable="false" :title="`检索失败：${errorMessage}`">
-      检索失败与「没有识别到该主体」是两件事：请按错误原因处理后重试，不要据此认定合同不存在该主体。
+      检索失败与「没有识别到该主体」是两件事：请按错误原因处理后重试，不要据此认定材料不存在该主体。
     </el-alert>
 
     <template v-else>
@@ -145,7 +145,7 @@ function candidateKey(candidate: RetrievalCandidate): string {
         v-if="!hasCandidates"
         kind="empty"
         :title="status === 'NO_INDEX' ? '本次范围内没有可用的主体索引' : '本次范围内没有识别到印章主体候选'"
-        description="没有候选不等于合同不存在该主体；请先确认印章识别已完成、主体索引已建立后重试。"
+        description="没有候选不等于材料不存在该主体；请先确认印章识别已完成、主体索引已建立后重试。"
       />
 
       <template v-else>

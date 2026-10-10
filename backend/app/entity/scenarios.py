@@ -30,7 +30,6 @@ class ScenarioTemplate(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("scenario_code"),
         CheckConstraint("latest_version_no >= 0"),
-        Index("idx_scenario_template_deleted", "deleted_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -42,7 +41,6 @@ class ScenarioTemplate(Base, TimestampMixin):
     category: Mapped[str | None] = mapped_column(String(80))
     description: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
-    deleted_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
     latest_version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
@@ -99,7 +97,7 @@ class ScenarioNode(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
-    node_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    node_code: Mapped[str] = mapped_column(String(80), nullable=False)
     node_type: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -128,7 +126,7 @@ class ScenarioRule(Base, TimestampMixin):
     rule_code: Mapped[str | None] = mapped_column(String(80))
     legacy_rule_key: Mapped[str | None] = mapped_column(String(40))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    node_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    node_code: Mapped[str] = mapped_column(String(80), nullable=False)
     operator_code: Mapped[str] = mapped_column(String(40), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     rule_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

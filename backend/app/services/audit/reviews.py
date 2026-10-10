@@ -1,23 +1,22 @@
 """人工复核裁决与依赖结果的重算。
 
-复核分批（不可打乱）：存在字段确认待办时本批**只**包含字段事实，否则包含全部待办。
-判卷、提交与裁决必须用同一集合，否则用户会先裁决一条即将被字段纠错失效的规则。
-材料类型待复核不参与这个分批——它是独立事项，捆进字段批次会让两条互不相干的业务问题
-互相决定对方批次的哈希。
+复核分批（不可打乱）：存在字段确认待办时本批只包含字段事实，否则包含全部待办。判卷、提交与
+裁决必须用同一集合，否则用户会先裁决一条即将被字段纠错失效的规则。材料类型待复核不参与这个
+分批——它是独立事项，捆进字段批次会让两条互不相干的业务问题互相决定对方批次的哈希。
 
-裁决后按「事实变化」的范围重算，不做无差别重跑：
-
-- 字段事实变化 → 重算抽取规则结果，只失效引用该字段的节点及其 DAG 后继，退回重判；
-- 材料类型定案 → 只就地重算文件质量结论（判定依据变了），**不**退回校验链路、
-  不作废排队中的复核。
+裁决后按「事实变化」的范围重算，不做无差别重跑：字段事实变化则重算抽取规则结果，只失效引用
+该字段的节点及其 DAG 后继并退回重判；材料类型定案则只就地重算文件质量结论（判定依据变了），
+不退回校验链路、不作废排队中的复核。
 
 失效一律保留历史：旧批次标 INVALIDATED，旧事实与旧复核仍可追溯，不原地清空。"""
 
 import hashlib
 from ...domain import fact_snapshot, workflow_dag
+from ...domain.manifest import enabled_extraction_field_keys
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
+from .. import task_csv_service
 from ...schema.dto import ManualReviewRequest
 from ..operation_types import OBJECT_AUDIT_TASK
 from ..task_lookup import task_or_404
@@ -39,17 +38,16 @@ def _review_hash(reviews: list[ManualReview]) -> str:
 def _current_review_batch(db: Session, task: AuditTask) -> list[ManualReview]:
     """本批待办复核集合：先事实、后规则。
 
-    存在字段确认（FIELD_CONFIRMATION）待办时，本批只包含字段事实，否则本批包含全部待办。
-    判卷与完整性校验（prepare / submit / apply）必须用同一集合，否则用户会先裁决一条即将
-    被字段纠错失效的规则。
+    存在字段确认（FIELD_CONFIRMATION）待办时，本批只包含字段事实，否则包含全部待办。判卷与
+    完整性校验（prepare / submit / apply）必须用同一集合，否则用户会先裁决一条即将被字段纠错
+    失效的规则。
 
-    **材料类型待复核不参与这个分批**：它不再是「依据不可用」的阻断来源，而是一条独立的
-    待确认事项。把它捆进字段批次会让两条互不相干的业务问题互相决定对方批次的哈希，
-    也解释不了「为什么改材料类型会让我正在填的字段复核被作废」。
+    材料类型待复核不参与这个分批：它不再是「依据不可用」的阻断来源，而是一条独立的待确认事项。
+    把它捆进字段批次会让两条互不相干的业务问题互相决定对方批次的哈希，也解释不了「为什么改
+    材料类型会让我正在填的字段复核被作废」。
 
-    这是**分批**口径而非一次性口径：一批提交后仍可能剩下规则结论待办，
-    提交方据此重新取集合决定「继续复核本节点」还是「推进下一节点」——见
-    `_apply_manual_reviews_direct` 的 remaining 判断。规则待办未处理完时不得推进。
+    这是分批口径而非一次性口径：一批提交后仍可能剩下规则结论待办，提交方据此重新取集合决定
+    「继续复核本节点」还是「推进下一节点」。规则待办未处理完时不得推进。
     """
     pending = list(
         db.scalars(
@@ -438,9 +436,9 @@ def _field_change_affected_node_codes(
             affected.add(str(rule["node"]))
 
     changed_field_codes = {
-        str(field.get("source_ref"))
+        str(field.get("source_ref") or field["field_key"])
         for field in (manifest.get("fields") or [])
-        if field.get("field_key") in changed_field_keys and field.get("source_ref")
+        if field.get("field_key") in changed_field_keys
     }
     for calculation in manifest.get("calculations") or []:
         node_code = str(calculation.get("node_instance_code") or "")
@@ -584,24 +582,17 @@ def _invalidate_retry_results(
     affected_extraction_codes = extraction_codes & affected_nodes
     if not affected_extraction_codes:
         return
-    affected_field_keys: set[str] = set()
-    for node in manifest.get("nodes") or []:
-        if str(node.get("node_code") or "") not in affected_extraction_codes:
-            continue
-        contract = node.get("execution_contract")
-        if isinstance(contract, dict) and isinstance(contract.get("field_keys"), list):
-            affected_field_keys.update(
-                str(field_key) for field_key in contract["field_keys"] if field_key
-            )
-    # 历史 manifest 没有节点执行契约，字段归属由抽取规则的 outputs 表达。
-    for rule in manifest.get("rules") or []:
-        if (
-            str(rule.get("node") or "") in affected_extraction_codes
-            and rule.get("operator") == "LLM_EXTRACT"
-        ):
-            affected_field_keys.update(
-                str(field_key) for field_key in (rule.get("outputs") or []) if field_key
-            )
+    # 执行契约包含保留的停用定义，不能直接作为重试取数范围。
+    # 与实际抽取共用启停口径，只失效受影响节点在本任务中启用的抽取输出。
+    enabled_rule_keys = set(task.task_schema_json["enabled_rule_keys"])
+    affected_rule_keys = [
+        rule["rule_key"] for rule in manifest["rules"]
+        if rule["rule_key"] in enabled_rule_keys
+        and rule["node"] in affected_extraction_codes
+    ]
+    affected_field_keys = enabled_extraction_field_keys(manifest, affected_rule_keys) & {
+        field["field_key"] for field in task.task_schema_json["fields"]
+    }
     if not affected_field_keys:
         return
     current_upload_ids = [
@@ -667,7 +658,7 @@ def _apply_review_decisions(
 ) -> tuple[bool, bool, list[dict[str, Any]]]:
     """把一批裁决写到各自的业务对象上，返回（字段事实是否变化, 材料状态是否变化, 字段变化清单）。
 
-    只有**裁决落库**这一件事在这里，不含批次划分与流程推进：Agent 复核批与
+    只有裁决落库这一件事在这里，不含批次划分与流程推进：Agent 复核批与
     人工复核节点批调用的是同一份实现，两者的差别只在「提交之后怎么推进」。
     复制一份裁决逻辑会让「复核一个待办」在两处产生不同的副作用。
     """
@@ -735,24 +726,26 @@ def _apply_review_decisions(
             result = db.get(RuleResult, review.rule_result_id)
             if not result:
                 raise BusinessError("REVIEW_RULE_MISSING", "复核关联规则不存在", status_code=500)
-            before_status = result.status
+            result_csv = task_csv_service.from_index(db, task, RuleResult, [result])[0]
+            before_status = result_csv.status
             # 人工结论成为后续风险使用的有效结论；系统原始 message 与判断保留在复核快照中，
             # 不被人工说明覆盖，报告仍能分别展示系统原判断与人工结论。
-            result.status = {
+            new_status = {
                 "CONFIRM_ABNORMAL": "ABNORMAL",
                 "MARK_NORMAL": "PASSED",
                 "EVIDENCE_INSUFFICIENT": "EVIDENCE_INSUFFICIENT",
-            }.get(decision.decision, result.status)
+            }.get(decision.decision, result_csv.status)
+            result.status = new_status
             result.result_json = {
-                **(result.result_json or {}),
+                **(result_csv.result_json or {}),
                 "manual_review_no": review.review_no,
-                "manual_effective_status": result.status,
+                "manual_effective_status": new_status,
                 "manual_business_note": decision.business_note,
                 "manual_conclusion": REVIEW_DECISION_LABELS.get(decision.decision, decision.decision),
                 "manual_basis_type": decision.basis_type,
             }
             review.before_value = before_status
-            review.after_value = result.status
+            review.after_value = new_status
         if review.document_upload_id:
             upload = db.get(DocumentUpload, review.document_upload_id)
             document = db.get(TaskDocument, upload.task_document_id) if upload else None
@@ -790,7 +783,7 @@ def _apply_manual_reviews_direct(
 ) -> dict[str, Any]:
     task = task_or_404(db, task_no, lock=True)
     checkpoint_state = _validate_graph_namespace(task, graph_namespace)
-    # 等待点按**能力类型**解析实例码：`task.current_node` 是实例码，
+    # 等待点按能力类型解析实例码：`task.current_node` 是实例码，
     # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
     review_node_code = _single_node_code_of_type(
         _task_manifest(task), "MANUAL_REVIEW", purpose="人工复核等待点"
@@ -825,7 +818,7 @@ def _apply_manual_reviews_direct(
     nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
     review_node_code = _single_node_code_of_type(manifest, "MANUAL_REVIEW", purpose="人工复核等待点")
     current_index = next(index for index, item in enumerate(nodes) if item["node_code"] == review_node_code)
-    # 只有**字段事实本身变化**（确认新值 / 判为证据不足）才需要把校验链路退回重判：
+    # 只有字段事实本身变化（确认新值 / 判为证据不足）才需要把校验链路退回重判：
     # 那条取值的含义变了，按它算出来的结论不再成立。
     # 材料类型定案不在此列：它不再是依据可用性的开关，普通审核不受它影响，
     # 唯一受影响的是「以材料类型为前提」的文件检查，由下面就地重算处理。
@@ -837,7 +830,7 @@ def _apply_manual_reviews_direct(
         # 只失效不重算会让下游读取依据已不成立的旧结论。
         # 重跑该节点会重新调用外部服务并重建产物，代价与风险都高于就地重算，
         # 因此只重算质量结论：旧批次标 INVALIDATED 保留为历史，新批次挂在新执行记录上。
-        # 人工结论不会被改回去：该节点现在只按 MATERIAL_CLASSIFY 产物**记录**识别结论，
+        # 人工结论不会被改回去：该节点现在只按 MATERIAL_CLASSIFY 产物记录识别结论，
         # 不再据它写材料状态或挂待办。
         invalidated_quality = _invalidate_file_quality_results(db, task, manifest)
         invalidated_reviews += invalidated_quality["invalidated_reviews"]

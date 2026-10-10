@@ -86,7 +86,7 @@ async function remove(item: DraftNodeItem): Promise<void> {
   if (!props.scenarioCode) return;
   try {
     await ElMessageBox.confirm(
-      `确认删除节点「${item.name}」？仍被规则或下游节点引用时会被拒绝，请先处理引用。`,
+      `确认删除节点「${item.name}」？仍被字段、规则、计算、工作表或下游节点引用时会被拒绝，请先处理引用。`,
       "删除节点",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -162,7 +162,7 @@ function dependLabel(code: string): string {
       </el-table>
       <div class="text-hint block-gap-sm">
         节点顺序与依赖由用户配置；发布时会校验缺失依赖、自依赖、循环依赖与顺序冲突。
-        Sheet 与节点的绑定在导入作业里确认，写入场景草稿后才会出现在场景页。
+        工作表只用于选择解析范围；LLM 解析出的字段、规则和计算分别引用当前场景的节点。
       </div>
     </el-card>
   </div>

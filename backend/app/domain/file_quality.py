@@ -1,19 +1,13 @@
-"""文件处理检查（02_文件处理规则）的配置事实与确定性判定。
+"""场景共用的文件处理检查配置与确定性判定。
 
-这个模块是**叶子模块**：不导入 manifest、node_rulebook、capabilities 或任何 services。
-它同时承载两类内容，且必须放在一起，否则「导入期校验」与「运行期判定」会各写一份
-单位表/格式表而漂移：
-
-- 配置事实：有哪些检查项目、各自依赖哪种产物、允许哪些合格要求、中文标签、
-  哪些已实现。导入期与能力目录都引用这里。
-- 确定性判定：已实现的检查项按真实输入判定（见各 `check_*` 函数）。
+叶子模块：不导入 manifest、capabilities 或任何 services。
+配置事实与判定必须放在一起，否则导入期校验与运行期判定会各写一份单位表/格式表而漂移。
 
 未实现的检查项（图像清晰度方差、页码连续、有效签章、骑缝章完整）缺少已确认的判定依据，
-本模块**不实现**成默认判断：调用方按能力缺口返回「不可判定」，绝不因为文件处理成功
-就当作通过。缺少标准值、单位或口径时同样明确报错，不用默认值补齐。
+调用方按能力缺口返回「不可判定」，不因为文件处理成功就当作通过；缺标准值、单位或口径
+时同样明确报错，不用默认值补齐。
 
-判定只基于已经持久化的真实数据（上传记录、OCR 产物页结构），不调用模型、
-不看文件名猜内容、不把数量当成质量结论。
+判定只基于已持久化的真实数据（上传记录、OCR 产物页结构），不调用模型、不看文件名猜内容。
 """
 
 from __future__ import annotations
@@ -24,7 +18,7 @@ from typing import Any
 from ..common.exceptions import BusinessError
 
 
-# 检查项目。与 02_文件处理规则 的「检查项目」下拉取值一一对应。
+# 已有文件处理能力的检查项目码，由场景配置选择，不依赖 Excel 下拉或固定列。
 CHECK_FILE_FORMAT = "FILE_FORMAT"
 CHECK_FILE_SIZE = "FILE_SIZE"
 CHECK_FILE_DUPLICATE = "FILE_DUPLICATE"
@@ -34,7 +28,7 @@ CHECK_SEAL_PARTY_A = "SEAL_PARTY_A"
 CHECK_SEAL_PARTY_B = "SEAL_PARTY_B"
 CHECK_SEAL_CROSS_PAGE = "SEAL_CROSS_PAGE"
 
-# 已具备**真实输入**、由代码确定性判定的检查项目。
+# 已具备真实输入、由代码确定性判定的检查项目。
 #   判定依据是已持久化的真实数据：原始上传的格式与字节数、同任务内上传的内容哈希。
 IMPLEMENTED_QUALITY_ITEMS = frozenset({CHECK_FILE_FORMAT, CHECK_FILE_SIZE, CHECK_FILE_DUPLICATE})
 
@@ -90,7 +84,7 @@ QUALITY_REQUIREMENT_LABELS: dict[str, str] = {
 # 不在这个集合里的取值不是「证据不足」，而是未知能力：必须显式报错。
 KNOWN_QUALITY_ITEMS = frozenset(QUALITY_ITEM_ARTIFACT)
 
-# 缺口的机器码。只有**声明了但未实现**的检查项才构成能力缺口。
+# 缺口的机器码。只有声明了但未实现的检查项才构成能力缺口。
 GAP_CRITERION_UNCONFIRMED = "QUALITY_CRITERION_UNCONFIRMED"
 # 印章识别只返回印章数量与位置，不能证明盖章正确——它即使将来实现判定，
 # 也只能形成“是否检出印章”的证据，需要与上面一类分开表达。
@@ -217,15 +211,12 @@ def parse_format_set(standard_value: str | None) -> set[str]:
 
 
 def check_file_format(upload: Any, *, standard_value: str | None) -> dict[str, Any]:
-    """文件格式：上传文件的真实后缀属于标准值列出的格式集合，且不与已声明的内容类型冲突。
+    """文件格式：真实后缀属于标准值列出的格式集合，且不与已声明的内容类型冲突。
 
-    口径说明（必须如实表达，不能用兜底话术掩盖）：
-
-    - 后缀是**客户端上报的文件名**，不是服务端对内容的鉴定。
-    - `content_type` 同样是客户端上报的声明值，系统不读取文件字节做类型嗅探。
-    - 因此本项能确定的是「声明一致 / 声明冲突 / 声明不足」，不能声称做过真实内容鉴定：
-      后缀与声明明确冲突时判不合格；后缀无法用于核对时不能因此判通过；
-      内容类型缺失或为通用占位时通过，但结论里必须说明未做内容鉴定。
+    口径必须如实表达：后缀与 content_type 都是客户端上报的声明值，系统不读文件字节
+    做类型嗅探。因此本项能确定的是「声明一致 / 声明冲突 / 声明不足」，不能声称做过
+    内容鉴定——后缀与声明明确冲突时判不合格，后缀无法用于核对时不能因此判通过，
+    内容类型缺失或为通用占位时通过但结论里必须说明未做内容鉴定。
     """
     allowed = parse_format_set(standard_value)
     filename = str(getattr(upload, "original_filename", "") or "")
@@ -337,7 +328,7 @@ def check_file_duplicate(
 ) -> dict[str, Any]:
     """文件内容：同一任务内当前上传文件的内容哈希不得重复。
 
-    重复范围按填写规范仍需业务明确；这里只比对**同一任务内当前上传版本**之间，
+    重复范围按填写规范仍需业务明确；这里只比对同一任务内当前上传版本之间，
     不跨任务、不回看历史版本，也不按文件名相似度判断。
 
     比对对象按上传 ID 排除自身：按哈希排除会把「自己」也当成重复项，

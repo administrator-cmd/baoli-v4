@@ -1,39 +1,26 @@
 """工具 adapter：把共享领域服务接到 Agent 工具接口上。
 
-为什么单独成模块
-----------------
-工具与节点必须**共用同一份判定实现**（`domain/quality_judgement.py`），
-但两者的输入来源不同：
+工具与节点必须共用同一份判定实现（`domain/quality_judgement.py`），但输入来源不同：
+节点从 ORM 与已发布 manifest 取数，工具只拿到 `ToolExecutionContext` 与模型给的业务参数。
+adapter 的职责就是把后者的形状转成前者的输入，再调同一个共享服务——它不含任何判定逻辑，
+一旦出现 `if check_item == ...` 就说明判定被复制了。
 
-- 节点从 ORM 与已发布 manifest 取数（它持有会话与任务）；
-- 工具只拿到 `ToolExecutionContext`（会话在 `database_session` 里）+ 模型给的业务参数。
+模型能填的只有业务口径（要检查的材料角色、检查项目、标准值/单位）；任务 ID、事实快照、
+策略版本、会话全部由运行时经 `ToolExecutionContext` 注入，模型看不到也填不了
+（schema 里没有这些键，`additionalProperties: false` 会拒绝）。
 
-adapter 的职责就是把后者的形状转成前者的输入，然后调**同一个**共享服务。
-它不含任何判定逻辑：这里一旦出现 `if check_item == ...` 就说明判定被复制了。
-
-模型只给业务参数
-----------------
-模型能填的只有业务口径：要检查的材料角色、检查项目、标准值/单位。
-任务 ID、事实快照、策略版本、会话全部由运行时经 `ToolExecutionContext` 注入，
-模型看不到也填不了（schema 里没有这些键，`additionalProperties: false` 会拒绝）。
-
-工具读的不是「当前数据」
-------------------------
-需要读材料记录的工具**先读冻结快照**（`evaluation_snapshot`），再用它核对真实记录：
-
-- 冻结快照里的材料位身份是权威版本（材料位、必传属性、当前上传的 id 与内容哈希、
-  材料状态、修订号）；
-- 真实记录必须逐项与冻结身份一致：上传引用、内容哈希、材料状态任一项不同即
-  `TOOL_SNAPSHOT_MISMATCH`，本次调用不执行；
-- 判定用到的取值（必传属性、材料名、上传哈希）取自冻结身份，不取当前记录。
-
-只存哈希、执行时仍读「当前数据」的写法会让同一次评估的两次工具调用落到不同的
-材料版本上，而指纹对得上只是巧合——所以快照存的是**内容**，不是只有指纹。
+需要读材料记录的工具先读冻结快照，再用它核对真实记录：快照里的材料位身份是权威版本，
+真实记录必须逐项与冻结身份一致（上传引用、内容哈希、材料状态任一项不同即
+`TOOL_SNAPSHOT_MISMATCH`，本次不执行），判定取用的取值也取自冻结身份。
+只存哈希、执行时仍读「当前数据」的写法会让同一次评估的两次工具调用落到不同的材料版本上，
+而指纹对得上只是巧合——所以快照存的是内容，不是只有指纹。
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
+
+from langchain_core.tools import InjectedToolArg, tool
 
 from ..domain import quality_judgement
 from ..domain.audit_vocab import read_material_type_status
@@ -109,7 +96,7 @@ def material_scope(context: Any, *, material_keys: list[str], include_peers: boo
     """本次判定需要的材料位：冻结身份 + 已核对的真实记录。
 
     核对逐项做，任一项不同即报 `TOOL_SNAPSHOT_MISMATCH`：
-    当前上传引用、内容哈希、材料状态。判定取值一律取自**冻结身份**。
+    当前上传引用、内容哈希、材料状态。判定取值一律取自冻结身份。
 
     `include_peers` 为真时同时核对全部有上传的材料位（去重比对的对照集），
     因为对照集的内容哈希参与判定，用当前值会让结论无法复现。
@@ -219,24 +206,22 @@ def _scope_materials(context: Any, requested: list[str]) -> list[str]:
     return list(requested)
 
 
+@tool("MATERIAL_EXISTS")
 def check_materials_tool(
     parameters: dict[str, Any],
     inputs: list[dict[str, Any]],
     *,
-    context: Any,
+    context: Annotated[Any, InjectedToolArg],
 ) -> dict[str, Any]:
     """材料存在性工具：声明的材料位是否都已上传。
 
-    判定与结果结构调 `quality_judgement.material_exists_result`——与材料检查节点
-    **同一实现**，因此工具目录声明的 `applicability` / `standard` / `comparison` /
-    `missing_material_keys` / `missing_material_names` 在 Agent 路径上真实存在，
-    不是只写在文档里的键。
+    判定与结果结构调 `quality_judgement.material_exists_result`，与材料检查节点同一实现，
+    因此工具目录声明的 `applicability` / `standard` / `comparison` / `missing_material_keys` /
+    `missing_material_names` 在 Agent 路径上真实存在。已上传判定取冻结快照的上传引用：
+    快照里没有上传引用的材料位就是「未上传」。
 
-    已上传判定取冻结快照的上传引用：快照里没有上传引用的材料位就是「未上传」。
-
-    `applicability` / `requirement` / `check_level` 由调用方经 runtime 注入
-    （见 `domain.tool_catalog._RUNTIME_KEYS`），它们是**已发布配置事实**，
-    模型不能提供——模型自己写一个适用条件等于它自己决定这条规则适不适用。
+    `applicability` / `requirement` / `check_level` 由调用方经 runtime 注入，它们是已发布
+    配置事实——模型自己写一个适用条件等于它自己决定这条规则适不适用。
     """
     material_refs = parameters.get("material_refs")
     if not isinstance(material_refs, list) or not material_refs:
@@ -283,11 +268,12 @@ def check_materials_tool(
     )
 
 
+@tool("FILE_QUALITY_CHECK")
 def check_file_quality_tool(
     parameters: dict[str, Any],
     inputs: list[dict[str, Any]],
     *,
-    context: Any,
+    context: Annotated[Any, InjectedToolArg],
 ) -> dict[str, Any]:
     """文件质量工具：对授权范围内的材料逐份判定一个检查项目。
 
@@ -377,11 +363,12 @@ def check_file_quality_tool(
     }
 
 
+@tool("DECIMAL_CN_EQUAL")
 def decimal_cn_equal_tool(
     parameters: dict[str, Any],
     inputs: list[dict[str, Any]],
     *,
-    context: Any = None,
+    context: Annotated[Any, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """大小写金额一致性工具。
 

@@ -1,45 +1,26 @@
 """统一工具目录：模型可以调用的工具，与它们的真实 handler 引用。
 
-与 `capabilities.py` 的分工
----------------------------
-- `capabilities.py` 声明**审核能力是什么**：业务标签、可挂节点、输入形态、
-  可表达的状态、取证与判定方式、当前是否已实现。它是 22 项能力的单一事实来源，
-  `manifest` 的节点约束、中文标签、路由表都从它派生。
-- 本模块声明**模型可以调用什么**：工具标识、版本、描述、参数 JSON Schema、
-  handler 引用、权限范围、错误码。它从能力目录派生，不另写一份能力名单。
+与 `capabilities.py` 的分工：那里声明审核能力是什么（业务标签、可挂节点、输入形态、
+可表达的状态、取证与判定方式、是否已实现），是 22 项能力的单一事实来源；本模块声明
+模型可以调用什么（工具标识、版本、描述、参数 JSON Schema、handler 引用、权限范围、
+错误码），从能力目录派生，不另写一份能力名单。
 
-为什么要有这一层
-----------------
-能力目录描述的是「这条规则由哪项能力判定」，粒度是**规则配置**；
-模型需要的是「我可以调用哪个函数、参数长什么样」。两者相关但不同：
+需要这一层是因为粒度不同：能力目录的粒度是规则配置（「这条规则由哪项能力判定」），
+模型需要的是「我可以调用哪个函数、参数长什么样」。文件检查的 8 个子项与材料存在性
+已有工具 adapter；`LLM_EXTRACT`、`LLM_VALIDATE`、`REPORT_RENDER` 只有节点级入口。
+因此本目录的 `implemented` = 「底层能力已实现」且「存在可独立调用的 handler」，
+不满足时如实标为不可调用并写明原因，不提供默认 handler。
 
-- 文件检查的 8 个子项在能力目录里是 8 项能力（`FILE_SIZE`、`FILE_FORMAT`…），
-  但它们没有独立的工具入口——实现只在文件处理节点里；
-- `LLM_EXTRACT` / `MATERIAL_EXISTS` / `REPORT_RENDER` 同理，只有节点级实现。
+handler 只写引用不写函数对象：`domain` 层不允许导入 `services` 与 `operators`
+（否则 `manifest → capabilities → tool_catalog → operators` 会把执行层拉进领域层），
+因此这里只声明 `handler_ref`，执行期由 `services.tool_service` 解析标准 `@tool` 对象，
+通过 `.invoke()` 调用。模型可见的身份引用与业务参数 Schema 仍由本目录声明；
+工具对象的执行参数结构由函数签名推导，接收系统已解析的真实事实。
 
-因此本目录的 `implemented` 表达的是「**这个工具当前能否被真实执行**」，
-它等于「底层能力已实现」**且**「存在可独立调用的 handler」。
-不满足时如实标为不可调用并写明原因，**不提供默认 handler、不伪装成已实现**。
-
-为什么 handler 只写引用、不写函数对象
---------------------------------------
-`domain` 层不允许导入 `services` 与 `operators`（否则 `manifest → capabilities →
-tool_catalog → operators` 会把执行层拉进领域层，与 `domain` 零 services 依赖的
-既有约束冲突）。因此这里只声明 `handler_ref`，真实解析在执行期由
-`services.tool_service` 完成。这与 `services/audit/document_ports.py` 的端口注册
-是同一手法：声明与实现分离，缺失时明确报错而不是静默退回。
-
-模型调用参数的形状
-------------------
-工具参数**不是**让模型抄写业务取值。金额、日期与文件内容一律由系统按身份解析：
-
-- `inputs`：字段/事实的**身份引用**列表（`field_key` + `material_key`），
-  真实取值由调用方从事实快照取；
-- `parameters`：规则配置（比较方向、允许差值、审核要求原文等）。
-
-约束逐条对齐 `manifest._validate_rule_parameters`，枚举取值来自叶子模块
-`parameter_contract`——两份声明漂移过一次（后端 12 个算子、页面 7 个），
-因此这里只从既有来源派生，不新写取值集合。
+工具参数的形状：`inputs` 是字段/事实的身份引用（`field_key` + `material_key`），真实取值
+由调用方从事实快照取；`parameters` 是规则配置。金额、日期与文件内容一律由系统按身份解析，
+不让模型抄写。约束逐条对齐 `manifest._validate_rule_parameters`，枚举取值来自叶子模块
+`parameter_contract`，不新写取值集合。
 """
 
 from __future__ import annotations
@@ -53,17 +34,17 @@ from .parameter_contract import (
     DATE_THRESHOLD_UNIT,
     DECIMAL_COMPARE_OPERATORS,
     DECIMAL_SUM_COMPARE_OPERATORS,
-    RISK_LEVELS,
 )
 
 # 工具目录版本：工具语义（参数、输出结构、权限范围）变化时递增。
-# 已发布配置与历史任务按发布时刻冻结的版本执行，不随本模块修改被重新解释。
-TOOL_CATALOG_VERSION = "1"
+# 冻结版本用于执行前核对；当前没有旧 handler，版本不符时显式拒绝重新执行。
+# 版本 3：风险按完整场景条件调用 LLM，运行期注入完整来源结果；普通数值与金额区分。
+TOOL_CATALOG_VERSION = "3"
 
-# 工具策略版本：**本次发布允许 Agent 在什么范围内选工具**。
+# 工具策略版本：本次发布允许 Agent 在什么范围内选工具。
 # 它与目录版本分开：目录可以升级（新增工具、调整 Schema）而任务仍按旧策略执行。
 # 策略变化（放开或收紧工具范围、改变越权判定口径）时递增。
-TOOL_POLICY_VERSION = "1"
+TOOL_POLICY_VERSION = "2"
 
 # handler 所在的模块与函数。解析在 services.tool_service 里完成：
 # domain 层不导入 operators 与 services，避免领域层依赖执行层。
@@ -73,8 +54,8 @@ _OPERATOR_FUNCTION = "execute_operator"
 # adapter 不含判定逻辑：它把上下文转成共享领域服务的输入，然后调同一个实现。
 _ADAPTER_MODULE = "app.services.agent_tools"
 
-# 当前可独立调用的算子工具：它们都有 `(parameters, inputs) -> dict` 形状的 handler，
-# 经 operators.registry.execute_operator 按算子码分发。
+# 当前可独立调用的算子工具：原函数签名为 `(parameters, inputs) -> dict`，
+# 标准 @tool 对象保存在 operators.registry.REGISTRY 中，调用通过 .invoke() 完成。
 _CALLABLE_OPERATORS: tuple[str, ...] = (
     "FIELD_EQUAL",
     "FIELD_NOT_EQUAL",
@@ -84,7 +65,7 @@ _CALLABLE_OPERATORS: tuple[str, ...] = (
     "FIELD_NOT_EMPTY",
     "CLAUSE_ABSENT",
     "RISK_TRIGGER",
-    # 大小写金额一致性：判定口径未确认，但**工具入口存在**且会如实返回
+    # 大小写金额一致性：判定口径未确认，但工具入口存在且会如实返回
     # 「不可判定 + 缺哪条口径」。这与「没有实现、调不了」是两件事：
     # Agent 需要能调用它并拿到「这项做不了、因为口径未确认」这个真实结论，
     # 而不是在目录里看到一个不存在的工具。
@@ -100,7 +81,7 @@ _CONTEXT_TOOLS: dict[str, str] = {
 }
 
 # 只有节点级实现、当前没有独立工具入口的能力，以及真实原因。
-# 这些能力**不是**未实现：它们的判定逻辑在 services.audit 的节点实现里，
+# 这些能力不是未实现：它们的判定逻辑在 services.audit 的节点实现里，
 # 但那个入口的签名是 (db, task, manifest, execution, node_code)，
 # 需要数据库会话与任务上下文，不能作为模型可调用的工具。
 _NODE_LEVEL_ONLY_REASONS: dict[str, str] = {
@@ -251,9 +232,9 @@ _OPERATOR_ARGUMENT_SCHEMAS: dict[str, dict[str, Any]] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "risk_level": {"type": "string", "enum": sorted(RISK_LEVELS)},
+                "risk_level": {"type": "string", "pattern": r"\S"},
                 "action": {"type": "string", "minLength": 1},
-                # 来源检查的**身份引用**：模型只说明这条风险监视哪些来源规则，
+                # 来源检查的身份引用：模型只说明这条风险监视哪些来源规则，
                 # 各来源当时的真实结论由调用方按业务编号解析后经 runtime 注入。
                 # 模型不得自己填写来源状态——那是当前有效执行批次的真实结果。
                 "source_rule_codes": {
@@ -317,14 +298,15 @@ _FILE_QUALITY_PARAMETERS: dict[str, Any] = {
 }
 
 # 需要调用方注入运行期状态的工具：键名 → 说明。
-# 这些值**不能**由模型提供，它们是当前有效执行批次的真实结果或已发布配置事实。
+# 这些值不能由模型提供，它们是当前有效执行批次的真实结果或已发布配置事实。
 # 模型只给身份引用，调用方解析后经 `invoke(runtime=...)` 注入。
 _RUNTIME_KEYS: dict[str, dict[str, str]] = {
     "RISK_TRIGGER": {
-        "source_statuses": "各来源检查在当前有效执行批次里的真实结论，按 source_rule_codes 顺序给出",
-        "risk_condition": "风险成立条件（ANY_ABNORMAL / ALL_ABNORMAL），来自已发布配置",
+        "source_results": "各来源检查和计算的真实结果、字段输入及判断依据，按来源引用顺序给出",
+        "risk_condition": "风险成立条件完整原文，来自已发布配置",
+        "requirement": "风险业务要求原文，来自已发布配置",
     },
-    # 材料存在性检查的「适用条件」与「检查口径原文」是**已发布配置事实**，
+    # 材料存在性检查的「适用条件」与「检查口径原文」是已发布配置事实，
     # 不是模型能填的业务参数：模型填一个适用条件就等于它自己决定这条规则适不适用。
     # 注入后由 `quality_judgement.material_exists_result` 与节点共用同一份实现组装结果，
     # 目录声明的 applicability / standard 因此在 Agent 路径上也真实存在。
@@ -364,9 +346,9 @@ class ToolSpec:
     idempotent: bool
     # 是否支持按作业号查询执行进度（外部作业才需要）。
     supports_query: bool
-    # 当前能否被真实执行：底层能力已实现 **且** 有可独立调用的 handler。
+    # 当前能否被真实执行：底层能力已实现 且 有可独立调用的 handler。
     implemented: bool
-    # 是否是**模型可以选择**的工具。
+    # 是否是模型可以选择的工具。
     #
     # 它与 `implemented` 是两件事，必须分开表达：
     # `implemented=True` 说的是「这个工具当前能被真实执行」；本字段说的是
@@ -387,7 +369,7 @@ class ToolSpec:
     runtime_keys: tuple[str, ...] = ()
 
     def to_definition(self) -> dict[str, Any]:
-        """发布期**冻结**的完整工具定义。
+        """发布期冻结的完整工具定义。
 
         模型可见的函数定义、参数与输出契约、实现身份、权限范围与目录/策略版本
         全部在这一份里，随已发布配置一起落库。恢复执行时只读它，
@@ -450,13 +432,10 @@ class ToolSpec:
 def _output_schema_of(capability: capabilities.Capability) -> dict[str, Any]:
     """工具输出的 Schema，从能力目录的 `statuses` 与 `output_keys` 派生。
 
-    `status` 的枚举取自 `capabilities.RULE_STATUSES`（排序后），
-    不另写一份状态集合——状态分档与中文含义由能力目录统一给出。
-
-    `required` 只包含**每条返回路径都会给出**的键：`status`、`message`，
-    以及能力目录用 `required_output_keys` 显式确认过的输出键。把「可能出现」
-    写成「必填」会让输出校验放行缺字段的结果，把「保证出现」漏掉又会让校验
-    拒绝合法结果，两者都必须以同一个来源为准。
+    `status` 的枚举取自 `capabilities.RULE_STATUSES`，状态分档与中文含义由能力目录统一给出。
+    `required` 只含每条返回路径都会给出的键（`status`、`message`，以及能力目录用
+    `required_output_keys` 确认过的）。把「可能出现」写成「必填」会放行缺字段的结果，
+    把「保证出现」漏掉又会拒绝合法结果，两者必须以同一个来源为准。
     """
     properties: dict[str, Any] = {
         "status": {"type": "string", "enum": sorted(capability.statuses)},
@@ -486,6 +465,7 @@ def _input_count_text(capability: capabilities.Capability) -> str:
         capabilities.INPUT_FIELD_ONE: "恰好一个字段输入",
         capabilities.INPUT_FIELD_PAIR: "恰好两个字段输入，顺序为左侧在前、右侧在后",
         capabilities.INPUT_FIELD_LIST: "左侧待核对总额 + 至少一个加数",
+        capabilities.INPUT_FIELD_SET: "业务规则声明的一个或多个字段输入",
         capabilities.INPUT_NONE: "无字段输入",
         capabilities.INPUT_OUTPUT_FIELDS: "产出字段",
         capabilities.INPUT_MATERIAL_SCOPE: "按材料位判定",
@@ -525,15 +505,11 @@ def _unavailable_reason(capability: capabilities.Capability) -> str:
 
 
 def _agent_selectable_of(capability: capabilities.Capability) -> bool:
-    """该工具是否是**模型可选择**的。
+    """该工具是否是模型可选择的。
 
-    判据只有一条：它可挂载的节点**全部**落在 `node_registry.AGENT_NODE_TYPES` 里。
-    材料检查、文件处理等节点由确定性实现执行，它们的能力（材料齐全性、文件质量子项）
-    即使底层已实现、也有可独立调用的 handler，也没有「让模型在循环里调用」的入口，
-    因此不是 Agent 工具。
-
-    扩大这份集合需要先完成副作用、输入产物、恢复与权限的完整设计，
-    不能为了让目录显示得更宽就直接把节点类型加进去。
+    判据只有一条：它可挂载的节点全部落在 `node_registry.AGENT_NODE_TYPES` 里。材料检查、
+    文件处理等节点由确定性实现执行，它们的能力即使已实现、也有 handler，也没有「让模型在
+    循环里调用」的入口。扩大这份集合需要先完成副作用、输入产物、恢复与权限的完整设计。
     """
     if not capability.nodes:
         return False
@@ -550,11 +526,12 @@ def _agent_unselectable_reason(capability: capabilities.Capability) -> str:
 def _handler_ref_of(capability_id: str) -> dict[str, str] | None:
     """工具的真实 handler 引用；不可调用时为 None。
 
-    两种 handler 形状：
+    两种工具引用：
 
-    - 算子工具：`operators.registry.execute_operator`，签名 `(operator, parameters, inputs)`；
-    - 上下文工具：`services.agent_tools` 的 adapter，签名 `(parameters, inputs, *, context)`，
-      与节点共用 `domain/quality_judgement` 的判定实现。
+    - 算子工具：保留 `execute_operator` 分发引用与算子码；工具服务按算子码取得
+      `operators.registry.REGISTRY` 中的标准工具对象，确定性节点通过分发函数调用同一对象；
+    - 上下文工具：`services.agent_tools` 的标准工具对象，原函数接收
+      `(parameters, inputs, *, context)`，与节点共用 `domain/quality_judgement` 的判定实现。
     """
     if capability_id in _CALLABLE_OPERATORS:
         return {"module": _OPERATOR_MODULE, "function": _OPERATOR_FUNCTION, "operator": capability_id}
@@ -565,7 +542,7 @@ def _handler_ref_of(capability_id: str) -> dict[str, str] | None:
 
 
 def _build_operator_tool(capability: capabilities.Capability) -> ToolSpec:
-    # 参数 Schema 只对**可调用**的工具定义。不注册为 Agent 工具的能力
+    # 参数 Schema 只对可调用的工具定义。不注册为 Agent 工具的能力
     # （LLM_EXTRACT / LLM_VALIDATE / REPORT_RENDER）仍要在目录里如实出现，
     # 因此给它们一份「不可调用」的显式形状，而不是留空或编造参数。
     schema = _OPERATOR_ARGUMENT_SCHEMAS.get(capability.capability_id)
@@ -659,7 +636,7 @@ def _build_quality_tool(capability: capabilities.Capability) -> ToolSpec:
     check_item = capability.capability_id
     artifact = file_quality.QUALITY_ITEM_ARTIFACT.get(check_item)
     implemented = file_quality.is_implemented(check_item)
-    # 未实现的检查项（图像清晰度、页码连续、有效签章、骑缝章）**工具入口仍然存在**：
+    # 未实现的检查项（图像清晰度、页码连续、有效签章、骑缝章）工具入口仍然存在：
     # Agent 需要能调用它并拿到「缺少已确认判定依据、本项不可判定」这个真实结论。
     # 「调不了」与「调了但判定不出来」是两件事，混在一起会让 Agent 无法区分
     # 「系统不支持这个检查」与「这项检查没通过」。
@@ -710,7 +687,7 @@ def _build_quality_tool(capability: capabilities.Capability) -> ToolSpec:
         error_codes=tuple(sorted(_TOOL_LAYER_ERROR_CODES)),
         unimplemented_reason="",
         # 文件质量子项挂在 DOCUMENT_PREPARE 上：实现完备（节点与 adapter 共用判定），
-        # 但**不作为 Agent 可选工具**——模型没有调用它的入口。
+        # 但不作为 Agent 可选工具——模型没有调用它的入口。
         agent_selectable=_agent_selectable_of(capability),
         agent_unselectable_reason="" if _agent_selectable_of(capability) else _agent_unselectable_reason(capability),
         input_count="按材料位逐份判定",
@@ -748,41 +725,37 @@ def catalog_payload() -> list[dict[str, Any]]:
 
 
 def allowed_tools_of(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """本次发布允许 Agent 调用的工具范围（含**完整冻结定义**）。
+    """本次发布允许 Agent 调用的工具范围（含完整冻结定义）。
 
-    范围由**已发布规则实际引用的能力**与**规则所属节点**共同决定，
-    不是把整个目录倒给模型。一条规则引用了 `DATE_COMPARE` 且挂在内部校验节点，
-    那么这次审核就允许在该节点调用日期比较工具。
-
+    范围由已发布规则实际引用的能力与规则所属节点共同决定，不是把整个目录倒给模型。
     返回每项含 `tool_id` / `node_code` / `rule_codes` / `rule_keys` / `definition`：
+    `definition` 是发布期冻结的完整工具定义，恢复执行时模型看到的必须是它，而不是用当前
+    目录现场重新生成的；`rule_codes` 保留业务编号供阅读与旧版本任务使用，多材料分支由
+    `rule_keys` 区分。
 
-    - `definition` 是发布期冻结的完整工具定义（函数名、描述、参数与输出 Schema、
-      handler 引用、目录版本与内容指纹、策略版本），恢复执行时模型看到的必须是它，
-      而不是用当前目录现场重新生成的那一份；
-    - `tool_id` / `node_code` / `rule_keys` 是「模型能用哪些工具」与
-      「这些工具服务于哪条规则」的答案。
-      `rule_codes` 保留业务编号，供阅读及旧版本任务使用；多材料分支由 `rule_keys` 区分。
-
-    只有**Agent 可选择**的工具进范围：节点级实现的工具（材料齐全性、文件质量子项）
-    即使已实现、有 handler，也没有模型调用入口，列进来会让策略看起来比实际宽，
-    而后端 `_partition_rules` 又不会把它们当 Agent 规则——两处不一致。
+    只让 Agent 可选择的工具进范围：节点级实现的工具即使已实现、有 handler 也没有模型调用
+    入口，列进来会让策略看起来比实际宽，而后端 `_partition_rules` 又不会把它们当 Agent 规则。
     """
     allowed: dict[tuple[str, str], dict[str, list[str]]] = {}
     for rule in rules:
         if not rule.get("enabled", True):
             continue
-        capability_id = capabilities.capability_id_of_rule(rule)
-        spec = tool_spec(capability_id)
-        if spec is None or not spec.agent_selectable:
-            continue
         node_code = rule.get("node")
-        if not isinstance(node_code, str) or not node_code:
-            continue
-        key = (spec.tool_id, node_code)
+        node_type = rule.get("node_type") or node_code
         rule_code = rule.get("rule_code") or rule.get("rule_key")
         rule_key = rule.get("rule_key")
-        if isinstance(rule_code, str) and rule_code and isinstance(rule_key, str) and rule_key:
-            scope = allowed.setdefault(key, {"rule_codes": [], "rule_keys": []})
+        if not all(isinstance(value, str) and value for value in (node_code, rule_code, rule_key)):
+            continue
+        if rule.get("operator") == "LLM_VALIDATE":
+            # 模型先执行业务方法；需要工具时可选该节点已有的只读执行工具。
+            specs = [spec for spec in TOOL_SPECS.values()
+                     if spec.agent_selectable and spec.implemented and not spec.side_effect
+                     and node_type in spec.allowed_nodes]
+        else:
+            spec = tool_spec(capabilities.capability_id_of_rule(rule))
+            specs = [spec] if spec is not None and spec.agent_selectable else []
+        for spec in specs:
+            scope = allowed.setdefault((spec.tool_id, node_code), {"rule_codes": [], "rule_keys": []})
             scope["rule_codes"].append(rule_code)
             scope["rule_keys"].append(rule_key)
     return [

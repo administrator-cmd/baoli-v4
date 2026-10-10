@@ -16,9 +16,9 @@ export interface TaskScope {
   unenabled_rules: RuleSnapshotEntry[];
   enabled_rule_keys?: string[];
   unenabled_rule_keys?: string[];
-  /** 未配置的检查类别（**能力类型**汇总）：用于「这类检查有没有配」。 */
+  /** 未配置的检查类别（能力类型汇总）：用于「这类检查有没有配」。 */
   unconfigured_node_types: string[];
-  /** 这些类别下真实存在的**节点实例码**：用于「当前这个节点是不是未配置的类别」。 */
+  /** 这些类别下真实存在的节点实例码：用于「当前这个节点是不是未配置的类别」。 */
   unconfigured_node_codes: string[];
   capability_gaps?: Array<{
     rule_key?: string;
@@ -43,7 +43,6 @@ export interface ScenarioListItem {
   category: string | null;
   description: string | null;
   enabled: boolean;
-  deleted: boolean;
   published_version_no: number | null;
   published_at: string | null;
   latest_version_no: number;
@@ -86,7 +85,6 @@ export interface ScenarioDetail extends ApiResponse {
   category: string | null;
   description: string | null;
   enabled: boolean;
-  deleted: boolean;
   latest_version_no: number;
   created_at: string;
   updated_at: string;
@@ -109,6 +107,8 @@ export interface DraftMaterialItem {
 export interface DraftFieldItem {
   field_key: string;
   material_key: string;
+  /** 字段自身声明的抽取节点；已有显式抽取规则时由规则确定实际归属。 */
+  node_code?: string | null;
   material_name: string | null;
   name: string;
   value_type: string;
@@ -120,8 +120,8 @@ export interface DraftFieldItem {
   /** 产物来源：当前仅印章识别 SEAL；留空表示字段由常规字段抽取提供。 */
   artifact_source?: string | null;
   /**
-   * 取数期间与报表口径：**由字段自己声明**，计算参数按这两项定位字段事实
-   * （参数表不再声明它们）。必填，没有默认值。
+   * 取数期间与报表口径：由字段自己声明，计算参数按这两项定位字段事实
+   * （参数表不再声明它们）。仅在业务实际涉及时填写，缺省由服务端归一为不适用。
    */
   period_scope?: string | null;
   statement_scope?: string | null;
@@ -202,13 +202,14 @@ export interface DraftSectionItem {
   section_order?: number | null;
   content_type?: string | null;
   result_sort?: string | null;
+  risk_level_order?: string[];
   config_status?: string | null;
   origin?: ConfigOrigin | null;
   updated_at?: string | null;
 }
 
 /**
- * 场景配置里的一个**节点实例**。
+ * 场景配置里的一个节点实例。
  *
  * 节点由用户配置：`node_code` 是实例码（同一场景可以有两个同类节点），
  * `node_type` 才是能力类型。顺序与依赖决定执行顺序，不由系统按规则内容生成。
@@ -219,7 +220,7 @@ export interface DraftNodeItem {
   node_type_label: string;
   name: string;
   sequence_no: number;
-  /** 上游节点**实例码**列表。 */
+  /** 上游节点实例码列表。 */
   depends_on: string[];
   config_json: Record<string, JsonValue> | null;
   enabled: boolean;
@@ -227,21 +228,25 @@ export interface DraftNodeItem {
 }
 
 /**
- * 场景**选用**的一张 Sheet 及它归属的节点实例。
- *
- * 场景配置「使用哪些 Sheet、Sheet 对应哪些节点及其流程关系」；统一模板协议定义
- * 「系统支持哪些 Sheet 以及每张 Sheet 的结构」。这份选择是用户配置，不由系统按内容反推。
+ * 场景选入的来源表；自由布局表可同时承载多个节点的业务配置。
  */
 export interface DraftSheetItem {
   sheet_role: string;
   sheet_role_label: string;
-  /** 该 Sheet 归属的节点实例码；null 表示已写入草稿但节点为空，发布会被阻断。 */
+  /** 新导入保存真实身份和表名；历史配置可能没有记录。 */
+  sheet_key?: string | null;
+  sheet_name?: string | null;
+  /** 历史模板的节点绑定；自由布局导入为 null，字段和规则各自指定节点。 */
   node_code: string | null;
   sort_no: number;
 }
 
 /** 草稿中的计算配置核对行。来自 calculation_json，不是运行结果。 */
 export interface DraftCalculationItem {
+  // PROGRAM 仅用于展示旧配置，已不支持发布或执行。
+  execution_engine: "PROGRAM" | "LLM";
+  judgement_instruction: string;
+  execution_mode: "CHECK" | "VALUE_ONLY";
   rule_code: string | null;
   name: string | null;
   node_code: string | null;
@@ -266,8 +271,10 @@ export interface DraftDisabledSourceRow {
   columns: Array<{ key: string; label: string; value: string; cell?: string | null }>;
 }
 
-export interface DraftDisabledSourceRowActivationPreview extends ApiResponse {
+export interface DraftSourceActivationPreviewData {
+  preview_id: string;
   revision_no: number;
+  can_activate: boolean;
   rows: Array<{
     row_key: string;
     sheet_role: string;
@@ -275,8 +282,11 @@ export interface DraftDisabledSourceRowActivationPreview extends ApiResponse {
     row_no: number;
     source_id: string | null;
   }>;
-  updated_risk_codes: string[];
+  items: Array<{ kind: string; name: string; description: string }>;
+  questions: string[];
 }
+
+export interface DraftSourceActivationPreview extends DraftSourceActivationPreviewData, ApiResponse {}
 
 export interface ScenarioDraftView extends ApiResponse {
   scenario_code: string;
@@ -284,14 +294,14 @@ export interface ScenarioDraftView extends ApiResponse {
   source: string;
   source_label: string;
   base_version_no: number | null;
-  /** 统一模板协议的版本标识；页面新建时为 null。 */
+  /** 内部能力与参考格式的版本标识；页面新建时为 null。 */
   profile_version?: string | null;
   /** 当前配置是否已生效：null 表示已生效；非空时页面显示“尚未生效 + 原因”。 */
   sync_error?: ConfigSyncError | null;
   updated_at: string;
-  /** 用户配置的节点实例。Sheet 绑定不在节点面板里改。 */
+  /** 用户配置的实际节点实例，字段、规则和计算分别引用它们。 */
   nodes: DraftNodeItem[];
-  /** 导入成功写入草稿后的 Sheet→节点。导入绑定下拉不读这份清单。 */
+  /** 导入来源工作表清单；动态来源无表级节点，历史来源可保留旧绑定。 */
   sheets: DraftSheetItem[];
   calculations: DraftCalculationItem[];
   disabled_source_rows: DraftDisabledSourceRow[];

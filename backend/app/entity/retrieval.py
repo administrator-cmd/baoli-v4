@@ -36,7 +36,7 @@ class EvidenceIndexVersion(Base, TimestampMixin):
     __tablename__ = "evidence_index_version"
     __table_args__ = (
         # 一份索引由「上传 + 产物类型 + 产物内容版本 + 索引版本」唯一确定。
-        # artifact_content_sha256 是产物**内容**的哈希：同一 PDF 重新识别后内容变了，
+        # artifact_content_sha256 是产物内容的哈希：同一 PDF 重新识别后内容变了，
         # 新索引就是另一条记录，旧索引不会被当成当前产物的索引。
         UniqueConstraint(
             "document_upload_id", "artifact_type", "artifact_content_sha256", "index_version"
@@ -150,7 +150,7 @@ class EvidenceRetrieval(Base, TimestampMixin):
     scenario_version_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # 发起检索的规则键；程序侧检索没有规则键时为 NULL。
     rule_key: Mapped[str | None] = mapped_column(String(40))
-    node_code: Mapped[str | None] = mapped_column(String(40))
+    node_code: Mapped[str | None] = mapped_column(String(80))
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
     # 限定范围（任务、材料、上传版本、产物、索引版本）：范围过滤发生在排序之前。
     scope_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -160,7 +160,7 @@ class EvidenceRetrieval(Base, TimestampMixin):
     chunk_version: Mapped[str | None] = mapped_column(String(80))
     index_version: Mapped[str | None] = mapped_column(String(80))
     index_versions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    # 候选结果：分块、相似度、产物归属与定位。这里保存的是**候选**，不是人工结论。
+    # 候选结果：分块、相似度、产物归属与定位。这里保存的是候选，不是人工结论。
     candidates_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     # 实际送入后续步骤的正文条目（本次检索的上下文预算），与人工结论是两件事。
     adopted_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)

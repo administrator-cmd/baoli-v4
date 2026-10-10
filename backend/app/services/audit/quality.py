@@ -1,20 +1,20 @@
 """文件处理节点与文件质量检查。
 
-文件处理按材料位逐份执行：8018 材料识别（**只记录不判定**）、8010 处理、OCR、印章识别
-（按需启用）。印章是否启用由两条依据决定，缺一不可：文件名质量规则声明
-`artifact_type = SEAL`，或字段在 03_字段 中声明了「产物来源=印章识别」。
+文件处理按材料位逐份执行：8018 材料识别（只记录不判定）、8010 处理、OCR、印章识别（按需启用）。
+印章识别的启用依据为：文件质量规则声明 `artifact_type = SEAL`，或当前场景的字段配置
+声明了「产物来源=印章识别」。
 
-文件质量检查逐份材料判定并保留每份的结果：不合格优先、其次不可判定、全部适用结果合格
-才通过。不可判定的检查项目（图像清晰度、页码连续、有效签章、骑缝章）缺少已确认的判定
-依据，明确记为不可判定并给出能力缺口，绝不因为文件处理成功就当作通过。
+文件质量检查逐份材料判定并保留每份的结果：不合格优先、其次不可判定、全部适用结果合格才通过。
+不可判定的检查项目（图像清晰度、页码连续、有效签章、骑缝章）缺少已确认的判定依据，明确记为
+不可判定并给出能力缺口，不因为文件处理成功就当作通过。
 
-材料类型待复核**不阻断**这些检查：判定依据是真实上传记录，类型本身作为待确认事项另行说明。"""
+材料类型待复核不阻断这些检查：判定依据是真实上传记录，类型本身作为待确认事项另行说明。"""
 
 from ...domain import file_quality, quality_judgement
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, declared_artifact_source, is_type_unavailable, read_material_type_status
 from ...domain.file_quality import CHECK_FILE_DUPLICATE, CHECK_FILE_FORMAT, CHECK_FILE_SIZE
 from ...domain.identity import public_no
-from ...domain.manifest import OPERATOR_LABELS, rule_node_type_of
+from ...domain.manifest import OPERATOR_LABELS, enabled_extraction_field_keys, rule_node_type_of
 from ...common.exceptions import BusinessError
 from .document_ports import document_service
 from ...entity import AuditTask, DocumentUpload, ManualReview, NodeExecution, RuleResult, StoredArtifact
@@ -34,7 +34,7 @@ def _seal_field_material_keys(
 ) -> dict[str, list[str]]:
     """材料位 -> 声明了「产物来源=印章识别」的字段 key。
 
-    印章识别的启用依据之一是**字段自己的声明**：声明取自印章产物的字段，其所属
+    印章识别的启用依据之一是字段自己的声明：声明取自印章产物的字段，其所属
     材料位必须有印章产物，否则该字段没有可取的来源。只看规则的适用材料会漏掉这一类
     （表单路径的比较规则不填写适用材料列），使声明无法落实。
     """
@@ -48,13 +48,11 @@ def _seal_field_material_keys(
 def _seal_requirements(manifest: dict[str, Any], enabled_keys: set[str]) -> dict[str, Any]:
     """需要印章产物的启用规则与其材料范围。
 
-    印章按需启用，来源有两条，缺一不可：
+    印章按需启用，来源有两条：文件质量规则声明 `artifact_type = SEAL`；
+    主体核对规则自身——规则引用的字段配置声明了「产物来源=印章
+    识别」，这类规则不需要额外启用某条文件质量检查，也不需要再启用一条条款规则。
 
-      1. 文件名质量规则声明 `artifact_type = SEAL`（检查项目是甲方签章 / 乙方签章 / 骑缝章）；
-      2. **主体核对规则自身**：规则引用的字段在 03_字段 中声明了「产物来源=印章识别」。
-         这类规则不需要额外启用某条文件质量检查才取得印章产物，也不需要再启用一条条款规则。
-
-    未启用时报告与页面显示为“未配置”，不能因为服务不可用就静默删掉步骤。
+    未启用时报告与页面显示为「未配置」，不能因为服务不可用就静默删掉步骤。
     """
     quality_rules = [
         rule
@@ -76,7 +74,7 @@ def _seal_requirements(manifest: dict[str, Any], enabled_keys: set[str]) -> dict
     material_keys: set[str] = {key for rule in quality_rules for key in rule["materials"]}
     for rule in subject_rules:
         # 主体核对的印章候选来自规则材料范围与输入字段所属材料；
-        # 待核对主体本身取自合同正文，它的材料位不需要印章产物。
+        # 待核对主体本身取自材料正文，它的材料位不需要印章产物。
         for key in rule.get("materials") or []:
             material_keys.add(key)
     return {"rule_names": names, "material_keys": material_keys}
@@ -88,12 +86,17 @@ def _seal_required_material_keys(
 ) -> dict[str, Any]:
     """本次任务真正需要印章产物的规则、字段与材料位。
 
-    字段范围按**任务实际执行的字段**收敛：任务快照之外的字段不参与抽取，
-    不因它们声明了印章来源就去调用印章识别服务。声明了印章来源的字段，其材料位
-    一律纳入范围——否则该字段的抽取没有可取值的来源，只能失败。
+    字段范围按启用的自动抽取规则收敛；仅保留定义而未启用抽取的字段
+    不触发印章服务。规则自身明确需要印章产物时，仍按规则的材料范围执行。
     """
     requirements = _seal_requirements(manifest, enabled_keys)
-    seal_fields_by_material = _seal_field_material_keys(task.task_schema_json["fields"])
+    extraction_field_keys = enabled_extraction_field_keys(
+        manifest, task.task_schema_json["enabled_rule_keys"],
+    )
+    seal_fields_by_material = _seal_field_material_keys([
+        field for field in task.task_schema_json["fields"]
+        if field["field_key"] in extraction_field_keys
+    ])
     material_keys: set[str] = set(requirements["material_keys"])
     material_keys.update(seal_fields_by_material)
     return {
@@ -103,7 +106,7 @@ def _seal_required_material_keys(
     }
 
 def _type_review_recorded(db: Session, task: AuditTask, upload: DocumentUpload) -> bool:
-    """该上传是否已经有材料类型复核记录。**已裁决的也算**：类型这件事已经交给人处理过一次。
+    """该上传是否已经有材料类型复核记录。已裁决的也算：类型这件事已经交给人处理过一次。
 
     只看「有没有未失效的待办」会让裁决过一轮的材料位在下一批被重新挂上同一条待办，
     形成「裁决 → 重挂 → 再裁决」的循环。材料位换了上传（重新上传文件）才会重新进入
@@ -122,16 +125,16 @@ def _type_review_recorded(db: Session, task: AuditTask, upload: DocumentUpload) 
 def _sync_type_review_pending(db: Session, task: AuditTask) -> dict[str, Any]:
     """保证「类型待复核」的材料位都有可提交的人工复核待办。
 
-    材料类型的自动识别只供参考，不阻断审核（真实原文照常参与判定），但类型本身仍需
-    由人定案。部分历史任务只保留了识别产物，没有可提交的裁决入口。
+    材料类型的自动识别只供参考，不阻断审核（真实原文照常参与判定），但类型本身仍需由人定案。
+    部分历史任务只保留了识别产物，没有可提交的裁决入口。
 
     这里按当前有效的 MATERIAL_CLASSIFY 产物把识别结论与命中关键词快照进待办，供人据实裁决；
-    已裁决过的材料位不再重复挂。**不替人下结论、也不改材料状态**：材料状态只在人工提交
-    裁决时改变。识别产物不可用时如实写明，不伪造结论。
+    已裁决过的材料位不再重复挂。不替人下结论、也不改材料状态（材料状态只在人工提交裁决时改变）；
+    识别产物不可用时如实写明，不伪造结论。
 
-    只在**当前没有任何待处理复核项**时补挂（文件处理节点、进入复核节点却没有待办可处理时）：
-    规则结论与字段事实的待办优先，补挂材料类型待办不能把它们挤掉、更不能让已排队的那一批
-    被重新洗牌。历史任务在进入复核等待点之前确实一条待办都没有，那时才由这里给出入口。
+    只在当前没有任何待处理复核项时补挂：规则结论与字段事实的待办优先，补挂材料类型待办不能把
+    它们挤掉、更不能让已排队的那一批被重新洗牌。历史任务在进入复核等待点之前确实一条待办都没有，
+    那时才由这里给出入口。
     """
     if db.scalar(
         select(ManualReview.id)
@@ -150,7 +153,7 @@ def _sync_type_review_pending(db: Session, task: AuditTask) -> dict[str, Any]:
         if _type_review_recorded(db, task, upload):
             continue
         service_result = _material_classify_result(_material_classify_content(db, upload))
-        # 类型复核是**待确认事项**，不是「依据不可用」：真实原文照常参与判定，
+        # 类型复核是待确认事项，不是「依据不可用」：真实原文照常参与判定，
         # 因此文案不能说成「依赖它的检查缺少有效依据」——那会把待确认说成阻断。
         pending_note = (
             "材料类型待复核：自动识别给出的类型结论尚未由人定案，本材料仍在审核范围内，"
@@ -208,7 +211,7 @@ def _document_prepare(db: Session, task: AuditTask, manifest: dict[str, Any], ex
         source_path = resolve_storage_path(upload.relative_path)
 
         # 8018/8010/印章与 OCR 一样先占位再调用：占位提交后才联系供应商，中断不会被自动重放。
-        # doc_type 取**本次上传时用户声明的类型**（上传入口已按 8018 目录核对过），
+        # doc_type 取本次上传时用户声明的类型（上传入口已按 8018 目录核对过），
         # 不来自场景配置：材料位不声明类型，同一材料位换文件时可以换类型。
         _ensure_external_artifact(
             db,
@@ -224,7 +227,7 @@ def _document_prepare(db: Session, task: AuditTask, manifest: dict[str, Any], ex
         )
         # 8018 的识别结论只记录不判定：不改材料状态、不挂人工复核，后续节点照常执行。
         material_classify_by_key[document.material_key] = _material_classify_content(db, upload)
-        # 正文抽取依赖的 8010 处理链路必须真实执行，不因本模板没有质量规则而跳过。
+        # 正文抽取依赖的 8010 处理链路必须真实执行，不因当前场景没有质量规则而跳过。
         parsed_artifact = _ensure_external_artifact(
             db,
             task,
@@ -315,13 +318,13 @@ def _quality_material_inputs(
 ) -> list[dict[str, Any]]:
     """文件质量检查的材料归属摘要。
 
-    文件检查没有字段输入，但报告与风险要按**实际涉及的材料**筛选结果；
-    归属因此取自逐份材料的判定结果，与 `_result_material_keys` 读取的键结构一致。
-    未上传的材料位（NOT_APPLICABLE）不计入归属：这次判定没有用到它。
+    文件检查没有字段输入，但报告与风险要按实际涉及的材料筛选结果；归属因此取自逐份材料的判定
+    结果，与 `_result_material_keys` 读取的键结构一致。未上传的材料位（NOT_APPLICABLE）不计入
+    归属：这次判定没有用到它。
 
-    这里的条目是**材料级**事实，不是字段取值：`kind=MATERIAL` 显式标明，并带上该份材料
-    自己的判定状态与文件名。页面据此逐份说明「查的是哪份文件、那份判成了什么」，
-    不会退化成一条没有字段名、没有取值的残缺输入行。
+    这里的条目是材料级事实而不是字段取值：`kind=MATERIAL` 显式标明，并带上该份材料自己的判定
+    状态与文件名。页面据此逐份说明「查的是哪份文件、那份判成了什么」，不会退化成一条没有字段名、
+    没有取值的残缺输入行。
     """
     summary: list[dict[str, Any]] = []
     for item in per_material:
@@ -391,16 +394,13 @@ def _quality_comparison_view(
     per_material: list[dict[str, Any]],
     material_names: dict[str, str],
 ) -> dict[str, Any] | None:
-    """文件质量检查的实际比较：由**决定本次结论的那一份材料**给出。
+    """文件质量检查的实际比较：由决定本次结论的那一份材料给出。
 
-    汇总结论（不合格优先、其次不可判定、全部合格才通过）出自某一份材料，
-    比较过程就必须是那一份的真实取值。只给一个汇总结论会让工作人员无法核对
-    「到底是哪份文件、拿什么和什么比」。
+    汇总结论（不合格优先、其次不可判定、全部合格才通过）出自某一份材料，比较过程就必须是那一份
+    的真实取值——只给一个汇总结论会让工作人员无法核对「到底是哪份文件、拿什么和什么比」。
 
-    已实现的三项检查各有真实的比较对象：
-      文件大小  实际上传字节数 与 标准值换算出的字节上限；
-      文件格式  实际上传的后缀 与 允许的格式集合；
-      文件内容  同任务内当前上传文件的内容哈希是否重复。
+    已实现的三项检查各有真实的比较对象：文件大小是实际上传字节数与标准值换算出的字节上限；
+    文件格式是实际上传的后缀与允许的格式集合；文件内容是同任务内当前上传文件的内容哈希是否重复。
     不可判定的检查没有比较对象，返回 None，页面只展示标准与原因。
     """
     check_item = parameters.get("check_item")
@@ -498,11 +498,9 @@ def _execute_file_quality_rules(
         standard_value = params.get("standard_value")
         unit = params.get("unit")
         artifact_type = params.get("artifact_type")
-        if not isinstance(artifact_type, str) or not artifact_type:
-            raise BusinessError("RULE_PARAMETER_MISSING", "文件质量规则必须明确声明处理产物类型", details={"rule": rule["name"]})
         state = _applicability_state(rule, uploaded_keys)
         scoped_uploads = [uploads_by_key.get(material_key) for material_key in rule["materials"]]
-        # 只有**人工已确认与材料位不符**的材料位才是「依据不可用」。类型待复核来自已下线为
+        # 只有人工已确认与材料位不符的材料位才是「依据不可用」。类型待复核来自已下线为
         # 仅供参考的自动识别（或人工的“证据不足”），不是对文件内容的否定结论：
         # 文件格式/大小/重复判定依据的是真实上传记录，照常判定；类型本身作为待确认事项另行说明。
         rejected_material_keys = [
@@ -525,8 +523,12 @@ def _execute_file_quality_rules(
             else None
         )
         quality_artifacts: list[StoredArtifact] = []
-        if not state["applicable"]:
+        if not rule["materials"]:
+            result = {"status": "EVIDENCE_INSUFFICIENT", "message": "该文件质量检查未声明适用材料，无法执行"}
+        elif not state["applicable"]:
             result = {"status": "NOT_APPLICABLE", "message": _not_applicable_message(state, material_names)}
+        elif not isinstance(artifact_type, str) or not artifact_type:
+            result = {"status": "EVIDENCE_INSUFFICIENT", "message": "该文件质量检查未声明处理产物类型，无法执行"}
         elif rejected_material_keys:
             rejected = "、".join(material_names.get(key, key) for key in rejected_material_keys)
             result = {

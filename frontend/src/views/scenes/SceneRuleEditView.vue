@@ -11,12 +11,9 @@ import { getCapabilityCatalog } from "@/api/system";
 import BackButton from "@/components/BackButton.vue";
 import {
   artifactTypeOptions,
-  checkLevelOptions,
   dateCompareOperatorOptions,
   decimalCompareOperatorOptions,
   decimalSumCompareOperatorOptions,
-  riskLevelOptions,
-  riskConditionOptions,
   riskSourceNodeOptions,
 } from "@/constants/labels";
 
@@ -50,7 +47,7 @@ const activeOperator = ref("FIELD_EQUAL");
 
 /**
  * 检查方式与可选检查阶段：由后端能力目录派生，不在页面维护第二份名单。
- * 目录读取失败时**不**回退到本地默认名单：那会让页面显示一份后端并不支持的能力集合。
+ * 目录读取失败时不回退到本地默认名单：那会让页面显示一份后端并不支持的能力集合。
  * 此时明确报错并禁用表单，规则仍可在规则列表里查看。
  */
 const catalog = ref<CapabilityItem[]>([]);
@@ -59,9 +56,12 @@ const catalogLoading = ref(true);
 
 /** 已导入的显式抽取规则可以编辑；新增规则不提供系统派生算子。 */
 const SYSTEM_OPERATORS = new Set(["LLM_EXTRACT", "REPORT_RENDER"]);
+/** 新业务校验由模型解释方法；已有程序规则保留其当前方式，避免编辑时改写含义。 */
 const businessCapabilities = computed(() =>
   catalog.value.filter((item) =>
     item.kind === "OPERATOR" &&
+    (item.new_rule_nodes.length > 0 ||
+      (!isCreate.value && loadedOperator.value === item.capability_id)) &&
     (!SYSTEM_OPERATORS.has(item.capability_id) ||
       (!isCreate.value && loadedOperator.value === "LLM_EXTRACT" && item.capability_id === "LLM_EXTRACT")),
   ),
@@ -75,7 +75,8 @@ const OPERATOR_OPTIONS = computed(() =>
   })),
 );
 const OPERATOR_NODES = computed<Record<string, string[]>>(() =>
-  Object.fromEntries(businessCapabilities.value.map((item) => [item.capability_id, item.nodes])),
+  Object.fromEntries(businessCapabilities.value.map((item) => [item.capability_id,
+    !isCreate.value && loadedOperator.value === item.capability_id ? item.nodes : item.new_rule_nodes])),
 );
 
 /** 风险来源节点 → 允许的来源规则所在节点（与后端一致）。 */
@@ -88,8 +89,8 @@ const SOURCE_NODE_RULE_NODES: Record<string, string[]> = {
 const form = reactive({
   name: "",
   source_ref: "",
-  operator: "FIELD_EQUAL",
-  node: "CROSS_VALIDATE",
+  operator: "LLM_VALIDATE",
+  node: "",
   enabled: true,
   // 材料规则
   material_keys: [] as string[],
@@ -100,6 +101,8 @@ const form = reactive({
   right_material_key: "",
   right_field_key: "",
   addends: [] as Array<{ material_key: string; field_key: string }>,
+  llm_inputs: [] as Array<{ material_key: string; field_key: string }>,
+  evidence_source: "",
   // 参数
   date_operator: "EQ",
   decimal_operator: "EQ",
@@ -117,7 +120,7 @@ const form = reactive({
   source_rule_keys: [] as string[],
   source_rule_codes: [] as string[],
   risk_condition: "",
-  risk_level: "中",
+  risk_level: "",
   risk_action: "",
 });
 
@@ -127,7 +130,7 @@ const currentCapability = computed(
 );
 
 /**
- * 工具目录：模型在规则评估循环里**可以选择**哪些工具。
+ * 工具目录：模型在规则评估循环里可以选择哪些工具。
  *
  * 它与「能力已实现」是两件事，页面必须分开显示：
  * 材料齐全性、文件质量子项由确定性节点执行（`agent_selectable=false`），
@@ -159,30 +162,25 @@ function nodeName(code: string): string {
   return nodes.value.find((node) => node.node_code === code)?.name ?? code;
 }
 /**
- * 表单分支按能力的**输入形态**与执行方式判断，不按算子码逐个列举——
+ * 表单分支按能力的输入形态与执行方式判断，不按算子码逐个列举——
  * 硬编码名单会让「后端新增算子」变成「能保存但表单少了一块输入」。
  */
 const inputKind = computed(() => currentCapability.value?.input_kind ?? null);
 /** 需要字段输入的能力（比较、非空、条款存在性、智能判断、金额加总）。 */
 const needsFieldInputs = computed(() =>
-  ["FIELD_ONE", "FIELD_PAIR", "FIELD_LIST"].includes(inputKind.value ?? ""),
+  ["FIELD_ONE", "FIELD_PAIR", "FIELD_LIST", "FIELD_SET"].includes(inputKind.value ?? ""),
 );
 /** 按材料位判定、没有字段输入的能力（材料齐全性、文件质量检查）。 */
 const isMaterialRule = computed(() => inputKind.value === "MATERIAL_SCOPE");
 const isExplicitExtraction = computed(() => !isCreate.value && form.operator === "LLM_EXTRACT");
-/** 输入形态是「字段对」的能力（比较、大小写金额、智能判断）：加总比较用 FIELD_LIST，不在此列。 */
+/** 输入形态是「字段对」的能力；智能判断用 FIELD_SET，加总比较用 FIELD_LIST。 */
 const isPairInput = computed(() => inputKind.value === "FIELD_PAIR");
 const isAddends = computed(() => form.operator === "DECIMAL_SUM_COMPARE");
 const isComparison = computed(() => needsFieldInputs.value && !isLlmValidate.value);
 const isLlmValidate = computed(() => currentCapability.value?.execution === "LLM_VALIDATE");
 const isRisk = computed(() => currentCapability.value?.execution === "RISK_TRIGGER");
-/**
- * 单输入：形态声明为「一个字段」的能力（非空、条款存在性），
- * 以及文件内部校验的智能判断（它只针对同一份材料里的一段约定）。
- */
-const singleInput = computed(
-  () => inputKind.value === "FIELD_ONE" || (isLlmValidate.value && currentNodeType.value === "INTERNAL_VALIDATE"),
-);
+/** 单输入能力按目录声明，不将智能判断限制为一个字段。 */
+const singleInput = computed(() => inputKind.value === "FIELD_ONE");
 /** 文件检查由导入维护的口径参数：页面只读展示，保存时原样保留。 */
 const qualityParameters = computed<Record<string, string>>(() => {
   const result: Record<string, string> = {};
@@ -233,6 +231,9 @@ function onOperatorChange(): void {
     form.left_material_key = "";
     form.right_material_key = "";
   }
+  if (isLlmValidate.value && !form.llm_inputs.length) {
+    form.llm_inputs = [{ material_key: "", field_key: "" }];
+  }
   if (isAddends.value) {
     form.right_field_key = "";
     form.right_material_key = "";
@@ -255,13 +256,6 @@ function onOperatorChange(): void {
   if (form.operator !== "DATE_COMPARE" && form.operator !== "DECIMAL_COMPARE" && !isAddends.value) {
     form.threshold = "";
     form.threshold_unit = "";
-  }
-}
-
-function onNodeChange(): void {
-  if (isLlmValidate.value && currentNodeType.value === "INTERNAL_VALIDATE") {
-    form.right_material_key = "";
-    form.right_field_key = "";
   }
 }
 
@@ -346,6 +340,9 @@ function applyRule(rule: DraftRuleItem): void {
   form.applicability_kind = rule.applicability.kind === "MATERIALS_UPLOADED" ? "MATERIALS_UPLOADED" : "ALWAYS";
   form.material_keys = rule.materials.map((item) => item.material_key);
   form.output_field_keys = rule.outputs.map((item) => item.field_key);
+  form.llm_inputs = rule.operator === "LLM_VALIDATE"
+    ? rule.inputs.map((item) => ({ material_key: item.material_key ?? "", field_key: item.field_key ?? "" }))
+    : [];
   if (rule.inputs.length) {
     form.left_material_key = rule.inputs[0]?.material_key ?? "";
     form.left_field_key = rule.inputs[0]?.field_key ?? "";
@@ -363,6 +360,7 @@ function applyRule(rule: DraftRuleItem): void {
   // 打开既有规则时先记住它的完整参数：表单只呈现一部分键，保存时必须把其余键原样带回，
   // 否则一次保存就会丢掉文件检查的标准值与合格要求、非 ABS_DIFF_LTE 的金额容差等配置。
   loadedParameters.value = { ...parameters };
+  form.evidence_source = typeof parameters.evidence_source === "string" ? parameters.evidence_source : "";
   // 比较方向存在参数的 operator 键里（与后端契约一致）：日期与金额分别回填到各自的表单字段，
   // 不能按不存在的 date_operator 读取，否则打开规则后保存会静默把方向改成默认值。
   if (rule.operator === "DATE_COMPARE" && typeof parameters.operator === "string") {
@@ -406,7 +404,15 @@ function buildPayload(): DraftRulePayload | string {
     return "请选择当前场景中可用的检查节点";
   }
   const inputs: Array<{ field_key: string; material_key: string }> = [];
-  if (needsFieldInputs.value) {
+  if (isLlmValidate.value) {
+    if (!form.llm_inputs.length || form.llm_inputs.some((item) => !item.material_key || !item.field_key)) {
+      return "智能校验至少需要一个完整的输入字段";
+    }
+    inputs.push(...form.llm_inputs.map((item) => ({ field_key: item.field_key, material_key: item.material_key })));
+    if (currentNodeType.value === "CROSS_VALIDATE" && inputs.length < 2) {
+      return "文件交叉校验至少需要两个输入字段";
+    }
+  } else if (needsFieldInputs.value) {
     if (!form.left_field_key || !form.left_material_key) {
       return "请选择实际输入字段（左侧/唯一输入）";
     }
@@ -499,7 +505,11 @@ function buildPayload(): DraftRulePayload | string {
     if (!form.instruction.trim()) {
       return "智能判断必须填写审核要求（instruction）";
     }
+    if (!["FIELD_FACTS", "RETRIEVAL"].includes(form.evidence_source)) {
+      return "请选择智能校验的判断依据";
+    }
     parameters.instruction = form.instruction.trim();
+    parameters.evidence_source = form.evidence_source;
   }
   if (form.operator === "FILE_QUALITY_CHECK") {
     parameters.artifact_type = form.artifact_type;
@@ -511,13 +521,16 @@ function buildPayload(): DraftRulePayload | string {
     if (!form.source_rule_keys.length && !form.source_rule_codes.length) {
       return "风险规则必须选择来源检查或计算结果";
     }
-    if (!form.risk_condition) {
-      return "请选择风险成立条件";
+    if (!form.risk_condition.trim()) {
+      return "请填写完整的风险成立条件";
+    }
+    if (!form.risk_level.trim()) {
+      return "请填写本场景的风险等级";
     }
     if (!form.risk_action.trim()) {
       return "风险规则必须填写处理建议";
     }
-    parameters.risk_level = form.risk_level;
+    parameters.risk_level = form.risk_level.trim();
     parameters.action = form.risk_action.trim();
   }
   return {
@@ -528,7 +541,7 @@ function buildPayload(): DraftRulePayload | string {
     enabled: form.enabled,
     inputs,
     outputs: isExplicitExtraction.value ? [...form.output_field_keys] : [],
-    materials: isMaterialRule.value || isExplicitExtraction.value ? [...form.material_keys] : [],
+    materials: isMaterialRule.value || isExplicitExtraction.value || isLlmValidate.value ? [...form.material_keys] : [],
     parameters,
     requirement: form.requirement,
     check_level: form.check_level.trim() || null,
@@ -611,10 +624,11 @@ onMounted(load);
           <el-option v-for="item in OPERATOR_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
-      <el-form-item label="检查阶段" required>
-        <el-select v-model="form.node" :disabled="nodeOptions.filter((item) => !item.disabled).length === 1" style="width: 260px" @change="onNodeChange">
+      <el-form-item label="执行节点" required>
+        <el-select v-model="form.node" :disabled="nodeOptions.filter((item) => !item.disabled).length === 1" style="width: 260px">
           <el-option v-for="item in nodeOptions" :key="item.value" :value="item.value" :label="item.label" :disabled="item.disabled" />
         </el-select>
+        <span class="text-hint">规则所属的系统执行节点。</span>
         <span v-if="!nodeOptions.some((item) => !item.disabled)" class="text-hint">当前场景没有支持该检查方式的可用节点</span>
       </el-form-item>
 
@@ -671,7 +685,34 @@ onMounted(load);
         </el-form-item>
       </template>
 
-      <template v-else-if="isComparison || isLlmValidate">
+      <template v-else-if="isLlmValidate">
+        <el-form-item v-for="(input, index) in form.llm_inputs" :key="index" :label="`输入字段 ${index + 1}`" required>
+          <div class="rule-addend-row">
+            <el-select v-model="input.material_key" placeholder="材料" class="rule-addend-select" @change="input.field_key = ''">
+              <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
+            </el-select>
+            <el-select v-model="input.field_key" placeholder="字段" class="rule-addend-select">
+              <el-option v-for="item in fields.filter((field) => field.material_key === input.material_key)" :key="item.field_key" :value="item.field_key" :label="item.name" />
+            </el-select>
+            <el-button :icon="Trash2" :aria-label="`移除输入字段 ${index + 1}`" :title="`移除输入字段 ${index + 1}`" @click="form.llm_inputs.splice(index, 1)" />
+          </div>
+        </el-form-item>
+        <el-form-item>
+          <el-button :icon="Plus" @click="form.llm_inputs.push({ material_key: '', field_key: '' })">添加输入字段</el-button>
+        </el-form-item>
+        <el-form-item label="判断依据" required>
+          <el-radio-group v-model="form.evidence_source">
+            <el-radio value="FIELD_FACTS">已抽取字段</el-radio>
+            <el-radio value="RETRIEVAL">字段与材料正文检索</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="form.evidence_source === 'RETRIEVAL'" label="补充检索材料">
+          <el-select v-model="form.material_keys" multiple filterable style="width: 100%" placeholder="按需补充输入字段所属材料之外的检索范围">
+            <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
+          </el-select>
+        </el-form-item>
+      </template>
+      <template v-else-if="isComparison">
         <el-form-item :label="singleInput ? '输入字段' : '左侧字段'" required>
           <el-select v-model="form.left_material_key" placeholder="材料" style="width: 220px" @change="form.left_field_key = ''">
             <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
@@ -791,12 +832,10 @@ onMounted(load);
           maxlength="4000"
           placeholder="业务上对这条检查的要求原文（会随规则一起进入报告与导出）"
         />
-        <div class="text-hint">汇总、合计、与固定常量比较等当前不支持的能力会在这里被识别并在保存/发布时明确报错。</div>
+        <div class="text-hint">智能校验按提供的字段、结构化记录与业务方法判断；缺少外部数据或尚未实现的能力会明确报错。</div>
       </el-form-item>
       <el-form-item v-if="!isRisk" label="检查等级">
-        <el-select v-model="form.check_level" clearable style="width: 220px" placeholder="选择检查等级">
-          <el-option v-for="item in checkLevelOptions" :key="item.value" :value="item.value" :label="item.label" />
-        </el-select>
+        <el-input v-model="form.check_level" clearable style="width: 220px" placeholder="填写规则库定义的检查等级" />
       </el-form-item>
 
       <el-form-item label="适用条件">
@@ -824,14 +863,10 @@ onMounted(load);
           </el-select>
         </el-form-item>
         <el-form-item label="成立条件" required>
-          <el-select v-model="form.risk_condition" style="width: 260px" placeholder="选择成立条件">
-            <el-option v-for="item in riskConditionOptions" :key="item.value" :value="item.value" :label="item.label" />
-          </el-select>
+          <el-input v-model="form.risk_condition" type="textarea" :rows="3" placeholder="填写规则库中的完整风险成立条件" />
         </el-form-item>
         <el-form-item label="风险等级" required>
-          <el-select v-model="form.risk_level" style="width: 160px">
-            <el-option v-for="item in riskLevelOptions" :key="item.value" :value="item.value" :label="item.label" />
-          </el-select>
+          <el-input v-model="form.risk_level" placeholder="填写本场景的风险等级" />
         </el-form-item>
         <el-form-item label="处理建议" required>
           <el-input v-model="form.risk_action" maxlength="500" placeholder="命中风险时的处理建议（会显示在风险结果与报告中）" />

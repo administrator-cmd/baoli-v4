@@ -1,24 +1,22 @@
 """审核图的运行时装配与等待点校验。
 
-图恢复身份只由 `thread_id` 决定；`graph_namespace` 属于业务批次信息，用来识别
-「这个等待点还属不属于当前这一次流程」——材料替换或退回节点会换新的图实例，
-沿用旧 thread 会复用已经废弃的等待点。
+图恢复身份只由 `thread_id` 决定；`graph_namespace` 属于业务批次信息，用来识别「这个等待点
+还属不属于当前这一次流程」——材料替换或退回节点会换新的图实例，沿用旧 thread 会复用已经
+废弃的等待点。
 
-检查点读取失败分三类，调用方据此决定可重试还是终止：
-
-- `PENDING`：确实停在该等待点；
-- `NOT_WAITING`：能读到但没有该等待点 → 业务等待点已丢失，任务必须显式失败，
-  不能新建空图伪装成恢复；
-- `STORAGE_UNAVAILABLE`：连接或读取异常 → 只是本次操作失败，**不能**把任务判成失败
-  并丢掉等待点。"""
+检查点读取失败分三类，调用方据此决定可重试还是终止：`PENDING` 确实停在该等待点；
+`NOT_WAITING` 能读到但没有该等待点，业务等待点已丢失，任务必须显式失败，不能新建空图伪装成
+恢复；`STORAGE_UNAVAILABLE` 连接或读取异常，只是本次操作失败，不能把任务判成失败并丢掉
+等待点。"""
 
 from ...common.exceptions import BusinessError
 from ...graphs.audit_graph import CHECKPOINT_STORAGE_UNAVAILABLE, probe_interrupt
-from ...entity import AuditTask, WorkflowCheckpoint
+from ...entity import AuditTask, NodeExecution, WorkflowCheckpoint
 from ..task_lookup import task_or_404
 from .state import _fail_unrecoverable_checkpoint, _flow_checkpoint_state, _graph_namespace, _task_checkpoint
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
+from datetime import UTC, datetime
 
 
 def _expected_interrupt_node(phase: str) -> str:
@@ -28,12 +26,28 @@ def _expected_interrupt_node(phase: str) -> str:
         return "await_manual_review"
     raise BusinessError("AUDIT_CHECKPOINT_INVALID", "审核流程当前不处于可恢复等待状态", status_code=409)
 
-def _mark_graph_runtime_failed(db: Session, task_no: str) -> None:
+def _mark_graph_runtime_failed(
+    db: Session,
+    task_no: str,
+    *,
+    failure_code: str = "AUDIT_GRAPH_RUNTIME_FAILED",
+    failure_message: str = "审核流程运行失败，详情见后台操作失败信息与服务端日志",
+) -> None:
     """图基础设施在业务分支之外失败时，落一个终态，避免任务永远停在「执行中」。"""
     db.rollback()
     task = task_or_404(db, task_no, lock=True)
     task.status = "FAILED"
     task.pending_review_hash = None
+    db.execute(
+        update(NodeExecution)
+        .where(NodeExecution.audit_task_id == task.id, NodeExecution.status == "RUNNING")
+        .values(
+            status="FAILED",
+            finished_at=datetime.now(UTC),
+            failure_code=failure_code,
+            failure_message=failure_message,
+        )
+    )
     db.execute(
         update(WorkflowCheckpoint)
         .where(WorkflowCheckpoint.audit_task_id == task.id, WorkflowCheckpoint.status == "WAITING")

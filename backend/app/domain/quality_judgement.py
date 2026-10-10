@@ -1,23 +1,14 @@
 """共享领域服务：文件质量检查、材料存在性、大小写金额一致性。
 
-为什么需要这一层
-----------------
-节点与 Agent 工具共用这些判定，避免同一业务口径出现两套实现。
+节点与 Agent 工具共用这些判定，避免同一业务口径出现两套实现。本模块是这三类判定的
+唯一实现：节点负责取数、落库、生成审核标准视图，它只回答「按这些真实输入，结论是什么」。
 
-本模块因此是这三类判定的**唯一实现**：节点负责取数、落库、生成审核标准视图；
-它只回答「按这些真实输入，判定结论是什么」。两侧传入的输入形状相同，结论必然一致。
+输入是已解析的真实数据，不是标识：本模块不查库、不持有会话、不解析材料角色，
+调用方按自己的方式准备好数据（节点从 ORM 取，工具从 `ToolExecutionContext` 的会话取）。
 
-输入是**已解析的真实数据**，不是标识
-------------------------------------
-本模块不查库、不持有会话、不解析材料角色：调用方按自己的方式把真实数据准备好
-（节点从 ORM 取，工具从 `ToolExecutionContext` 的会话取），然后交给这里判定。
-
-边界
-----
-- 不产生 RuleResult、不写库、不生成页面视图：那些是节点职责。
-- 不为未实现的检查项提供默认结论：缺少判定依据时返回 EVIDENCE_INSUFFICIENT
-  并带上能力缺口，绝不默认通过。
-- 不代填业务阈值、单位、币种：缺标准值即明确报错。
+边界：不产生 RuleResult、不写库、不生成页面视图（节点职责）；不为未实现的检查项
+提供默认结论，缺判定依据时返回 EVIDENCE_INSUFFICIENT 并带上能力缺口；不代填业务阈值、
+单位、币种，缺标准值即明确报错。
 """
 
 from __future__ import annotations
@@ -59,7 +50,7 @@ def judge_quality_item(
     peers: list[dict[str, Any]] | None = None,
     gap: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """一个文件检查项目对**一份上传文件**的判定。
+    """一个文件检查项目对一份上传文件的判定。
 
     已实现的检查项目走确定性判定；未实现的（图像清晰度、页码连续、有效签章、
     骑缝章完整）明确返回不可判定并带上能力缺口——不把「处理成功」当成「质量通过」。
@@ -86,13 +77,12 @@ def judge_quality_item(
             "capability_gap": (gap or {}).get("gap", file_quality.GAP_CRITERION_UNCONFIRMED),
             "capability_message": (gap or {}).get("message"),
         }
-    # 未知检查项目不是「证据不足」：系统根本不认识它，混进不可判定会让配置错误
-    # 伪装成「已知但未确认的能力」。
-    raise BusinessError(
-        "OPERATOR_QUALITY_ITEM_UNKNOWN",
-        "文件检查规则的「检查项目」不是系统已知的检查项目，无法执行也无法形成能力缺口",
-        details={"check_item": check_item},
-    )
+    # 原文项目尚无处理器时暴露实际能力缺口；保留原文，不映射成另一项检查。
+    return {
+        "status": "EVIDENCE_INSUFFICIENT",
+        "message": f"文件检查项目“{check_item}”尚无执行能力，本项无法执行",
+        "capability_gap": "QUALITY_CAPABILITY_UNAVAILABLE",
+    }
 
 
 def check_materials(
@@ -104,11 +94,18 @@ def check_materials(
 ) -> dict[str, Any]:
     """材料存在性判定：声明的材料位是否都已上传。
 
-    缺**可选**材料属于缺输入（不可判定），不是通过——「可选」说的是业务上允许没有，
-    不是「系统可以据此判通过」。缺**必传**材料是不合格。
+    缺可选材料属于缺输入（不可判定），不是通过——「可选」说的是业务上允许没有，
+    不是「系统可以据此判通过」。缺必传材料是不合格。
 
     `required_by_key` 是每个材料位的必传属性；它来自任务绑定的已确认配置。
     """
+    if not required_keys:
+        return {
+            "status": "EVIDENCE_INSUFFICIENT",
+            "message": "该材料检查未声明适用材料，无法执行",
+            "missing_material_keys": [],
+            "missing_material_names": [],
+        }
     missing = sorted(set(required_keys) - available_keys)
     names = "、".join(material_names.get(key, key) for key in missing)
     if not missing:
@@ -160,18 +157,15 @@ def material_exists_result(
     status: str | None = None,
     message: str | None = None,
 ) -> dict[str, Any]:
-    """材料存在性检查的**完整结果**：判定 + 审核标准 + 实际比较 + 适用条件。
+    """材料存在性检查的完整结果：判定 + 审核标准 + 实际比较 + 适用条件。
 
-    节点实现（`services.audit.facts._material_check`）与 Agent 工具
-    （`services.agent_tools.check_materials_tool`）都调这一份：
-    判定与结果结构只在这里实现一次，两条路径不可能给出不同结论，
-    也不会出现「工具目录声明的输出键在 Agent 路径上永远为空」。
+    节点（`services.audit.facts._material_check`）与 Agent 工具
+    （`services.agent_tools.check_materials_tool`）都调这一份，两条路径不可能给出
+    不同结论，也不会出现「工具目录声明的输出键在 Agent 路径上永远为空」。
 
-    `status` / `message` 显式给出时（规则适用条件不成立，节点已经判为
-    NOT_APPLICABLE）原样采用；为 None 时由 `check_materials` 判定。
-    任何一种情况下，返回的键集合完全相同——输出契约是稳定的。
-
-    `applicability` 由调用方给出：它是规则的已发布配置事实，不是本次判定算出来的。
+    `status` / `message` 显式给出时（规则不适用，节点已判 NOT_APPLICABLE）原样采用，
+    为 None 时由 `check_materials` 判定；两种情况返回的键集合完全相同。
+    `applicability` 由调用方给出，它是规则的已发布配置事实。
     """
     verdict = (
         {"status": status, "message": message}
@@ -200,6 +194,8 @@ def material_exists_result(
         },
         "missing_material_keys": missing,
         "missing_material_names": [material_names.get(key, key) for key in missing],
+        # 存在性检查也涉及尚未上传的材料位；适用条件不成立时没有执行检查。
+        "checked_material_keys": declared if verdict["status"] != "NOT_APPLICABLE" else [],
         "standard": {
             "operator_label": operator_label,
             # 检查口径原文来自配置列；没有填写时如实标缺失，不代填默认条件。
@@ -229,7 +225,7 @@ def material_exists_result(
 def decimal_cn_equal(inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """大小写金额一致性。
 
-    当前**不具备**可执行能力：把大写金额换算成可核验数值需要业务先确认金额单位、
+    当前不具备可执行能力：把大写金额换算成可核验数值需要业务先确认金额单位、
     币种与大写金额换算口径，代码不会自行补值、不会按字符串比较、也不让大模型做算术。
     因此明确返回不可判定并说明缺哪条口径——既不默认通过，也不伪装成已执行。
 

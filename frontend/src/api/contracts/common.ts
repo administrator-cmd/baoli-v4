@@ -26,9 +26,11 @@ export interface OperationAccepted extends ApiResponse {
   message: string;
   reused: boolean;
   result: Record<string, JsonValue> | null;
+  /** 规则库模型原始返回文件，相对于后端 data 根目录。 */
+  raw_response_path?: string | null;
   failure_code: string | null;
   failure_message: string | null;
-  /** 命令当前阶段：区分已保存未执行 / 外部已受理 / 结果未知 / 业务已提交但图未推进等。 */
+  /** 命令当前阶段：区分已保存未执行 / 外部已受理 / 结果未知 / 业务已提交但图未推进 / 结果已就绪等。 */
   phase?: string | null;
   /** 外部作业引用（例如 OCR jobId）；本地超时后只能续查同一个作业。 */
   external_job_ref?: string | null;

@@ -48,6 +48,35 @@ const loadError = ref<string | null>(null);
 const saving = ref(false);
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
+const extractionNodes = computed(() =>
+  (draft.value?.nodes ?? []).filter((node) => node.node_type === "FIELD_EXTRACTION"),
+);
+
+function fieldNodeCodes(item: DraftFieldItem): string[] {
+  const extractionRules = (draft.value?.rules ?? []).filter((rule) =>
+    rule.operator === "LLM_EXTRACT"
+    && rule.outputs.some((output) => output.field_key === item.field_key),
+  );
+  const activeRules = extractionRules.filter((rule) => rule.enabled);
+  const owners = (activeRules.length ? activeRules : extractionRules)
+    .map((rule) => rule.node).filter((code): code is string => Boolean(code));
+  return [...new Set(owners.length ? owners : item.node_code ? [item.node_code] : [])];
+}
+
+function fieldNodeLabel(item: DraftFieldItem): string {
+  const codes = fieldNodeCodes(item);
+  if (!codes.length) return "未指定抽取节点";
+  const labels = codes.map((code) => {
+    const node = draft.value?.nodes.find((candidate) => candidate.node_code === code);
+    return node ? `${node.name}${node.enabled ? "" : "（已停用）"}` : "未找到所属节点";
+  }).join("、");
+  const extractionRules = (draft.value?.rules ?? []).filter((rule) =>
+    rule.operator === "LLM_EXTRACT"
+    && rule.outputs.some((output) => output.field_key === item.field_key),
+  );
+  return extractionRules.length && extractionRules.every((rule) => !rule.enabled)
+    ? `${labels}（自动抽取已停用）` : labels;
+}
 
 const query = reactive({ material_key: "", name: "" });
 const filteredFields = computed(() =>
@@ -82,6 +111,7 @@ const dialogVisible = ref(false);
 const editingItem = ref<DraftFieldItem | null>(null);
 const form = reactive({
   material_key: "",
+  node_code: "",
   name: "",
   value_type: "STRING",
   extraction_strategy: "RAW_TEXT" as "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED",
@@ -90,13 +120,12 @@ const form = reactive({
   currency: "",
   artifact_source: "",
   // 取数期间与报表口径：计算参数按这两项定位字段事实。
-  // 默认「不适用」——合同场景的字段本来就没有期间与报表口径的概念；
-  // 财报场景要按实际口径改选，被计算引用的字段声明成「不适用」时发布期会明确拦下。
+  // 表单初始选择「不适用」，涉及期间或报表口径时按真实业务配置选择。
   period_scope: "NOT_APPLICABLE",
   statement_scope: "NOT_APPLICABLE",
   required: false,
   instruction: "",
-  // 业务编号（Excel 的「字段编号」列）：导出规则库时写回该列，导入时必填。
+  // 真实业务编号可留空；自由规则库用稳定字段身份关联。
   source_ref: "",
 });
 
@@ -130,6 +159,7 @@ watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immed
 function openCreate(): void {
   editingItem.value = null;
   form.material_key = materials.value[0]?.material_key ?? "";
+  form.node_code = "";
   form.name = "";
   form.value_type = "STRING";
   form.extraction_strategy = "RAW_TEXT";
@@ -148,6 +178,8 @@ function openCreate(): void {
 function openEdit(item: DraftFieldItem): void {
   editingItem.value = item;
   form.material_key = item.material_key;
+  const owners = fieldNodeCodes(item);
+  form.node_code = owners.length === 1 ? owners[0]! : item.node_code ?? "";
   form.name = item.name;
   form.value_type = item.value_type;
   form.extraction_strategy = item.extraction_strategy ?? defaultExtractionStrategy(item.value_type);
@@ -168,10 +200,7 @@ function describeError(error: unknown): string {
 }
 
 function handleValueTypeChange(): void {
-  if (!extractionStrategySupports(form.extraction_strategy, form.value_type)) {
-    form.extraction_strategy = defaultExtractionStrategy(form.value_type);
-    form.structure_schema_text = "";
-  }
+  if (form.extraction_strategy !== "STRUCTURED") form.structure_schema_text = "";
 }
 
 function handleExtractionStrategyChange(): void {
@@ -214,6 +243,7 @@ async function submitForm(): Promise<void> {
   try {
     const payload = {
       material_key: form.material_key,
+      node_code: form.node_code || null,
       name: form.name.trim(),
       value_type: form.value_type,
       extraction_strategy: form.extraction_strategy,
@@ -222,7 +252,7 @@ async function submitForm(): Promise<void> {
       // 币种与产物来源：留空表示未声明 / 常规字段抽取，不表示“随便选一个”。
       currency: form.currency.trim() ? form.currency.trim() : null,
       artifact_source: form.artifact_source ? form.artifact_source : null,
-      // 取数期间与报表口径必须显式提交：服务端不代填默认值。
+      // 仅在规则实际涉及期间或报表口径时选择；留空由服务端归一为“不适用”。
       period_scope: form.period_scope,
       statement_scope: form.statement_scope,
       required: form.required,
@@ -252,7 +282,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
   }
   try {
     await ElMessageBox.confirm(
-      `确认删除字段「${item.name}」？删除前会检查规则与报告章节引用；历史版本不受影响。`,
+      `确认删除字段「${item.name}」？删除前会检查规则、计算与报告章节引用；历史版本不受影响。`,
       "删除字段配置",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -269,10 +299,12 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
     if (error instanceof ApiError && error.code === "FIELD_REFERENCED") {
       const details = error.details as Record<string, unknown>;
       const rules = Array.isArray(details.rule_keys) ? (details.rule_keys as string[]) : [];
+      const calculations = Array.isArray(details.calculation_rules) ? (details.calculation_rules as string[]) : [];
       const sections = Array.isArray(details.section_names) ? (details.section_names as string[]) : [];
       dependencyIssue.value = {
         title: error.message,
-        entries: [...rules.map((item) => `规则：${item}`), ...sections.map((item) => `报告章节：${item}`)],
+        entries: [...rules.map((item) => `规则：${item}`), ...calculations.map((item) => `计算：${item}`),
+          ...sections.map((item) => `报告章节：${item}`)],
       };
     } else {
       ElMessage.error(describeError(error));
@@ -315,8 +347,8 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
 
       <el-table v-else :data="filteredFields" border stripe v-loading="loading" empty-text="暂无字段配置">
         <el-table-column type="index" label="序号" width="60" />
-        <el-table-column label="字段 key" width="190">
-          <template #default="{ row }"><span class="mono">{{ row.field_key }}</span></template>
+        <el-table-column label="抽取节点" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">{{ fieldNodeLabel(row) }}</template>
         </el-table-column>
         <el-table-column prop="source_ref" label="字段编号" width="120">
           <template #default="{ row }">
@@ -376,9 +408,23 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
               <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
             </el-select>
           </el-form-item>
+          <el-form-item label="抽取节点">
+            <el-select v-model="form.node_code" style="width: 100%" placeholder="请选择抽取节点">
+              <el-option value="" label="未指定（发布时核对唯一归属）" />
+              <el-option
+                v-if="form.node_code && !extractionNodes.some((node) => node.node_code === form.node_code)"
+                :value="form.node_code" label="原归属节点不可用" disabled
+              />
+              <el-option
+                v-for="node in extractionNodes" :key="node.node_code" :value="node.node_code"
+                :label="`${node.name}${node.enabled ? '' : '（已停用）'}`" :disabled="!node.enabled"
+              />
+            </el-select>
+            <div class="text-hint">同类节点有多个时须明确归属；已有独立抽取规则时，节点归属须与该规则一致。</div>
+          </el-form-item>
           <el-form-item label="字段编号">
             <el-input v-model="form.source_ref" maxlength="80" placeholder="例如：FD-001；导出规则库时写回「字段编号」列" />
-            <div class="text-hint">从 Excel 导入的字段会带回原编号；页面新建的请补一个，否则导出会因缺少必填编号被拒绝。</div>
+            <div class="text-hint">保留规则库已有的业务编号；没有编号时可留空，系统用内部身份关联字段。</div>
           </el-form-item>
           <el-form-item label="字段名称" required>
             <el-input v-model="form.name" maxlength="255" placeholder="例如：应收账款金额" />
@@ -398,7 +444,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
                 :disabled="!extractionStrategySupports(item.value, form.value_type)"
               />
             </el-select>
-            <div class="text-hint">文本和条款保留原文；金额、日期和是否值由系统确定性转换；一个字段包含多个业务属性时使用结构化抽取。</div>
+            <div class="text-hint">文本和条款保留原文；数值、金额、日期和是否值由系统确定性转换；一个字段包含多个业务属性时使用结构化抽取。</div>
           </el-form-item>
           <el-form-item v-if="form.extraction_strategy === 'STRUCTURED'" label="结构定义" required>
             <el-input
@@ -410,23 +456,22 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <div class="text-hint">填写 JSON Schema。系统按这个结构校验模型返回值，并要求每个有值属性分别提供原文证据。</div>
           </el-form-item>
           <el-form-item label="单位">
-            <el-input v-model="form.unit" maxlength="40" placeholder="金额类字段建议填写（如：元）；不填写表示未声明" />
+            <el-input v-model="form.unit" maxlength="40" placeholder="按规则库填写（如：件、%、元）；不填写表示未声明" />
           </el-form-item>
           <el-form-item label="币种">
             <el-input v-model="form.currency" maxlength="40" placeholder="金额类字段建议填写（如：人民币）；不填写表示未声明，系统不默认币种" />
           </el-form-item>
           <el-form-item label="取数期间">
-            <el-select v-model="form.period_scope" style="width: 100%">
+            <el-select v-model="form.period_scope" clearable style="width: 100%" placeholder="不涉及时留空">
               <el-option v-for="item in periodScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
           </el-form-item>
           <el-form-item label="报表口径">
-            <el-select v-model="form.statement_scope" style="width: 100%">
+            <el-select v-model="form.statement_scope" clearable style="width: 100%" placeholder="不涉及时留空">
               <el-option v-for="item in statementScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
             <div class="text-hint">
-              合同场景的字段没有期间与报表口径，选「不适用」即可。被计算公式引用的字段不能是「不适用」，
-              发布时会明确拦下——计算参数按这两项定位字段事实。
+              不涉及期间或报表口径时可选「不适用」，计算按字段声明的实际口径定位事实。
             </div>
           </el-form-item>
           <el-form-item label="产物来源">

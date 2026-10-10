@@ -7,30 +7,27 @@ import { getTaskEvidence } from "@/api/audits";
 import { evidenceExportUrl, listEvidence } from "@/api/materials";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
-import { locatorStatusLabel, locatorStatusTone, toneTagType } from "@/constants/labels";
 import EvidenceDrawer from "@/components/EvidenceDrawer.vue";
 
 /**
  * 证据记录：跨任务的证据引用。
- * 定位核对状态如实展示（未核实/无法定位不写成已核实）；历史证据按历史身份查看，
+ * 展示来源和引用原文；历史证据按历史身份查看，
  * 失效只表示不再支撑当前结论，不等于删除证据。
  */
 const route = useRoute();
 const router = useRouter();
 
-const list = usePagedList<EvidenceRow, { task_no: string; reference_type: string; locator_status: string; keyword: string }>({
+const list = usePagedList<EvidenceRow, { task_no: string; reference_type: string; keyword: string }>({
   key: "evidence",
   initialFilters: {
     task_no: typeof route.query.task_no === "string" ? route.query.task_no : "",
     reference_type: "",
-    locator_status: "",
     keyword: "",
   },
   fetch: (params) =>
     listEvidence({
       task_no: params.task_no || undefined,
       reference_type: params.reference_type || undefined,
-      locator_status: params.locator_status || undefined,
       keyword: params.keyword || undefined,
       page: params.page,
       page_size: params.page_size,
@@ -45,11 +42,6 @@ const referenceTypeOptions = [
   { value: "ARTIFACT", label: "处理产物证据" },
 ];
 
-const locatorOptions = [
-  { value: "VERIFIED", label: "已核实定位" },
-  { value: "UNVERIFIED", label: "引文未核实" },
-  { value: "UNLOCATABLE", label: "无法定位" },
-];
 
 function referenceTypeText(value: string): string {
   return value === "FIELD_FACT" ? "字段事实" : value === "RULE_RESULT" ? "规则判定" : "处理产物";
@@ -59,7 +51,6 @@ function exportUrl(): string {
   return evidenceExportUrl({
     task_no: filters.task_no || undefined,
     reference_type: filters.reference_type || undefined,
-    locator_status: filters.locator_status || undefined,
     keyword: filters.keyword || undefined,
   });
 }
@@ -68,7 +59,7 @@ function openTask(row: EvidenceRow): void {
   void router.push({ name: "audit-task-detail", params: { taskNo: row.task_no }, query: { tab: "fields" } });
 }
 
-/* 详情（复用任务级证据查看：核对定位、历史身份） */
+/* 详情（复用任务级原文依据查看） */
 const evidence = ref<Evidence | null>(null);
 const evidenceOpen = ref(false);
 const evidenceLoading = ref(false);
@@ -107,7 +98,7 @@ onMounted(() => {
     <PageHeader
       eyebrow="资料管理"
       title="证据记录"
-      subtitle="字段、规则与处理产物引用的原文证据；定位核对状态如实展示，点击行查看完整证据。"
+      subtitle="字段、规则与处理产物引用的原文证据，点击行查看完整原文和来源。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -117,11 +108,6 @@ onMounted(() => {
       <el-form-item label="依据类型">
         <el-select v-model="filters.reference_type" clearable placeholder="全部" style="width: 150px">
           <el-option v-for="item in referenceTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="定位核对">
-        <el-select v-model="filters.locator_status" clearable placeholder="全部" style="width: 140px">
-          <el-option v-for="item in locatorOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
       <el-form-item label="引用原文">
@@ -138,7 +124,7 @@ onMounted(() => {
     <div class="app-toolbar">
       <div class="app-toolbar__left">
         <span class="text-hint">
-          点击行可查看完整证据。后端只支持按任务、依据类型、定位核对与引用原文筛选。
+          点击行可查看完整证据，可按任务、依据类型与引用原文筛选。
         </span>
       </div>
     </div>
@@ -173,15 +159,6 @@ onMounted(() => {
       <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ row.filename || "—" }}</template>
       </el-table-column>
-      <el-table-column label="页码" width="80">
-        <template #default="{ row }">{{ row.page_no ? `第 ${row.page_no} 页` : "—" }}</template>
-      </el-table-column>
-      <el-table-column label="定位信息" min-width="180" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span v-if="row.locator_note">{{ row.locator_note }}</span>
-          <span v-else class="text-hint">无定位说明</span>
-        </template>
-      </el-table-column>
       <el-table-column label="引用文本" min-width="240" show-overflow-tooltip>
         <template #default="{ row }">{{ row.quote_text || "—" }}</template>
       </el-table-column>
@@ -193,13 +170,6 @@ onMounted(() => {
       </el-table-column>
       <el-table-column label="依据类型" width="110">
         <template #default="{ row }">{{ referenceTypeText(row.reference_type) }}</template>
-      </el-table-column>
-      <el-table-column label="定位核对" width="130">
-        <template #default="{ row }">
-          <el-tag :type="toneTagType(locatorStatusTone(row.locator_status))" size="small" effect="light" disable-transitions>
-            {{ locatorStatusLabel(row.locator_status) }}
-          </el-tag>
-        </template>
       </el-table-column>
       <el-table-column label="版本" width="90">
         <template #default="{ row }">

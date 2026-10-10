@@ -1,3 +1,4 @@
+from . import task_csv_service
 import logging
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from ..common.exceptions import BusinessError
 from .audit.interrupt import start_audit_interrupt
 from .audit.recovery import can_recover_failed_node
 from .audit.facts import _current_field_fact_pairs
+from .audit.evidence import result_content_view, review_content_view
 # 复核批次的划分与哈希口径只有一份（`services.audit.reviews`）：
 # 任务视图给出的本批、提交校验用的本批、检查点里的哈希必须是同一个集合，
 # 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
@@ -40,7 +42,7 @@ from . import rag_service
 from .background_service import assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
 from ..domain.node_registry import legacy_node_type_of
-from ..domain.manifest import build_task_schema
+from ..domain.manifest import build_task_schema, enabled_extraction_field_keys
 from ..domain import fact_snapshot, workflow_dag
 from ..integrations.http_services import list_material_types
 from .operation_types import OBJECT_AUDIT_TASK
@@ -198,7 +200,7 @@ def record_failed_task_command(
 def _verified_material_type(declared: str) -> str:
     """核对上传时声明的材料类型，返回可落库的取值。
 
-    8018 的 doc_type 是严格枚举，目录是**外部服务的事实**：本函数不缓存、不内置默认清单、
+    8018 的 doc_type 是严格枚举，目录是外部服务的事实：本函数不缓存、不内置默认清单、
     不按材料名称猜类型。空值与目录外的取值都在这里显式拒绝——问题要在上传时就暴露，
     不能等到材料检查节点执行时才由 8018 拒绝，那时用户已经以为文件传好了。
     """
@@ -231,17 +233,16 @@ def create_task_from_plan(
 ) -> AuditTask:
     """使用审核方案创建审核任务。这是新任务的唯一创建服务。
 
-    同一事务里先锁定方案行，再校验方案、场景和已固定版本。通过后把**创建时确认的
-    方案范围**整体冻结进 task_schema_json：场景版本、节点、Sheet、规则、材料与字段，
-    以及方案的编号、名称与范围指纹。任务之后一切读取都从这里取，
-    不再读方案当前名称或方案后来重算的范围。
+    同一事务里先锁定方案行，再校验方案、场景和已固定版本。通过后把创建时确认的方案范围整体
+    冻结进 task_schema_json：场景版本、节点、Sheet、规则、材料与字段，以及方案的编号、名称与
+    范围指纹。任务之后一切读取都从这里取，不再读方案当前名称或方案后来重算的范围。
 
-    `expected_scope_hash` 是页面预览时看到的方案范围指纹：与锁定后的实际指纹不一致时
-    明确返回 `PLAN_SCOPE_CHANGED`——任务必须冻结用户刚刚确认的那一版范围，
-    不在创建时静默取一个已经改过的范围。
+    `expected_scope_hash` 是页面预览时看到的方案范围指纹：与锁定后的实际指纹不一致时明确返回
+    `PLAN_SCOPE_CHANGED`——任务必须冻结用户刚刚确认的那一版范围，不在创建时静默取一个已经改过
+    的范围。
 
-    task_no 可由调用方预生成，使幂等命令记录与任务在同一次提交中对账。
-    本函数**不**记录成功操作日志：调用方要在等待点确认成功之后才记。
+    task_no 可由调用方预生成，使幂等命令记录与任务在同一次提交中对账。本函数不记录成功操作
+    日志：调用方要在等待点确认成功之后才记。
     """
     locked = db.scalar(select(AuditPlan).where(AuditPlan.id == plan.id).with_for_update())
     if locked is None:
@@ -269,7 +270,7 @@ def create_task_from_plan(
     scenario_template = db.scalar(
         select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == plan.scenario_code)
     )
-    if scenario_template is None or scenario_template.deleted_at is not None:
+    if scenario_template is None:
         raise BusinessError(
             "SCENARIO_NOT_FOUND",
             "方案所属场景不存在或已被删除",
@@ -417,7 +418,7 @@ def copy_task(
     new_task_no: str | None = None,
     creation_operation_id: int | None = None,
 ) -> AuditTask:
-    """按源任务所属方案的**当前范围**重新创建任务。
+    """按源任务所属方案的当前范围重新创建任务。
 
     明确不是「复制原任务的执行快照」：复制出来的是一个全新的任务，它冻结的是
     方案此刻的范围——源任务的冻结快照与已发生的执行事实一概不带过来。
@@ -612,7 +613,7 @@ async def upload_document(
 ) -> DocumentUpload:
     """上传或替换材料文件：落库、失效下游结果，并返回本次输入修订的真实影响范围。
 
-    `material_type` 是用户本次上传时从 8018 支持目录中选择的材料类型。它随**本次上传**
+    `material_type` 是用户本次上传时从 8018 支持目录中选择的材料类型。它随本次上传
     保存（见 DocumentUpload.declared_material_type），不来自场景配置：材料位本身不声明
     类型，替换文件时可以改选。空值或不在 8018 目录内都显式拒绝，不代填、不跳过校验。
     """
@@ -878,18 +879,13 @@ def _task_display_structure(
     manifest: dict[str, Any],
     nodes: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """当前任务的**展示结构**：只包含本场景真实选中的节点、Sheet 与字段。
+    """当前任务的展示结构：只包含本场景真实选中的节点、Sheet 与字段。
 
-    前端提供通用组件（文本、金额、日期、表格、审核结果），具体展示什么由后端按
-    当前场景配置返回，页面不得按场景名或固定条件分支写死内容。
-
-    因此这里返回的是**数据**而不是文案：
-    - `nodes`：本任务真实配置的节点实例（实例码 + 能力类型 + 顺序 + 依赖），
-      前端据此渲染流程条与工作区，不再维护一份写死的阶段清单；
-    - `sheets`：本场景选用的 Sheet 及各自归属的节点（来自 manifest 的
-      `selected_sheets`，即用户在场景配置里确认过的选择）；
-    - `fields`：本任务执行范围内的字段定义（名称、类型、单位、币种、所属材料），
-      前端据此决定用哪种通用组件渲染，不靠字段名猜类型。
+    前端提供通用组件（文本、金额、日期、表格、审核结果），具体展示什么由后端按当前场景配置
+    返回，页面不得按场景名或固定条件分支写死内容。因此这里返回的是数据而不是文案：`nodes` 是
+    本任务真实配置的节点实例（实例码 + 能力类型 + 顺序 + 依赖），前端据此渲染流程条与工作区；
+    `sheets` 是本场景选用的 Sheet 及各自归属的节点；`fields` 是本任务执行范围内的字段定义
+    （名称、类型、单位、币种、所属材料），前端据此决定用哪种通用组件渲染，不靠字段名猜类型。
 
     任务创建时写入的 task_schema_json 优先：有 node_plan / selected_sheets 键就用它们。
     历史任务没有这些键时，才读该任务所钉版本的 manifest，不读场景草稿。
@@ -939,7 +935,7 @@ def _task_display_structure(
 
 
 def _execution_skip_reason(execution: NodeExecution | None) -> str | None:
-    """节点被显式跳过时给出原因（例如“本模板未配置此类检查”）。"""
+    """节点被显式跳过时给出原因（例如“当前场景未配置此类检查”）。"""
     if execution is None or not isinstance(execution.result_json, dict):
         return None
     reason = execution.result_json.get("skip_reason")
@@ -1013,6 +1009,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         )
         .order_by(TaskFieldValue.id)
     ).all()
+    field_facts = task_csv_service.from_index(db, task, TaskFieldValue, field_facts)
     # 规则结果只取当前有效执行批次：非 INVALIDATED 口径之上，再按节点取最新批次。
     # 人工复核节点允许形成多批成功执行记录；任务当前页展示最新批是明确的页面口径，
     # 历史批次仍保留在执行记录中追溯。
@@ -1031,7 +1028,8 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         if current_execution_ids
         else []
     )
-    # 待办分两层，页面必须按**本批**提交：
+    rule_results = task_csv_service.from_index(db, task, RuleResult, rule_results)
+    # 待办分两层，页面必须按本批提交：
     # `reviews` 是当前复核批次（唯一允许提交的集合），`all_pending` 是全部待办。
     # 复核是分批判决的：存在字段确认待办时本批只含字段事实，规则结论待办留到下一批。
     # 页面把全部待办一次提交时，集合恒不等于本批，服务端只会 409。
@@ -1052,7 +1050,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     }
     scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
     scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
-    # 未配置的检查类别优先读**任务冻结的快照**：它随任务一起冻结，之后场景发布新版本
+    # 未配置的检查类别优先读任务冻结的快照：它随任务一起冻结，之后场景发布新版本
     # 不会改写历史任务的范围说明。历史任务没有这两个键时按该任务所钉版本的 manifest 读取，
     # 都取不到时返回空列表（不编造「都没配」）。
     unconfigured_node_types = list(
@@ -1107,7 +1105,12 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             "filename": upload.original_filename if upload else None,
             "quote_text": evidence.quote_text,
         })
-    rule_definitions = {item["rule_key"]: item for item in manifest["rules"]}
+    rule_definitions = {(item["node"], item["rule_key"]): item for item in manifest["rules"]}
+    execution_node_by_id = {item.id: item.node_code for item in executions.values()}
+    node_type_by_code = {
+        str(item["node_code"]): str(item.get("node_type") or item["node_code"])
+        for item in nodes
+    }
     extraction_codes = _node_codes_of_type(manifest, "FIELD_EXTRACTION")
     extraction_finished = any(
         executions[code].status == "SUCCEEDED" for code in extraction_codes if code in executions
@@ -1124,6 +1127,9 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             continue
         for field_key in contract["field_keys"]:
             extraction_owner_by_field[str(field_key)] = str(node["node_code"])
+    extraction_field_keys = enabled_extraction_field_keys(
+        manifest, task.task_schema_json["enabled_rule_keys"],
+    )
     field_view = []
     field_correction_candidates = []
     for field in task.task_schema_json["fields"]:
@@ -1141,7 +1147,10 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             if owner_code
             else extraction_finished
         )
-        status = task_fact.status if task_fact else ("NOT_EXECUTED" if owner_finished else "PENDING")
+        extraction_enabled = field["field_key"] in extraction_field_keys
+        status = task_fact.status if task_fact else (
+            "NOT_EXECUTED" if owner_finished or not extraction_enabled else "PENDING"
+        )
         # 当前事实行会保留待复核候选，供人工查看；任务字段结果里的“标准化结果”
         # 只展示可执行事实，避免把 EVIDENCE_UNCLEAR / NORMALIZATION_FAILED 的
         # 候选误显示成已经生效的值。
@@ -1158,15 +1167,14 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 "name": field["name"],
                 "material_name": document.material_name,
                 "status": status,
+                "extraction_enabled": extraction_enabled,
                 "raw_value": fact.raw_value if fact_is_current else None,
                 "normalized_value": normalized_value,
                 "evidence_no": evidence.evidence_no if evidence else None,
-                "evidence_locator_status": evidence.locator_status if evidence else None,
                 "evidences": [
                     {
                         "evidence_no": item.evidence_no,
                         "field_path": item.field_path,
-                        "locator_status": item.locator_status,
                     }
                     for item in field_evidences
                 ],
@@ -1191,6 +1199,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             )
     return {
         "task_no": task.task_no,
+        "intermediate_csv_available": task.intermediate_csv_json is not None,
         "task_name": task.task_name,
         # 任务备注是可编辑的基本资料；执行快照不随重命名或备注修改变化。
         "remark": task.remark,
@@ -1217,7 +1226,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         # 任务输入修订号：携带旧修订的命令会被后端明确拒绝，页面必须据此刷新。
         "input_revision": task.input_revision,
         # 本任务实际执行范围：未配置 / 未启用 的区分依据。
-        # **没有「自动补入」这一类**：范围就是创建任务时勾选的那些规则。
+        # 没有「自动补入」这一类：范围就是创建任务时勾选的那些规则。
         "scope": {
             "enabled_rule_keys": scope_enabled_keys,
             "unenabled_rule_keys": scope_unenabled_keys,
@@ -1248,7 +1257,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             }
             for node in nodes
         ],
-        # 本模板没有配置这类检查；页面和执行都必须明确说明，不能显示成通过。
+        # 当前场景没有配置这类检查；页面和执行都必须明确说明，不能显示成通过。
         # 两个口径分开：类型级说明「哪一类检查没配」，实例级让页面判断
         # 「当前这个节点是不是未配置的类别」——拿实例码与类型列表交叉比较恒为假。
         "unconfigured_check_node_types": unconfigured_node_types,
@@ -1282,10 +1291,19 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 "name": item.rule_name,
                 "status": item.status,
                 "message": item.message,
-                "result": item.result_json,
+                "result": {
+                    **result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
+                    # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
+                    # node_code 保留用户配置的实例码，两个字段都不由规则名称推断。
+                    "node": node_type_by_code.get(execution_node_by_id[item.node_execution_id]),
+                    "node_type": node_type_by_code.get(execution_node_by_id[item.node_execution_id]),
+                    "node_code": execution_node_by_id[item.node_execution_id],
+                },
                 "evidence": rule_evidence.get(item.id, []),
                 # 旧结果没有 standard 快照时，单独返回任务绑定配置的要求，不改写执行结果。
-                "configured_requirement": rule_definitions.get(item.rule_key, {}).get("requirement"),
+                "configured_requirement": rule_definitions.get(
+                    (execution_node_by_id[item.node_execution_id], item.rule_key), {},
+                ).get("requirement"),
             }
             for item in rule_results
         ],
@@ -1397,14 +1415,15 @@ def _pending_review_view(
         raise BusinessError("REVIEW_TARGET_INVALID", "人工复核缺少关联业务对象", status_code=500)
 
     # 系统原判断是不可变快照：状态、消息、原值、标准化值与证据整体返回，不能只取 message。
-    judgment = review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {}
+    judgment = review_content_view(review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {})
     system_judgment = {
         "status": judgment.get("status"),
         "message": judgment.get("message"),
         "raw_value": judgment.get("raw_value"),
         "normalized_value": judgment.get("normalized_value"),
         "evidence": judgment.get("evidence"),
-        "evidences": judgment.get("evidences") if isinstance(judgment.get("evidences"), list) else [],
+        "evidences": judgment.get("evidences", [])
+        if isinstance(judgment.get("evidences"), list) else [],
         # 人工复核必须看到系统当时使用的完整业务依据。它们已经冻结在
         # system_judgment_json 中，这里只做投影，不重新检索或重算。
         "retrieval": judgment.get("retrieval"),

@@ -645,7 +645,7 @@ async function loadFilterOptions(): Promise<void> {
           <el-input v-model="copyName" maxlength="255" />
         </el-form-item>
       </el-form>
-      <p class="text-hint">按所属方案的**当前范围**重新创建一个新任务；材料与结果重新开始，原任务报告保留。</p>
+      <p class="text-hint">按所属方案的当前范围重新创建一个新任务；材料与结果重新开始，原任务报告保留。</p>
       <template #footer>
         <el-button @click="copyVisible = false">取消</el-button>
         <el-button type="primary" :loading="copySaving" @click="submitCopy">复制</el-button>

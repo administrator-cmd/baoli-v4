@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from ..repositories import task_repository
 from .task_lookup import task_or_404
+from .audit.evidence import review_content_view
 
 
 def task_reviews_view(db: Session, task_no: str) -> dict[str, Any]:
@@ -17,7 +18,7 @@ def task_reviews_view(db: Session, task_no: str) -> dict[str, Any]:
 
     items: list[dict[str, Any]] = []
     for review in rows.reviews:
-        judgment = review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {}
+        judgment = review_content_view(review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {})
         if review.rule_result_id is not None:
             object_name = f"规则：{rule_names.get(review.rule_result_id, '未知规则')}"
             object_kind = "RULE"

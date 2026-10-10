@@ -16,7 +16,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
  * 下方「执行说明 / 报告诊断」折叠区，不占首屏。
  *
  * 「报告已生成」不等于「审核通过」：三个信号必须分开表达，不能合并成一个「通过」。
- * 如果服务端没有给出结构化总体结论，这里如实列为后端接口缺口，**不**从 Markdown
+ * 如果服务端没有给出结构化总体结论，这里如实列为后端接口缺口，不从 Markdown
  * 正文里猜结论——正文任何一次措辞调整都会让字符串匹配静默退化成「没有结论」。
  */
 const props = defineProps<{
@@ -88,7 +88,7 @@ const nextAction = computed(() => {
   if (!riskAvailable.value) {
     return {
       title: "下一步：确认风险结论是否需要在系统外判断",
-      description: "本模板未配置风险评级，或风险结论尚未闭合；报告不给出「无风险」的判断。如需风险结论，请先配置风险规则。",
+      description: "当前场景未配置风险评级，或风险结论尚未闭合；报告不给出「无风险」的判断。如需风险结论，请先配置风险规则。",
     };
   }
   return {
@@ -255,7 +255,7 @@ const businessSectionCount = computed(() => props.report?.business_section_count
           :closable="false"
           title="本次报告只有系统固定事实章节"
         >
-          本模板未配置业务报告章节。零业务章节不等于零报告，也不等于审核范围完整；
+          当前场景未配置业务报告章节。零业务章节不等于零报告，也不等于审核范围完整；
           审核范围是否完整以上方的「审核范围是否完整」为准。
         </el-alert>
 

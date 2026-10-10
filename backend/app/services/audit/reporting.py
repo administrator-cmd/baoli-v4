@@ -1,168 +1,200 @@
-"""报告生成：系统固定事实章节 + 已配置的业务报告章节。
+"""报告生成：按场景业务章节生成正文，并保留系统执行摘要。
 
-报告必须同时、分开表达三件事，不能用一句「成功」代替：
+报告必须同时、分开表达三件事，不能用一句「成功」代替：报告是否生成；已配置的审核范围是否
+执行完整（按预期集合核对启用字段、启用规则、必传材料、启用节点都必须有有效结果）；风险是否
+可判定（未配置风险评级不是执行故障，但也不能据此认定无风险）。
 
-- 报告是否生成；
-- 已配置的审核范围是否**执行完整**（按预期集合核对：启用字段、启用规则、必传材料、
-  启用节点都必须有有效结果）；
-- 风险是否**可判定**（未配置风险评级不是执行故障，但也不能据此认定无风险）。
+结论同时以结构化键写入执行结果，页面不靠匹配正文行首文案提取结论——正文任何一次措辞调整
+都会让页面静默退化成「没有结论」。
 
-结论同时以结构化键写入执行结果，页面不靠匹配正文行首文案提取结论——正文任何一次
-措辞调整都会让页面静默退化成「没有结论」。
+正文只落 `audit_report.content_md`：执行结果会作为操作结果回传，把几百行正文塞进去会被页面
+当成「结果摘要」铺开成一条无换行的长文本。"""
 
-正文只落 `audit_report.content_md`：执行结果会作为操作结果回传，把几百行正文塞进去
-会被页面当成「结果摘要」铺开成一条无换行的长文本。"""
-
-from ...domain.audit_vocab import LEGACY_TYPE_MISMATCH, MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, MATERIAL_TYPE_UNAVAILABLE_STATUSES, read_material_type_status
+from .. import task_csv_service
+from ...domain import fact_snapshot, workflow_dag
+from ...domain.audit_vocab import MATERIAL_TYPE_UNAVAILABLE_STATUSES
 from ...domain.identity import public_no
-from ...domain.manifest import NODE_DEFINITIONS, rule_node_type_of
+from ...domain.manifest import enabled_extraction_field_keys, rule_node_type_of
 from .state import _node_codes_of_type
 from ...common.exceptions import BusinessError
-from ...entity import AuditReport, AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFieldValue
-from .evidence import _fact_evidence_suffix, _quote_check_of
-from .facts import _current_field_fact_pairs, _input_trace
-from .shared import BASIS_TYPE_LABELS, LOCATOR_STATUS_LABELS, QUOTE_CHECK_LABELS, _current_uploads, _material_names, _scenario
-from .state import _current_execution_ids, _current_node_executions, _risk_rule_keys, _scope_results
+from ...entity import AuditReport, AuditTask, ManualReview, NodeExecution, RuleResult, TaskDocument
+from .facts import _current_field_fact_pairs
+from .shared import _current_uploads, _material_names
+from .state import _current_node_executions, _risk_rule_refs, _scope_results, _result_material_keys
+from ..llm_report import generate_report_sections
 from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typing import Any
 
 
-def _render_report_groups(
-    db: Session,
-    task: AuditTask,
-    manifest: dict[str, Any],
-    groups: list[dict[str, Any]],
-) -> list[str]:
-    """按报告编号逐份渲染报告章节。
+def _sort_report_results(results: list[Any], group: dict[str, Any]) -> list[Any]:
+    """按已配置的材料顺序和等级顺序排列，不按等级文字猜高低。"""
+    mode = group.get("result_sort")
+    if not mode:
+        return results
+    materials = {key: index for index, key in enumerate(group.get("material_keys") or [])}
+    levels = {value: index for index, value in enumerate(group.get("risk_level_order") or [])}
+    if mode in {"RISK_LEVEL_DESC", "MATERIAL_ORDER_RISK_LEVEL_DESC"}:
+        if not levels:
+            raise BusinessError("REPORT_LEVEL_ORDER_REQUIRED", "报告按风险等级排序，但场景缺少等级顺序")
+        unknown = sorted({str(item.result_json["risk_level"]) for item in results
+                          if item.result_json.get("risk_level") and item.result_json["risk_level"] not in levels})
+        if unknown:
+            raise BusinessError("REPORT_LEVEL_ORDER_INCOMPLETE", "报告等级顺序未包含实际结果中的等级", details={"levels": unknown})
+    def key(item: Any) -> tuple[int, ...]:
+        material = min((materials[value] for value in _result_material_keys(item) if value in materials), default=len(materials))
+        level = levels.get(item.result_json.get("risk_level"), len(levels))
+        if mode == "RISK_LEVEL_DESC":
+            return (level,)
+        if mode == "MATERIAL_ORDER":
+            return (material,)
+        if mode == "MATERIAL_ORDER_RISK_LEVEL_DESC":
+            return (material, level)
+        raise BusinessError("REPORT_SORT_INVALID", "报告排序方式不受支持", details={"result_sort": mode})
+    return sorted(results, key=key)
 
-    内容类型决定章节的数据来源，章节标题不参与推断；结果排序只作用于审核/风险结果，
-    不改变章节顺序与字段顺序。报告筛选已有结果，不重新评定风险。
-    """
+
+def _render_report_groups(
+    db: Session, task: AuditTask, manifest: dict[str, Any], groups: list[dict[str, Any]],
+    task_execution: dict[str, Any],
+) -> list[str]:
+    """按场景章节生成报告正文，真实数据先筛选、排序，再交给共用模型工具。"""
     material_names = _material_names(manifest)
     field_defs = {item["field_key"]: item for item in manifest["fields"]}
-    current_pairs = _current_field_fact_pairs(db, task)
-    facts = {key: pair[0] for key, pair in current_pairs.items()}
-    fact_statuses = {key: pair[1].status for key, pair in current_pairs.items()}
-    evidence_by_id = {
-        item.id: item for item in db.scalars(select(Evidence).where(Evidence.audit_task_id == task.id)).all()
-    }
-    current_execution_ids = _current_execution_ids(db, task)
-    results = (
-        db.scalars(
-            select(RuleResult)
-            .where(
-                RuleResult.audit_task_id == task.id,
-                RuleResult.node_execution_id.in_(current_execution_ids),
-            )
-            .order_by(RuleResult.id)
-        ).all()
-        if current_execution_ids
-        else []
-    )
+    pairs = _current_field_fact_pairs(db, task)
+    executions = _current_node_executions(db, task)
+    execution_ids = {item.id for item in executions.values()}
+    node_by_id = {item.id: item.node_code for item in executions.values()}
+    risk_refs = _risk_rule_refs(manifest)
+    results = list(db.scalars(select(RuleResult).where(
+        RuleResult.audit_task_id == task.id, RuleResult.node_execution_id.in_(execution_ids),
+    ).order_by(RuleResult.id)).all()) if execution_ids else []
+    results = task_csv_service.from_index(db, task, RuleResult, results)
+    report_nodes = set(_node_codes_of_type(manifest, "REPORT_OUTPUT"))
+    results = [item for item in results if node_by_id[item.node_execution_id] not in report_nodes]
+    reviews = list(db.scalars(select(ManualReview).where(
+        ManualReview.audit_task_id == task.id, ManualReview.status != "INVALIDATED",
+    ).order_by(ManualReview.id)).all())
+
+    def review_payloads(*, field_value_id: int | None = None, rule_result_id: int | None = None) -> list[dict[str, Any]]:
+        return [
+            {"status": item.status, "decision": item.decision,
+             "system_judgment": item.system_judgment_json, "basis_type": item.basis_type,
+             "before_value": item.before_value, "after_value": item.after_value,
+             "business_note": item.business_note}
+            for item in reviews
+            if ((field_value_id is not None and item.field_value_id == field_value_id)
+                or (rule_result_id is not None and item.rule_result_id == rule_result_id))
+        ]
     lines: list[str] = []
     for group in groups:
         sections = [item for item in group.get("sections", []) if item.get("config_status") != "DISABLED"]
         if not sections:
-            lines.append(f"- 报告“{group.get('report_name')}”（{group.get('report_code')}）：全部章节已停用，本次不输出该报告。")
-            lines.append("")
             continue
-        formats = "、".join(group.get("formats") or [])
-        scope_keys = list(group.get("material_keys") or [])
-        scope_names = "、".join(material_names.get(key, key) for key in scope_keys)
-        pending_sections = [item["section_name"] for item in sections if item.get("config_status") == "PENDING"]
-        lines.append(f"### {group.get('report_name')}（报告编号 {group.get('report_code')}）")
-        lines.append(f"- 输出格式：{formats}")
-        lines.append(f"- 材料范围：{scope_names}")
-        if group.get("result_sort"):
-            lines.append(f"- 结果排序：{group['result_sort']}")
-        if pending_sections:
-            lines.append(f"- 配置状态：未完成（以下章节仍为待确认：{'、'.join(pending_sections)}）")
-        lines.append("")
-        for section in sections:
-            lines.append(f"#### {section['section_order']}. {section['section_name']}")
-            if section.get("content_instruction"):
-                lines.append(f"- 本节内容要求（展示说明，不代表已生成正文）：{section['content_instruction']}")
+        scope = list(group.get("material_keys") or [])
+        # 没有分组材料范围的章节使用其显式字段与任务结果；不代填某类材料。
+        section_payloads = []
+        for index, section in enumerate(sections):
+            section_scope = list(section.get("material_keys", scope))
+            sorting = {**group, "result_sort": section.get("result_sort", group.get("result_sort")),
+                       "risk_level_order": section.get("risk_level_order", group.get("risk_level_order")),
+                       "material_keys": section_scope}
+            sources: list[dict[str, Any]] = []
+            unattributed = 0
             content_type = section.get("content_type")
-            if content_type in {"FIELD_DETAIL", "FIELD_AND_RESULT"}:
-                for field_key in section.get("field_keys", []):
-                    definition = field_defs.get(field_key)
-                    if definition is None:
-                        continue
-                    fact = facts.get((field_key, definition["material_key"]))
-                    label = f"{material_names.get(definition['material_key'], '未知材料')} · {definition['name']}"
-                    if fact is not None and fact_statuses.get((field_key, definition["material_key"])) in {"PRESENT", "REVIEWED"}:
-                        lines.append(f"- {label}：{fact.raw_value}{_fact_evidence_suffix(evidence_by_id, fact)}")
-                    else:
-                        # 未取得的值明确标记，不编造内容；也不把“未提供”写成“不适用”。
-                        lines.append(
-                            f"- {label}：未形成有效结果（"
-                            f"{fact_statuses.get((field_key, definition['material_key']), 'NOT_EXECUTED')}）"
-                        )
-            if content_type in {"AUDIT_RESULT", "FIELD_AND_RESULT", "CONCLUSION"}:
-                # 按**实际结果涉及的材料**筛选，而不是按规则声明的适用材料：
-                # 只发生在补充协议内部的异常不能混进主合同报告；跨材料检查涉及两侧，
-                # 因此只要有一侧在范围内就保留，并保留完整对照证据。
-                selected, related, unattributed = _scope_results(results, scope_keys, material_names)
-                if selected or related:
-                    for item in selected:
-                        lines.append(f"- 检查「{item.rule_name}」：{item.status}（{item.message}）")
-                    for item, extra in related:
-                        names = "、".join(extra)
-                        lines.append(
-                            f"- 检查「{item.rule_name}」（涉及范围外材料作为对照证据：{names}）："
-                            f"{item.status}（{item.message}）"
-                        )
-                elif unattributed:
-                    # 有结果但无法归属材料：必须如实说明，不能写成“没有可用的检查结果”。
-                    lines.append(
-                        f"- 报告范围内没有可归属的检查结果；另有 {unattributed} 条检查结果缺少材料归属，"
-                        "无法判断是否属于本报告范围，请先核对证据归属。"
-                    )
+            if content_type is None or content_type in {"FIELD_DETAIL", "FIELD_AND_RESULT"}:
+                for field_key in section.get("field_keys") or []:
+                    definition = field_defs[field_key]
+                    pair = pairs.get((field_key, definition["material_key"]))
+                    sources.append({
+                        "source_ref": "field:" + field_key, "kind": "FIELD",
+                        "name": definition["name"], "material_name": material_names[definition["material_key"]],
+                        "status": pair[1].status if pair else "NOT_EXECUTED",
+                        "raw_value": pair[0].raw_value if pair else None,
+                        "normalized_value": fact_snapshot.task_fact_value(pair[1], field_definition=definition)
+                        if pair and pair[1].status in {"PRESENT", "REVIEWED"} else None,
+                        "unit": definition.get("unit"), "currency": definition.get("currency"),
+                        "manual_reviews": review_payloads(field_value_id=pair[0].id) if pair else [],
+                    })
+            if content_type is None or content_type in {"AUDIT_RESULT", "FIELD_AND_RESULT", "RISK_LIST", "CONCLUSION"}:
+                candidates = [item for item in results if
+                    ((node_by_id[item.node_execution_id], item.rule_key) in risk_refs)
+                    == (content_type == "RISK_LIST") or content_type in {None, "CONCLUSION"}]
+                if section_scope:
+                    inside, related, unattributed = _scope_results(candidates, section_scope, material_names)
+                    selected_ids = {item.id for item in inside} | {item.id for item, _ in related}
+                    candidates = [item for item in candidates if item.id in selected_ids]
+                    outside = {item.id: names for item, names in related}
                 else:
-                    lines.append("- 报告范围内没有可用的检查结果。")
-            if content_type == "RISK_LIST":
-                risk_results = [
-                    item for item in results if item.rule_key in _risk_rule_keys(manifest)
-                ]
-                selected, related, unattributed = _scope_results(risk_results, scope_keys, material_names)
-                if selected or related:
-                    for item in selected:
-                        lines.append(f"- 风险「{item.rule_name}」：{item.status}（{item.message}）")
-                    for item, extra in related:
-                        names = "、".join(extra)
-                        lines.append(
-                            f"- 风险「{item.rule_name}」（关联对照材料：{names}）："
-                            f"{item.status}（{item.message}）"
-                        )
-                elif unattributed:
-                    # 筛选漏项时绝不能显示“没有已成立风险”：那是把系统的归属缺口
-                    # 说成业务结论。这里如实说明有多少条风险结果无法归属。
-                    lines.append(
-                        f"- 报告范围内没有可归属的风险结果；另有 {unattributed} 条风险结果缺少材料归属，"
-                        "无法判断是否属于本报告范围。这不等于没有风险。"
-                    )
-                else:
-                    lines.append("- 报告范围内没有已成立的风险或待复核事项；这不等于自动通过。")
-            if content_type == "CONCLUSION":
-                lines.append("- 本节结论按报告范围内的检查、风险与人工复核结果形成；仍有不合格或无法判断项时不得自动通过。")
-            lines.append("")
+                    unattributed = 0
+                    outside = {}
+                for item in _sort_report_results(candidates, sorting):
+                    sources.append({
+                        "source_ref": f"result:{item.id}", "kind": "RESULT", "name": item.rule_name,
+                        "status": item.status, "message": item.message, "result": item.result_json,
+                        "related_materials_outside_scope": outside.get(item.id, []),
+                        "manual_reviews": review_payloads(rule_result_id=item.id),
+                    })
+            section_payloads.append({
+                "section_index": index, "section_name": section["section_name"],
+                "content_type": content_type, "content_instruction": section.get("content_instruction") or "",
+                "config_status": section.get("config_status"), "sources": sources,
+                "unattributed_result_count": unattributed,
+                "material_names": [material_names[key] for key in section_scope],
+                "result_sort": sorting.get("result_sort"),
+                "risk_level_order": sorting.get("risk_level_order"),
+            })
+        generated = generate_report_sections.invoke({
+            "report": {"report_name": group.get("report_name"),
+                       "material_names": [material_names[key] for key in scope],
+                       "result_sort": group.get("result_sort"), "risk_level_order": group.get("risk_level_order"),
+                       "task_execution": task_execution},
+            "sections": section_payloads,
+        })
+        lines.extend([f"## {group['report_name']}", ""])
+        for configured, payload, section in zip(sections, section_payloads, generated["sections"], strict=True):
+            lines.extend([f"### {configured['section_name']}", ""])
+            if section["introduction_md"]:
+                lines.extend([section["introduction_md"], ""])
+            sources_by_ref = {source["source_ref"]: source for source in payload["sources"]}
+            for entry in section["entries"]:
+                source = sources_by_ref[entry["source_ref"]]
+                # 标签及状态来自真实结果，模型只组织正文，不能改写审核结论。
+                lines.extend([f"- {source['name']}：{_report_status_label(source['status'])}", entry["content_md"], ""])
+                result = source.get("result") or {}
+                if result.get("risk_level"):
+                    lines.append(f"  风险等级：{result['risk_level']}")
+                if result.get("action"):
+                    lines.append(f"  处理建议：{result['action']}")
+            if section["conclusion_md"]:
+                lines.extend([section["conclusion_md"], ""])
     return lines
+
+
+def _report_status_label(status: str) -> str:
+    return {"PASSED": "合格", "ABNORMAL": "异常", "COMPUTED": "已计算",
+            "EVIDENCE_INSUFFICIENT": "依据不足", "PENDING_REVIEW": "待复核",
+            "NOT_APPLICABLE": "不适用", "NOT_EXECUTED": "未执行",
+            "PRESENT": "已抽取", "REVIEWED": "已确认", "NOT_PRESENT": "未找到"}.get(status, status)
+
 
 def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execution: NodeExecution) -> dict[str, Any]:
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
+    extraction_field_keys = enabled_extraction_field_keys(
+        manifest, task.task_schema_json["enabled_rule_keys"],
+    )
     report_rules = [
         item
         for item in manifest["rules"]
         if rule_node_type_of(item) == "REPORT_OUTPUT" and item["operator"] == "REPORT_RENDER" and item["rule_key"] in enabled_keys
     ]
     if not report_rules:
-        # 本任务没有选入报告生成规则：**显式跳过**，不报错。
+        # 本任务没有选入报告生成规则：显式跳过，不报错。
         #
         # 方案是用户自己的范围选择——勾了什么就跑什么。没勾报告生成就没有报告，
         # 这正是这份方案表达的意思，不该让任务在最后一个节点整个失败。
-        # 跳过必须写明原因：**「没有报告」不等于「审核通过」**，也不等于
+        # 跳过必须写明原因：「没有报告」不等于「审核通过」，也不等于
         # 「报告生成了但是空的」。因此三个信号与正常路径同一口径，report_generated=False。
         return {
             "skipped": True,
@@ -178,9 +210,13 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     ]
     # 未配置风险评级不是执行失败：报告照常输出，但必须写明未配置且不能给出无风险结论。
     risk_configured = bool(risk_rules)
-    # 报告只取当前有效执行批次：节点序号不晚于当前节点、每个节点取最新一条未失效执行。
+    # 报告只取当前有效执行批次：每个节点取最新一条未失效执行。
+    # 节点执行由 DAG 依赖决定，sequence_no 只用于展示排序，不能作为结果范围边界。
     current_executions = _current_node_executions(db, task)
+    node_plans = workflow_dag.plans_of(manifest)
+    node_names = {plan.node_instance_code: plan.label for plan in node_plans}
     current_execution_ids = {item.id for item in current_executions.values()}
+    execution_node_by_id = {item.id: item.node_code for item in current_executions.values()}
     unfinished_node_codes = sorted(
         node["node_code"]
         for node in manifest["nodes"]
@@ -198,7 +234,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             status_code=409,
             details={"node_codes": unfinished_node_codes},
         )
-    # 报告输出节点按**能力类型**解析实例码：`node_code` 是用户配置的实例码，
+    # 报告输出节点按能力类型解析实例码：`node_code` 是用户配置的实例码，
     # 写死能力类型当实例码会在用户改过实例码后一条都匹配不上——
     # 报告输出规则的产物就会被误算进「预期结果缺失」。
     report_node_codes = set(_node_codes_of_type(manifest, "REPORT_OUTPUT"))
@@ -221,53 +257,10 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         "REVIEWED": "已人工复核",
         "PRESENT": "已抽取",
     }
-    node_labels = dict(NODE_DEFINITIONS)
-    scenario = _scenario(db, task)
     material_names = {item["material_key"]: item["name"] for item in manifest["materials"]}
     material_defs = {item["material_key"]: item for item in manifest["materials"]}
-    field_name_by_key = {item["field_key"]: item["name"] for item in manifest["fields"]}
-    rule_name_by_key = {item["rule_key"]: item["name"] for item in manifest["rules"]}
-    ruled_status_labels = {
-        "PASSED": "通过",
-        "ABNORMAL": "异常",
-        "EVIDENCE_INSUFFICIENT": "证据不足",
-        "NOT_APPLICABLE": "不适用",
-        "NOT_EXECUTED": "未执行",
-        "PENDING_REVIEW": "待复核",
-        MATERIAL_TYPE_REVIEW: "材料类型待复核",
-        MATERIAL_TYPE_REJECTED: "材料类型不符",
-        LEGACY_TYPE_MISMATCH: "材料类型待复核",
-        "RUNNING": "执行中",
-    }
-    status_labels = {**field_status_labels, **ruled_status_labels}
-    document_status_labels = {
-        "WAITING_UPLOAD": "等待上传",
-        "UPLOADED": "已上传，尚未处理",
-        "PREPARED": "文件处理完成",
-        MATERIAL_TYPE_REVIEW: "材料类型待复核",
-        MATERIAL_TYPE_REJECTED: "材料类型不符（人工已确认）",
-        LEGACY_TYPE_MISMATCH: "材料类型待复核",
-    }
-    risk_status_labels = {
-        "ABNORMAL": "已触发风险疑点",
-        "PASSED": "未触发风险疑点",
-        "EVIDENCE_INSUFFICIENT": "尚不能形成结论",
-        "NOT_EXECUTED": "未执行",
-        "NOT_APPLICABLE": "不适用",
-        "PENDING_REVIEW": "待复核",
-    }
-    decision_labels = {
-        "CONFIRM_ABNORMAL": "确认异常",
-        "MARK_NORMAL": "判定正常",
-        "EVIDENCE_INSUFFICIENT": "证据不足",
-        "CONFIRM_FIELD": "确认字段",
-        "MODIFY_FIELD": "修改字段",
-        "MARK_NOT_PRESENT": "确认字段不存在",
-    }
     unfinished_rule_statuses = {"EVIDENCE_INSUFFICIENT", "NOT_EXECUTED", "PENDING_REVIEW"}
     pairs = _current_uploads(db, task)
-    documents_by_id = {document.id: document for document, _ in pairs}
-    documents_by_material = {document.material_key: document for document, _ in pairs}
     uploads_by_material = {document.material_key: upload for document, upload in pairs}
     uploaded_keys = {key for key, upload in uploads_by_material.items() if upload is not None}
     out_of_scope_field_keys: set[tuple[str, str]] = set()
@@ -298,9 +291,14 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
             out_of_scope_field_keys.add(key)
             continue
         state = field_statuses.get(key, "NOT_EXECUTED")
+        reason = (
+            "本方案未启用自动抽取，当前没有有效值"
+            if fact is None and field["field_key"] not in extraction_field_keys
+            else field_status_labels.get(state, state)
+        )
         unfinished_field_names.append(
             f"{material_names.get(field['material_key'], field['material_key'])}·{field['name']}"
-            f"（{field_status_labels.get(state, state)}）"
+            f"（{reason}）"
         )
     unfinished_fields = len(unfinished_field_names)
     # 规则结果只取当前有效执行批次，并排除报告输出节点自身在本次执行中尚未提交的结果。
@@ -316,43 +314,53 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         if current_execution_ids
         else []
     )
+    current_rule_results = task_csv_service.from_index(db, task, RuleResult, current_rule_results)
     rule_results = [item for item in current_rule_results if item.node_execution_id not in output_execution_ids]
-    passed_rules = [item for item in rule_results if item.status == "PASSED"]
-    abnormal_rules = [item for item in rule_results if item.status == "ABNORMAL"]
-    other_rules = [item for item in rule_results if item.status not in {"PASSED", "ABNORMAL"}]
     # 只有输出字段全部落在“可选材料未上传”范围内的抽取规则才算出执行范围（6.3）：
     # 它们不是执行故障，但也绝不等于通过，会在不确定事项里单独列出。
     field_material_by_key = {item["field_key"]: item["material_key"] for item in manifest["fields"]}
     extraction_outputs = {
-        rule["rule_key"]: list(rule.get("outputs", []))
+        (rule["node"], rule["rule_key"]): list(rule.get("outputs", []))
         for rule in manifest["rules"]
         if rule_node_type_of(rule) == "FIELD_EXTRACTION" and rule["operator"] == "LLM_EXTRACT"
     }
 
     def rule_out_of_scope(result: RuleResult) -> bool:
-        outputs = extraction_outputs.get(result.rule_key)
+        outputs = extraction_outputs.get((execution_node_by_id[result.node_execution_id], result.rule_key))
         if not outputs:
             return False
         return all((key, field_material_by_key.get(key)) in out_of_scope_field_keys for key in outputs)
 
     # 预期集合：任务实际启用范围里的每条规则都必须形成结果，不能只统计已有结果里的未完成项。
     # 报告输出规则由本节点自身产出，不进入“预期结果缺失”的判断。
-    # 按**能力类型**判断，不按实例码：`node` 是用户配置的实例码。
-    rule_node_by_key = {item["rule_key"]: rule_node_type_of(item) for item in manifest["rules"]}
-    expected_rule_keys = {
-        key
-        for key in task.task_schema_json["enabled_rule_keys"]
-        if rule_node_by_key.get(key) != "REPORT_OUTPUT"
+    # 按能力类型判断，不按实例码：`node` 是用户配置的实例码。
+    expected_rule_refs = {
+        (item["node"], item["rule_key"])
+        for item in manifest["rules"]
+        if item["rule_key"] in enabled_keys and rule_node_type_of(item) != "REPORT_OUTPUT"
     }
-    produced_rule_keys = {item.rule_key for item in rule_results}
-    missing_rule_keys = sorted(expected_rule_keys - produced_rule_keys)
+    enabled_node_codes = {
+        node["node_code"] for node in manifest["nodes"] if node.get("enabled", True)
+    }
+    calculation_scope = [
+        item for item in manifest.get("calculations", [])
+        if item.get("status") != "DISABLED" and item["node_instance_code"] in enabled_node_codes
+    ]
+    expected_rule_refs.update((item["node_instance_code"], item["rule_code"]) for item in calculation_scope)
+    rule_name_by_ref = {
+        (item["node"], item["rule_key"]): item["name"] for item in manifest["rules"]
+    }
+    rule_name_by_ref.update({
+        (item["node_instance_code"], item["rule_code"]): item["rule_name"]
+        for item in manifest.get("calculations", [])
+    })
+    produced_rule_refs = {
+        (execution_node_by_id[item.node_execution_id], item.rule_key) for item in rule_results
+    }
+    missing_rule_refs = sorted(expected_rule_refs - produced_rule_refs)
+    missing_rule_keys = [key for _, key in missing_rule_refs]
     unfinished_rule_results = [
         item for item in rule_results if item.status in unfinished_rule_statuses and not rule_out_of_scope(item)
-    ]
-    out_of_scope_rule_names = [
-        item.rule_name
-        for item in rule_results
-        if item.status in unfinished_rule_statuses and rule_out_of_scope(item)
     ]
     unfinished_rules = len(unfinished_rule_results) + len(missing_rule_keys)
     pending_reviews = db.scalar(
@@ -372,14 +380,14 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
     node_failures = [
         {
             "node_code": execution.node_code,
-            "node_name": node_labels.get(execution.node_code, execution.node_code),
+            "node_name": node_names[execution.node_code],
             "status": execution.status,
             "failure_code": execution.failure_code,
             "failure_message": execution.failure_message,
         }
         for execution in current_executions.values()
         # 报告输出节点自身在本次执行中仍是 RUNNING，不能因此把报告判成永远不完整。
-        # 这里按**能力类型**解析出的实例码集合判断，不按固定实例码比较。
+        # 这里按能力类型解析出的实例码集合判断，不按固定实例码比较。
         if execution.node_code not in report_node_codes and execution.status in {"FAILED", "BLOCKED"}
     ]
     expected_risk_keys = {item["rule_key"] for item in risk_rules}
@@ -399,6 +407,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         if risk_configured and risk_execution_ids
         else []
     )
+    risk_results = task_csv_service.from_index(db, task, RuleResult, risk_results)
     if risk_configured and not risk_results:
         raise BusinessError("RISK_RESULT_MISSING", "已配置风险评级规则但未形成结果，不能生成无风险结论", status_code=409)
     produced_risk_keys = {item.rule_key for item in risk_results}
@@ -413,9 +422,8 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         and not missing_risk_keys
         and len(risk_results) == len(risk_rules)
     )
-    risk_level_by_key = {item["rule_key"]: item.get("parameters", {}).get("risk_level") for item in risk_rules}
     if not risk_configured:
-        risk_label = "不可判定（本模板未配置风险评级规则，本次不输出“无风险”结论）"
+        risk_label = "不可判定（当前场景未配置风险评级规则，本次不输出“无风险”结论）"
     elif not risk_conclusion_available:
         risk_label = "部分不可判定（存在尚未形成结论或不适用的风险规则）"
     else:
@@ -432,519 +440,34 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         or node_failures
     )
     status = "COMPLETE" if scope_execution_complete else "INCOMPLETE"
-    # 人工复核只改变"有效结果"；系统原判断必须从保存的复核记录取回，不能只展示最终状态。
-    resolved_reviews = db.scalars(
-        select(ManualReview)
-        .where(ManualReview.audit_task_id == task.id, ManualReview.status == "RESOLVED")
-        .order_by(ManualReview.id)
-    ).all()
-    reviews_by_rule = {item.rule_result_id: item for item in resolved_reviews if item.rule_result_id is not None}
-    reviews_by_field = {item.field_value_id: item for item in resolved_reviews if item.field_value_id is not None}
-    node_executions = db.scalars(
-        select(NodeExecution)
-        .where(NodeExecution.audit_task_id == task.id, NodeExecution.status != "INVALIDATED")
-        .order_by(NodeExecution.id)
-    ).all()
-    latest_by_node = {item.node_code: item for item in node_executions}
-    uploads_by_id = {
-        item.id: item
-        for item in db.scalars(
-            # document_upload 与 task_document 之间有两条外键，必须显式给出连接条件。
-            select(DocumentUpload)
-            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-            .where(TaskDocument.audit_task_id == task.id)
-        ).all()
-    }
-    evidence_by_id = {
-        item.id: item for item in db.scalars(select(Evidence).where(Evidence.audit_task_id == task.id)).all()
-    }
-
-    def effective_status_of(review: ManualReview) -> str | None:
-        """该复核落到的业务对象当前状态：规则结果 / 字段事实 / 材料位。"""
-        if review.rule_result_id is not None:
-            result = db.get(RuleResult, review.rule_result_id)
-            return result.status if result else None
-        if review.field_value_id is not None:
-            fact = db.get(TaskFieldValue, review.field_value_id)
-            # 已完成复核指向的是当次裁决生成的不可变字段版本；报告展示当次
-            # “复核后状态”，而不是用今天的当前事实改写历史记录。
-            return fact.status if fact else None
-        if review.document_upload_id is not None:
-            upload = db.get(DocumentUpload, review.document_upload_id)
-            document = db.get(TaskDocument, upload.task_document_id) if upload else None
-            return document.status if document else None
-        return None
-
-    def review_detail(review: ManualReview) -> list[str]:
-        """统一三部分：系统原判断（不可变快照）、人工结论、复核后有效状态。"""
-        judgment = review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {}
-        original_status = judgment.get("status")
-        original_message = judgment.get("message")
-        original_value = judgment.get("raw_value")
-        original = [str(status_labels.get(original_status, original_status or "未记录"))]
-        if isinstance(original_message, str) and original_message:
-            original.append(original_message)
-        if original_value not in (None, ""):
-            original.append(f"原值 {original_value}")
-        evidence_refs = judgment.get("evidences")
-        if not isinstance(evidence_refs, list) or not evidence_refs:
-            evidence_ref = judgment.get("evidence")
-            evidence_refs = [evidence_ref] if isinstance(evidence_ref, dict) else []
-        for evidence_ref in evidence_refs:
-            if not isinstance(evidence_ref, dict):
-                continue
-            locator = LOCATOR_STATUS_LABELS.get(evidence_ref.get("locator_status"), "状态未知")
-            # 内容依据与位置分开说明：人工要看的是「这段原文还在不在材料里」，
-            # 位置对不上不改变内容是否存在这件事。
-            quote_check = evidence_ref.get("quote_check_label") or QUOTE_CHECK_LABELS.get(
-                evidence_ref.get("quote_check"), "内容依据状态未知"
-            )
-            field_path = f"；字段属性：{evidence_ref['field_path']}" if evidence_ref.get("field_path") else ""
-            original.append(
-                f"证据 {evidence_ref.get('evidence_no') or '未记录'}"
-                f"（内容依据：{quote_check}；位置：{locator}{field_path}）"
-            )
-        conclusion = [
-            f"人工结论：{decision_labels.get(review.decision, review.decision or '未记录')}",
-            f"依据类型：{BASIS_TYPE_LABELS.get(review.basis_type, review.basis_type or '未记录')}",
-        ]
-        if review.before_value not in (None, "") or review.after_value not in (None, ""):
-            before = review.before_value if review.before_value not in (None, "") else "（空）"
-            after = review.after_value if review.after_value not in (None, "") else "（空）"
-            conclusion.append(f"改动：{before} → {after}")
-        conclusion.append(f"业务说明：{review.business_note or '未填写'}")
-        effective = effective_status_of(review)
-        return [
-            f"  - 系统原判断：{' · '.join(original)}",
-            f"  - {' · '.join(conclusion)}",
-            f"  - 复核后有效状态：{status_labels.get(effective, effective or '未记录')}",
-        ]
-
-    material_summary = (
-        "、".join(f"{item['name']}{'' if item['required'] else '（按需）'}" for item in manifest["materials"]) or "无"
-    )
-    lines = [
-        f"# {task.task_name}",
-        "",
-        "## 一、任务与模板版本",
-        "",
-        f"- 审核模板：{manifest.get('scene_name')}（模板标识 {scenario.scenario_code}）",
-        f"- 模板版本：V{scenario.version_no}",
-        # 配置来源必须如实标明：页面表单配置没有 Excel 工作簿，不显示一个不存在的格式版本。
-        f"- 配置来源：{'页面表单配置' if manifest.get('source_kind') == 'FORM' else 'Excel 规则库导入'}",
-        f"- Excel 格式版本：{manifest.get('profile_version') or '不适用（页面表单配置）'}",
-        f"- 审核任务：{task.task_name}（任务编号 {task.task_no}）",
-        f"- 报告生成时间：{datetime.now(UTC).isoformat(timespec='seconds')}",
-        "- 报告生成状态：已生成。报告文件生成成功只表示报告已产出，不代表审核通过。",
-        "",
-        "## 二、材料清单",
-        "",
-    ]
-    if not manifest["materials"]:
-        lines.append("- 本模板没有定义材料位。")
-    for material in manifest["materials"]:
-        upload = uploads_by_material.get(material["material_key"])
-        document = documents_by_material.get(material["material_key"])
-        scope_label = "必传" if material["required"] else "按需"
-        state_label = f"；材料位状态：{document_status_labels.get(document.status, document.status)}" if document else ""
-        if upload is None:
-            lines.append(f"- {material['name']}（{scope_label}）：未上传{state_label}")
-        else:
-            lines.append(
-                f"- {material['name']}（{scope_label}）：已上传 {upload.original_filename}"
-                f"（{upload.size_bytes} 字节）{state_label}"
-            )
-    lines.extend(["", "## 三、执行范围", ""])
-    enabled_rule_keys = set(task.task_schema_json["enabled_rule_keys"])
-    # 执行范围一节按**能力类型**归并：实例码是用户配置的，同一类型可能有多个实例，
-    # 按实例码分行会让报告出现「同一类检查列两遍」而用户看不出它们是一类。
-    rule_node_counts: dict[str, int] = {}
-    for rule in manifest["rules"]:
-        if rule["rule_key"] in enabled_rule_keys:
-            node_type = rule_node_type_of(rule)
-            rule_node_counts[node_type] = rule_node_counts.get(node_type, 0) + 1
-    lines.append(f"- 材料范围：{material_summary}")
-    lines.append(f"- 已启用规则：{len(enabled_rule_keys)} 条")
-    for code, label in NODE_DEFINITIONS:
-        if code in rule_node_counts:
-            lines.append(f"  - {label}：{rule_node_counts[code]} 条")
-    lines.append(f"- 任务字段：{len(task.task_schema_json['fields'])} 个")
-    lines.extend(["", "节点执行情况：", ""])
-    # 节点执行记录按**实例码**存储，报告按**能力类型**分行：先解析该类型的实例码集合。
-    # 直接拿能力类型当实例码查会让报告永远显示「没有执行记录」。
-    node_codes_by_type = {
-        node_type: _node_codes_of_type(manifest, node_type) for node_type, _ in NODE_DEFINITIONS
-    }
-    for code, label in NODE_DEFINITIONS:
-        execution = next(
-            (latest_by_node[node_code] for node_code in node_codes_by_type[code] if node_code in latest_by_node),
-            None,
-        )
-        if execution is None:
-            continue
-        if execution.status == "SKIPPED":
-            reason = (execution.result_json or {}).get("skip_reason") if isinstance(execution.result_json, dict) else None
-            lines.append(f"- {label}：未执行（{reason or '本模板未配置此类检查'}）")
-        elif execution.status == "SUCCEEDED":
-            lines.append(f"- {label}：已执行完成")
-        elif execution.status == "FAILED":
-            lines.append(f"- {label}：执行失败（{execution.failure_code or '未记录错误码'}：{execution.failure_message or '未记录原因'}）")
-        elif execution.status == "BLOCKED":
-            lines.append(f"- {label}：已阻断（{execution.failure_code or '未记录错误码'}：{execution.failure_message or '未记录原因'}）")
-        else:
-            lines.append(f"- {label}：{ruled_status_labels.get(execution.status, execution.status)}")
-    # 报告说明按**能力类型**汇总（「本模板未配置这类检查」），不按实例码列节点。
-    unconfigured = [
-        code for code in manifest.get("unconfigured_check_node_types", []) if code in node_labels
-    ]
-    if unconfigured:
-        lines.append(f"- 本模板未配置此类检查：{'、'.join(node_labels[code] for code in unconfigured)}")
-        lines.append("- 未配置的检查类别不产生规则结果，本报告不会把它当成已通过。")
-    lines.append("")
-    lines.extend(["## 四、字段结果", ""])
-    for field in task.task_schema_json["fields"]:
-        key = (field["field_key"], field["material_key"])
-        fact = fields.get(key)
-        label = f"{material_names.get(field['material_key'], '未知材料')} · {field['name']}"
-        if key in out_of_scope_field_keys:
-            lines.append(f"- {label}：材料未上传，本次不在有效执行范围内（未抽取，也不代表字段为空）")
-            continue
-        if fact is not None and field_statuses.get(key) in {"PRESENT", "REVIEWED"}:
-            lines.append(f"- {label}：{fact.raw_value}{_fact_evidence_suffix(evidence_by_id, fact)}")
-        else:
-            state = field_statuses.get(key, "NOT_EXECUTED")
-            lines.append(f"- {label}：未形成有效结果（{field_status_labels.get(state, '状态未知')}）")
-        review = reviews_by_field.get(fact.id) if fact else None
-        if review is not None:
-            lines.extend(review_detail(review))
-    lines.append("")
-
-    def rule_lines(result: RuleResult) -> list[str]:
-        entry = f"- {result.rule_name}：{ruled_status_labels.get(result.status, result.status)}"
-        if result.message:
-            entry += f"（{result.message}）"
-        output = [entry]
-        payload = result.result_json if isinstance(result.result_json, dict) else {}
-        standard = payload.get("standard") if isinstance(payload.get("standard"), dict) else None
-        if standard:
-            # 审核标准先于结论出现：只给结论看不到这条是照什么标准判的。
-            standard_text = standard.get("requirement") or standard.get("missing")
-            if standard_text:
-                output.append(f"  - 审核标准：{standard_text}")
-        trace = _input_trace(result.result_json, status_labels)
-        if trace:
-            output.append(f"  - 使用的内容：{trace}")
-        comparison = payload.get("comparison") if isinstance(payload.get("comparison"), dict) else None
-        if comparison:
-            output.append(f"  - 实际比较：{comparison.get('expression')}")
-            left = "，".join(
-                str(value)
-                for value in (comparison.get("left_label"), comparison.get("left_value"))
-                if value not in (None, "")
-            )
-            right = "，".join(
-                str(value)
-                for value in (comparison.get("right_label"), comparison.get("right_value"))
-                if value not in (None, "")
-            )
-            if left or right:
-                output.append(f"  - 对比双方：{left} ／ {right}")
-        notice = payload.get("material_type_notice")
-        if notice:
-            output.append(f"  - 待确认事项：{notice}")
-        review = reviews_by_rule.get(result.id)
-        if review is not None:
-            # 系统原判断只从复核记录保存的真实初始快照读取，不把人工覆盖后的内容当成系统原话。
-            output.extend(review_detail(review))
-        return output
-
-    lines.extend(["## 五、规则结果", ""])
-    lines.append(
-        f"已配置并形成结果的规则共 {len(rule_results)} 条：通过 {len(passed_rules)} 条，异常 {len(abnormal_rules)} 条，"
-        f"其他状态（不适用、未执行、证据不足、待复核）{len(other_rules)} 条。"
-    )
-    lines.extend(["", "### 已完成并通过的检查", ""])
-    if passed_rules:
-        for result in passed_rules:
-            lines.extend(rule_lines(result))
-    else:
-        lines.append("- 本次没有已完成并通过的检查。")
-    lines.extend(["", "### 已完成但发现异常的检查", ""])
-    if abnormal_rules:
-        lines.append("- 以下检查技术执行已完成，但业务结论为异常：")
-        for result in abnormal_rules:
-            lines.extend(rule_lines(result))
-    else:
-        lines.append("- 本次没有发现异常的检查。")
-    lines.extend(["", "### 未配置、不适用、未执行、证据不足与待复核", ""])
-    if other_rules:
-        for result in other_rules:
-            lines.extend(rule_lines(result))
-    else:
-        lines.append("- 本次没有其他状态的规则。")
-    lines.append("")
-    lines.extend(["", "## 六、人工复核", ""])
-    lines.append(f"- 待处理复核项：{pending_reviews} 项")
-
-    def review_target(review: ManualReview) -> str:
-        if review.rule_result_id is not None:
-            result = db.get(RuleResult, review.rule_result_id)
-            return f"规则“{result.rule_name if result else '未知规则'}”"
-        if review.field_value_id is not None:
-            fact = db.get(TaskFieldValue, review.field_value_id)
-            if fact is None:
-                return "字段“未知字段”"
-            material = material_names.get(fact.material_key, fact.material_key)
-            return f"字段“{material}·{field_name_by_key.get(fact.field_key, fact.field_key)}”"
-        if review.document_upload_id is not None:
-            upload = db.get(DocumentUpload, review.document_upload_id)
-            document = documents_by_id.get(upload.task_document_id) if upload else None
-            return f"材料“{document.material_name if document else '未知材料'}”"
-        return "未关联业务对象"
-
-    all_reviews = db.scalars(
-        select(ManualReview).where(ManualReview.audit_task_id == task.id).order_by(ManualReview.id)
-    ).all()
-    if not all_reviews:
-        lines.append("- 本次审核没有产生人工复核项。")
-    for review in all_reviews:
-        target = review_target(review)
-        if review.status == "PENDING":
-            judgment = review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {}
-            lines.append(f"- {target}：待人工复核（系统判断：{judgment.get('message') or '未记录'}）")
-            continue
-        if review.status == "INVALIDATED":
-            lines.append(f"- {target}：复核记录已失效（对应结果已被重算或被替换材料取代，不作为本次结论）")
-            continue
-        lines.append(f"- {target}：")
-        lines.extend(review_detail(review))
-    lines.extend(["", "## 七、风险及不确定事项", "", "### 未配置风险评级", ""])
-    if risk_configured:
-        lines.append("- 本模板已配置风险评级规则。")
-    else:
-        lines.append("- 本模板未配置风险评级规则，本次审核未形成风险结论，不能据此认定无风险。")
-    lines.extend(["", "### 已配置风险规则的实际结果", ""])
-    if not risk_configured:
-        lines.append("- 无已配置的风险规则，因此无法判定风险。")
-    else:
-        risk_abnormal = [item for item in risk_results if item.status == "ABNORMAL"]
-        for item in risk_results:
-            level = risk_level_by_key.get(item.rule_key)
-            level_label = f"（风险等级 {level}）" if level else ""
-            lines.append(
-                f"- {item.rule_name}{level_label}：{risk_status_labels.get(item.status, item.status)}；{item.message}"
-            )
-        if missing_risk_keys:
-            lines.append("- 以下风险规则尚未形成结果：" + "、".join(
-                rule_name_by_key.get(key, key) for key in sorted(missing_risk_keys)
-            ))
-        if risk_conclusion_available and not risk_abnormal:
-            lines.append("- 已配置的风险规则均未触发风险疑点。")
-    lines.extend(["", "### 不确定事项与未完成项", ""])
-    uncertain: list[str] = []
-    if unfinished_field_names:
-        uncertain.append("以下字段尚未形成有效结果：" + "、".join(unfinished_field_names))
-    if unfinished_rules:
-        uncertain.append(
-            f"以下 {unfinished_rules} 条规则未执行、证据不足或待复核："
-            + "、".join(
-                f"{item.rule_name}（{ruled_status_labels.get(item.status, item.status)}）"
-                for item in unfinished_rule_results
-            )
-            + (
-                "；尚未形成任何结果的规则："
-                + "、".join(rule_name_by_key.get(key, key) for key in missing_rule_keys)
-                if missing_rule_keys
-                else ""
-            )
-        )
-    elif missing_rule_keys:
-        uncertain.append(
-            "以下已启用规则尚未形成任何结果："
-            + "、".join(rule_name_by_key.get(key, key) for key in missing_rule_keys)
-        )
-    if required_missing_names:
-        uncertain.append("以下必传材料尚未上传：" + "、".join(required_missing_names))
-    if node_failures:
-        uncertain.append(
-            "以下审核节点执行失败或被阻断，相关范围的结论不完整："
-            + "、".join(
-                f"{item['node_name']}（{item['failure_code'] or item['status']}：{item['failure_message'] or '未记录原因'}）"
-                for item in node_failures
-            )
-        )
-    configured_gaps = [
-        item for item in capability_gap_items if item.get("rule_key") in set(task.task_schema_json["enabled_rule_keys"])
-    ]
-    if configured_gaps:
-        uncertain.append(
-            "以下已配置检查缺少供应商提供的质量结论，本次不可判定（不默认通过）："
-            + "、".join(f"{item.get('rule_name')}（{item.get('gap')}）" for item in configured_gaps)
-        )
-    if out_of_scope_rule_names:
-        uncertain.append(
-            "以下规则因可选材料未上传而不在本次执行范围内（未执行不代表通过）：" + "、".join(out_of_scope_rule_names)
-        )
-    if out_of_scope_field_keys:
-        uncertain.append(
-            "以下字段因可选材料未上传而不在本次执行范围内（不适用不代表通过）："
-            + "、".join(
-                f"{material_names.get(material_key, material_key)}·{field_name_by_key.get(field_key, field_key)}"
-                for field_key, material_key in sorted(out_of_scope_field_keys)
-            )
-        )
-    if material_type_mismatches:
-        # 两种状态对下游的后果不同，报告里必须分开说：待复核不阻断普通审核，已确认不符才阻断。
-        pending_names = [
-            document.material_name
-            for document, _ in pairs
-            if read_material_type_status(document.status) == MATERIAL_TYPE_REVIEW
-        ]
-        rejected_names = [
-            document.material_name
-            for document, _ in pairs
-            if read_material_type_status(document.status) == MATERIAL_TYPE_REJECTED
-        ]
-        if pending_names:
-            uncertain.append(
-                "以下材料位的类型待人工确认（不影响已按真实原文给出的审核结论）："
-                + "、".join(pending_names)
-            )
-        if rejected_names:
-            uncertain.append(
-                "以下材料位已被人工确认与材料位不符，依赖它们的检查缺少有效依据："
-                + "、".join(rejected_names)
-            )
-    if not risk_configured:
-        uncertain.append("本模板未配置风险评级规则，本次风险不可判定。")
-    elif risk_inconclusive:
-        uncertain.append(
-            "以下风险规则尚未形成结论，不能据此认定无风险："
-            + "、".join(item.rule_name for item in risk_inconclusive)
-        )
-    if risk_not_applicable:
-        uncertain.append(
-            "以下风险规则因来源规则不适用而未形成风险结论："
-            + "、".join(item.rule_name for item in risk_not_applicable)
-        )
-    if not scope_execution_complete:
-        uncertain.append("本次已配置的审核范围未全部执行完成，报告不能作为无风险结论。")
-    if uncertain:
-        lines.extend(f"- {item}" for item in uncertain)
-    else:
-        lines.append("- 无。")
-    lines.extend(["", "## 八、证据引用", ""])
-    lines.append(
-        "说明：字段取值为系统生成的结果摘要；“引用原文”一栏才是文档引用原文。"
-        "内容依据与位置分开核对：位置（页码、坐标）只是辅助信息，缺失或对不上不影响"
-        "原文本身可用于审核；只有引文在所属材料里确实找不到时，字段内容才按缺少原文依据处理。"
-    )
-    lines.append("")
-    fact_by_id = {item.id: item for item in fields.values()}
-    rule_result_by_id = {item.id: item for item in rule_results}
-    evidence_lines: list[str] = []
-    missing_quote_count = 0
-    for evidence in evidence_by_id.values():
-        if evidence.document_upload_id is not None and evidence.document_upload_id not in uploads_by_id:
-            # 旧上传版本的证据不再进入当前报告。
-            continue
-        if evidence.rule_result_id is not None:
-            result = rule_result_by_id.get(evidence.rule_result_id)
-            if result is None:
-                continue
-            purpose = f"规则“{result.rule_name}”"
-        elif evidence.field_value_id is not None:
-            fact = fact_by_id.get(evidence.field_value_id)
-            if fact is None or not fact.is_current:
-                continue
-            field_path = f"的属性“{evidence.field_path}”" if evidence.field_path else ""
-            purpose = f"字段“{field_name_by_key.get(fact.field_key, fact.field_key)}”{field_path}"
-        else:
-            continue
-        upload = uploads_by_id.get(evidence.document_upload_id) if evidence.document_upload_id else None
-        document = documents_by_id.get(upload.task_document_id) if upload else None
-        # 内容依据在前、位置在后，并明确标注位置是辅助信息：工作人员先要能核对“这段话在不在”。
-        quote_check = _quote_check_of(db, evidence)
-        quote_check_label = QUOTE_CHECK_LABELS.get(quote_check, "内容依据状态未知")
-        page_label = f"第 {evidence.page_no} 页" if evidence.page_no else "未标注页码"
-        bbox_label = f"坐标 {evidence.bbox_json}" if evidence.bbox_json else "未提供坐标"
-        locator_label = LOCATOR_STATUS_LABELS.get(evidence.locator_status, "状态未知")
-        locator_note = f"（{evidence.locator_note}）" if evidence.locator_note else ""
-        quote = (evidence.quote_text or "").strip()
-        if not quote:
-            missing_quote_count += 1
-            quote = "未记录文档引用原文"
-        evidence_lines.append(
-            f"- {evidence.evidence_no} ｜ 材料：{document.material_name if document else '未关联材料'}"
-            f" ｜ 文件：{upload.original_filename if upload else '未关联文件'}"
-            f" ｜ 内容依据核对：{quote_check_label}"
-            f" ｜ 位置（辅助）：{page_label}、{bbox_label}、{locator_label}{locator_note}"
-            f" ｜ 用于：{purpose} ｜ 引用原文：{quote}"
-        )
-    if evidence_lines:
-        lines.extend(sorted(evidence_lines))
-    else:
-        lines.append("- 本次没有可引用的文档证据记录。")
-    if missing_quote_count:
-        lines.append(f"- 其中 {missing_quote_count} 条证据缺少引用原文，已明确标注，未进行推断。")
-    lines.extend(["", "## 九、附加展示章节（来自报告模板）", ""])
+    all_reviews = db.scalars(select(ManualReview).where(ManualReview.audit_task_id == task.id)).all()
     report_template = manifest.get("report_template") or []
     report_groups = manifest.get("report_groups") or {}
-    grouped_reports = report_groups.get("reports") if isinstance(report_groups, dict) else None
-    # 配置声明但**当前没有文件生成实现**的输出格式：必须在报告正文里写清楚，
-    # 否则「模板要求 PDF、系统只产 Markdown」这件事只在配置 JSON 里躺着，页面与报告都看不见。
-    format_support: list[dict[str, Any]] = []
-    for report in grouped_reports or []:
-        for entry in report.get("format_support") or []:
-            format_support.append(
-                {
-                    "format": entry.get("format"),
-                    "supported": bool(entry.get("supported")),
-                    "message": entry.get("message") or "",
-                    "report_code": report.get("report_code"),
-                    "report_name": report.get("report_name"),
-                }
-            )
-    if isinstance(grouped_reports, list) and report_groups.get("source_kind") == "REPORT_CODES":
-        # 节点版按报告编号分组的报告配置：逐份报告、逐章节渲染。
-        # 全部章节停用的报告不输出；非停用章节待确认时该报告标为未完成配置。
-        lines.append(
-            "以下报告由审核模板的报告配置指定：报告编号、报告名称、材料范围、输出格式、"
-            "结果排序与章节顺序都来自已发布配置。"
-        )
-        lines.append("")
-        lines.extend(_render_report_groups(db, task, manifest, grouped_reports))
-    elif report_template:
-        lines.append("以下章节由审核模板的报告配置指定，属于附加展示内容。")
-        lines.append("")
-        field_defs = {item["field_key"]: item for item in manifest["fields"]}
-        for section in report_template:
-            lines.extend([f"### {section['section_name']}", ""])
-            if section.get("content_instruction"):
-                # 内容要求只是展示说明，不能被当作已经生成的正文。
-                lines.append(f"- 本节内容要求（展示说明，不代表已生成正文）：{section['content_instruction']}")
-            bound_field_keys = list(section.get("field_keys", []))
-            if not bound_field_keys:
-                lines.append("- 本节未形成内容（本模板未为本节绑定字段，系统不代为生成正文）。")
-            for field_key in bound_field_keys:
-                field_definition = field_defs[field_key]
-                key = (field_key, field_definition["material_key"])
-                fact = fields.get(key)
-                label = f"{material_names.get(field_definition['material_key'], '未知材料')} · {field_definition['name']}"
-                if key in out_of_scope_field_keys:
-                    lines.append(f"- {label}：材料未上传，本次不在有效执行范围内")
-                elif fact is not None and field_statuses.get(key) in {"PRESENT", "REVIEWED"}:
-                    lines.append(f"- {label}：{fact.raw_value}{_fact_evidence_suffix(evidence_by_id, fact)}")
-                elif fact is not None and field_statuses.get(key) == "NOT_PRESENT" and fact.id in confirmed_missing_field_ids:
-                    lines.append(f"- {label}：人工确认文档中不存在该字段")
-                else:
-                    state = field_statuses.get(key, "NOT_EXECUTED")
-                    lines.append(f"- {label}：未形成有效结果（{field_status_labels.get(state, '状态未知')}）")
-            lines.append("")
+    grouped_reports = report_groups.get("reports") or []
+    format_support = [
+        {"format": entry.get("format"), "supported": bool(entry.get("supported")),
+         "message": entry.get("message") or "", "report_code": report.get("report_code"),
+         "report_name": report.get("report_name")}
+        for report in grouped_reports for entry in report.get("format_support") or []
+    ]
+    lines = [f"# {task.task_name} 审核报告", ""]
+    if grouped_reports:
+        lines.extend(_render_report_groups(db, task, manifest, grouped_reports, {
+            "scope_execution_complete": scope_execution_complete,
+            "unfinished_fields": unfinished_field_names,
+            "missing_results": [rule_name_by_ref[ref] for ref in missing_rule_refs],
+            "unfinished_results": [{"name": item.rule_name, "status": item.status, "message": item.message}
+                                   for item in unfinished_rule_results],
+            "pending_review_count": pending_reviews,
+            "unavailable_material_type_count": material_type_mismatches,
+            "required_missing_materials": required_missing_names,
+            "node_failures": node_failures,
+            "risk_configured": risk_configured,
+            "risk_conclusion_available": risk_conclusion_available,
+        }))
     else:
-        lines.append("- 本模板未配置附加报告章节，以上即为系统固定事实章节。")
-        lines.append("")
-    lines.extend(["## 十、报告结论", ""])
+        lines.extend(["本场景未配置业务报告章节。", ""])
+    lines.extend(["## 系统执行摘要", ""])
     lines.append("- 报告是否生成：已生成。报告生成成功不代表审核通过。")
     incompleteness_reasons = []
     if unfinished_fields or missing_rule_keys or unfinished_rule_results:
@@ -1011,7 +534,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         "results_scope": "CURRENT_RUN",
         "input_revision": task.input_revision,
         "snapshot": snapshot,
-        # 结论同时以**结构化键**给出：报告正文里的中文字面量是给人读的，
+        # 结论同时以结构化键给出：报告正文里的中文字面量是给人读的，
         # 页面不应靠匹配「## 十、」这类行首文案来提取结论——正文任何一次措辞调整
         # 都会让页面静默退化成「没有结论」，且不报错。
         "conclusion": {
@@ -1045,7 +568,7 @@ def _report_output(db: Session, task: AuditTask, manifest: dict[str, Any], execu
         },
         # 本节报告声明的输出格式与真实支持状态：随报告一起保存，页面据此显示格式缺口。
         "format_support": format_support,
-        # 系统固定事实章节之外的业务附加章节：零业务章节不等于零报告，也不等于范围完整。
+        # 业务章节数量与执行完整性分别记录。
         "business_section_count": (
             len(report_template)
             if not (isinstance(grouped_reports, list) and report_groups.get("source_kind") == "REPORT_CODES")

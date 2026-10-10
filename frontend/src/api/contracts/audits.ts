@@ -5,7 +5,7 @@ import type { TaskScope } from "./scenes";
 import type { TaskPlanInfo } from "./plans";
 
 export interface AuditNode {
-  /** 节点**实例码**：用户配置的实例，同一能力类型可以有多个。 */
+  /** 节点实例码：用户配置的实例，同一能力类型可以有多个。 */
   node_code: string;
   /** 能力类型：决定这个节点由谁执行、属于哪个业务工作区。 */
   node_type?: string | null;
@@ -16,16 +16,16 @@ export interface AuditNode {
   failure_message: string | null;
   skip_reason: string | null;
 }
-/** 任务展示结构里的一张 Sheet：本场景选用的表及它归属的节点实例。 */
+/** 任务冻结的来源工作表；新动态来源不绑定节点，node_code 仅保留历史数据。 */
 export interface TaskDisplaySheet {
   sheet_role: string;
   node_code: string | null;
 }
 /**
- * 任务的**展示结构**：由后端按当前任务的场景配置返回。
+ * 任务的展示结构：由后端按当前任务的场景配置返回。
  *
  * 页面按它通用渲染：只展示当前场景实际使用的节点、Sheet 与字段，
- * 统一模板协议里未被本场景选中的内容不出现。
+ * 展示范围来自任务冻结的配置，不按参考模板补充内容。
  */
 export interface TaskDisplay {
   task_no: string;
@@ -74,7 +74,6 @@ export interface AuditField {
   evidences?: Array<{
     evidence_no: string;
     field_path: string | null;
-    locator_status: string;
   }>;
 }
 
@@ -163,11 +162,6 @@ export interface RetrievalCandidateSnapshot {
   subject_name?: string | null;
   artifact_type?: string | null;
   text?: string | null;
-  page_no?: number | null;
-  page_no_source?: string | null;
-  heading_path?: string | null;
-  char_start?: number | null;
-  char_end?: number | null;
   material_key?: string | null;
   material_name?: string | null;
   filename?: string | null;
@@ -190,7 +184,6 @@ export interface SealRecord {
   material_name?: string | null;
   filename?: string | null;
   artifact_no?: string | null;
-  page_no?: number | null;
   entry_no?: number | null;
   subject_name?: string | null;
   seal_type?: string | null;
@@ -223,12 +216,7 @@ export interface PendingReview {
     evidence?: {
       evidence_no?: string | null;
       field_path?: string | null;
-      page_no?: number | null;
       quote_text?: string | null;
-      bbox?: JsonValue;
-      /** 位置结论；只是辅助定位信息。 */
-      locator_status?: string | null;
-      locator_note?: string | null;
       /** 内容依据结论：引文能否在所属材料里找到原文。 */
       quote_check?: string | null;
       quote_check_label?: string | null;
@@ -236,16 +224,14 @@ export interface PendingReview {
     evidences?: Array<{
       evidence_no?: string | null;
       field_path?: string | null;
-      page_no?: number | null;
       quote_text?: string | null;
-      locator_status?: string | null;
       quote_check?: string | null;
       quote_check_label?: string | null;
     }>;
     /**
      * 主体/签章一致性核对的判据：
      *   retrieval 是本次检索的真实范围、候选身份与双方原文；
-     *   seal_records 是规则材料范围内的**全部**印章识别条目；
+     *   seal_records 是规则材料范围内的全部印章识别条目；
      *   subject_query 是本次实际使用的待核对主体原文。
      * 人工要同时看到这三项才能判断是否一致，不能在响应投影里丢掉。
      */
@@ -280,20 +266,14 @@ export interface TaskReviewJudgment {
   evidence?: {
     evidence_no?: string | null;
     field_path?: string | null;
-    page_no?: number | null;
     quote_text?: string | null;
-    bbox?: JsonValue;
-    locator_status?: string | null;
-    locator_note?: string | null;
     quote_check?: string | null;
     quote_check_label?: string | null;
   } | null;
   evidences?: Array<{
     evidence_no?: string | null;
     field_path?: string | null;
-    page_no?: number | null;
     quote_text?: string | null;
-    locator_status?: string | null;
     quote_check?: string | null;
     quote_check_label?: string | null;
   }>;
@@ -303,6 +283,7 @@ export interface TaskReviewJudgment {
 }
 
 export interface AuditTask extends ApiResponse {
+  intermediate_csv_available?: boolean;
   task_no: string;
   task_name: string;
   scenario_name: string;
@@ -375,12 +356,7 @@ export interface Evidence extends ApiResponse {
   document_name: string | null;
   /** 结构化字段的顶层属性名；普通字段与规则证据为空。 */
   field_path: string | null;
-  page_no: number | null;
   quote_text: string;
-  bbox: number[] | null;
-  /** 位置（页码/坐标）的核对结论；位置只是辅助信息，对不上不影响内容可用。 */
-  locator_status: "VERIFIED" | "UNVERIFIED" | "UNLOCATABLE";
-  locator_note: string | null;
   /** 内容依据的核对结论：引文或字段值能否在所属材料里找到原文。 */
   quote_check?: "FOUND" | "VALUE_FOUND" | "NOT_FOUND" | "NOT_CHECKABLE" | "PENDING" | null;
   quote_check_label?: string | null;

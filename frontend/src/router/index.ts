@@ -41,9 +41,9 @@ function forwardQuery(source: LocationQuery, drop: string): Record<string, strin
 /**
  * 场景配置类页面与场景详情 tab 的关系。
  *
- * 材料、字段、规则、节点这些配置**属于某个场景**，因此它们是场景详情的 tab，
+ * 材料、字段、规则、节点这些配置属于某个场景，因此它们是场景详情的 tab，
  * 不是独立页面：独立的「不选场景就能进」的路由会让用户绕过
- * 「建场景 → 导入 → 确认 Sheet 绑定 → 保存配置」的主流程，
+ * 「建场景 → 上传规则库 → 选择解析工作表 → 核对候选 → 保存草稿」的主流程，
  * 直接改到某一份配置上。场景身份只在路径里（`:scenarioCode`）。
  */
 const routes: RouteRecordRaw[] = [
@@ -59,7 +59,7 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "场景配置", group: "场景管理", menu: "/scene-config" },
   },
   {
-    // 规则编辑是**场景上下文页面**：路径里已经带固定的场景编码，
+    // 规则编辑是场景上下文页面：路径里已经带固定的场景编码，
     // 不存在「不选场景就能改规则」这条路径。
     path: "/scene-rules/edit/:scenarioCode/:ruleKey",
     name: "scene-rule-edit",
@@ -67,7 +67,7 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "规则编辑", group: "场景管理", menu: "/scene-config" },
   },
   {
-    // 导入作业列表与工作台是**场景上下文页面**：上传必须以场景为起点，
+    // 导入作业列表与工作台是场景上下文页面：上传必须以场景为起点，
     // 页面可从侧栏进入，也可通过 `?scenario=` 指定场景；作业记录所属场景。
     path: "/scene-imports",
     name: "scene-imports",

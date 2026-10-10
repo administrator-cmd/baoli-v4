@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from ...common.api import ApiResponse
 
 
-class DraftDisabledSourceRowActivationPreviewItem(BaseModel):
+class DraftSourceActivationPreviewItem(BaseModel):
     row_key: str
     sheet_role: str
     sheet_name: str
@@ -14,10 +14,13 @@ class DraftDisabledSourceRowActivationPreviewItem(BaseModel):
     source_id: str | None = None
 
 
-class DraftDisabledSourceRowActivationPreviewResponse(ApiResponse):
+class DraftSourceActivationPreviewResponse(ApiResponse):
+    preview_id: str
     revision_no: int
-    rows: list[DraftDisabledSourceRowActivationPreviewItem]
-    updated_risk_codes: list[str]
+    can_activate: bool
+    rows: list[DraftSourceActivationPreviewItem]
+    items: list[dict[str, str]]
+    questions: list[str]
 
 
 class ScenarioVersionResponse(ApiResponse):
@@ -80,7 +83,6 @@ class ScenarioDetailResponse(ApiResponse):
     category: str | None = None
     description: str | None = None
     enabled: bool
-    deleted: bool
     latest_version_no: int
     created_at: datetime
     updated_at: datetime

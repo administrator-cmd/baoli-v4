@@ -31,7 +31,7 @@ defineEmits<{
       v-else-if="!jobs.length"
       kind="empty"
       title="还没有导入作业"
-      description="上传 .xlsx 或 .xlsm 规则库文件后，系统会读取工作表清单、识别模板格式并列出需要业务确认的内容。"
+      description="上传 .xlsx 或 .xlsm 规则库文件后，系统读取工作表并按原文生成执行配置。"
     />
     <el-table v-else :data="jobs" border @row-click="$emit('select', $event)">
       <el-table-column label="规则库文件" prop="source_filename" min-width="240" show-overflow-tooltip />

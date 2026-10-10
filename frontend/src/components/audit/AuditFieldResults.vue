@@ -9,8 +9,6 @@ import {
   factOriginLabel,
   fieldStatusTone,
   formatBusinessValue,
-  locatorStatusLabel,
-  locatorStatusTone,
   statusLabel,
 } from "@/constants/labels";
 
@@ -18,15 +16,12 @@ import {
  * 字段抽取结果。
  *
  * 阅读顺序固定为：字段与来源材料 → 原文内容 → 标准化结果 → 当前状态 → 事实来源 → 操作。
- * 原文与标准化结果**分列**：原文是材料里真实写着的那几个字，标准化结果是系统为比较
+ * 原文与标准化结果分列：原文是材料里真实写着的那几个字，标准化结果是系统为比较
  * 确定性算出来的值。两者不是一回事，合并成一格会让「系统算成了什么」和「材料里写了什么」
  * 无法对照，也无法发现标准化出错。
  *
  * 标准化结果不代表审核通过：它只说明系统按字段类型把原文算成了可比对的值。
  * 人工已确认的有效值（事实来源=人工纠错 / 状态=已复核）单独标注。
- *
- * 定位（页码、坐标）只是**辅助信息**，收在「辅助信息」列里：缺失或对不上都不影响
- * 字段值与原文证据的可用性，因此不在这里显示成字段有问题。
  *
  * 未取到值时区分原因：材料未上传、本次未执行抽取、抽取失败、未抽取到——它们是
  * 四种不同的缺什么，统一写成「字段为空」会让人不知道该去补哪一步。
@@ -44,10 +39,10 @@ const emit = defineEmits<{
   correct: [field: AuditFieldView];
 }>();
 
-function evidenceItems(field: AuditFieldView): Array<{ evidence_no: string; field_path: string | null; locator_status: string }> {
+function evidenceItems(field: AuditFieldView): Array<{ evidence_no: string; field_path: string | null }> {
   if (field.evidences?.length) return field.evidences;
   return field.evidence_no
-    ? [{ evidence_no: field.evidence_no, field_path: null, locator_status: field.evidence_locator_status ?? "UNVERIFIED" }]
+    ? [{ evidence_no: field.evidence_no, field_path: null }]
     : [];
 }
 
@@ -59,6 +54,9 @@ function openEvidence(field: AuditFieldView, evidenceNo: string): void {
 function rawText(field: AuditFieldView): string {
   if (field.raw_value !== null && field.raw_value !== undefined && field.raw_value !== "") {
     return field.raw_value;
+  }
+  if (field.extraction_enabled === false) {
+    return "本方案未启用该字段的自动抽取";
   }
   if (field.material_uploaded === false) {
     return "材料未上传，没有可抽取的原文";
@@ -253,23 +251,16 @@ const emptyDescription = computed(() => {
         </template>
       </el-table-column>
 
-      <!-- 位置只是辅助信息：单独一列，明确标注为位置，不影响上面的字段值与原文证据 -->
-      <el-table-column label="辅助信息" min-width="170">
+      <el-table-column label="原文依据" min-width="170">
         <template #default="{ row }">
           <div v-if="evidenceItems(row).length" class="table-note">已记录 {{ evidenceItems(row).length }} 条原文证据</div>
+          <div v-else-if="row.extraction_enabled === false" class="table-note">本方案未启用自动抽取</div>
           <div v-else-if="row.material_uploaded === false" class="table-note">材料未上传，无法抽取</div>
           <div v-else-if="row.status === 'PENDING' || row.status === 'NOT_EXECUTED'" class="table-note">
             本次未执行抽取
           </div>
           <div v-else-if="row.status === 'EXTRACTION_FAILED'" class="table-note">抽取失败，没有证据</div>
           <div v-else class="table-note">已抽取，未记录原文证据</div>
-          <div v-if="row.evidence_locator_status" class="table-note">
-            <StatusBadge
-              :status="row.evidence_locator_status"
-              :label="locatorStatusLabel(row.evidence_locator_status)"
-              :tone="locatorStatusTone(row.evidence_locator_status)"
-            />
-          </div>
         </template>
       </el-table-column>
 
@@ -282,7 +273,7 @@ const emptyDescription = computed(() => {
           <el-dropdown
             v-else-if="evidenceItems(row).length > 1"
             trigger="click"
-            @command="(evidenceNo) => openEvidence(row, String(evidenceNo))"
+            @command="(evidenceNo: unknown) => openEvidence(row, String(evidenceNo))"
           >
             <el-button link type="primary" size="small" title="选择字段属性的原文证据">
               <template #icon><FileSearch :size="15" /></template>
@@ -316,7 +307,6 @@ const emptyDescription = computed(() => {
 
     <p class="text-hint">
       标准化结果只表示系统把原文算成了可比对的值，不代表审核通过；是否通过要看使用该字段的规则结论。
-      定位信息只作辅助核对，缺失或对不上不影响字段内容与原文证据的可用性。
     </p>
   </div>
 </template>

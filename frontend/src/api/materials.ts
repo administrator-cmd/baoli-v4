@@ -36,7 +36,6 @@ export function documentFileUrl(documentNo: string, uploadNo: string, preview = 
 export interface EvidenceQuery {
   task_no?: string;
   reference_type?: string;
-  locator_status?: string;
   keyword?: string;
   page: number;
   page_size: number;

@@ -13,7 +13,6 @@ import {
   type TemplateOption,
 } from "@/api/imports";
 import { usePagedList } from "@/composables/usePagedList";
-import TemplateDownloadButton from "@/components/scenes/TemplateDownloadButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import { statusLabel } from "@/constants/labels";
 
@@ -44,6 +43,8 @@ const { filters, page, pageSize, total, items, loading, error } = list;
 
 /** 正在中止的作业号；中止是同步请求，用它给对应行的按钮显示 loading。 */
 const abortingJobNo = ref("");
+const deletingJobs = ref<string[]>([]);
+const deleteError = ref<string | null>(null);
 
 const statusOptions = [
   { value: "PARSED", label: "已解析" },
@@ -107,19 +108,28 @@ async function submitCreate(): Promise<void> {
 async function removeJob(row: ImportJobRow): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确认删除导入作业「${row.source_filename}」？仅未发布的草稿作业可删除；已发布作业会保留来源追溯。`,
+      `确认删除导入作业「${row.source_filename}」？已写入场景或已发布的作业不可删除；正在转换的作业请先中止。`,
       "删除导入作业",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
-  } catch {
+  } catch (failure) {
+    if (failure !== "cancel" && failure !== "close") {
+      deleteError.value = failure instanceof Error ? failure.message : "删除确认失败";
+      ElMessage.error(deleteError.value);
+    }
     return;
   }
+  deletingJobs.value.push(row.job_no);
+  deleteError.value = null;
   try {
     await deleteImportJob(row.job_no);
     ElMessage.success("导入作业已删除");
     await list.load();
   } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
+    deleteError.value = failure instanceof Error ? failure.message : "删除失败";
+    ElMessage.error(deleteError.value);
+  } finally {
+    deletingJobs.value = deletingJobs.value.filter((jobNo) => jobNo !== row.job_no);
   }
 }
 
@@ -127,7 +137,7 @@ async function removeJob(row: ImportJobRow): Promise<void> {
  * 这份规则库所属的场景。
  *
  * 显示服务端给出的场景名与保存时的 Profile 版本；旧格式作业明确标为「旧格式」，
- * 不把旧合同 Profile 与新场景 Schema 混成同一个没有版本语义的名字。
+ * 不把来源能力版本与场景 Schema 混成同一个没有版本语义的名字。
  */
 function sceneText(row: ImportJobRow): string {
   // 作业所属场景在上传时指定；历史作业没有记录，如实显示「未记录场景」，
@@ -238,8 +248,6 @@ watch(scopedScenarioCode, () => {
     <div class="app-toolbar">
       <div class="app-toolbar__left">
         <el-button type="primary" @click="openCreate">新增导入</el-button>
-        <TemplateDownloadButton v-if="scopedScenarioCode" :scenario-code="scopedScenarioCode" />
-        <el-button v-else @click="openCreate">选择场景并下载模板</el-button>
       </div>
     </div>
 
@@ -247,7 +255,9 @@ watch(scopedScenarioCode, () => {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据">
+    <el-alert v-if="deleteError" type="error" show-icon :closable="false" :title="`删除失败：${deleteError}`" />
+
+    <el-table v-if="!error" :data="items" border stripe v-loading="loading" empty-text="暂无数据">
       <el-table-column type="index" label="序号" width="60" />
       <el-table-column label="文件名称" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">
@@ -290,7 +300,14 @@ watch(scopedScenarioCode, () => {
           >
             中止
           </el-button>
-          <el-button link type="danger" size="small" @click="removeJob(row)">删除</el-button>
+          <el-button
+            link
+            type="danger"
+            size="small"
+            :loading="deletingJobs.includes(row.job_no)"
+            :disabled="abortingJobNo === row.job_no"
+            @click="removeJob(row)"
+          >删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -328,9 +345,6 @@ watch(scopedScenarioCode, () => {
             />
           </el-select>
           <div class="text-hint">包含尚未发布的场景。作业只属于这里选中的场景，系统不从 Excel 内容猜测。</div>
-          <div class="block-gap-sm">
-            <TemplateDownloadButton :scenario-code="createScenarioCode || null" :disabled="scenariosLoading || Boolean(scenariosError)" label="下载当前场景模板" />
-          </div>
         </el-form-item>
       </el-form>
       <div class="block-gap-sm">
@@ -345,7 +359,7 @@ watch(scopedScenarioCode, () => {
           <div class="upload-block__icon">⬆</div>
           <div class="el-upload__text">拖拽规则库 Excel 到此处，或<em>点击选择文件</em></div>
           <template #tip>
-            <div class="text-hint">支持 .xlsx / .xlsm；请使用下载的模板或与之同格式的规则库文件。</div>
+            <div class="text-hint">支持 .xlsx / .xlsm；系统会根据 Excel 的实际内容解析材料、字段、规则和计算配置。</div>
           </template>
         </el-upload>
       </div>

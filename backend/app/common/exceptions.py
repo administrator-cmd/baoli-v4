@@ -38,7 +38,7 @@ class BusinessError(Exception):
 
 
 # 未预期异常的定位信息必须能被事后读到：只写一句通用文案会让一次失败彻底无法诊断，
-# 日志没有落盘时只能靠重启复现碰运气。这里把异常类型、消息与**最后一层业务代码栈帧**
+# 日志没有落盘时只能靠重启复现碰运气。这里把异常类型、消息与最后一层业务代码栈帧
 # 一起落库到 failure_message——只取最后一层自己的代码（排除 site-packages 与标准库），
 # 那是业务代码真正抛错的位置，也正是需要修的那一行；完整堆栈仍由 logger.exception 记录。
 MAX_ERROR_SUMMARY = 2000
@@ -90,6 +90,9 @@ SAFE_DETAIL_KEYS = frozenset(
         "node_code",
         "node_type",
         "node_codes",
+        "missing_source_nodes",
+        "downstream_nodes",
+        "calculation_rules",
         "sheet_role",
         "sheet_roles",
         "contract_roles",
@@ -143,6 +146,7 @@ SAFE_DETAIL_KEYS = frozenset(
         "operator",
         "allowed",
         "missing",
+        "unexpected",
         "parameter",
         "property",
         "role",
@@ -155,6 +159,13 @@ SAFE_DETAIL_KEYS = frozenset(
         "detail",
         "blockers",
         "mismatches",
+        "candidate_ref",
+        "target_ref",
+        "target_type",
+        "question_ref",
+        "parameter_key",
+        "report_code",
+        "report_name",
         "conflicts",
         # 嵌套结构（例如 blockers 列表项）使用的业务键。message 与顶层 message 同级安全。
         "code",

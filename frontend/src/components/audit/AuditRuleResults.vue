@@ -30,26 +30,25 @@ import {
  *   审核事项 → 最终状态 → 判断结论 → 判断原因 → 原文内容 → 标准化结果 →
  *   审核标准 → 实际比较 → 人工复核 → 技术执行详情。
  *
- * 列表默认是**紧凑表格**，不是把每条规则都摊成长卡片；点开某一条才打开详情抽屉。
+ * 列表默认是紧凑表格，不是把每条规则都摊成长卡片；点开某一条才打开详情抽屉。
  * 这样几十条规则也能一眼扫完，需要细看的再展开。
  *
- * 「位置」不是审核的前置条件：页码、坐标、索引号收在技术执行详情里，
- * 缺失或对不上都不影响上面这些内容的可读性。未执行与被跳过都不会显示成通过。
+ * 证据展示引用原文及来源；未执行与被跳过都不会显示成通过。
  */
 const props = defineProps<{
   rules: AuditRule[];
-  /** 本模板未配置检查规则的业务节点，用于解释为什么某些规则没有结果。 */
+  /** 当前场景未配置检查规则的业务节点，用于解释为什么某些规则没有结果。 */
   unconfiguredNodes: string[];
   /** 打开时预置的节点筛选（例如从「跨文件校验」工作区进入）。 */
   initialNodeFilter?: string | null;
   /**
-   * 本任务真实配置的校验阶段（节点**能力类型**）。阶段下拉只列出它们——
+   * 本任务真实配置的校验阶段（节点能力类型）。阶段下拉只列出它们——
    * 固定列出全部阶段会让用户筛到一个本场景根本没配的阶段，然后看到空列表。
    * 未给出时不提供阶段下拉。
    */
   nodeTypeOptions?: string[];
   /**
-   * 任务编号。给出时，Agent 规则详情会按 `task_no + evaluation_id` 读取**真实账本**，
+   * 任务编号。给出时，Agent 规则详情会按 `task_no + evaluation_id` 读取真实账本，
    * 而不是只展示 `result_json.tool_calls` 摘要——摘要是投影，账本才是取证过程的事实来源。
    */
   taskNo?: string | null;
@@ -113,13 +112,12 @@ function materialsOf(rule: AuditRule): string {
 /**
  * 规则所属节点。
  *
- * 结果负载里目前**没有**节点字段，因此这里只读不猜：读不到就返回 null，
- * 由页面把节点筛选显式标为「服务端未返回」，而不是按材料数量或规则名去推断
- * 一条检查属于文件内部校验还是跨文件校验——猜错会让筛选数量与真实结果对不上。
- * 服务端补上 node 之后，这里无需改动即可生效。
+ * 节点类型与实例码都由服务端从实际执行记录返回。阶段筛选使用能力类型，
+ * 不能按材料数量或规则名推断一条检查属于哪个阶段。
  */
 function nodeOf(rule: AuditRule): string | null {
-  const value = payloadOf(rule).node;
+  const payload = payloadOf(rule);
+  const value = payload.node_type ?? payload.node;
   return typeof value === "string" && value ? value : null;
 }
 
@@ -328,7 +326,7 @@ function columnText(values: CompactValue[], key: "raw" | "normalized", rule: Aud
       return "本次未执行，没有原文";
     }
     if (rule.status === "SKIPPED") {
-      return "本模板未配置此类检查，未执行";
+      return "当前场景未配置此类检查，未执行";
     }
     return "服务端没有返回原文内容";
   }
@@ -376,7 +374,7 @@ watch(
  * 服务端规则状态目录。分档以它为准，页面不再本地维护一份名单——
  * 本地名单与后端漂移过（`NOT_APPLICABLE`、`SKIPPED` 曾被漏出分档）。
  *
- * 目录读取中或读取失败时退回下面的**只读兜底**分档：兜底只在拿不到目录时生效，
+ * 目录读取中或读取失败时退回下面的只读兜底分档：兜底只在拿不到目录时生效，
  * 且未覆盖的状态码仍会被显式提示出来。没有兜底的话，目录还没到时所有结果都会落进
  * 「未识别」，筛选数量显示为 0，用户会以为结果丢了。
  */
@@ -393,6 +391,7 @@ void (async () => {
 
 /** 与服务端 STATUS_CATEGORIES 同口径的兜底分档；仅用于目录不可用时。 */
 const FALLBACK_CATEGORY: Record<string, string> = {
+  COMPUTED: "COMPUTED",
   PASSED: "DECIDED",
   ABNORMAL: "DECIDED",
   REVIEWED: "DECIDED",
@@ -405,14 +404,15 @@ const FALLBACK_CATEGORY: Record<string, string> = {
 };
 
 /**
- * 筛选分档。它必须覆盖服务端可能给出的**全部**状态码：
+ * 筛选分档。它必须覆盖服务端可能给出的全部状态码：
  *   「未执行」= 应当执行但没有跑完；「不适用」= 适用条件明确不成立，本次就不该查；
- *   「已跳过」= 本模板没配置这类检查。三者都不是通过，也不能互相冒充。
+ *   「已跳过」= 当前场景没配置这类检查。三者都不是通过，也不能互相冒充。
  * 在目录中找不到的码（新增或历史遗留）不会被静默丢掉——它进「未识别」，并在下方单独提示。
  */
 const filters = [
   { value: "ALL", label: "全部", categories: [] as string[] },
   { value: "DECIDED", label: "已判定", categories: ["DECIDED"] },
+  { value: "COMPUTED", label: "仅计算完成", categories: ["COMPUTED"] },
   { value: "UNDECIDED", label: "尚未判定", categories: ["UNDECIDED"] },
   { value: "NOT_APPLICABLE", label: "不适用", categories: ["NOT_APPLICABLE"] },
 ];
@@ -510,6 +510,10 @@ function closeDetail(): void {
 }
 
 const detailPayload = computed(() => (detailRule.value ? payloadOf(detailRule.value) : {}));
+const detailCalculationSteps = computed(() => {
+  const steps = detailPayload.value.calculation_steps;
+  return Array.isArray(steps) ? steps.filter((step): step is string => typeof step === "string") : [];
+});
 
 /** 详情抽屉的取值来源：与列表同一份事实，不重新查库也不重新计算。 */
 const detailValues = computed(() => (detailRule.value ? valueSourcesOf(detailRule.value) : []));
@@ -547,7 +551,7 @@ const detailHasOcrCandidates = computed(() => detailRetrievalCandidates.value.so
 /**
  * `result_json.tool_calls` 的摘要：工具名、状态、确定性比较结果与说明。
  *
- * 它是**投影**，用于列表与离线展示；页面只读它，不重新计算比较过程——
+ * 它是投影，用于列表与离线展示；页面只读它，不重新计算比较过程——
  * 重新算一遍等于让页面与后端各说一套。
  */
 const summaryToolCalls = computed<Record<string, JsonValue>[]>(() => {
@@ -664,7 +668,7 @@ function toolMessage(row: Record<string, JsonValue>): string {
     title="当前还没有规则结果"
     :description="
       unconfiguredNodes.length
-        ? `本模板未配置以下检查类别：${unconfiguredNodes.map((node) => nodeLabel(node)).join('、')}。未配置的检查不会产生结果，也不代表检查通过。`
+        ? `当前场景未配置以下检查类别：${unconfiguredNodes.map((node) => nodeLabel(node)).join('、')}。未配置的检查不会产生结果，也不代表检查通过。`
         : '规则节点执行后，这里会显示每条检查的标准、实际比较与结论；未执行的检查不会显示成通过。'
     "
   />
@@ -881,9 +885,15 @@ function toolMessage(row: Record<string, JsonValue>): string {
         系统原说明：{{ detailRule.message || "未记录" }}
       </div>
       <div v-if="detailReason" class="text-muted detail-block">无法判断的具体原因：{{ detailReason }}</div>
+      <template v-if="detailCalculationSteps.length">
+        <h4 class="app-section-title">AI 计算说明</h4>
+        <ol class="detail-block">
+          <li v-for="(step, index) in detailCalculationSteps" :key="index">{{ step }}</li>
+        </ol>
+      </template>
 
       <!-- 4b. 模型取证过程：这条结论是 Agent 路径得出时，列出它调用的工具与真实返回。
-           有 task_no + evaluation_id 时读**真实账本**；读不到时如实说明并回落到
+           有 task_no + evaluation_id 时读真实账本；读不到时如实说明并回落到
            `result_json.tool_calls` 摘要——不把摘要冒充成完整账本。 -->
       <template v-if="detailToolCalls.length || ledgerLoading || ledgerError">
         <h4 class="app-section-title">模型取证过程</h4>
@@ -966,7 +976,7 @@ function toolMessage(row: Record<string, JsonValue>): string {
         复核后有效状态：<StatusBadge :status="detailManualStatus" />
       </div>
 
-      <!-- 7. 技术执行详情：页码、编号、能力与检索范围等辅助信息 -->
+      <!-- 7. 技术执行详情：能力与检索范围等辅助信息 -->
       <el-collapse class="block-gap">
         <el-collapse-item title="技术执行详情（辅助信息）" name="tech">
           <div class="text-muted">适用条件：{{ applicabilityText(detailRule) }}</div>
@@ -997,7 +1007,6 @@ function toolMessage(row: Record<string, JsonValue>): string {
               <el-table-column v-if="detailHasOcrCandidates" prop="text" label="检索到的原文" min-width="280" show-overflow-tooltip />
               <el-table-column v-else prop="subject_name" label="识别到的印章主体" min-width="160" show-overflow-tooltip />
               <el-table-column prop="material_name" label="归属材料" min-width="120" show-overflow-tooltip />
-              <el-table-column v-if="detailHasOcrCandidates" prop="page_no" label="产物页序" width="100" />
               <el-table-column prop="similarity" label="相似度" width="90" />
               <el-table-column label="候选身份" width="170">
                 <template #default="{ row }">

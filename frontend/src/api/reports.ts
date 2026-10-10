@@ -66,8 +66,7 @@ export interface RiskPage extends Paged<RiskResultRow> {
   hit_count: number;
   /**
    * 当前筛选作用域内真实出现过的风险等级。页面筛选下拉从这里取，不硬编码——
-   * 两套等级标签（高/中/低/待确认 与 最高/一级/二级/三级）并存，
-   * 硬编码一份会让另一套一条都筛不出来，而页面看起来一切正常。
+   * 各场景可以定义自己的等级名称。
    */
   risk_levels?: string[];
 }

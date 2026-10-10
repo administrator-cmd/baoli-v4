@@ -35,7 +35,6 @@ class WorkbookSheet(BaseModel):
     rows_truncated: bool
     columns_truncated: bool
     cells_truncated: bool
-    suggested_role: str | None = None
 
 
 class WorkbookIR(BaseModel):
@@ -43,11 +42,10 @@ class WorkbookIR(BaseModel):
     source_filename: str
     source_size: int
     source_sha256: str
-    # 统一模板协议的版本标识。系统只有一份协议，这里记录「按哪一版协议解释」。
+    # 内部节点能力版本身份，不约束上传 Excel 的布局。
     profile_version: str
-    # 上传入口的**场景身份**（用户先建场景、再在该场景下上传）。它不由表头推断：
-    # 猜错场景会拿另一套列协议去解释这份 Excel，报出一堆与真实问题无关的缺列错误，
-    # 而用户手里的文件根本没变。历史作业没有这一项，读取方按「未记录场景」处理。
+    # 上传入口的场景身份（用户先建场景、再在该场景下上传）。它不由表头推断：
+    # 字段及规则使用该场景的实际节点；历史作业没有这一项时按未记录场景处理。
     scenario_code: str | None = None
     # 新导入记录场景协议身份；历史 IR 与草稿行转换的内部 IR 没有该身份。
     schema_key: str | None = None

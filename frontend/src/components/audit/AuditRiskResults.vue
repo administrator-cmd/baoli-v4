@@ -21,7 +21,7 @@ const props = defineProps<{
   risks: RiskList | null;
   /** 风险评定节点是否执行过（状态来自服务端节点列表）。 */
   riskNodeExecuted: boolean;
-  /** 本模板是否配置了风险评级规则。 */
+  /** 当前场景是否配置了风险评级规则。 */
   riskConfigured: boolean;
   /** 风险结果读取中。 */
   loading?: boolean;
@@ -91,7 +91,7 @@ const conclusionState = computed(() => {
   if (!props.riskConfigured) {
     return {
       tone: "info" as const,
-      title: "本模板未配置风险评级",
+      title: "当前场景未配置风险评级",
       description: "模板没有配置风险规则，本次审核不会形成风险结论。这不等于没有风险，也不等于审核通过。",
     };
   }
@@ -113,7 +113,7 @@ const conclusionState = computed(() => {
   return {
     tone: "success" as const,
     title: "风险评定已执行，未命中任何风险规则",
-    description: "这是已配置风险规则范围内的结论，不代表合同整体没有风险。",
+    description: "这是已配置风险规则范围内的结论，不代表审核对象整体没有风险。",
   };
 });
 </script>

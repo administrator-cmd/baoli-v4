@@ -1,5 +1,5 @@
 -- ============================================================================
--- baoli-v4 合同审核验证版：完整数据库结构（唯一权威脚本）
+-- baoli-v4 规则库驱动审核系统：开发验证用完整数据库结构
 --
 -- 适用数据库：baoli_v4；开发验证可使用 baoli_v4_dev（应用与 checkpoint 使用同一目标）
 -- 前置条件：MySQL >= 8.0.19（已按 MySQL 8.4.11 核对）
@@ -7,31 +7,16 @@
 --   - 第 8 节的 checkpoint 表由 langgraph-checkpoint-mysql 3.0.0 使用。
 --     该包要求 MySQL >= 8.0.19：除了建表 DDL，它的运行期 UPSERT 语句还使用
 --     8.0.19 引入的 INSERT ... AS new 行别名语法，因此 8.0.11～8.0.18 不适用。
---   - 本文件已去掉该包建表 DDL 里 JSON 列的表达式默认值（需要 8.0.13+，
---     且 saver 每次都会显式写入该列，并不依赖默认值），建表本身不再受此限制。
 --
 -- 用法：
 --   本文件是**唯一的结构脚本**：在全新的 baoli_v4 库上执行一次，得到完整结构。
 --   1. 库不存在时先建库：
 --      CREATE DATABASE baoli_v4 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 --   2. 以该库为默认库执行本文件。
---   本仓库只保留这一份脚本，不再维护增量脚本。需要改结构时直接改本文件；
---   本地测试前会先清空数据库，
---   因此不存在「已有数据的库需要增量升级」这一路径。
---   注意：本文件的 CREATE TABLE IF NOT EXISTS 只保证表存在，**不会**给已存在的表
---   补列、改约束或加索引——所以结构变更后必须从空库重建，不能在旧库上重复执行。
---
--- 重复执行的行为（重要）：
---   - 建表用 CREATE TABLE IF NOT EXISTS：已存在的表被跳过（结构是否一致不校验）；
---   - 版本计数器回填用 INSERT ... ON DUPLICATE KEY UPDATE，计数器只增不减；
---   - 触发器采用「先建新版（_r2）→ 再删旧名字」的顺序，重复执行不会出现保护空窗；
---   再次强调：重复执行只能补齐缺失的表/触发器，不能把旧结构升级成本文件的结构。
---
--- 需要注意的代价：
---   IF NOT EXISTS 只保证表存在，**不会校验已存在表的结构**。如果某张表已存在但列
---   或约束与本文不同，本文件不会修正它。执行完请查看文件末尾的确认查询；
---   它只会列出缺失的表名，结构是否一致由应用启动时的只读校验（runtime/schema_check.py）
---   负责发现并拒绝启动，不会自动修表。
+--   本仓库只维护本文件的最终结构。结构变更后清空开发库，再执行本文件；
+--   不备份开发数据，不提供 Alembic、增量升级、历史结构兼容或迁移记录表。
+--   CREATE TABLE 遇到同名表直接报错，不能用重复执行代替重建。
+--   文件末尾查询缺表情况；列、索引、外键和触发器由应用启动时只读核对。
 --
 -- 重要约束：
 --   - 应用启动与请求过程只检查连接和表结构，绝不执行 DDL、不调用 create_all()、
@@ -39,16 +24,16 @@
 --   - 表结构以 backend/app/entity/ 下的 ORM 定义为准，本文件必须与 ORM 保持一致。
 --
 -- 业务主流程（表与状态取值都按这条链组织，任何一步都不得跳过）：
---   场景草稿（scenario_draft*，可编辑、不生效）
+--   场景草稿（scenario_draft.config_json，可编辑、不生效）
 --     -> 显式发布（scenario_version 及其关系投影，不可覆盖）
 --     -> 方案钉住某个已发布版本号（audit_plan.scenario_version_id）
 --     -> 任务冻结方案执行配置与范围（audit_task.manifest_json / task_schema_json）
 --   规则库导入只写草稿，不在这里发布；导入预览不保留第二套编译/发布状态机。
 --
 -- 目录：
---   1. 审核模板身份与后台操作
+--   1. 审核场景身份与后台操作
 --   2. 导入作业与候选
---   3. 已发布模板版本及关系投影
+--   3. 已发布场景 JSON 版本及关系索引
 --   3b. 场景配置草稿、审核方案、报告快照与操作日志
 --   4. 审核任务与流程等待点摘要
 --   5. 材料位、文件上传与处理产物
@@ -60,15 +45,16 @@
 
 
 -- ---------------------------------------------------------------------------
--- 1. 审核模板身份与后台操作
+-- 1. 审核场景身份与后台操作
 -- ---------------------------------------------------------------------------
 
 -- 审核场景身份与版本计数器。
 -- scenario_code 是场景身份（稳定标识），不是中文名称；版本号由本表原子分配，
 -- 不依赖无保护的 max(version_no)+1。
--- 基本资料（名称/业务类型/说明/启停/逻辑删除）直接维护在本表；已发布版本保存的是
+-- 基本资料（名称/业务类型/说明/启停）直接维护在本表；删除实际移除场景和草稿。
+-- 已发布版本保存的是
 -- 发布时刻的名称与配置快照，不随本表修改而变。
-CREATE TABLE IF NOT EXISTS scenario_template (
+CREATE TABLE scenario_template (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_code VARCHAR(80) NOT NULL,
     scenario_name VARCHAR(255) NOT NULL,
@@ -80,23 +66,17 @@ CREATE TABLE IF NOT EXISTS scenario_template (
     description TEXT NULL,
     -- 启停：停用后不用于新建方案与任务；已创建任务按原快照继续。
     enabled TINYINT(1) NOT NULL DEFAULT 1,
-    -- 逻辑删除：保留历史版本、任务与报告。仅删除场景身份，不级联清理任何历史资料。
-    deleted_at DATETIME(6) NULL,
     latest_version_no INT NOT NULL DEFAULT 0,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     CONSTRAINT uq_scenario_template_code UNIQUE (scenario_code),
-    CONSTRAINT chk_scenario_template_version CHECK (latest_version_no >= 0),
-    KEY idx_scenario_template_deleted (deleted_at)
+    CONSTRAINT chk_scenario_template_version CHECK (latest_version_no >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- 已有数据库的一次性回填：把现存已发布版本的最大版本号写进计数器，避免新版本号与旧版本冲突。
--- 它引用 scenario_version，因此必须放在第 3 节该表建好之后，不能紧跟在 scenario_template 后面。
 
 -- 后台长操作：先认领记录，再由后台用独立 Session 执行；请求只返回受理状态。
 -- object_no 是业务编号（作业号或任务号），跨两种对象，因此不设外键。
-CREATE TABLE IF NOT EXISTS background_operation (
+CREATE TABLE background_operation (
     id BIGINT NOT NULL AUTO_INCREMENT,
     operation_no VARCHAR(40) NOT NULL,
     object_type VARCHAR(30) NOT NULL,
@@ -115,6 +95,8 @@ CREATE TABLE IF NOT EXISTS background_operation (
     status VARCHAR(30) NOT NULL,
     request_json JSON NOT NULL,
     result_json JSON NULL,
+    -- 规则库模型原始返回文件，相对于 data 根目录；解析或结构校验失败也保留。
+    raw_response_path VARCHAR(500) NULL,
     failure_code VARCHAR(80) NULL,
     failure_message TEXT NULL,
     started_at DATETIME(6) NULL,
@@ -135,7 +117,7 @@ CREATE TABLE IF NOT EXISTS background_operation (
 -- 2. 导入作业与候选
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS import_job (
+CREATE TABLE import_job (
     id BIGINT NOT NULL AUTO_INCREMENT,
     job_no VARCHAR(40) NOT NULL,
     source_filename VARCHAR(255) NOT NULL,
@@ -181,31 +163,26 @@ CREATE TABLE IF NOT EXISTS import_job (
     KEY idx_import_job_created_at_id (created_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS import_sheet (
+CREATE TABLE import_sheet (
     id BIGINT NOT NULL AUTO_INCREMENT,
     import_job_id BIGINT NOT NULL,
     sheet_key VARCHAR(40) NOT NULL,
     sheet_name VARCHAR(255) NOT NULL,
     visible TINYINT(1) NOT NULL,
     status VARCHAR(40) NOT NULL,
-    bound_role VARCHAR(40) NULL,
-    -- 绑定的节点实例码。一张 Sheet 只能绑定一个节点；一个节点可以绑定多张 Sheet。
-    -- 空表示未绑定：未绑定的 Sheet 不进入转换、发布与执行范围，也不自动推断用途。
-    bound_node_code VARCHAR(80) NULL,
-    header_row INT NULL,
+    -- 工作表布局来源；角色、字段和规则由模型解析到场景 JSON，不保存表级节点绑定。
     snapshot_json JSON NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     CONSTRAINT uq_import_sheet_job_sheet_key UNIQUE (import_job_id, sheet_key),
-    CONSTRAINT chk_import_sheet_header_row CHECK (header_row IS NULL OR header_row >= 1),
     CONSTRAINT fk_import_sheet_job
         FOREIGN KEY (import_job_id) REFERENCES import_job (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT,
     KEY idx_import_sheet_job_status (import_job_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS import_issue (
+CREATE TABLE import_issue (
     id BIGINT NOT NULL AUTO_INCREMENT,
     import_job_id BIGINT NOT NULL,
     issue_no VARCHAR(40) NOT NULL,
@@ -227,7 +204,7 @@ CREATE TABLE IF NOT EXISTS import_issue (
     KEY idx_import_issue_job_status (import_job_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS field_candidate (
+CREATE TABLE field_candidate (
     id BIGINT NOT NULL AUTO_INCREMENT,
     import_job_id BIGINT NOT NULL,
     candidate_ref VARCHAR(120) NOT NULL,
@@ -248,10 +225,10 @@ CREATE TABLE IF NOT EXISTS field_candidate (
 
 
 -- ---------------------------------------------------------------------------
--- 3. 已发布模板版本及关系投影
+-- 3. 已发布场景 JSON 版本及关系索引
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS scenario_version (
+CREATE TABLE scenario_version (
     id BIGINT NOT NULL AUTO_INCREMENT,
     -- 页面表单 / 复制来源的版本没有导入作业（import_job_id 为 NULL），
     -- 不伪造 Excel 作业与工作表行号；旧数据保持原 import_job_id 不变。
@@ -287,7 +264,7 @@ CREATE TABLE IF NOT EXISTS scenario_version (
     KEY idx_scenario_version_base (base_version_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS scenario_material (
+CREATE TABLE scenario_material (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_version_id BIGINT NOT NULL,
     material_key VARCHAR(40) NOT NULL,
@@ -303,15 +280,15 @@ CREATE TABLE IF NOT EXISTS scenario_material (
         ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS scenario_node (
+CREATE TABLE scenario_node (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_version_id BIGINT NOT NULL,
     -- node_code 承载节点**实例码**（例如 extract_balance_sheet），在场景版本内唯一。
     -- 保留列名不改：它在 17 个文件、313 处被引用，改名会牵动全部读写路径而收益为零。
-    node_code VARCHAR(40) NOT NULL,
+    node_code VARCHAR(80) NOT NULL,
     -- node_type 是节点**能力类型**（MATERIAL_CHECK / CALCULATION / RISK_RATING …）。
     -- 它与实例码是两件事：同一能力类型在场景里可以有多个实例。
-    -- 旧数据（线性流程）在迁移中按 node_code 回填，因此非空。
+    -- 节点能力类型由场景配置明确声明，不从实例码推断。
     node_type VARCHAR(40) NOT NULL,
     name VARCHAR(120) NOT NULL,
     sequence_no INT NOT NULL,
@@ -332,7 +309,7 @@ CREATE TABLE IF NOT EXISTS scenario_node (
         ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS scenario_rule (
+CREATE TABLE scenario_rule (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_version_id BIGINT NOT NULL,
     -- rule_key 是**历史**规则身份（由 namespace + 来源编号派生的稳定键）。
@@ -346,7 +323,7 @@ CREATE TABLE IF NOT EXISTS scenario_rule (
     -- 在读取时不需要区分「哪个字段是历史身份」：legacy_rule_key 恒为历史口径。
     legacy_rule_key VARCHAR(40) NULL,
     name VARCHAR(255) NOT NULL,
-    node_code VARCHAR(40) NOT NULL,
+    node_code VARCHAR(80) NOT NULL,
     operator_code VARCHAR(40) NOT NULL,
     enabled TINYINT(1) NOT NULL,
     rule_json JSON NOT NULL,
@@ -366,26 +343,6 @@ CREATE TABLE IF NOT EXISTS scenario_rule (
     KEY idx_scenario_rule_version_code (scenario_version_id, rule_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 模板版本计数器的回填（在 scenario_version 建好之后执行）。
--- 把现存已发布版本的最大版本号写进计数器，避免后续发布分配到已被占用的版本号。
--- 全新初始化的库里 scenario_version 为空，这条语句不会插入任何行。
--- 可重复执行：已存在的模板身份不会被重建，计数器只增不减。
--- 这里不使用 ON DUPLICATE KEY UPDATE + VALUES()（该写法自 MySQL 8.0.20 起已弃用），
--- 改为给子查询起别名后引用它。
-INSERT INTO scenario_template (scenario_code, scenario_name, schema_key, schema_version, schema_json, latest_version_no)
-SELECT version.scenario_code, version.scenario_name,
-       version.schema_key, version.schema_version, version.schema_json, version.version_no
-FROM (
-    SELECT scenario_code, MAX(version_no) AS max_version
-    FROM scenario_version
-    GROUP BY scenario_code
-) AS derived
-JOIN scenario_version AS version
-    ON version.scenario_code = derived.scenario_code AND version.version_no = derived.max_version
-ON DUPLICATE KEY UPDATE
-    latest_version_no = GREATEST(scenario_template.latest_version_no, derived.max_version);
-
-
 -- ---------------------------------------------------------------------------
 -- 3b. 场景配置草稿、审核方案、报告快照与操作日志
 -- ---------------------------------------------------------------------------
@@ -395,7 +352,7 @@ ON DUPLICATE KEY UPDATE
 -- （FORM=页面直接建立；EXCEL=由规则库导入写入；COPY=复制场景；REVISION=基于某个
 -- 已发布版本创建的修订），base_version_no 记录它基于的版本号（没有则为 NULL——
 -- 不伪造“第 0 版”）。
-CREATE TABLE IF NOT EXISTS scenario_draft (
+CREATE TABLE scenario_draft (
     id BIGINT NOT NULL AUTO_INCREMENT,
     scenario_code VARCHAR(80) NOT NULL,
     schema_key VARCHAR(80) NOT NULL,
@@ -414,9 +371,9 @@ CREATE TABLE IF NOT EXISTS scenario_draft (
     -- 计算规则候选（定义、参数、判定区间）。发布时按这份候选重新编译。
     -- NULL 与空数组都表示这份草稿没有计算配置，不是「使用全部计算」。
     -- 历史版本只有编译产物、没有候选时，存为 {"frozen": [...]}，发布前核对字段与节点仍在。
-    calculation_json JSON NULL,
     -- 停用行允许其他业务列未填，仍保留来源供场景核对与版本修订。
-    disabled_source_rows JSON NULL,
+    -- 场景业务定义整体保存 JSON：节点、材料、动态字段、规则、计算与报告。
+    config_json JSON NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
@@ -425,197 +382,11 @@ CREATE TABLE IF NOT EXISTS scenario_draft (
     CONSTRAINT chk_scenario_draft_base CHECK (base_version_no IS NULL OR base_version_no >= 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- ---------------------------------------------------------------------------
--- 2b. 场景配置草稿的节点实例
---
--- 节点的存在、顺序与依赖由**用户配置**，不由系统按规则内容或固定序列自动生成。
--- 一个场景可以有两个同类节点（两张报表各一个字段抽取），因此 node_code 是实例码、
--- node_type 才是能力类型，两者不能混用。
---
--- 节点与 Sheet 是一对多：一个节点可以绑定多张 Sheet（财报的计算定义/参数/判定三表
--- 都绑到同一个 CALCULATION 实例上），一张 Sheet 只能绑定一个节点
--- （见 import_sheet.bound_node_code）。
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS scenario_draft_node (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    draft_id BIGINT NOT NULL,
-    -- 节点实例码：同一场景内唯一，规则按它归属。
-    node_code VARCHAR(80) NOT NULL,
-    -- 能力类型：来自统一模板协议的 node_types，决定谁执行这个节点。
-    node_type VARCHAR(40) NOT NULL,
-    name VARCHAR(120) NOT NULL,
-    sequence_no INT NOT NULL,
-    -- 上游节点**实例码**列表。发布期校验缺失依赖、自依赖、循环依赖与顺序冲突。
-    depends_on JSON NOT NULL,
-    -- 节点级配置（例如计算节点参与的计算规则编号）；为空表示没有额外配置。
-    config_json JSON NULL,
-    enabled TINYINT(1) NOT NULL DEFAULT 1,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_scenario_draft_node_code UNIQUE (draft_id, node_code),
-    CONSTRAINT chk_scenario_draft_node_sequence CHECK (sequence_no >= 1),
-    CONSTRAINT fk_scenario_draft_node_draft
-        FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
-        ON DELETE CASCADE ON UPDATE RESTRICT,
-    KEY idx_scenario_draft_node_draft (draft_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- ---------------------------------------------------------------------------
--- 2c. 场景选用的 Sheet
---
--- 场景负责配置「使用哪些 Sheet、Sheet 对应哪些节点及其流程关系」；统一模板协议
--- 负责定义「系统支持哪些 Sheet 以及每张 Sheet 的结构」。两者职责分离，
--- 但**不形成两套 Profile 文件**。
---
--- 这张表就是「这个场景用哪些 Sheet」的持久化落点。缺了它，模板下载只能按草稿里
--- 已有内容反推 Sheet（有材料→材料清单表，有规则→按节点类型反查），于是
--- 「本场景选了哪些表」这件事没有权威来源：反推会在合同版与财报版同类 Sheet 之间
--- 无法区分，也会把用户明确排除的表重新算进来。
---
--- node_code 指向该 Sheet 在本场景里归属的节点实例；一个节点可以绑多张 Sheet，
--- 一张 Sheet 只能绑一个节点（与 import_sheet.bound_node_code 同一口径）。
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS scenario_draft_sheet (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    draft_id BIGINT NOT NULL,
-    -- Sheet 角色：来自统一模板协议的 sheet_role。
-    sheet_role VARCHAR(80) NOT NULL,
-    -- 该 Sheet 归属的节点实例码。为空表示本场景选用这张表但尚未指定节点。
-    node_code VARCHAR(80) NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_scenario_draft_sheet_role UNIQUE (draft_id, sheet_role),
-    CONSTRAINT fk_scenario_draft_sheet_draft
-        FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
-        ON DELETE CASCADE ON UPDATE RESTRICT,
-    KEY idx_scenario_draft_sheet_draft (draft_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS scenario_draft_material (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    draft_id BIGINT NOT NULL,
-    material_key VARCHAR(40) NOT NULL,    name VARCHAR(255) NOT NULL,
-    required TINYINT(1) NOT NULL,
-    description TEXT NOT NULL,
-    -- 来源业务编号（Excel 的「材料编号」列）：导出时写回，页面新建的行留空。
-    source_ref VARCHAR(80) NULL,
-    origin_json JSON NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_scenario_draft_material_key UNIQUE (draft_id, material_key),
-    CONSTRAINT fk_scenario_draft_material_draft
-        FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS scenario_draft_field (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    draft_id BIGINT NOT NULL,
-    field_key VARCHAR(40) NOT NULL,
-    material_key VARCHAR(40) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    value_type VARCHAR(30) NOT NULL,
-    extraction_strategy VARCHAR(30) NOT NULL,
-    structure_schema_json JSON NULL,
-    unit VARCHAR(40) NULL,
-    -- 币种是金额比较与加总的口径之一：留空表示未声明，不表示人民币。
-    currency VARCHAR(40) NULL,
-    -- 产物来源：该字段的取值由哪种处理产物提供（当前仅印章识别 SEAL）。
-    -- 留空表示字段由常规字段抽取提供。
-    artifact_source VARCHAR(30) NULL,
-    -- 取数期间与报表口径：**由字段自己声明**，计算参数按这两项定位字段事实。
-    -- 参数表不再声明它们，因此这里是唯一的来源；必填、无默认值。
-    period_scope VARCHAR(30) NOT NULL,
-    statement_scope VARCHAR(20) NOT NULL,
-    required TINYINT(1) NOT NULL,
-    instruction TEXT NOT NULL,
-    -- 来源业务编号（Excel 的「字段编号」列）：导出时写回，页面新建的字段留空。
-    source_ref VARCHAR(80) NULL,
-    origin_json JSON NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_scenario_draft_field_key UNIQUE (draft_id, field_key),
-    CONSTRAINT chk_scenario_draft_field_strategy CHECK (
-        extraction_strategy IN ('RAW_TEXT', 'DETERMINISTIC', 'STRUCTURED')
-    ),
-    CONSTRAINT chk_scenario_draft_field_structure CHECK (
-        (extraction_strategy = 'STRUCTURED' AND structure_schema_json IS NOT NULL)
-        OR (extraction_strategy <> 'STRUCTURED' AND structure_schema_json IS NULL)
-    ),
-    CONSTRAINT fk_scenario_draft_field_draft
-        FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT,
-    KEY idx_scenario_draft_field_material (draft_id, material_key)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS scenario_draft_rule (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    draft_id BIGINT NOT NULL,
-    rule_key VARCHAR(40) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    node_code VARCHAR(40) NOT NULL,
-    operator_code VARCHAR(40) NOT NULL,
-    enabled TINYINT(1) NOT NULL DEFAULT 1,
-    -- 规则的业务定义：输入对象（材料/字段引用）、审核要求、参数、适用条件、
-    -- 风险来源规则与等级建议。发布时由 compile_form_manifest 编译成 manifest 规则。
-    rule_json JSON NOT NULL,
-    -- 来源业务编号（Excel 的「规则编号」列）：导出时写回，页面新建的规则留空。
-    source_ref VARCHAR(80) NULL,
-    origin_json JSON NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_scenario_draft_rule_key UNIQUE (draft_id, rule_key),
-    CONSTRAINT fk_scenario_draft_rule_draft
-        FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS scenario_draft_section (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    draft_id BIGINT NOT NULL,
-    section_key VARCHAR(40) NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    content_instruction TEXT NOT NULL,
-    field_keys JSON NOT NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    -- 节点版（contract_review_v3）报告分组属性：报告编号、报告名称、材料范围、
-    -- 输出格式、章节顺序、内容类型、结果排序与业务配置状态。旧格式章节保持 NULL，
-    -- 继续按「附加展示章节」语义渲染与导出。
-    report_code VARCHAR(80) NULL,
-    report_name VARCHAR(255) NULL,
-    material_keys JSON NULL,
-    formats JSON NULL,
-    section_order INT NULL,
-    content_type VARCHAR(40) NULL,
-    result_sort VARCHAR(60) NULL,
-    config_status VARCHAR(30) NULL,
-    origin_json JSON NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_scenario_draft_section_key UNIQUE (draft_id, section_key),
-    CONSTRAINT fk_scenario_draft_section_draft
-        FOREIGN KEY (draft_id) REFERENCES scenario_draft (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 -- 审核方案：对某个场景版本的可复用审核范围选择，保存即生效。
 -- 方案只有一份配置，没有草稿/发布之分；scope_json 是每次保存时算好的范围快照
 -- （显式规则、自动补入依赖、未启用规则、任务 schema 快照与场景版本引用）。
 -- 已建任务不受方案后续改动影响：创建时冻结 manifest_json 与 task_schema_json。
-CREATE TABLE IF NOT EXISTS audit_plan (
+CREATE TABLE audit_plan (
     id BIGINT NOT NULL AUTO_INCREMENT,
     plan_code VARCHAR(80) NOT NULL,
     plan_name VARCHAR(255) NOT NULL,
@@ -628,7 +399,6 @@ CREATE TABLE IF NOT EXISTS audit_plan (
     deleted_at DATETIME(6) NULL,
     -- 场景级、方案里只读的那部分上下文：节点实例、选用 Sheet 与协议版本。
     -- 不参与方案编辑，但编译（compile_form_manifest）必须有，因此随方案冻结一份。
-    context_json JSON NULL,
     -- 方案的编译产物：报告渲染与任务冻结都读它。编译未成功时为空，原因见 sync_error。
     manifest_json JSON NULL,
     manifest_hash CHAR(64) NULL,
@@ -638,6 +408,8 @@ CREATE TABLE IF NOT EXISTS audit_plan (
     sync_error JSON NULL,
     scope_hash CHAR(64) NULL,
     scope_json JSON NULL,
+    -- 场景业务定义整体保存 JSON：节点、材料、动态字段、规则、计算与报告。
+    config_json JSON NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
@@ -649,121 +421,9 @@ CREATE TABLE IF NOT EXISTS audit_plan (
     KEY idx_audit_plan_deleted (deleted_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 方案自己的配置：创建时从钉住的场景版本复制一份，之后由用户在方案里增删改。
--- 形状与 scenario_draft_* 一一对应，只是归属换成 plan_id —— 方案是场景版本的
--- **可编辑副本**，配置本身归方案所有，不再随场景版本变化。
-CREATE TABLE IF NOT EXISTS plan_material (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    plan_id BIGINT NOT NULL,
-    material_key VARCHAR(40) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    required TINYINT(1) NOT NULL,
-    description TEXT NOT NULL,
-    source_ref VARCHAR(80) NULL,
-    origin_json JSON NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_plan_material_key UNIQUE (plan_id, material_key),
-    CONSTRAINT fk_plan_material_plan
-        FOREIGN KEY (plan_id) REFERENCES audit_plan (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT,
-    KEY idx_plan_material_plan (plan_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS plan_field (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    plan_id BIGINT NOT NULL,
-    field_key VARCHAR(40) NOT NULL,
-    material_key VARCHAR(40) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    value_type VARCHAR(30) NOT NULL,
-    extraction_strategy VARCHAR(30) NOT NULL,
-    structure_schema_json JSON NULL,
-    unit VARCHAR(40) NULL,
-    currency VARCHAR(40) NULL,
-    artifact_source VARCHAR(30) NULL,
-    period_scope VARCHAR(30) NOT NULL,
-    statement_scope VARCHAR(20) NOT NULL,
-    required TINYINT(1) NOT NULL,
-    instruction TEXT NOT NULL,
-    source_ref VARCHAR(80) NULL,
-    origin_json JSON NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_plan_field_key UNIQUE (plan_id, field_key),
-    CONSTRAINT chk_plan_field_strategy CHECK (
-        extraction_strategy IN ('RAW_TEXT', 'DETERMINISTIC', 'STRUCTURED')
-    ),
-    CONSTRAINT chk_plan_field_structure CHECK (
-        (extraction_strategy = 'STRUCTURED' AND structure_schema_json IS NOT NULL)
-        OR (extraction_strategy <> 'STRUCTURED' AND structure_schema_json IS NULL)
-    ),
-    CONSTRAINT fk_plan_field_plan
-        FOREIGN KEY (plan_id) REFERENCES audit_plan (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT,
-    KEY idx_plan_field_plan (plan_id),
-    KEY idx_plan_field_material (plan_id, material_key)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- 方案自己的规则。enabled 就是「这条规则要不要在这个方案里跑」：
--- 用户在方案页勾选与取消，直接改它。不再区分「系统派生 / 业务规则」。
-CREATE TABLE IF NOT EXISTS plan_rule (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    plan_id BIGINT NOT NULL,
-    rule_key VARCHAR(40) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    node_code VARCHAR(40) NOT NULL,
-    operator_code VARCHAR(40) NOT NULL,
-    enabled TINYINT(1) NOT NULL DEFAULT 1,
-    rule_json JSON NOT NULL,
-    source_ref VARCHAR(80) NULL,
-    origin_json JSON NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_plan_rule_key UNIQUE (plan_id, rule_key),
-    CONSTRAINT fk_plan_rule_plan
-        FOREIGN KEY (plan_id) REFERENCES audit_plan (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT,
-    KEY idx_plan_rule_plan (plan_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS plan_section (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    plan_id BIGINT NOT NULL,
-    section_key VARCHAR(40) NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    content_instruction TEXT NOT NULL,
-    field_keys JSON NOT NULL,
-    sort_no INT NOT NULL DEFAULT 0,
-    report_code VARCHAR(80) NULL,
-    report_name VARCHAR(255) NULL,
-    material_keys JSON NULL,
-    formats JSON NULL,
-    section_order INT NULL,
-    content_type VARCHAR(40) NULL,
-    result_sort VARCHAR(60) NULL,
-    config_status VARCHAR(30) NULL,
-    origin_json JSON NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (id),
-    CONSTRAINT uq_plan_section_key UNIQUE (plan_id, section_key),
-    CONSTRAINT fk_plan_section_plan
-        FOREIGN KEY (plan_id) REFERENCES audit_plan (id)
-        ON DELETE RESTRICT ON UPDATE RESTRICT,
-    KEY idx_plan_section_plan (plan_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- 业务写操作的持久记录：只记录已成功提交的同步写操作；后台长命令的记录在
--- background_operation，两者按编号并列查询，不互相复制。
--- 同一对象同一操作类型下幂等标识唯一：响应丢失后的重发返回原结果，绝不重复创建。
-CREATE TABLE IF NOT EXISTS operation_log (
+-- 已提交业务写操作的追加日志。后台长操作仍记录在 background_operation；
+-- 本表只记录已成功提交的同步写操作，供操作查询与幂等重放使用。
+CREATE TABLE operation_log (
     id BIGINT NOT NULL AUTO_INCREMENT,
     log_no VARCHAR(40) NOT NULL,
     object_type VARCHAR(30) NOT NULL,
@@ -787,12 +447,8 @@ CREATE TABLE IF NOT EXISTS operation_log (
     KEY idx_operation_log_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-
--- ---------------------------------------------------------------------------
--- 4. 审核任务与流程等待点摘要
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS audit_task (
+-- 审核任务：业务值文件指针与任务执行元数据。
+CREATE TABLE audit_task (
     id BIGINT NOT NULL AUTO_INCREMENT,
     task_no VARCHAR(40) NOT NULL,
     scenario_version_id BIGINT NOT NULL,
@@ -803,7 +459,7 @@ CREATE TABLE IF NOT EXISTS audit_task (
     -- 任务备注：属于可编辑的基本资料，不进入执行快照。
     remark TEXT NULL,
     status VARCHAR(40) NOT NULL,
-    current_node VARCHAR(40) NOT NULL,
+    current_node VARCHAR(80) NOT NULL,
     thread_id VARCHAR(64) NOT NULL,
     -- 本任务的执行快照：**方案的编译产物整份冻结**（材料/字段/规则/报告章节/节点/Sheet）。
     -- 执行期只读它，不读场景版本、也不读方案当前配置——方案后来怎么改都不影响已建任务。
@@ -811,6 +467,8 @@ CREATE TABLE IF NOT EXISTS audit_task (
     task_schema_json JSON NOT NULL,
     checkpoint_json JSON NULL,
     pending_review_hash CHAR(64) NULL,
+    -- CSV 中间文件的事务性指针；文件缺失不降级读取数据库数值。
+    intermediate_csv_json JSON NULL,
     -- 任务输入修订号：首次补传、替换材料和人工有效值变化都会递增。
     -- 写入口在对象锁内核对命令携带的修订号，过期命令不得覆盖新输入。
     input_revision INT NOT NULL DEFAULT 0,
@@ -841,7 +499,7 @@ CREATE TABLE IF NOT EXISTS audit_task (
 
 -- 业务流程等待点的摘要，用于业务查询与一致性交叉校验。
 -- 它不是 LangGraph 的 checkpoint，不能替代第 8 节的 checkpoints 表。
-CREATE TABLE IF NOT EXISTS workflow_checkpoint (
+CREATE TABLE workflow_checkpoint (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     thread_id VARCHAR(64) NOT NULL,
@@ -860,8 +518,8 @@ CREATE TABLE IF NOT EXISTS workflow_checkpoint (
 
 -- 报告输出节点生成的一份报告快照。报告由真实节点生成，不提供空白报告手填结论；
 -- 重新生成是新快照，历史快照保留。名称与备注可编辑，正文、三信号与快照范围不可改写。
--- origin=NODE 表示由报告节点写入；LEGACY_BACKFILL 表示增量升级时从历史节点结果按原值回填。
-CREATE TABLE IF NOT EXISTS audit_report (
+-- origin=NODE 表示由报告节点写入。
+CREATE TABLE audit_report (
     id BIGINT NOT NULL AUTO_INCREMENT,
     report_no VARCHAR(40) NOT NULL,
     audit_task_id BIGINT NOT NULL,
@@ -897,7 +555,7 @@ CREATE TABLE IF NOT EXISTS audit_report (
 -- 5. 材料位、文件上传与处理产物
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS task_document (
+CREATE TABLE task_document (
     id BIGINT NOT NULL AUTO_INCREMENT,
     document_no VARCHAR(40) NOT NULL,
     audit_task_id BIGINT NOT NULL,
@@ -918,7 +576,7 @@ CREATE TABLE IF NOT EXISTS task_document (
     KEY idx_task_document_current_upload (current_upload_id, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS document_upload (
+CREATE TABLE document_upload (
     id BIGINT NOT NULL AUTO_INCREMENT,
     upload_no VARCHAR(40) NOT NULL,
     task_document_id BIGINT NOT NULL,
@@ -953,7 +611,7 @@ CREATE TABLE IF NOT EXISTS document_upload (
     KEY idx_document_upload_sha256 (sha256)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS stored_artifact (
+CREATE TABLE stored_artifact (
     id BIGINT NOT NULL AUTO_INCREMENT,
     artifact_no VARCHAR(40) NOT NULL,
     document_upload_id BIGINT NOT NULL,
@@ -986,11 +644,11 @@ CREATE TABLE IF NOT EXISTS stored_artifact (
 -- 6. 节点执行、字段事实、规则结果、证据与人工复核
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS node_execution (
+CREATE TABLE node_execution (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     scenario_version_id BIGINT NOT NULL,
-    node_code VARCHAR(40) NOT NULL,
+    node_code VARCHAR(80) NOT NULL,
     sequence_no INT NOT NULL,
     status VARCHAR(30) NOT NULL,
     started_at DATETIME(6) NULL,
@@ -1016,7 +674,7 @@ CREATE TABLE IF NOT EXISTS node_execution (
     KEY idx_node_execution_task_status (audit_task_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS task_field_value (
+CREATE TABLE task_field_value (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     scenario_version_id BIGINT NOT NULL,
@@ -1070,25 +728,13 @@ CREATE TABLE IF NOT EXISTS task_field_value (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ---------------------------------------------------------------------------
--- 6b. 统一事实表：字段抽取事实与计算派生事实
---
--- 为什么需要它：task_field_value 的唯一范围是
--- (任务, 字段, 材料位, 上传版本, 版本号)，它表达不了财报场景的三个必要维度——
--- **期间**（本期/上期/期初/期末）、**报表口径**（合并/母公司）与**主体范围**。
--- 同一个「营业收入」在本期与上期是两个不同的数，在 task_field_value 里无处安放。
---
--- 与 task_field_value 的关系：两者并存，不是替换。task_field_value 继续承载
--- 合同审核的字段事实与其不可变版本、证据关联；task_fact 承载财报场景需要
--- 多维口径的事实。合同审核的既有读取路径一行都不改。
---
--- 事实不可变：重跑新增 revision_no 并置 is_current，旧行保留为历史。
--- 同一 (任务, 事实编号, 期间, 报表口径, 主体范围) 最多一条当前事实，
--- 由生成列唯一键在数据库层保证——与 task_field_value 同一手法。
---
--- RAG 只保存证据、原文与检索信息，**不是** decimal_value 的权威来源。
+-- 6b. 场景字段及计算结果的事实索引与查询投影
+-- 业务值的执行读取以任务 CSV 为准；本表仍服务身份、输入口径、依赖及证据关联查询。
+-- 期间、报表口径和主体范围来自当前场景配置，不预设财报或合同场景。
+-- 重跑使用 revision_no 区分记录；同一作用域只有一个当前事实。
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS task_fact (
+CREATE TABLE task_fact (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     scenario_version_id BIGINT NOT NULL,
@@ -1159,14 +805,14 @@ CREATE TABLE IF NOT EXISTS task_fact (
     KEY idx_task_fact_rule (audit_task_id, calculation_rule_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS rule_result (
+CREATE TABLE rule_result (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     node_execution_id BIGINT NOT NULL,
-    -- rule_key 是历史规则身份；新任务的规则身份在 rule_code。
+    -- rule_key 保留历史规则身份，计算结果按最多 80 字符的业务 rule_code 写入此列。
     -- 唯一键仍建在 rule_key 上：历史任务按它去重，新任务写入时 rule_key 与
     -- rule_code 取同一个业务编号，因此唯一性口径不变。
-    rule_key VARCHAR(40) NOT NULL,
+    rule_key VARCHAR(80) NOT NULL,
     -- 业务规则编号。历史结果为空（当时没有这个口径），新结果必须非空。
     rule_code VARCHAR(80) NULL,
     legacy_rule_key VARCHAR(40) NULL,
@@ -1191,7 +837,7 @@ CREATE TABLE IF NOT EXISTS rule_result (
     KEY idx_rule_result_task_code (audit_task_id, rule_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS evidence (
+CREATE TABLE evidence (
     id BIGINT NOT NULL AUTO_INCREMENT,
     evidence_no VARCHAR(40) NOT NULL,
     audit_task_id BIGINT NOT NULL,
@@ -1244,7 +890,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     KEY idx_evidence_field_value (field_value_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS manual_review (
+CREATE TABLE manual_review (
     id BIGINT NOT NULL AUTO_INCREMENT,
     review_no VARCHAR(40) NOT NULL,
     audit_task_id BIGINT NOT NULL,
@@ -1294,7 +940,7 @@ CREATE TABLE IF NOT EXISTS manual_review (
 -- 复核草稿：未提交的复核答案按“待办版本”持久化暂存。
 -- pending_hash 是保存草稿时任务的待办版本；读取只返回与当前待办版本一致的草稿，
 -- 旧草稿不会套用到变化后的待办；提交（正式裁决）仍走后台命令。
-CREATE TABLE IF NOT EXISTS review_draft (
+CREATE TABLE review_draft (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     review_no VARCHAR(40) NOT NULL,
@@ -1336,7 +982,7 @@ CREATE TABLE IF NOT EXISTS review_draft (
 -- 工具目录版本，否则「这个数是按哪一版输入算出来的」无法回答。
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS agent_tool_call (
+CREATE TABLE agent_tool_call (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NULL,
     -- 规则评估批次：一次评估内的事实集合是冻结的，同一批次的调用共享快照身份。
@@ -1403,8 +1049,6 @@ CREATE TABLE IF NOT EXISTS agent_tool_call (
 -- 2. 终态（SUCCEEDED / FAILED）一经形成不允许改为任何其他状态：否则
 --    「同一个 tool_call_id 不重复执行」的保证会被一次状态回退绕过。
 --
--- 先删后建：本文件要能重复执行，同名触发器必须先清理（DROP IF EXISTS 不报错）。
-DROP TRIGGER IF EXISTS trg_agent_tool_call_identity_immutable;
 DELIMITER $$
 CREATE TRIGGER trg_agent_tool_call_identity_immutable
 BEFORE UPDATE ON agent_tool_call
@@ -1448,7 +1092,7 @@ DELIMITER ;
 -- `snapshot_hash` 由内容算出（含事实与材料位身份），不由人维护。
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS evaluation_snapshot (
+CREATE TABLE evaluation_snapshot (
     id BIGINT NOT NULL AUTO_INCREMENT,
     -- 可读引用，形如 facts:<条数>:<短哈希>。唯一，恢复按它读回冻结内容。
     snapshot_ref VARCHAR(120) NOT NULL,
@@ -1483,7 +1127,6 @@ CREATE TABLE IF NOT EXISTS evaluation_snapshot (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 冻结快照的内容不可改写：改写它等于让已经据此执行的工具结果无从解释。
-DROP TRIGGER IF EXISTS trg_evaluation_snapshot_immutable;
 DELIMITER $$
 CREATE TRIGGER trg_evaluation_snapshot_immutable
 BEFORE UPDATE ON evaluation_snapshot
@@ -1509,79 +1152,35 @@ DELIMITER ;
 
 -- ---------------------------------------------------------------------------
 -- 7. 延迟添加的复合外键
---
--- 这两条外键的两端互相引用（task_document ↔ document_upload、task_field_value ↔ evidence），
--- 无法在建表时同时声明，只能在两张表都建好之后补加。
--- 为了让本文件可以重复执行，这里先用 information_schema 判断约束是否已存在：
--- 已存在时执行空语句 DO 0，不会重复添加，也不会报错。
--- （MySQL 没有 DROP FOREIGN KEY IF EXISTS，所以不能直接写成先删后加。）
+-- 两端互相引用，等相关表都创建后直接补充；本文件只在空库执行。
+-- ---------------------------------------------------------------------------
 
--- 让 current_upload_id 只能指向本材料位自己的上传版本。
-SET @fk_exists := (
-    SELECT COUNT(*) FROM information_schema.table_constraints
-    WHERE constraint_schema = DATABASE()
-      AND table_name = 'task_document'
-      AND constraint_name = 'fk_task_document_current_upload'
-);
-SET @fk_sql := IF(@fk_exists = 0,
-    'ALTER TABLE task_document ADD CONSTRAINT fk_task_document_current_upload FOREIGN KEY (current_upload_id, id) REFERENCES document_upload (id, task_document_id) ON DELETE RESTRICT ON UPDATE RESTRICT',
-    'DO 0');
-PREPARE fk_stmt FROM @fk_sql;
-EXECUTE fk_stmt;
-DEALLOCATE PREPARE fk_stmt;
+ALTER TABLE task_document
+    ADD CONSTRAINT fk_task_document_current_upload
+    FOREIGN KEY (current_upload_id, id) REFERENCES document_upload (id, task_document_id)
+    ON DELETE RESTRICT ON UPDATE RESTRICT;
 
--- 字段事实指向证据的指针，在 evidence 表建好之后补加。
-SET @fk_exists := (
-    SELECT COUNT(*) FROM information_schema.table_constraints
-    WHERE constraint_schema = DATABASE()
-      AND table_name = 'task_field_value'
-      AND constraint_name = 'fk_task_field_value_evidence_task'
-);
-SET @fk_sql := IF(@fk_exists = 0,
-    'ALTER TABLE task_field_value ADD CONSTRAINT fk_task_field_value_evidence_task FOREIGN KEY (evidence_id, audit_task_id) REFERENCES evidence (id, audit_task_id) ON DELETE RESTRICT ON UPDATE RESTRICT',
-    'DO 0');
-PREPARE fk_stmt FROM @fk_sql;
-EXECUTE fk_stmt;
-DEALLOCATE PREPARE fk_stmt;
+ALTER TABLE task_field_value
+    ADD CONSTRAINT fk_task_field_value_evidence_task
+    FOREIGN KEY (evidence_id, audit_task_id) REFERENCES evidence (id, audit_task_id)
+    ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 
 -- ---------------------------------------------------------------------------
--- 8. LangGraph checkpoint 表
---
--- 这些表由 langgraph-checkpoint-mysql 3.0.0 的 PyMySQLSaver 使用，
--- 与业务表共用同一个 baoli_v4 库。
---
--- 下面的建表语句是该包 MIGRATIONS 列表（langgraph/checkpoint/mysql/base.py）逐条执行完
--- 之后的**最终结构**，不是迁移过程的中间态：
---   - checkpoint_ns 最终为 VARCHAR(2000)：迁移先扩到 255，再扩到 2000。
---   - checkpoint_ns_hash 最终是普通 BINARY(16) 列（不再是 STORED 生成列）：
---     该包为兼容 MariaDB 在后续迁移里把它改成普通列，由 saver 的 SQL 显式写入
---     UNHEX(MD5(...))。它参与主键，因此必须是 NOT NULL。
---   - 主键与索引为该包全部迁移执行后的最终形态。
---
--- checkpoint_migrations 记录已经应用过的迁移版本。这里一次性写入 0..21（共 22 条，
--- 与该包的 MIGRATIONS 条数一致），表示结构已经是最新：
--- 这样即使有人误调用 saver.setup()，它读到的版本号已是最大值，不会重复执行迁移。
--- 应用自身不会调用 setup()，也不执行任何 DDL。
+-- 8. LangGraph checkpoint 运行状态
+-- PyMySQLSaver 使用下面三张表进行 interrupt/resume。
+-- 结构来自 langgraph-checkpoint-mysql 3.0.0 的最终 DDL，直接创建，不使用迁移记录表。
+-- 应用不调用 saver.setup()；实际列与索引由启动结构检查核对。
+-- checkpoint_ns_hash 由 saver 的 SQL 显式写入 UNHEX(MD5(checkpoint_ns))。
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS checkpoint_migrations (
-    v INTEGER PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS checkpoints (
+CREATE TABLE checkpoints (
     thread_id VARCHAR(150) NOT NULL,
     checkpoint_ns VARCHAR(2000) NOT NULL DEFAULT '',
     checkpoint_id VARCHAR(150) NOT NULL,
     parent_checkpoint_id VARCHAR(150) NULL,
     type VARCHAR(150) NULL,
     checkpoint JSON NOT NULL,
-    -- 上游迁移写的是 `metadata JSON NOT NULL DEFAULT ('{}')`；JSON 列的表达式默认值
-    -- 是 MySQL 8.0.13 才支持的特性，8.0.11/8.0.12 会直接报
-    -- "BLOB, TEXT, GEOMETRY or JSON column 'metadata' can't have a default value"，
-    -- 导致 checkpoints 建表失败、后续两条 checkpoint 表也建不出来。
-    -- saver 的 UPSERT_CHECKPOINTS_SQL 每次都会显式写入 metadata，从不依赖该默认值，
-    -- 因此这里去掉默认值，保持与上游相同的列定义与 NOT NULL 约束。
     metadata JSON NOT NULL,
     checkpoint_ns_hash BINARY(16) NOT NULL,
     PRIMARY KEY (thread_id, checkpoint_ns_hash, checkpoint_id),
@@ -1589,7 +1188,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     KEY checkpoints_checkpoint_id_idx (checkpoint_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+CREATE TABLE checkpoint_blobs (
     thread_id VARCHAR(150) NOT NULL,
     checkpoint_ns VARCHAR(2000) NOT NULL DEFAULT '',
     channel VARCHAR(150) NOT NULL,
@@ -1601,7 +1200,7 @@ CREATE TABLE IF NOT EXISTS checkpoint_blobs (
     KEY checkpoint_blobs_thread_id_idx (thread_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS checkpoint_writes (
+CREATE TABLE checkpoint_writes (
     thread_id VARCHAR(150) NOT NULL,
     checkpoint_ns VARCHAR(2000) NOT NULL DEFAULT '',
     checkpoint_id VARCHAR(150) NOT NULL,
@@ -1616,108 +1215,66 @@ CREATE TABLE IF NOT EXISTS checkpoint_writes (
     KEY checkpoint_writes_thread_id_idx (thread_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 记录已经应用过的迁移版本。这里一次性写入 0..21（共 22 条，与该包的 MIGRATIONS 条数一致），
--- 表示结构已经是最新：这样即使有人误调用 saver.setup()，它读到的版本号已是最大值，
--- 不会重复执行迁移。应用自身不会调用 setup()，也不执行任何 DDL。
--- ON DUPLICATE KEY UPDATE v = v 是空更新：重复执行时已存在的版本行保持不变，
--- 既不会因主键冲突中断，也不会掩盖其它类型的错误。
-INSERT INTO checkpoint_migrations (v) VALUES
-    (0), (1), (2), (3), (4), (5), (6), (7), (8), (9), (10),
-    (11), (12), (13), (14), (15), (16), (17), (18), (19), (20), (21)
-ON DUPLICATE KEY UPDATE v = v;
-
 
 -- ---------------------------------------------------------------------------
--- 9. 不可变性与快照保护触发器
---
--- 已发布模板版本及其关系投影、任务快照、上传文件出处、字段事实版本与人工复核的
--- 系统原判断都是只能追加、不能被改写的记录。
---
--- 执行顺序（重要）：本版触发器使用带版本后缀的新名字（_r2）。
---   1) 先删除同名的新版触发器（只影响本版自身，旧名字的保护仍在生效）；
---   2) 创建新版触发器——此时保护已经覆盖，不存在"先删后建"的空窗期；
---   3) 最后才删除旧名字的触发器。
--- 因此重复执行本文件不会出现"旧触发器已被删除、新触发器还没建好"的窗口，
--- 也不会因为重复执行而报错（每一步都是 DROP IF EXISTS + CREATE）。
--- MySQL 允许同一事件/时机存在多个触发器，第 2 步与第 3 步之间的短暂共存只是
--- 同一条件的重复保护：先触发的那个 SIGNAL 会中断语句，行为不变。
+-- 9. 业务记录不可变性触发器
+-- 已发布场景与任务执行配置、上传出处、事实版本和人工复核原判断的现有约束。
+-- 这些触发器直接创建，不保留旧名称或触发器升级顺序。
 -- ---------------------------------------------------------------------------
-
--- 先清理本版触发器（旧名字的保护此时仍然存在）。
-DROP TRIGGER IF EXISTS trg_scenario_version_no_update_r2;
-DROP TRIGGER IF EXISTS trg_scenario_version_no_delete_r2;
-DROP TRIGGER IF EXISTS trg_scenario_material_no_update_r2;
-DROP TRIGGER IF EXISTS trg_scenario_material_no_delete_r2;
-DROP TRIGGER IF EXISTS trg_scenario_node_no_update_r2;
-DROP TRIGGER IF EXISTS trg_scenario_node_no_delete_r2;
-DROP TRIGGER IF EXISTS trg_scenario_rule_no_update_r2;
-DROP TRIGGER IF EXISTS trg_scenario_rule_no_delete_r2;
--- 任务快照触发器升到 _r3（新增方案绑定 plan_id 不可变）；旧 _r2 在本节末尾才退休，
--- 先建新版再删旧名，不存在保护空窗。
-DROP TRIGGER IF EXISTS trg_audit_task_snapshot_immutable_r3;
-DROP TRIGGER IF EXISTS trg_task_document_snapshot_immutable_r2;
-DROP TRIGGER IF EXISTS trg_document_upload_identity_immutable_r2;
-DROP TRIGGER IF EXISTS trg_manual_review_system_judgment_immutable_r2;
-DROP TRIGGER IF EXISTS trg_task_field_value_immutable_r2;
--- 报告快照的不可变保护；操作日志只追加。
-DROP TRIGGER IF EXISTS trg_audit_report_content_immutable_r2;
-DROP TRIGGER IF EXISTS trg_operation_log_immutable_r2;
--- 统一事实表与字段事实表同一口径：事实不可变，重跑新增版本而不是原地改写。
-DROP TRIGGER IF EXISTS trg_task_fact_immutable_r2;
 
 DELIMITER $$
 
 -- A version and its relational projections are append-only after publication.
-CREATE TRIGGER trg_scenario_version_no_update_r2
+CREATE TRIGGER trg_scenario_version_no_update
 BEFORE UPDATE ON scenario_version
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'scenario version is immutable';
 END$$
 
-CREATE TRIGGER trg_scenario_version_no_delete_r2
+CREATE TRIGGER trg_scenario_version_no_delete
 BEFORE DELETE ON scenario_version
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'published scenario version cannot be deleted';
 END$$
 
-CREATE TRIGGER trg_scenario_material_no_update_r2
+CREATE TRIGGER trg_scenario_material_no_update
 BEFORE UPDATE ON scenario_material
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'published scenario material is immutable';
 END$$
 
-CREATE TRIGGER trg_scenario_material_no_delete_r2
+CREATE TRIGGER trg_scenario_material_no_delete
 BEFORE DELETE ON scenario_material
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'published scenario material cannot be deleted';
 END$$
 
-CREATE TRIGGER trg_scenario_node_no_update_r2
+CREATE TRIGGER trg_scenario_node_no_update
 BEFORE UPDATE ON scenario_node
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'published scenario node is immutable';
 END$$
 
-CREATE TRIGGER trg_scenario_node_no_delete_r2
+CREATE TRIGGER trg_scenario_node_no_delete
 BEFORE DELETE ON scenario_node
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'published scenario node cannot be deleted';
 END$$
 
-CREATE TRIGGER trg_scenario_rule_no_update_r2
+CREATE TRIGGER trg_scenario_rule_no_update
 BEFORE UPDATE ON scenario_rule
 FOR EACH ROW
 BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'published scenario rule is immutable';
 END$$
 
-CREATE TRIGGER trg_scenario_rule_no_delete_r2
+CREATE TRIGGER trg_scenario_rule_no_delete
 BEFORE DELETE ON scenario_rule
 FOR EACH ROW
 BEGIN
@@ -1725,9 +1282,9 @@ BEGIN
 END$$
 
 -- Task execution may advance status and checkpoints, but never replace its immutable snapshot.
--- _r3：方案绑定（plan_id）同样属于执行快照，创建后不可改写；
+-- 方案绑定（plan_id）同样属于执行配置，创建后不可改写；
 -- 旧任务（无方案关联）保持 NULL，恢复/删除只动 deleted_at。
-CREATE TRIGGER trg_audit_task_snapshot_immutable_r3
+CREATE TRIGGER trg_audit_task_snapshot_immutable
 BEFORE UPDATE ON audit_task
 FOR EACH ROW
 BEGIN
@@ -1745,7 +1302,7 @@ BEGIN
 END$$
 
 -- A task material slot retains the material identity copied from its published scenario.
-CREATE TRIGGER trg_task_document_snapshot_immutable_r2
+CREATE TRIGGER trg_task_document_snapshot_immutable
 BEFORE UPDATE ON task_document
 FOR EACH ROW
 BEGIN
@@ -1759,7 +1316,7 @@ BEGIN
 END$$
 
 -- Superseding a file changes only its lifecycle flags; its physical-file provenance remains fixed.
-CREATE TRIGGER trg_document_upload_identity_immutable_r2
+CREATE TRIGGER trg_document_upload_identity_immutable
 BEFORE UPDATE ON document_upload
 FOR EACH ROW
 BEGIN
@@ -1776,7 +1333,7 @@ END$$
 
 -- 字段事实版本不可变：重跑或人工纠错只能新增一版并把旧的置为非当前，
 -- 不允许改写任何一版的值、状态、身份或产生来源。允许变化的只有 is_current 与证据指针。
-CREATE TRIGGER trg_task_field_value_immutable_r2
+CREATE TRIGGER trg_task_field_value_immutable
 BEFORE UPDATE ON task_field_value
 FOR EACH ROW
 BEGIN
@@ -1798,7 +1355,7 @@ END$$
 -- 统一事实（task_fact）与字段事实同一口径：重跑新增一版并把旧的置为非当前，
 -- 不允许改写任何一版的身份、取值、口径、输入快照或计算状态。
 -- 允许变化的只有 is_current。生成列 current_fact_scope 由 is_current 派生，不必比较。
-CREATE TRIGGER trg_task_fact_immutable_r2
+CREATE TRIGGER trg_task_fact_immutable
 BEFORE UPDATE ON task_fact
 FOR EACH ROW
 BEGIN
@@ -1829,7 +1386,7 @@ BEGIN
 END$$
 
 -- A reviewer may add a decision and note, but must not replace the system judgment.
-CREATE TRIGGER trg_manual_review_system_judgment_immutable_r2
+CREATE TRIGGER trg_manual_review_system_judgment_immutable
 BEFORE UPDATE ON manual_review
 FOR EACH ROW
 BEGIN
@@ -1839,7 +1396,7 @@ BEGIN
 END$$
 
 -- 报告快照：正文、三信号与范围快照不可改写；只允许改备注、名称与归档状态。
-CREATE TRIGGER trg_audit_report_content_immutable_r2
+CREATE TRIGGER trg_audit_report_content_immutable
 BEFORE UPDATE ON audit_report
 FOR EACH ROW
 BEGIN
@@ -1859,7 +1416,7 @@ BEGIN
 END$$
 
 -- 操作日志只追加：不允许修改已写入的日志行（防止事后篡改操作记录）。
-CREATE TRIGGER trg_operation_log_immutable_r2
+CREATE TRIGGER trg_operation_log_immutable
 BEFORE UPDATE ON operation_log
 FOR EACH ROW
 BEGIN
@@ -1867,23 +1424,6 @@ BEGIN
 END$$
 
 DELIMITER ;
-
--- 新版触发器全部就位之后，才让旧名字的触发器退休。
--- 这一步在任何情况下都不会让保护出现空窗：上面的 _r2/_r3 触发器已经生效。
-DROP TRIGGER IF EXISTS trg_scenario_version_no_update;
-DROP TRIGGER IF EXISTS trg_scenario_version_no_delete;
-DROP TRIGGER IF EXISTS trg_scenario_material_no_update;
-DROP TRIGGER IF EXISTS trg_scenario_material_no_delete;
-DROP TRIGGER IF EXISTS trg_scenario_node_no_update;
-DROP TRIGGER IF EXISTS trg_scenario_node_no_delete;
-DROP TRIGGER IF EXISTS trg_scenario_rule_no_update;
-DROP TRIGGER IF EXISTS trg_scenario_rule_no_delete;
-DROP TRIGGER IF EXISTS trg_audit_task_snapshot_immutable_r2;
-DROP TRIGGER IF EXISTS trg_audit_task_snapshot_immutable;
-DROP TRIGGER IF EXISTS trg_task_document_snapshot_immutable;
-DROP TRIGGER IF EXISTS trg_document_upload_identity_immutable;
-DROP TRIGGER IF EXISTS trg_manual_review_system_judgment_immutable;
-
 
 -- ---------------------------------------------------------------------------
 -- 9a. 审核任务材料证据索引与检索（本地 Embedding + 任务范围检索）
@@ -1893,7 +1433,7 @@ DROP TRIGGER IF EXISTS trg_manual_review_system_judgment_immutable;
 -- ---------------------------------------------------------------------------
 
 -- 一个上传版本某个产物的一份索引版本。模型、向量维度或切分方式变化时必须新建版本。
-CREATE TABLE IF NOT EXISTS evidence_index_version (
+CREATE TABLE evidence_index_version (
     id BIGINT NOT NULL AUTO_INCREMENT,
     index_no VARCHAR(40) NOT NULL,
     audit_task_id BIGINT NOT NULL,
@@ -1934,7 +1474,7 @@ CREATE TABLE IF NOT EXISTS evidence_index_version (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 可检索分块：原文、真实位置与向量。没有页码时记录原文行/字符区间并标注缺失。
-CREATE TABLE IF NOT EXISTS evidence_chunk (
+CREATE TABLE evidence_chunk (
     id BIGINT NOT NULL AUTO_INCREMENT,
     audit_task_id BIGINT NOT NULL,
     index_version_id BIGINT NOT NULL,
@@ -1967,13 +1507,13 @@ CREATE TABLE IF NOT EXISTS evidence_chunk (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 每次任务内检索的完整记录：查询内容、限定范围、模型/索引版本、候选与采用结果。
-CREATE TABLE IF NOT EXISTS evidence_retrieval (
+CREATE TABLE evidence_retrieval (
     id BIGINT NOT NULL AUTO_INCREMENT,
     retrieval_no VARCHAR(40) NOT NULL,
     audit_task_id BIGINT NOT NULL,
     scenario_version_id BIGINT NOT NULL,
     rule_key VARCHAR(40) NULL,
-    node_code VARCHAR(40) NULL,
+    node_code VARCHAR(80) NULL,
     query_text TEXT NOT NULL,
     scope_json JSON NOT NULL,
     model_id VARCHAR(160) NOT NULL,
@@ -2014,8 +1554,6 @@ CREATE TABLE IF NOT EXISTS evidence_retrieval (
 -- 10. 执行结果确认
 --
 -- 预期：不返回任何行。返回的每一行表示该表没有被创建出来。
--- 本文件使用 CREATE TABLE IF NOT EXISTS，已存在的表会被跳过，
--- 所以重复执行时这里同样只反映"缺哪些表"。
 -- 注意：本查询只检查表是否存在，不校验已存在表的结构；结构校验由应用启动时的
 -- runtime/schema_check.py 只读完成，它发现问题会拒绝启动而不是自动修表。
 -- ---------------------------------------------------------------------------
@@ -2044,27 +1582,7 @@ SELECT 'scenario_rule'
     UNION ALL
 SELECT 'scenario_draft'
     UNION ALL
-SELECT 'scenario_draft_node'
-    UNION ALL
-SELECT 'scenario_draft_sheet'
-    UNION ALL
-SELECT 'scenario_draft_material'
-    UNION ALL
-SELECT 'scenario_draft_field'
-    UNION ALL
-SELECT 'scenario_draft_rule'
-    UNION ALL
-SELECT 'scenario_draft_section'
-    UNION ALL
 SELECT 'audit_plan'
-    UNION ALL
-SELECT 'plan_material'
-    UNION ALL
-SELECT 'plan_field'
-    UNION ALL
-SELECT 'plan_rule'
-    UNION ALL
-SELECT 'plan_section'
     UNION ALL
 SELECT 'audit_task'
     UNION ALL
@@ -2103,8 +1621,6 @@ SELECT 'manual_review'
 SELECT 'agent_tool_call'
     UNION ALL
 SELECT 'evaluation_snapshot'
-    UNION ALL
-SELECT 'checkpoint_migrations'
     UNION ALL
 SELECT 'checkpoints'
     UNION ALL

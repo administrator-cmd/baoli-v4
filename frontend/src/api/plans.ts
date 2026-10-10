@@ -39,11 +39,11 @@ export function listPlanOptions(scenarioCode?: string): Promise<{ request_id: st
 }
 
 /**
- * 创建方案：把那一版场景的配置**整份复制**成方案自己的配置，并立即编译一次。
+ * 创建方案：把那一版场景的配置整份复制成方案自己的配置，并立即编译一次。
  *
  * `scenario_version_no` 必须是页面看到的那一版：服务端在事务内核对它仍是允许创建方案的
  * 已发布版本，不一致时返回 `PLAN_VERSION_CHANGED`（刷新后重试），不会静默改取最新版。
- * **不再提交规则选择** —— 创建时整份复制，规则在方案里逐条勾。
+ * 不再提交规则选择 —— 创建时整份复制，规则在方案里逐条勾。
  */
 export function createPlan(payload: {
   plan_name: string;

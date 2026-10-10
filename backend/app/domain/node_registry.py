@@ -1,18 +1,11 @@
 """审核节点注册表：能力类型 → 节点实现。
 
-本模块统一维护**能力类型 → handler** 的映射，`flow._dispatch` 只查注册表。
+handler 由调用方注入的原因：节点实现在 services 层，而 manifest 编译也要知道
+「有哪些节点类型」（在 domain 层）。让 domain 反向依赖 services 会成环，因此本模块
+只声明注册接口与校验，真实 handler 在应用启动时由 `services.audit` 注册进来，
+未注册的能力类型在分发时明确报错。
 
-为什么 handler 由调用方注入
---------------------------
-节点实现（`_material_check`、`_execute_rules` …）在 `services` 层，
-而 `manifest` 编译也要知道「有哪些节点类型」（在 `domain` 层）。
-让 domain 反向依赖 services 会形成循环，因此：
-
-- 本模块只声明**注册接口与校验**，不导入任何 services；
-- 真实 handler 在应用启动时由 `services.audit` 注册进来；
-- 未注册的能力类型在分发时明确报错，不落到别的分支、也不静默跳过。
-
-这与 `capabilities.py` 的分工一致：那里声明「能力是什么」，这里声明「谁来执行」。
+与 `capabilities.py` 的分工一致：那里声明「能力是什么」，这里声明「谁来执行」。
 """
 
 from __future__ import annotations
@@ -22,7 +15,7 @@ from typing import Any, Protocol
 from ..common.exceptions import BusinessError
 
 
-# 节点能力类型。它描述**这个节点做什么**，与节点实例码（`node_code`）是两件事：
+# 节点能力类型。它描述这个节点做什么，与节点实例码（`node_code`）是两件事：
 # 同一能力类型在场景里可以有多个实例（例如两张报表各有一个字段抽取节点）。
 NODE_TYPE_MATERIAL_CHECK = "MATERIAL_CHECK"
 NODE_TYPE_DOCUMENT_PREPARE = "DOCUMENT_PREPARE"
@@ -47,12 +40,12 @@ NODE_TYPE_LABELS: dict[str, str] = {
     NODE_TYPE_REPORT_OUTPUT: "报告输出",
 }
 
-# 会走「规则评估 Agent」的节点能力类型。这是**唯一**的声明处：
+# 会走「规则评估 Agent」的节点能力类型。这是唯一的声明处：
 # `services.audit.flow` 据此决定执行模式，`domain.tool_catalog` 据此判定一个工具
 # 是否属于「Agent 可选择」——两处必须同源，否则会出现「目录说模型能调、
 # 实际没有调用入口」这种前后不一致。
 #
-# 只有**按规则执行**的校验节点在范围内。材料检查、文件处理、字段抽取、计算与
+# 只有按规则执行的校验节点在范围内。材料检查、文件处理、字段抽取、计算与
 # 报告输出仍由各自的确定性实现完成：它们的能力（抽取、渲染、外部服务调用）
 # 不是 Agent 可选工具，也不能被模型改写成别的方式。把它们并进来需要先完成
 # 副作用、输入产物、恢复与权限的完整设计，不能只扩大这份集合。
@@ -70,7 +63,7 @@ class NodeHandler(Protocol):
 
     签名与既有实现一致：接收数据库会话、任务、已发布 manifest 与本次执行记录，
     返回一个可 JSON 化的结果摘要。返回值里 `blocked` 为真表示节点被阻断
-    （例如必传材料缺失），`skipped` 为真表示本模板未配置这类检查——
+    （例如必传材料缺失），`skipped` 为真表示当前场景未配置这类检查——
     两者都不等于通过。
     """
 
@@ -89,7 +82,7 @@ _HANDLERS: dict[str, NodeHandler] = {}
 def register_node_handler(node_type: str, handler: NodeHandler) -> None:
     """注册一个节点实现。
 
-    重复注册**同一种能力类型**时明确报错：静默覆盖会让后注册的实现生效，
+    重复注册同一种能力类型时明确报错：静默覆盖会让后注册的实现生效，
     而注册顺序在导入顺序变化时会变——那是极难定位的问题。
     """
     if node_type not in NODE_TYPE_LABELS:
@@ -127,14 +120,12 @@ def node_type_label(node_type: str) -> str:
 
 
 def legacy_node_type_of(node_code: str) -> str | None:
-    """旧 manifest 缺 `node_type` 时的**确定性**迁移结果。
+    """旧 manifest 缺 `node_type` 时的确定性迁移结果。
 
-    旧格式里实例码本身就是能力类型（`node_code == node_type`），因此当且仅当
-    `node_code` 是一个已知能力类型时，迁移是唯一确定的：返回它。
-
-    自定义实例码（例如 `INT_A`）在旧格式里不存在——它的 `node_type` 一定曾被显式写出过。
-    此时无法确定它属于哪一类节点，返回 None，由调用方**明确拒绝**把这份配置带进新版本：
-    用 `node_type or node_code` 静默填一个自定义实例码，会把一个协议里不存在的
-    「能力类型」写进新版本，发布校验只能在更晚的环节报出一个看不出原因的错误。
+    旧格式里实例码本身就是能力类型，因此当且仅当 `node_code` 是已知能力类型时迁移
+    唯一确定：返回它。自定义实例码（如 `INT_A`）在旧格式里不存在——它的 `node_type`
+    一定曾被显式写出过，此时无法确定归属，返回 None 由调用方明确拒绝：
+    静默填一个自定义实例码会把协议里不存在的能力类型写进新版本，发布校验只能在更晚的
+    环节报出一个看不出原因的错误。
     """
     return node_code if node_code in NODE_TYPE_LABELS else None

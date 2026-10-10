@@ -15,8 +15,7 @@ from .retrieval import (
 )
 from .reviews import ReviewDraftResponse
 from .scenarios import (
-    DraftDisabledSourceRowActivationPreviewItem,
-    DraftDisabledSourceRowActivationPreviewResponse,
+    DraftSourceActivationPreviewItem,
     ScenarioDetailResponse,
     ScenarioDraftViewResponse,
     ScenarioPublishResponse,
@@ -71,8 +70,7 @@ __all__ = [
     "RetrievalResponse",
     "TaskEvidenceIndexResponse",
     "ReviewDraftResponse",
-    "DraftDisabledSourceRowActivationPreviewItem",
-    "DraftDisabledSourceRowActivationPreviewResponse",
+    "DraftSourceActivationPreviewItem",
     "ScenarioDetailResponse",
     "ScenarioDraftViewResponse",
     "ScenarioPublishResponse",

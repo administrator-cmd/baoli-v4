@@ -1,14 +1,13 @@
 """审核链路的共享取值口径与读取辅助。
 
-这里只放**被多个审核模块共同使用**的词汇与读取辅助，不含任何业务分支：
-
-- 材料类型状态的取值与归一，见 `domain.audit_vocab`；
-- 日期与金额原文的确定性标准化口径——自动抽取、人工裁决、主动纠错三条路径必须同口径，
-  否则同一个值在三条路径上会得到不同的规范值；
-- 规则的适用条件判定：适用条件自己声明材料范围时以它为准，否则退回规则的材料范围；
-- 证据引文的比对文本（抵消 OCR 排版差异，仍按连续子串判定，不做相似度匹配）。
+只放被多个审核模块共同使用的词汇与读取辅助，不含业务分支：材料类型状态的取值与归一
+（见 `domain.audit_vocab`）；日期与金额原文的确定性标准化口径——自动抽取、人工裁决、主动纠错
+三条路径必须同口径，否则同一个值会得到不同的规范值；规则的适用条件判定（适用条件自己声明
+材料范围时以它为准，否则退回规则的材料范围）；证据引文的比对文本。
 
 这些函数只读取任务与场景的当前状态，不写库、不提交事务。"""
+
+from .. import task_csv_service
 
 import json
 import re
@@ -39,15 +38,9 @@ BASIS_TYPE_LABELS = {
     "UPLOAD_RECORD": "上传记录",
 }
 
-LOCATOR_STATUS_LABELS = {
-    "VERIFIED": "位置已核对",
-    "UNVERIFIED": "位置未核实",
-    "UNLOCATABLE": "位置无法定位",
-}
-
 QUOTE_CHECK_LABELS = {
     "FOUND": "已在所属材料中找到该原文",
-    "VALUE_FOUND": "已在处理产物中找到字段值，但引文原文无法直接定位",
+    "VALUE_FOUND": "已在所属产物中找到字段值，但未找到完整引文",
     "NOT_FOUND": "在所属材料中找不到该原文，字段内容缺少原文依据",
     "NOT_CHECKABLE": "该产物没有可核对的原文文本，未能核对内容依据",
     "PENDING": "该证据写入时尚未按当前口径核对内容依据",
@@ -75,6 +68,7 @@ _CURRENCY_TOKENS: tuple[tuple[str, str], ...] = (
 )
 
 _AMOUNT_UNITS: tuple[str, ...] = ("亿元", "万元", "千元", "元")
+_AMOUNT_NUMBER = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 
 # 字段原值与引文的关系不能只靠整段连续子串判断：同一组主体可能在模型原值里用“、”
 # 分隔，在 OCR 引文里用“；”分隔。只对明确的列表分隔符拆分，并要求每个非空成员都
@@ -90,14 +84,21 @@ def _fullwidth_digits(value: str) -> str:
     return value.translate(table)
 
 
+def _remove_surrounding_marker(matched: re.Match[str]) -> str:
+    """两段数字之间的标记不能删除，否则会把多个片段拼成另一个数。"""
+    if re.search(r"\d", matched.string[:matched.start()]) and re.search(r"\d", matched.string[matched.end():]):
+        return matched.group(0)
+    return ""
+
+
 def _remove_token(value: str, token: str) -> tuple[str, bool]:
-    """移除金额标记；ASCII 币种缩写不区分大小写。"""
+    """移除数值周围的金额标记；ASCII 币种缩写不区分大小写。"""
     flags = re.IGNORECASE if token.isascii() else 0
-    replaced, count = re.subn(re.escape(token), "", value, flags=flags)
+    replaced, count = re.subn(re.escape(token), _remove_surrounding_marker, value, flags=flags)
     return replaced, count > 0
 
 
-def _amount_marker_details(value: Any) -> tuple[str, set[str], set[str]]:
+def _amount_marker_details(value: Any, *, unit: str | None = None) -> tuple[str, set[str], set[str]]:
     """返回去除标记后的文本，以及原文明确写出的币种和单位。"""
     text = _fullwidth_digits(str(value))
     currencies: set[str] = set()
@@ -106,11 +107,22 @@ def _amount_marker_details(value: Any) -> tuple[str, set[str], set[str]]:
         if found:
             currencies.add(currency.canonical_currency(name))
     units: set[str] = set()
-    # 长单位先移除，避免“万元”又被识别成“元”。
-    for token in _AMOUNT_UNITS:
-        text, found = _remove_token(text, token)
-        if found:
-            units.add(token)
+    declared_unit = (unit or "").strip()
+    unit_tokens = {*_AMOUNT_UNITS}
+    if declared_unit:
+        unit_tokens.add(declared_unit)
+    # 数字先作为完整词元保留，避免无量纲单位“1”被从数值“31”里移除。
+    # 单位按长度匹配，避免“万元”又被识别成“元”。
+    unit_pattern = "|".join(re.escape(token) for token in sorted(unit_tokens, key=lambda item: (-len(item), item)))
+
+    def remove_unit(matched: re.Match[str]) -> str:
+        marker = matched.group("unit")
+        if marker is None:
+            return matched.group(0)
+        units.add(next(token for token in unit_tokens if re.fullmatch(re.escape(token), marker, flags=re.IGNORECASE)))
+        return _remove_surrounding_marker(matched)
+
+    text = re.sub(r"\d+(?:[.,]\d+)*|(?P<unit>" + unit_pattern + ")", remove_unit, text, flags=re.IGNORECASE)
     return text, currencies, units
 
 
@@ -121,7 +133,7 @@ def _canonical_currency(value: str | None) -> str:
 def _parse_amount_text(value: Any, unit: str | None, currency: str | None) -> str:
     """把金额原文的明确写法解析成数值文本，口径不符时给出具体原因。
 
-    只做确定性处理：去掉千分位、空白与**字段已声明**的单位，识别原文里明确写出的
+    只做确定性处理：核对千分位、去掉外围空白与字段已声明的单位，识别原文里明确写出的
     币种标记。系统不推断单位或币种、不做汇率或单位换算——原文声明的币种/单位与
     字段声明不一致时直接报冲突，由人工确认，绝不按数值相等放行。
     """
@@ -130,7 +142,7 @@ def _parse_amount_text(value: Any, unit: str | None, currency: str | None) -> st
     text = _fullwidth_digits(str(value)).strip()
     if not text:
         raise ValueError("金额原文为空，无法标准化")
-    text, explicit_currencies, explicit_units = _amount_marker_details(text)
+    text, explicit_currencies, explicit_units = _amount_marker_details(text, unit=unit)
     declared_currency = _canonical_currency(currency)
     if explicit_currencies and not declared_currency:
         raise ValueError(
@@ -153,15 +165,34 @@ def _parse_amount_text(value: Any, unit: str | None, currency: str | None) -> st
             f"原文写明的单位为“{'、'.join(sorted(explicit_units))}”，字段声明的单位为“{declared_unit}”，"
             "系统不做单位换算，无法按同一口径标准化"
         )
-    text = text.replace(",", "").replace(" ", "").strip()
+    text = text.strip()
+    if not re.fullmatch(_AMOUNT_NUMBER, text):
+        raise ValueError(
+            f"金额原文“{str(value).strip()}”去掉单位与币种标记后不是有效数值或千分位格式，无法标准化"
+        )
+    text = text.replace(",", "")
     if text.startswith("+"):
         text = text[1:]
-    if not re.fullmatch(r"-?\d+(\.\d+)?", text):
-        raise ValueError(f"金额原文“{str(value).strip()}”去掉单位与币种标记后仍不是有效数值，无法标准化")
     decimal_value = Decimal(text)
     if not decimal_value.is_finite():
         raise ValueError("金额字段必须是有限数值")
     return format(decimal_value, "f")
+
+def _parse_decimal_text(value: Any, unit: str | None = None) -> str:
+    """普通数值只去掉明确声明的外围单位，不套金额标记或做尺度换算。"""
+    if isinstance(value, bool):
+        raise ValueError("数值字段不能使用布尔值")
+    text = _fullwidth_digits(str(value)).strip()
+    marker = (unit or "").strip()
+    if marker and not re.fullmatch(_AMOUNT_NUMBER, marker):
+        if text.endswith(marker):
+            text = text[:-len(marker)].strip()
+        elif text.startswith(marker):
+            text = text[len(marker):].strip()
+    if not re.fullmatch(_AMOUNT_NUMBER, text):
+        raise ValueError("数值原文不是有效数值或千分位格式，不能标准化")
+    return format(Decimal(text.replace(",", "")), "f")
+
 
 def _parse_date_text(value: Any) -> str:
     """把日期原文的明确写法解析成 ISO 日期，写法不受支持时说明支持范围。"""
@@ -213,8 +244,10 @@ def _normalize_field_value(
         if not isinstance(value, str) or not value.strip():
             raise ValueError("大写金额字段必须提供非空文本")
         return value.strip()
-    if value_type == "DECIMAL":
+    if value_type == "AMOUNT":
         return _parse_amount_text(value, unit, currency)
+    if value_type == "DECIMAL":
+        return _parse_decimal_text(value, unit)
     if value_type == "DATE":
         return _parse_date_text(value)
     if value_type == "BOOLEAN":
@@ -259,7 +292,7 @@ def _extraction_fact_value(field: dict[str, Any], result: Any) -> tuple[str, str
     if status == "NOT_PRESENT":
         return status, None, None, "材料中没有抽取到该字段"
     if status == "EXTRACTION_FAILED":
-        return status, raw_value, None, "字段抽取服务未能完成该字段的抽取"
+        return status, raw_value, None, result.failure_reason or "字段抽取服务未能完成该字段的抽取"
     if not _has_complete_extraction_candidate(field, result):
         reason = (
             "模型没有返回可由完整属性证据支持的结构化候选值"
@@ -312,13 +345,11 @@ _OCR_HEADING = re.compile(r"(?m)^\s*#+\s*")
 def _verification_text(value: str) -> str:
     """用于「引文是否有原文依据」的比对文本：保留原始引文，只抵消排版差异。
 
-    OCR 产物是有损文本：行内公式包裹（`$ \\underline{\\text{公司名称}} $`）、
-    Markdown 粗体与标题标记、HTML 图片标签、空白与换行都是排版产物，不是内容差异。
-    模型引用的可读文本与这些标记逐字不相等，但内容确实来自原文。
+    OCR 产物是有损文本：行内公式包裹、Markdown 粗体与标题标记、HTML 图片标签、空白与换行
+    都是排版产物，不是内容差异——模型引用的可读文本与这些标记逐字不相等，但内容确实来自原文。
 
-    本函数只消除这些排版差异，不删除文字、不做同义替换、不做相似度匹配：
-    「内容是否有原文依据」仍按规范化后的**连续子串**判定，找不到就是找不到。
-    原始引文按原样保存与展示，人工核查看到的始终是原文。
+    本函数只消除排版差异，不删除文字、不做同义替换、不做相似度匹配：「内容是否有原文依据」
+    仍按规范化后的连续子串判定，找不到就是找不到。原始引文按原样保存与展示。
     """
     text = value.replace("\u200b", "").replace("\ufeff", "")
     text = _OCR_HTML_TAG.sub("", text)
@@ -332,10 +363,10 @@ def _verification_text(value: str) -> str:
     return " ".join(text.split())
 
 def _locatable_text(value: str) -> str:
-    """用于「能不能定位到页内位置」的比对文本：在 `_verification_text` 基础上再去掉空白。
+    """原文内容的比对文本：在 `_verification_text` 基础上再去掉空白。
 
     排版差异在 OCR 产物里会穿行：同一句话可能被拆成多行或被块边界打断，
-    引文与页文本的空白分布因此不同。定位核对不声称逐字相等，只说明能在该页找到该内容。
+    引文与产物文本的空白分布因此不同。内容核对按规范化后的连续子串匹配。
     """
     return "".join(_verification_text(value).split())
 
@@ -364,7 +395,7 @@ def _evidence_supports_value(
     unit: str | None = None,
     currency: str | None = None,
 ) -> bool:
-    """判断一个字段值是否被**这段引文自身**支持。
+    """判断一个字段值是否被这段引文自身支持。
 
     金额、日期按字段类型做确定性等值核对，抵消千分位和日期分隔符差异；结构化属性
     中的数组或对象逐个核对有值叶子。文本仍要求连续子串或明确列表成员全部出现，
@@ -383,11 +414,11 @@ def _evidence_supports_value(
             _evidence_supports_value(item, quote_text, value_type=None) for item in values
         )
     normalized_type = str(value_type or "").upper()
-    if normalized_type in {"DECIMAL", "NUMBER", "INTEGER"} or (
+    if normalized_type in {"DECIMAL", "AMOUNT", "NUMBER", "INTEGER"} or (
         isinstance(raw_value, (int, float, Decimal)) and not isinstance(raw_value, bool)
     ):
         try:
-            expected = Decimal(_parse_amount_text(raw_value, unit, currency))
+            expected = Decimal(_parse_amount_text(raw_value, unit, currency) if normalized_type == "AMOUNT" else _parse_decimal_text(raw_value, unit))
         except (InvalidOperation, ValueError):
             try:
                 expected = Decimal(str(raw_value))
@@ -397,7 +428,7 @@ def _evidence_supports_value(
         declared_currency = _canonical_currency(currency)
         normalized_quote = _fullwidth_digits(quote_text)
         for matched in re.finditer(
-            r"(?<![\d.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])",
+            r"(?<![\d.])(?<!\d,)" + _AMOUNT_NUMBER + r"(?![\d.]|,\d)",
             normalized_quote,
         ):
             try:
@@ -411,7 +442,7 @@ def _evidence_supports_value(
             context = normalized_quote[
                 max(0, matched.start() - 8): min(len(normalized_quote), matched.end() + 6)
             ]
-            _, explicit_currencies, explicit_units = _amount_marker_details(context)
+            _, explicit_currencies, explicit_units = _amount_marker_details(context, unit=unit)
             if explicit_units and explicit_units != ({declared_unit} if declared_unit else set()):
                 continue
             if explicit_currencies and explicit_currencies != ({declared_currency} if declared_currency else set()):
@@ -512,7 +543,7 @@ def _not_applicable_message(state: dict[str, Any], material_names: dict[str, str
 def _material_input_problem(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
     """材料依据不可用时的统一判定；全部可用时返回 None。
 
-    与比较算子同一口径：**只有人工已确认与材料位不符**（TYPE_REJECTED）才算依据不可用；
+    与比较算子同一口径：只有人工已确认与材料位不符（TYPE_REJECTED）才算依据不可用；
     材料类型待复核（TYPE_REVIEW）不是对材料内容的否定结论，真实原文依据仍可用于审核，
     类型问题本身作为待确认事项单独暴露（见 `_material_type_review_notice`）。
     材料尚未形成处理产物 → 缺有效输入。
@@ -597,7 +628,7 @@ def _is_subject_rule(rule: dict[str, Any]) -> bool:
     """主体/签章一致性检查。
 
     判定依据是编译期固化的 route（取证方式=印章主体检索）与 subject_check 标记，
-    两者都来自 03_字段 的「产物来源=印章识别」声明，**不是**字段中文名里
+    两者都来自当前场景字段配置的「产物来源=印章识别」声明，不是字段中文名里
     是否含「签章主体」几个字：中文名可以改，靠名字认规则会接错证据源。
 
     这类检查不做程序判定：检索只返回候选，结论由工作人员确认。
@@ -621,13 +652,11 @@ def _subject_query(
 ) -> str:
     """待核对主体的当前有效值。
 
-    主体/签章一致性核对里，两侧字段的角色是固定的：**待核对主体**来自普通字段抽取
-    （合同正文里的甲方名称），**印章主体候选**来自印章识别产物。用印章字段去检索
-    印章自身没有意义，因此查询字段按「产物来源」声明确定，而不是取第一个有效输入：
-
-      - 有且仅有一个输入的产物来源是 SEAL 时，待核对主体取另一个输入；
-      - 全部输入都声明为 SEAL 时无法确定待核对主体，明确报错；
-      - 没有声明产物来源时退化为原有的“取第一个有有效值的输入”，与旧配置的语义一致。
+    主体/签章一致性核对按产物来源区分输入：待核对主体来自材料正文的字段抽取，
+    印章主体候选来自印章识别产物。用印章字段去检索印章自身没有意义，因此查询字段
+    按「产物来源」声明确定，而不是取第一个有效输入：有且仅有一个输入的产物来源是 SEAL 时，
+    待核对主体取另一个输入；全部输入都声明为 SEAL 时无法确定，明确报错；没有声明产物来源时
+    退化为原有的「取第一个有有效值的输入」，与旧配置语义一致。
 
     没有有效值时明确报错：主体检索没有可查的对象，不能退化成用规则名称或备注去搜相似文本。
     """
@@ -641,7 +670,7 @@ def _subject_query(
             raise BusinessError(
                 "SUBJECT_QUERY_UNRESOLVED",
                 f"规则“{rule['name']}”的输入字段全部取自印章识别产物，"
-                "无法确定哪一侧是待核对主体；请为该规则指定一个来自合同正文的待核对主体字段",
+                "无法确定哪一侧是待核对主体；请为该规则指定一个来自材料正文的待核对主体字段",
                 details={"rule": rule["name"], "field_keys": [item.get("field_key") for item in inputs]},
             )
     candidates = [query_item] if query_item is not None else list(inputs)

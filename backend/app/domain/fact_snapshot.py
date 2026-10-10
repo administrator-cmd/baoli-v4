@@ -1,73 +1,39 @@
-"""事实快照：一次规则评估所依据的**输入事实集合**的冻结内容与身份。
+"""事实快照：一次规则评估所依据的输入事实集合的冻结内容与身份。
 
-为什么需要它
-------------
-规则评估开始时必须冻结实际输入的事实集合。评估期间如果每次工具调用都去读
-「最新事实」，同一条规则的两次工具调用可能基于不同的数——先读到 1000，
-中途有人改了字段，后一次读到 1200，两次比较得到的结论无法解释。
+评估开始时必须冻结输入事实，否则评估期间有人改了字段，同一条规则的两次工具调用
+会基于不同的数（先读到 1000、后读到 1200），结论无法解释。指纹与冻结内容分别落进
+`agent_tool_call.fact_snapshot_hash` 与 `evaluation_snapshot.facts_json`。
 
-因此评估开始时算出**内容指纹**并**保存冻结内容本身**（`evaluation_snapshot`）：
+只冻结指纹不够——指纹对得上而数据已变的情况确实存在（例如工具额外读了材料记录）。
+因此同时冻结事实本身与材料位身份（材料位、必传属性、当前上传 id 与内容哈希、
+材料状态、修订号）；工具读文件或产物时必须核对这些引用与快照一致。
 
-- 指纹落进 `agent_tool_call.fact_snapshot_hash`，恢复时与原记录比对，
-  不一致即协议冲突（见 `services/agent_tool_ledger`）；
-- 冻结内容落进 `evaluation_snapshot.facts_json`，工具执行只从它解析事实。
+指纹与快照身份是两件事，混在一起第二次冻结必然撞唯一键：
 
-**只有指纹是不够的**：指纹对得上而数据已变的情况确实存在（例如指纹只覆盖事实、
-而工具额外读了材料记录）。因此快照同时冻结：
+- `hash` 只由事实与材料的内容算出。同一份内容用于两条规则时 hash 相同是正常的；
+- `ref` 还包含评估作用域（评估批次、规则实例、输入修订），是唯一键与恢复入口。
+  两条规则内容一样但作用域不同，就是两份快照，不能互相顶掉。
+  格式 `facts:<条数>:<作用域摘要12位>:<内容摘要12位>`，总长有上限。
 
-- 事实（字段事实 / 统一事实）：评估真正依据的取值；
-- 材料位身份：材料位、必传属性、当前上传的 id 与内容哈希、材料状态、修订号。
-  工具确实需要读取文件或产物时，必须核对这些引用、hash 与修订号与快照一致。
+指纹取 (事实编号, 材料位, 期间口径, 报表口径, 主体范围, 版本号, 规范值, 单位, 币种)
+加材料位身份，按确定性顺序拼接后 SHA-256。刻意不含时间戳（否则恢复时会把同一次评估
+误判成事实已变），也不含数据库 id（id 是物理主键，迁移后会变）。
 
-两个身份必须分开
-----------------
-「内容指纹」和「快照身份」是两件事，混在一起会让第二次冻结必然撞唯一键：
-
-- `hash` 只由**事实与材料的内容**算出。同一份内容用于两条不同规则时，hash 相同
-  是正常的，也是需要的（它回答「这两次评估依据的是不是同一批数」）；
-- `ref` 必须同时包含**评估作用域身份**（评估批次、规则实例、输入修订），
-  它是 `evaluation_snapshot` 的唯一键与恢复入口。两条规则即使内容一模一样，
-  作用域不同就是两份快照，不能互相顶掉。
-
-`ref` 的格式是 `facts:<条数>:<作用域摘要12位>:<内容摘要12位>`。两段摘要各自
-截断到 12 位十六进制，因此总长有明确上限（≤ 40 字符），不会因为拼接长字符串
-超出数据库字段长度。
-
-指纹怎么算
-----------
-对「本次参与评估的事实」逐条取 (事实编号, 材料位, 期间口径, 报表口径, 主体范围,
-版本号, 规范值, 单位, 币种)，加上材料位身份，按确定性顺序拼接后取 SHA-256。
-
-刻意**不**包含 `updated_at` 之类的时间戳：同一个事实集合在任何时刻都必须得到
-同一个指纹，否则恢复时会把「同一次评估」误判成事实已变。
-
-也不包含事实的数据库 id：id 是物理主键，重建数据或迁移后可能变化，
-而「哪些事实、什么版本、什么值」才是评估真正依赖的内容。
-
-JSON 安全投影
--------------
-冻结内容要落进 JSON 列，而统一事实的取值是 `Decimal` / `date`。**指纹与落库
-共用同一份投影**，否则会出现「指纹看到一个值、落库保存另一个值」：
-
-- `Decimal` → `{"kind": "decimal", "value": "<十进制字符串>"}`（绝不转 float：
-  float 的二进制误差会让同一个数算出不同指纹）；
-- `date` / `datetime` → `{"kind": "date"/"datetime", "value": "<ISO 字符串>"}`；
-- 其余标量原样保留（`str` / `bool` / `int` / `None`）。
-
-读取方用 `decode_value` 还原：`decimal` 还原成 `Decimal`，日期还原成 `date` /
-`datetime`。取不到的字段统一成 `None`，不用空串代替——空串与「没有这个维度」
-是两回事。无法投影的类型**显式报错**，不静默丢弃。
+冻结内容落进 JSON 列，而取值是 Decimal / date，因此指纹与落库共用同一份投影
+（Decimal 转十进制字符串而非 float，日期转 ISO 字符串），读取方用 `decode_value` 还原。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..common.exceptions import BusinessError
+from .audit_vocab import SCOPE_NOT_APPLICABLE
 from . import field_strategy
 
 # 快照口径版本：当前口径冻结统一事实、完整属性证据和规范化金额；
@@ -85,11 +51,22 @@ _ENVELOPE_KEYS = frozenset({"kind", "value"})
 def encode_value(value: Any) -> Any:
     """把一个取值投影成 JSON 可表达、且可无损还原的形式。
 
-    这是**唯一**的投影实现：指纹与落库都走它，解码由 `decode_value` 负责。
+    这是唯一的投影实现：指纹与落库都走它，解码由 `decode_value` 负责。
     无法投影的类型显式报错——静默丢弃会让「指纹里没有这个维度」与
     「这个维度取不到值」变得无法区分。
     """
     if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise BusinessError(
+                "FACT_SNAPSHOT_VALUE_UNENCODABLE",
+                "事实取值包含非有限数，无法冻结为有效 JSON",
+                status_code=500,
+                details={"value_type": type(value).__name__},
+            )
+        # STRUCTURED 的 JSON number 保持数值类型；金额仍走下面的 Decimal 编码。
+        # 原有可编码值及指纹投影不变，不改变历史快照版本。
         return value
     if isinstance(value, Decimal):
         # 十进制字符串：保留精度与原值，绝不经过 float。
@@ -297,6 +274,10 @@ def snapshot_payload(
     - `facts`：参与评估的事实本身（含取值），工具按身份引用从中解析输入；
     - `materials`：材料位身份与上传引用，工具读文件或产物前必须与它对账；
     - `scope`：这份快照属于哪个任务、哪条规则实例、哪一版输入。
+
+    新写入的规则快照由调用方增加 facts_scope=RULE_INPUTS 与 declared_inputs，
+    表示 facts 仅覆盖声明的字段。未带该属性的版本 8 历史记录是全任务事实范围；
+    两者共用相同的取值投影和指纹算法，恢复不能改写历史范围。
     """
     return {
         "version": FACT_SNAPSHOT_VERSION,
@@ -318,16 +299,13 @@ def resolve_rule_inputs(
 ) -> list[dict[str, Any]]:
     """从冻结事实里按身份引用解析一条规则的输入。
 
-    与 `services/audit/facts._field_inputs` 的**输出形状相同**（这也是两者能互换的前提），
-    区别只有取数来源：这里只读冻结快照，不查当前数据。冻结快照里没有的事实
-    如实返回 `NOT_EXECUTED` 与空取值——缺输入是事实，不由这里补默认值。
+    输出形状与 `services/audit/facts._field_inputs` 相同（这是两者能互换的前提），区别只有
+    取数来源：这里只读冻结快照，不查当前数据。冻结快照里没有的事实如实返回 `NOT_EXECUTED`
+    与空取值——缺输入是事实，不由这里补默认值。
 
-    **两种事实共用这一份解析**，不为合同字段事实与财报统一事实各写一套：
-
-    - 合同字段事实的 `field_key` 就是字段身份（`fld_…`）；
-    - 财报统一事实的 `fact_code` 是业务编号（`FEX-…` / 计算结果编号），
-      快照已按编译期索引把它翻译成 `field_key`；翻译不到时退回业务编号，
-      因此两条口径都能被引用到，且不需要调用方判断走哪条分支。
+    两种事实共用这一份解析：抽取候选的 `field_key` 就是字段身份；统一事实的
+    `fact_code` 是业务编号，快照已按编译期索引把它翻译成 `field_key`，翻译不到时退回业务
+    编号，因此两条口径都能被引用到，调用方不需要判断走哪条分支。
 
     `rule_inputs` 是规则声明的 (field_key, material_key) 引用清单，顺序即调用顺序。
     """
@@ -400,20 +378,18 @@ def facts_of_task_fact_rows(
     field_definitions: dict[str, dict[str, Any]] | None = None,
     material_states: dict[str, str | None] | None = None,
 ) -> list[dict[str, Any]]:
-    """把 `task_fact` 的 ORM 行投影成快照输入（财报统一事实路径）。
+    """把 `task_fact` 行投影成各场景共用的冻结输入。
 
     统一事实把取值按类型分存在 `decimal_value` / `text_value` / `date_value` 三个列里，
-    没有 `normalized_value` 这个列。这里按 `value_type` 把三个列归一成
-    **同一个 `normalized_value`**：Agent 因此拿得到真实取值，而不是一个恒为空的字段。
-    金额仍按 `Decimal` 编码（十进制字符串），不经过 float。
+    没有 `normalized_value`。这里按 `value_type` 把三个列归一成同一个 `normalized_value`，
+    让 Agent 拿得到真实取值而不是一个恒为空的字段；金额仍按 Decimal 十进制字符串编码。
 
-    `field_code_index` 是编译期就确定的「业务编号 → 字段身份」索引：统一事实的
-    `fact_code` 是业务编号，而规则输入引用的是字段身份，两者必须在冻结时对上。
-    索引里没有的编号（例如计算结果编号）退回业务编号本身，并保留 `fact_kind`
-    以便读取方区分抽取事实与派生事实。
+    `field_code_index` 是编译期确定的「业务编号 → 字段身份」索引：统一事实的 `fact_code`
+    是业务编号，规则输入引用的是字段身份，两者必须在冻结时对上。索引里没有的编号
+    （例如计算结果编号）退回业务编号本身，并保留 `fact_kind` 供读取方区分抽取与派生事实。
 
-    `task_fact` 没有单独的「抽取原文」列：文本类事实的原文就是 `text_value`，
-    数值与日期事实只有定型取值，`raw_value` 如实为 `None`——不拿规范值冒充原文。
+    `task_fact` 没有单独的抽取原文列：文本类事实的原文就是 `text_value`，数值与日期事实
+    只有定型取值，`raw_value` 如实为 `None`。
     """
     index = field_code_index or {}
     states = material_states or {}
@@ -431,7 +407,7 @@ def facts_of_task_fact_rows(
             else None
         )
         decimal_projection = None
-        if executable and row.value_type == "DECIMAL":
+        if executable and row.value_type in {"DECIMAL", "AMOUNT"}:
             if field_definitions and field_key in field_definitions:
                 # 统一事实的执行值已经按字段契约归一成十进制文本；快照指纹也必须使用
                 # 这个业务口径，不能把数据库 DECIMAL 的固定 scale 当成业务差异。
@@ -495,7 +471,7 @@ def task_fact_value(row: Any, *, field_definition: dict[str, Any] | None = None)
                 details={"fact_code": row.fact_code, "field_key": field_definition.get("field_key")},
             ) from exc
     value_type = str(row.value_type or "")
-    if value_type == "DECIMAL":
+    if value_type in {"DECIMAL", "AMOUNT"}:
         if row.decimal_value is None:
             return None
         # 字段执行契约一直使用 JSON 安全的十进制字符串；派生事实留在内部快照时
@@ -533,20 +509,20 @@ def canonical_field_value(value: Any, field_definition: dict[str, Any]) -> Any:
                 details={"field_key": field_definition.get("field_key")},
             ) from exc
     value_type = str(field_definition.get("value_type") or "")
-    if value_type == "DECIMAL":
+    if value_type in {"DECIMAL", "AMOUNT"}:
         try:
             decimal_value = value if isinstance(value, Decimal) else Decimal(str(value).strip())
         except (InvalidOperation, ValueError) as exc:
             raise BusinessError(
                 "TASK_FIELD_VALUE_INVALID",
-                "金额字段候选值不是有效十进制数",
+                "数值字段候选值不是有效十进制数",
                 status_code=500,
                 details={"field_key": field_definition.get("field_key"), "value": str(value)},
             ) from exc
         if not decimal_value.is_finite():
             raise BusinessError(
                 "TASK_FIELD_VALUE_INVALID",
-                "金额字段候选值必须是有限十进制数",
+                "数值字段候选值必须是有限十进制数",
                 status_code=500,
                 details={"field_key": field_definition.get("field_key"), "value": str(value)},
             )
@@ -585,10 +561,9 @@ def facts_of_field_value_rows(
     material_states: dict[str, str | None] | None = None,
     evidence_ids_by_field_value: dict[int, list[int]] | None = None,
 ) -> list[dict[str, Any]]:
-    """把 `task_field_value` 的 ORM 行投影成快照输入（合同审核路径）。
+    """把 `task_field_value` 抽取候选行投影成各场景共用的冻结输入。
 
-    字段事实没有期间/报表口径：它们按 (字段, 材料位) 定位，期间与报表口径留空。
-    这不是「缺维度」，而是这条事实本身不带这些维度。
+    字段事实的期间与报表口径来自字段配置；不涉及相应概念时使用统一的不适用标记。
 
     投影同时带上工具解析输入所需的字段：冻结内容
     既是指纹的输入，也是运行期解析 `inputs` 的唯一来源，两者不能各投影一份。
@@ -617,8 +592,8 @@ def facts_of_field_value_rows(
                 "field_key": row.field_key,
                 "fact_kind": "EXTRACTED",
                 "material_key": row.material_key,
-                "period_scope": None,
-                "statement_scope": None,
+                "period_scope": str(field.get("period_scope") or "").strip() or SCOPE_NOT_APPLICABLE,
+                "statement_scope": str(field.get("statement_scope") or "").strip() or SCOPE_NOT_APPLICABLE,
                 "entity_scope": None,
                 "revision_no": row.revision_no,
                 "value_type": field["value_type"],

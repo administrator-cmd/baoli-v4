@@ -1,6 +1,5 @@
 import type {
   DraftFieldItem,
-  DraftDisabledSourceRowActivationPreview,
   DraftMaterialItem,
   DraftRuleItem,
   DraftSectionItem,
@@ -11,6 +10,7 @@ import type {
   ScenarioListItem,
   ScenarioPublishResult,
 } from "./contracts";
+import type { OperationAccepted } from "./contracts/common";
 import { request } from "./http";
 import { toQuery } from "./query";
 
@@ -21,7 +21,6 @@ export interface ScenarioQuery {
   enabled?: boolean;
   published_from?: string;
   published_to?: string;
-  deleted?: boolean;
   page: number;
   page_size: number;
 }
@@ -42,7 +41,7 @@ export function listScenes(query: ScenarioQuery): Promise<Paged<ScenarioListItem
 }
 
 /**
- * **业务用户可用**的场景下拉：只含已启用且已有已发布版本的场景。
+ * 业务用户可用的场景下拉：只含已启用且已有已发布版本的场景。
  *
  * 方案与任务的场景选择器用它：草稿、未发布、停用或已删除的场景不出现。
  */
@@ -51,7 +50,7 @@ export function listSceneOptions(): Promise<{ request_id: string; items: Scenari
 }
 
 /**
- * **管理员用**的场景下拉：未删除的全部场景及其实时状态。
+ * 管理员用的场景下拉：未删除的全部场景及其实时状态。
  *
  * 场景管理页与导入页在发布前就要选中场景，因此不能使用只返回已发布场景的业务接口。
  */
@@ -89,14 +88,9 @@ export function setSceneEnabled(scenarioCode: string, enabled: boolean): Promise
   });
 }
 
-/** 逻辑删除场景。 */
-export function deleteScene(scenarioCode: string): Promise<ScenarioDetail> {
-  return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}`, { method: "DELETE" });
-}
-
-/** 恢复已逻辑删除的场景。 */
-export function restoreScene(scenarioCode: string): Promise<ScenarioDetail> {
-  return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}/restore`, { method: "POST" });
+/** 实际删除场景及草稿，不能恢复。 */
+export function deleteScene(scenarioCode: string): Promise<void> {
+  return request<void>(`/scenarios/${encodeURIComponent(scenarioCode)}`, { method: "DELETE" });
 }
 
 /** 新建场景。此时还没有规则库，也没有已发布版本。 */
@@ -130,27 +124,23 @@ export function updateDisabledSourceRow(
   );
 }
 
-export function activateDisabledSourceRow(
-  scenarioCode: string,
-  rowKey: string,
-  expectedRevision: number,
-): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/disabled-source-rows/${encodeURIComponent(rowKey)}/activate`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expected_revision: expectedRevision }),
-    },
+export function previewSourceActivation(
+  scenarioCode: string, rowKeys: string[], expectedRevision: number, idempotencyKey: string,
+): Promise<OperationAccepted> {
+  return request<OperationAccepted>(
+    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/source-activations/preview`,
+    { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row_keys: rowKeys, expected_revision: expectedRevision, idempotency_key: idempotencyKey }) },
   );
 }
 
-export function previewDisabledRuleGroup(
-  scenarioCode: string,
-  rowKey: string,
-): Promise<DraftDisabledSourceRowActivationPreview> {
-  return request<DraftDisabledSourceRowActivationPreview>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/disabled-source-rows/${encodeURIComponent(rowKey)}/activation-preview`,
+export function confirmSourceActivation(
+  scenarioCode: string, previewId: string, expectedRevision: number,
+): Promise<ScenarioDraftView> {
+  return request<ScenarioDraftView>(
+    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/source-activations/confirm`,
+    { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preview_id: previewId, expected_revision: expectedRevision }) },
   );
 }
 
@@ -166,7 +156,7 @@ export interface DraftNodePayload {
   node_type: string;
   name: string;
   sequence_no?: number;
-  /** 上游节点**实例码**列表。 */
+  /** 上游节点实例码列表。 */
   depends_on?: string[];
   config_json?: Record<string, unknown> | null;
   enabled?: boolean;
@@ -228,18 +218,20 @@ export function deleteDraftMaterial(scenarioCode: string, materialKey: string): 
 
 export interface DraftFieldPayload {
   material_key: string;
+  node_code?: string | null;
   source_ref?: string | null;
   name: string;
   value_type: string;
+  extraction_strategy?: "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED";
+  structure_schema?: Record<string, unknown> | null;
   unit: string | null;
   /** 币种：留空表示未声明，不表示人民币。 */
   currency?: string | null;
   /** 产物来源：当前仅 "SEAL"（印章识别）；留空表示常规字段抽取。 */
   artifact_source?: string | null;
   /**
-   * 取数期间与报表口径。合同场景的字段没有这两个概念，取「NOT_APPLICABLE」（不适用）。
-   * 被计算公式引用的字段不能用「不适用」——计算参数按这两项定位字段事实，
-   * 发布编译会明确阻断。
+   * 取数期间与报表口径，不涉及相应口径时声明 NOT_APPLICABLE（不适用）。
+   * 计算参数按字段实际声明定位事实。
    */
   period_scope?: string;
   statement_scope?: string;
@@ -331,8 +323,8 @@ export interface DraftSectionPayload {
   content_instruction: string;
   field_keys: string[];
   /**
-   * 节点版（contract_review_v3）的报告分组属性。旧格式章节留空即可：
-   * 留空表示该章节没有报告编号，按旧的「附加展示章节」语义渲染。
+   * 场景报告分组属性。无报告编号的历史章节可留空：
+   * 留空表示该章节没有报告编号，归为一份报告，按章节要求生成正文。
    */
   report_code?: string | null;
   report_name?: string | null;
@@ -341,6 +333,7 @@ export interface DraftSectionPayload {
   section_order?: number | null;
   content_type?: string | null;
   result_sort?: string | null;
+  risk_level_order?: string[];
   config_status?: string | null;
 }
 

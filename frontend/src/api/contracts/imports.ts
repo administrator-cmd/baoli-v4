@@ -1,31 +1,15 @@
-/** 规则库导入：工作表绑定、候选、问题、草稿写入与导入作业。 */
+/** 规则库导入：工作表选择、候选、问题、草稿写入与导入作业。 */
 
 import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 import type { DraftCalculationItem } from "./scenes";
 
-export interface ProfileSheet {
-  sheet_role: string;
-  /** 编号前缀（例如 RSK-）：跨表引用靠它判断指向。 */
-  code_prefix?: string;
-  display_name: string;
-  /** 这张 Sheet 可以绑定的节点类型（绑定由用户确认，系统只给建议）。 */
-  node_types: string[];
-  column_count: number;
-}
-
 export interface ProfileSummary {
   profile_version: string | null;
   display_name: string | null;
-  /** 业务场景冻结的 Schema 身份；与统一执行协议版本分开。 */
+  /** 业务场景冻结的 Schema 身份；与内部能力目录版本分开。 */
   scenario_schema_key?: string | null;
   scenario_schema_version?: string | null;
-  /** 内部统一协议版本；导入作业顶层 schema_version 是业务场景版本。 */
-  schema_version: string | null;
-  /** 模板说明页名称：模板生成、导出与导入读同一声明。 */
-  instruction_sheet?: string;
-  sheet_count: number;
   node_types: Array<{ node_type: string; display_name: string; depends_on_types: string[] }>;
-  sheets: ProfileSheet[];
   /** 作业所属场景（上传时指定）；历史作业为 null。 */
   scenario_code?: string | null;
   scenario_name?: string | null;
@@ -37,21 +21,7 @@ export interface ImportSheet {
   visible: boolean;
   status: string;
   fixed_excluded: boolean;
-  /** 已确认的 Sheet 角色（用户确认后落库）；null 表示尚未绑定。 */
-  role: string | null;
-  /** 已确认绑定的**节点实例码**；null 表示尚未绑定。 */
-  node_code: string | null;
-  /** 系统按表头给出的**建议**用途：只用于页面预选，不构成绑定。 */
-  suggested_role: string | null;
-  /** 建议用途的中文名，由服务端给出。 */
-  suggested_role_label: string;
-  /** 已确认用途的中文名，由服务端给出。 */
-  role_label: string;
-  header_row: number | null;
-  /**
-   * 表头候选行（服务端识别结果）。**页面不展示它**：「前 10 行里填充单元格最多的行」
-   * 会把填满数据的数据行和真表头并列，展示出来只会制造歧义；表头行按默认值给出、可改。
-   */
+  /** 预览启发式候选行；页面不要求确认表头，LLM 使用完整工作表内容。 */
   header_candidates?: number[];
   summary: {
     max_row: number;
@@ -87,6 +57,8 @@ export interface ImportIssue {
   source: ImportIssueSource;
   /** SELECT=选择题；DECIMAL/TEXT=业务输入控件，没有候选选项。 */
   input_kind: "SELECT" | "DECIMAL" | "TEXT";
+  /** 非空时仅展示说明，不提供无法落到候选的作答控件。 */
+  resolution_notice?: string | null;
   options: ImportIssueOption[];
   decision: JsonValue;
 }
@@ -124,6 +96,12 @@ export interface RuleComparison {
   source_rule_name: string | null;
   source_rule_refs: string[];
   source_rule_names: string[];
+  /** 风险关联的计算结果：名称与所属节点来自后端当前配置。 */
+  calculation_sources: Array<{
+    result_code: string;
+    rule_name: string | null;
+    node_name: string | null;
+  }>;
   scope_material_refs: string[];
   scope_material_names: Array<string | null>;
   output_field_names: Array<string | null>;
@@ -165,8 +143,9 @@ export interface ProposalRule {
   candidate_ref: string;
   name: string;
   node: string;
-  node_name: string;
+  node_name: string | null;
   operator: string;
+  config_status?: "CLEAR" | "PENDING" | "DISABLED" | null;
   decision_state: CandidateDecisionState;
   original: Record<string, JsonValue> | null;
   comparison: RuleComparison;
@@ -188,6 +167,10 @@ export interface ProposalSheet {
 }
 
 export interface ProposalCalculation extends Pick<DraftCalculationItem, "origin" | "parameter_sources" | "band_sources"> {
+  // PROGRAM 仅用于展示旧配置，已不支持发布或执行。
+  execution_engine: "PROGRAM" | "LLM";
+  judgement_instruction: string;
+  execution_mode: "CHECK" | "VALUE_ONLY";
   candidate_ref: string;
   rule_code: string;
   rule_name: string;
@@ -195,6 +178,7 @@ export interface ProposalCalculation extends Pick<DraftCalculationItem, "origin"
   result_code: string;
   result_type: string;
   node_code: string;
+  node_name: string | null;
   status: string;
   parameters: Array<Record<string, JsonValue>>;
   bands: Array<Record<string, JsonValue>>;
@@ -229,6 +213,16 @@ export interface ImportJob extends ApiResponse {
   } | null;
   /** 每条来源业务记录的处置：候选 / 停用保留 / 明确排除 / 待处理问题。 */
   coverage: {
+    rejected_candidates?: Array<{
+      kind: string;
+      path: string;
+      name: string | null;
+      candidate_ref: string | null;
+      source: { sheet_key?: string; row_no?: number; cells?: string[] } | null;
+      code: string;
+      message: string;
+      raw: JsonValue;
+    }>;
     notices?: Array<{
       code: string;
       message: string;

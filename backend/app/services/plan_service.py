@@ -1,17 +1,20 @@
 """审核方案管理：以已发布场景版本为基准的个性化配置。
 
-- 创建方案时把钉住的那一版场景的配置（材料 / 字段 / 规则 / 报告章节）整份复制到方案自己的
-  `plan_material` / `plan_field` / `plan_rule` / `plan_section`；节点与选用 Sheet 是场景级
-  执行结构，只读地存进 `context_json` 随方案冻结。
-- 之后由用户在方案里增删改。**规则不再分「系统派生 / 业务」**：用户在方案里看到的就是全部
-  规则，逐条可勾可取消；取消一条抽取规则就是那个字段不抽，取消报告生成规则就是不生成报告。
-- 每次保存都用方案自己的配置重新编译（`compile_form_manifest`）→ 写 `manifest_json`；
-  再用 `build_task_schema` 算任务范围写入 `scope_json`。算不出来时保存照常成功，
-  原因记在 `sync_error`，页面显示「待核对」，且不能被任务引用。
-- 场景后来发布新版本**不会**改变本方案（要换基准请另建方案）。
-- 已建任务把**方案的编译产物**整份抓进 `audit_task.manifest_json`，执行期只读它。
+创建方案时把钉住的那一版场景的配置（材料 / 字段 / 规则 / 报告章节）整份复制到方案自己的
+`config_json`；节点与选用 Sheet 存在同一 JSON 的 context 内，随方案冻结。之后由用户增删改。规则不再分「系统派生 / 业务」：
+用户在方案里看到的就是全部规则，逐条可勾可取消，取消一条抽取规则就是那个字段不抽。
+
+每次保存都用方案自己的配置重新编译（`compile_form_manifest`）并写 `manifest_json`，再用
+`build_task_schema` 算任务范围写入 `scope_json`；算不出来时保存照常成功，原因记在 `sync_error`，
+页面显示「待核对」，且不能被任务引用。
+
+场景后来发布新版本不会改变本方案（要换基准请另建方案）；已建任务把方案的编译产物整份抓进
+`audit_task.manifest_json`，执行期只读它。
 """
 
+from copy import deepcopy
+import hashlib
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any, Callable
@@ -19,8 +22,11 @@ from typing import Any, Callable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..repositories import configuration_store as config_store
+
 from ..domain import field_strategy, manifest as manifest_module
-from ..domain import unified_profile
+from ..domain.audit_vocab import SCOPE_NOT_APPLICABLE
+from ..domain import node_profile
 from ..domain.manifest import FORM_VALUE_TYPES, build_task_schema, compile_form_manifest
 from ..common.exceptions import BusinessError
 from ..entity import (
@@ -38,7 +44,10 @@ from .operation_types import OBJECT_PLAN
 from . import operation_log_service
 # 计算配置的解析口径只有一处（草稿与方案共用）：它区分「候选列表」与「历史版本留下的
 # 已编译结果」，各写一份会让同一份 calculation_json 在两个入口解释成不同的东西。
-from .scenario_admin_service import _calculation_store, _calculation_view_rows
+from .scenario_admin_service import (
+    _calculation_store, _calculation_view_rows,
+    _calculations_referencing_field, _remap_calculation_field_codes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +70,14 @@ def plan_or_404(db: Session, plan_code: str, *, lock: bool = False, include_dele
     return plan
 
 
-def _scenario_or_404(db: Session, scenario_code: str, *, allow_deleted: bool = False) -> ScenarioTemplate:
+def _scenario_or_404(db: Session, scenario_code: str) -> ScenarioTemplate:
     """取场景身份；不存在或已删除时 404。
 
-    只做「存在性」判断。**能不能用来建方案**由 `_published_scenario_or_fail` 判断：
+    只做「存在性」判断。能不能用来建方案由 `_published_scenario_or_fail` 判断：
     存在但未发布、已停用的场景同样不能建方案，那是业务状态问题而不是找不到。
     """
     template = db.scalar(select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == scenario_code))
-    if not template or (template.deleted_at is not None and not allow_deleted):
+    if not template:
         raise BusinessError(
             "SCENARIO_NOT_FOUND",
             "审核场景不存在或已被删除",
@@ -79,13 +88,13 @@ def _scenario_or_404(db: Session, scenario_code: str, *, allow_deleted: bool = F
 
 
 def _published_scenario_or_fail(db: Session, scenario_code: str) -> ScenarioVersion:
-    """业务用户可用的场景版本：场景必须**未删除、已启用、且已有已发布版本**。
+    """业务用户可用的场景版本：场景必须未删除、已启用、且已有已发布版本。
 
     业务用户只能从「已发布且启用」的场景建方案。三种不可用状态
     分别明确报出，不合并成一个「场景不可用」——它们对管理员的处理动作不同：
     草稿还没发布要去发布，场景停用要去启用，场景删除是另一回事。
 
-    没有已发布版本时**明确失败**，不先建一个没有版本的半成品方案再等后台补绑定：
+    没有已发布版本时明确失败，不先建一个没有版本的半成品方案再等后台补绑定：
     那会让业务用户拿到一个看似存在、实际无法创建任务的方案。
     """
     template = _scenario_or_404(db, scenario_code)
@@ -110,7 +119,7 @@ def _published_scenario_or_fail(db: Session, scenario_code: str) -> ScenarioVers
 def _published_scenario_version_or_fail(
     db: Session, scenario_code: str, version_no: int
 ) -> ScenarioVersion:
-    """按页面预览的**明确版本号**取可建方案的已发布版本。
+    """按页面预览的明确版本号取可建方案的已发布版本。
 
     版本号与当前允许建方案的版本不一致时返回 `PLAN_VERSION_CHANGED`，由页面刷新后重试：
     静默改取「当前最新版本」会让用户看着一版预览、实际建出另一版的方案。
@@ -163,13 +172,9 @@ def _selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
     规则的「选没选」就是 `plan_rule.enabled` —— 方案自己持有配置，规则、材料、字段都从
     方案自己的表读，不再从场景版本读，也不再有「系统派生的规则不能选」这条限制。
     """
-    rules = db.scalars(
-        select(PlanRule).where(PlanRule.plan_id == plan.id).order_by(PlanRule.sort_no, PlanRule.rule_key)
-    ).all()
-    materials = db.scalars(
-        select(PlanMaterial).where(PlanMaterial.plan_id == plan.id).order_by(PlanMaterial.sort_no, PlanMaterial.id)
-    ).all()
-    field_count = db.scalar(select(func.count()).select_from(PlanField).where(PlanField.plan_id == plan.id)) or 0
+    rules = sorted(config_store.rows(db, PlanRule, plan.id), key=lambda item: (item.sort_no, item.rule_key,))
+    materials = sorted(config_store.rows(db, PlanMaterial, plan.id), key=lambda item: (item.sort_no, item.id,))
+    field_count = len(plan.config_json["fields"])
     context = plan.context_json if isinstance(plan.context_json, dict) else {}
     calculation_candidates, frozen_calculations, calculation_enabled = _plan_calculation_config(context)
     calculation_source = frozen_calculations if frozen_calculations is not None else calculation_candidates
@@ -227,7 +232,7 @@ def _selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
 def _effective_predicate():
     """「范围已生效」的 SQL 判据：sync_error 为空且有 scope_json。
 
-    注意：sync_error 是 JSON 列，Python 的 None 会存成 **JSON 字面量 null**，
+    注意：sync_error 是 JSON 列，Python 的 None 会存成 JSON 字面量 null，
     MySQL 里 `sync_error IS NULL` 对它返回假（只有 SQL NULL 才为真），
     用它做过滤会把全部生效方案都排除掉。必须按 JSON 类型判断。
     scope_json 同理，用 JSON_TYPE 而不是 IS NOT NULL。
@@ -284,13 +289,7 @@ def list_plans_page(
     rule_counts: dict[int, int] = {}
     scenario_names: dict[str, str] = {}
     if plan_ids:
-        for plan_id, count in db.execute(
-            # 方案里**启用的规则条数**：方案自己持有规则，取消勾选就是 enabled=false。
-            select(PlanRule.plan_id, func.count())
-            .where(PlanRule.plan_id.in_(plan_ids), PlanRule.enabled.is_(True))
-            .group_by(PlanRule.plan_id)
-        ).all():
-            rule_counts[int(plan_id)] = int(count)
+        rule_counts = {plan.id: sum(bool(item["enabled"]) for item in plan.config_json["rules"]) for plan in plans}
         codes = {plan.scenario_code for plan in plans}
         for code, scenario_name in db.execute(
             select(ScenarioTemplate.scenario_code, ScenarioTemplate.scenario_name).where(ScenarioTemplate.scenario_code.in_(codes))
@@ -308,7 +307,10 @@ def list_plans_page(
                 "plan_code": plan.plan_code,
                 "plan_name": plan.plan_name,
                 "scenario_code": plan.scenario_code,
-                "scenario_name": scenario_names.get(plan.scenario_code, plan.scenario_code),
+                "scenario_name": (
+                    scenario_names[plan.scenario_code] if plan.scenario_code in scenario_names
+                    else base_version.scenario_name if base_version else "来源场景已删除，未记录场景名称"
+                ),
                 "description": plan.description,
                 "enabled": plan.enabled,
                 "deleted": plan.deleted_at is not None,
@@ -357,7 +359,7 @@ def list_plan_options(db: Session, *, scenario_code: str | None) -> list[dict[st
 
 
 def create_plan(db: Session, payload: dict[str, Any]) -> AuditPlan:
-    """创建方案：把钉住的那一版场景配置**整份复制**成方案自己的配置，并立即编译一次。
+    """创建方案：把钉住的那一版场景配置整份复制成方案自己的配置，并立即编译一次。
 
     版本号与当前可用的最新已发布版本不一致时明确返回 `PLAN_VERSION_CHANGED`，
     不静默改取「当前最新版本」。复制与编译在同一次提交里完成，不会先建一个空方案、
@@ -378,7 +380,7 @@ def create_plan(db: Session, payload: dict[str, Any]) -> AuditPlan:
             status_code=400,
             details={"scenario_code": scenario_code},
         )
-    # 复制的是**页面预览的那一版**：它不是最新版或场景不可用时明确失败，
+    # 复制的是页面预览的那一版：它不是最新版或场景不可用时明确失败，
     # 不先建一个半成品方案再等后台补复制。
     published = _published_scenario_version_or_fail(db, scenario_code, version_no)
     plan = AuditPlan(
@@ -535,77 +537,11 @@ def copy_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> AuditPlan
     # 方案自己的配置整份复制：材料 / 字段 / 规则 / 报告章节。
     # **不复制 manifest_json / scope_* / sync_error**：它们是编译产物与结果，
     # 复制过来会指向源方案的产物；下面重新编译一次，产物必然与新方案自己的配置一致。
-    materials, fields, rules, sections = _plan_config_rows(db, source.id)
-    for index, item in enumerate(materials, start=1):
-        db.add(
-            PlanMaterial(
-                plan_id=plan.id,
-                material_key=item.material_key,
-                name=item.name,
-                required=item.required,
-                description=item.description,
-                source_ref=item.source_ref,
-                origin_json=item.origin_json,
-                sort_no=index,
-            )
-        )
-    for index, item in enumerate(fields, start=1):
-        db.add(
-            PlanField(
-                plan_id=plan.id,
-                field_key=item.field_key,
-                material_key=item.material_key,
-                name=item.name,
-                value_type=item.value_type,
-                extraction_strategy=item.extraction_strategy,
-                structure_schema_json=item.structure_schema_json,
-                unit=item.unit,
-                currency=item.currency,
-                artifact_source=item.artifact_source,
-                period_scope=item.period_scope,
-                statement_scope=item.statement_scope,
-                required=item.required,
-                instruction=item.instruction,
-                source_ref=item.source_ref,
-                origin_json=item.origin_json,
-                sort_no=index,
-            )
-        )
-    for index, item in enumerate(rules, start=1):
-        db.add(
-            PlanRule(
-                plan_id=plan.id,
-                rule_key=item.rule_key,
-                name=item.name,
-                node_code=item.node_code,
-                operator_code=item.operator_code,
-                enabled=item.enabled,
-                rule_json=item.rule_json,
-                source_ref=item.source_ref,
-                origin_json=item.origin_json,
-                sort_no=index,
-            )
-        )
-    for index, item in enumerate(sections, start=1):
-        db.add(
-            PlanSection(
-                plan_id=plan.id,
-                section_key=stable_key("sec", plan.plan_code, f"{item.title}-{index}"),
-                title=item.title,
-                content_instruction=item.content_instruction,
-                field_keys=list(item.field_keys or []),
-                sort_no=index,
-                report_code=item.report_code,
-                report_name=item.report_name,
-                material_keys=list(item.material_keys or []) or None,
-                formats=list(item.formats or []) or None,
-                section_order=item.section_order,
-                content_type=item.content_type,
-                result_sort=item.result_sort,
-                config_status=item.config_status,
-                origin_json=item.origin_json,
-            )
-        )
+    plan.config_json = deepcopy(source.config_json)
+    plan.context_json = deepcopy(source.context_json)
+    for section in ("materials", "fields", "rules", "sections"):
+        for item in plan.config_json[section]:
+            item["plan_id"] = plan.id
     db.flush()
     _recompile_plan(db, plan)
     record_operation(
@@ -626,35 +562,31 @@ def _plan_config_rows(
 ) -> tuple[list[PlanMaterial], list[PlanField], list[PlanRule], list[PlanSection]]:
     """方案自己的配置行，按用户可见的顺序。"""
     return (
-        list(db.scalars(select(PlanMaterial).where(PlanMaterial.plan_id == plan_id).order_by(PlanMaterial.sort_no, PlanMaterial.id)).all()),
-        list(db.scalars(select(PlanField).where(PlanField.plan_id == plan_id).order_by(PlanField.sort_no, PlanField.id)).all()),
-        list(db.scalars(select(PlanRule).where(PlanRule.plan_id == plan_id).order_by(PlanRule.sort_no, PlanRule.id)).all()),
-        list(db.scalars(select(PlanSection).where(PlanSection.plan_id == plan_id).order_by(PlanSection.sort_no, PlanSection.id)).all()),
+        list(sorted(config_store.rows(db, PlanMaterial, plan_id), key=lambda item: (item.sort_no, item.id,))),
+        list(sorted(config_store.rows(db, PlanField, plan_id), key=lambda item: (item.sort_no, item.id,))),
+        list(sorted(config_store.rows(db, PlanRule, plan_id), key=lambda item: (item.sort_no, item.id,))),
+        list(sorted(config_store.rows(db, PlanSection, plan_id), key=lambda item: (item.sort_no, item.id,))),
     )
 
 
 def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, Any]) -> None:
     """把钉住的场景版本整份复制成方案自己的配置。
 
-    与草稿初始化走**同一份映射口径**（`editable_config_of`）。
+    与草稿初始化走同一份映射口径（`editable_config_of`）。
     系统派生规则也进入方案，供用户逐条启停；保存时仅使用其启停值，规则定义由编译器重建。
     """
     config = manifest_module.editable_config_of(manifest, namespace=plan.plan_code)
+    if "import_proposals" in manifest:
+        plan.config_json = {**plan.config_json, "import_proposals": deepcopy(manifest["import_proposals"])}
     for index, item in enumerate(config["materials"], start=1):
-        db.add(PlanMaterial(plan_id=plan.id, sort_no=index, **item))
+        config_store.add_mapping(db, PlanMaterial, plan.id, item, index)
     for index, item in enumerate(config["fields"], start=1):
-        db.add(PlanField(plan_id=plan.id, sort_no=index, **item))
+        config_store.add_mapping(db, PlanField, plan.id, item, index)
     for index, item in enumerate(config["rules"], start=1):
-        db.add(
-            PlanRule(
-                plan_id=plan.id,
-                sort_no=index,
-                **{key: value for key, value in item.items() if key != "is_system"},
-            )
-        )
+        config_store.add_mapping(db, PlanRule, plan.id, {key: value for key, value in item.items() if key != "is_system"}, index)
     for index, item in enumerate(config["sections"], start=1):
-        db.add(PlanSection(plan_id=plan.id, sort_no=index, **item))
-    # 节点与选用 Sheet 是**场景级执行结构**：方案里只读，随方案冻结一份供编译使用。
+        config_store.add_mapping(db, PlanSection, plan.id, item, index)
+    # 节点与选用 Sheet 是场景级执行结构：方案里只读，随方案冻结一份供编译使用。
     # 计算定义沿用场景版本，方案单独保存逐条启停选择。
     calculation_candidates, frozen_calculations = _calculation_store(config["calculation_json"])
     calculation_source = frozen_calculations if frozen_calculations is not None else calculation_candidates
@@ -663,6 +595,7 @@ def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, A
         "selected_sheets": config["sheets"],
         "profile_version": manifest.get("profile_version"),
         "scenario_schema": manifest.get("scenario_schema"),
+        "source_kind": manifest.get("source_kind"),
         "calculation_json": config["calculation_json"],
         "calculation_enabled": {
             str(item["rule_code"]): item.get("status") != "DISABLED"
@@ -725,9 +658,9 @@ def _selected_calculations(
 def _recompile_plan(db: Session, plan: AuditPlan) -> None:
     """用方案自己的配置重新编译，并算出任务范围。
 
-    编译失败**照常保存**：配置过程中必然不完整，页面要能存下来继续改。原因写进
+    编译失败照常保存：配置过程中必然不完整，页面要能存下来继续改。原因写进
     sync_error，这样的方案显示为「待核对」且不能被任务引用。
-    **失败时清空产物，不保留上一份**——那会让页面显示的范围与用户刚改的配置不一致。
+    失败时清空产物，不保留上一份——那会让页面显示的范围与用户刚改的配置不一致。
 
     与场景发布共用同一份映射口径（`compile_inputs_of_config`），两条路径编译出的产物
     必然同形，不会出现「同一份配置在两个入口编译出不同结果」。
@@ -742,7 +675,7 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
             sections=sections,
             nodes=list(context.get("nodes") or []),
             sheets=list(context.get("selected_sheets") or []),
-            profile_version=context.get("profile_version") or unified_profile.UNIFIED_PROFILE_VERSION,
+            profile_version=context.get("profile_version") or node_profile.NODE_PROFILE_VERSION,
             scenario_schema_config=context.get("scenario_schema"),
         )
         system_rule_enabled: dict[str, bool] = {}
@@ -772,7 +705,16 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
             calculation_candidates=calculation_candidates,
             frozen_calculations=frozen_calculations,
             system_rule_enabled=system_rule_enabled,
+            import_proposals=plan.config_json.get("import_proposals"),
         )
+        manifest["source_kind"] = str(context.get("source_kind") or "FORM")
+        canonical = json.dumps(
+            {key: value for key, value in manifest.items() if key != "manifest_hash"},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        manifest["manifest_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         # None = 全部启用：方案的启停已经编译进 manifest 的规则。
         schema = build_task_schema(manifest, None, allow_empty=True)
     except BusinessError as exc:
@@ -821,14 +763,14 @@ def _sync_plan_system_rules(
     }
     for rule_code, row in existing.items():
         if rule_code not in derived:
-            db.delete(row)
+            config_store.delete(row)
     next_sort_no = max((row.sort_no for row in stored_rules), default=0)
     for rule_code, item in derived.items():
         row = existing.get(rule_code)
         if row is None:
             next_sort_no += 1
             row = PlanRule(plan_id=plan.id, sort_no=next_sort_no)
-            db.add(row)
+            row = config_store.add(db, row)
         row.rule_key = item["rule_key"]
         row.name = item["name"]
         row.node_code = item["node_code"]
@@ -844,7 +786,7 @@ def _sync_plan_system_rules(
 def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
     """方案的可编辑配置：材料 / 字段 / 全部规则 / 报告章节 / 计算规则启停。
 
-    这是方案页各页签的数据源。**节点与选用 Sheet 不在这里** —— 它们是场景级执行结构，
+    这是方案页各页签的数据源。节点与选用 Sheet 不在这里 —— 它们是场景级执行结构，
     方案里只读（随 `context_json` 冻结），单独返回供页面展示。
     """
     materials, fields, rules, sections = _plan_config_rows(db, plan.id)
@@ -872,6 +814,7 @@ def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
             {
                 "field_key": item.field_key,
                 "material_key": item.material_key,
+                "node_code": item.data.get("node_code"),
                 "name": item.name,
                 "value_type": item.value_type,
                 "extraction_strategy": item.extraction_strategy,
@@ -918,6 +861,7 @@ def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
                 "section_order": item.section_order,
                 "content_type": item.content_type,
                 "result_sort": item.result_sort,
+                "risk_level_order": list(getattr(item, "risk_level_order", None) or []),
                 "config_status": item.config_status,
                 "origin": item.origin_json,
                 "sort_no": item.sort_no,
@@ -931,6 +875,10 @@ def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
             {
                 "rule_code": item["rule_code"],
                 "rule_name": item.get("rule_name") or item["rule_code"],
+                "execution_mode": item.get("execution_mode", "CHECK"),
+                "execution_engine": item.get("execution_engine", "PROGRAM"),
+                "formula": item.get("formula", ""),
+                "judgement_instruction": item.get("judgement_instruction", ""),
                 "node_code": item.get("node_code") or item.get("node_instance_code"),
                 "enabled": calculation_enabled[str(item["rule_code"])],
                 "origin": calculation_views[item["rule_code"]]["origin"],
@@ -960,7 +908,7 @@ _ADJUSTMENT_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
         ("report_code", "报告编号"), ("report_name", "报告名称"),
         ("material_keys", "材料范围"), ("formats", "输出格式"),
         ("section_order", "章节顺序"), ("content_type", "内容类型"),
-        ("result_sort", "结果排序"), ("config_status", "配置状态"),
+        ("risk_level_order", "等级顺序"), ("result_sort", "结果排序"), ("config_status", "配置状态"),
     ),
     "计算规则": (("enabled", "是否启用"),),
 }
@@ -1091,14 +1039,14 @@ def plan_adjustments_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
 def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> dict[str, Any]:
     """整体替换方案的配置并重新编译。
 
-    **整体提交而不是逐条增删**：一次提交的是一份完整集合，因此「这次提交之后这个方案
-    到底配了哪些材料 / 字段 / 规则 / 章节 / 计算规则」不取决于历史操作顺序。
+    整体提交而不是逐条增删：一次提交的是一份完整集合，因此「这次提交之后这个方案到底配了哪些
+    材料 / 字段 / 规则 / 章节 / 计算规则」不取决于历史操作顺序。
 
-    归属键（`material_key` / `field_key` / `rule_key` / `section_key`）由调用方给出并
-    原样保留：字段与规则的互相引用就是靠它们，重新生成会让已有引用断掉。
+    归属键（`material_key` / `field_key` / `rule_key` / `section_key`）由调用方给出并原样保留：
+    字段与规则的互相引用就是靠它们，重新生成会让已有引用断掉。
 
-    配置写完之后**立刻重新编译**：方案的范围与「能不能用」在同一次提交里算出来，
-    不会留下一个配置已改、范围还是旧的中间态。
+    配置写完之后立刻重新编译：方案的范围与「能不能用」在同一次提交里算出来，不会留下一个配置
+    已改、范围还是旧的中间态。
     """
     plan = plan_or_404(db, plan_code, lock=True)
     materials = _require_list(payload, "materials")
@@ -1127,18 +1075,47 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
 
     # 来源是已存在配置行的审计事实，整体提交的页面表单不能改写它。
     previous = _plan_config_rows(db, plan.id)
+    previous_fields = {item.field_key: item for item in previous[1]}
+    previous_code_owners: dict[str, set[str]] = {}
+    for item in previous[1]:
+        code = str(item.source_ref or "").strip() or item.field_key
+        previous_code_owners.setdefault(code, set()).add(item.field_key)
+    field_code_changes: dict[str, str] = {}
+    for index, item in enumerate(fields, start=1):
+        field_key = _required_key(item, "field_key", f"第 {index} 个字段")
+        previous_field = previous_fields.get(field_key)
+        if previous_field is None:
+            continue
+        previous_code = str(previous_field.source_ref or "").strip() or field_key
+        next_code = str(item.get("source_ref") or "").strip() or field_key
+        if previous_code == next_code:
+            continue
+        if len(previous_code_owners[previous_code]) > 1 and _calculations_referencing_field(
+            context.get("calculation_json"), previous_code,
+        ):
+            raise BusinessError(
+                "PLAN_CALC_FIELD_CODE_AMBIGUOUS",
+                "原配置的多个字段共用同一编号，无法确定计算引用对应哪个字段，不能自动改写引用",
+                details={"field_code": previous_code, "field_keys": sorted(previous_code_owners[previous_code])},
+            )
+        field_code_changes[previous_code] = next_code
     origins = [
         {getattr(row, key): row.origin_json for row in rows}
         for rows, key in zip(previous, ("material_key", "field_key", "rule_key", "section_key"), strict=True)
     ]
+    extensions = {}
+    for rows, model, identity in zip(previous, (PlanMaterial, PlanField, PlanRule, PlanSection),
+                                     ("material_key", "field_key", "rule_key", "section_key"), strict=True):
+        columns = {column.key for column in model.__table__.columns}
+        extensions[model.__name__] = {getattr(row, identity): deepcopy({key: value for key, value in row.data.items() if key not in columns}) for row in rows}
     for rows in previous:
         for row in rows:
-            db.delete(row)
+            config_store.delete(row)
     db.flush()
 
     for index, item in enumerate(materials, start=1):
-        db.add(
-            PlanMaterial(
+        config_store.add(
+            db, PlanMaterial(
                 plan_id=plan.id,
                 material_key=_required_key(item, "material_key", f"第 {index} 个材料"),
                 name=_required_key(item, "name", f"第 {index} 个材料"),
@@ -1150,6 +1127,12 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
             )
         )
     for index, item in enumerate(fields, start=1):
+        field_key = _required_key(item, "field_key", f"第 {index} 个字段")
+        if "node_code" in item:
+            node_code = item["node_code"]
+            if node_code is not None and (not isinstance(node_code, str) or not node_code.strip()):
+                raise BusinessError("PLAN_FIELD_NODE_INVALID", "字段抽取节点必须是节点编码或空值", details={"field_key": field_key})
+            extensions[PlanField.__name__].setdefault(field_key, {})["node_code"] = node_code
         value_type = _required_key(item, "value_type", f"第 {index} 个字段")
         if value_type not in FORM_VALUE_TYPES:
             raise BusinessError(
@@ -1164,10 +1147,10 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
             structure_schema=item.get("structure_schema"),
             field_name=field_name,
         )
-        db.add(
-            PlanField(
+        config_store.add(
+            db, PlanField(
                 plan_id=plan.id,
-                field_key=_required_key(item, "field_key", f"第 {index} 个字段"),
+                field_key=field_key,
                 material_key=_required_key(item, "material_key", f"第 {index} 个字段"),
                 name=field_name,
                 value_type=value_type,
@@ -1176,8 +1159,9 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
                 unit=item.get("unit") or None,
                 currency=item.get("currency") or None,
                 artifact_source=item.get("artifact_source") or None,
-                period_scope=_required_key(item, "period_scope", f"第 {index} 个字段"),
-                statement_scope=_required_key(item, "statement_scope", f"第 {index} 个字段"),
+                # 期间与报表口径只在业务涉及时填写；空值统一落成不适用，满足事实表的非空定位键。
+                period_scope=str(item.get("period_scope") or "").strip() or SCOPE_NOT_APPLICABLE,
+                statement_scope=str(item.get("statement_scope") or "").strip() or SCOPE_NOT_APPLICABLE,
                 required=bool(item.get("required")),
                 instruction=str(item.get("instruction") or ""),
                 source_ref=item.get("source_ref"),
@@ -1193,8 +1177,8 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
                 f"第 {index} 条规则缺少业务定义（rule_json）",
                 details={"rule_key": item.get("rule_key")},
             )
-        db.add(
-            PlanRule(
+        config_store.add(
+            db, PlanRule(
                 plan_id=plan.id,
                 rule_key=_required_key(item, "rule_key", f"第 {index} 条规则"),
                 name=_required_key(item, "name", f"第 {index} 条规则"),
@@ -1208,8 +1192,8 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
             )
         )
     for index, item in enumerate(sections, start=1):
-        db.add(
-            PlanSection(
+        config_store.add(
+            db, PlanSection(
                 plan_id=plan.id,
                 section_key=_required_key(item, "section_key", f"第 {index} 个章节"),
                 title=_required_key(item, "title", f"第 {index} 个章节"),
@@ -1222,13 +1206,22 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
                 section_order=item.get("section_order"),
                 content_type=item.get("content_type"),
                 result_sort=item.get("result_sort"),
+                risk_level_order=list(item.get("risk_level_order") or []),
                 config_status=item.get("config_status"),
                 origin_json=origins[3].get(item.get("section_key")),
                 sort_no=index,
             )
         )
     db.flush()
-    plan.context_json = {**context, "calculation_enabled": calculation_enabled}
+    for model, identity in ((PlanMaterial, "material_key"), (PlanField, "field_key"), (PlanRule, "rule_key"), (PlanSection, "section_key")):
+        for row in config_store.rows(db, model, plan.id):
+            for key, value in extensions[model.__name__].get(getattr(row, identity), {}).items():
+                setattr(row, key, value)
+    plan.context_json = {
+        **context,
+        "calculation_enabled": calculation_enabled,
+        "calculation_json": _remap_calculation_field_codes(context.get("calculation_json"), field_code_changes),
+    }
     # 配置改完立刻重算：范围与「能不能用」在同一次提交里确定。
     _recompile_plan(db, plan)
     record_operation(

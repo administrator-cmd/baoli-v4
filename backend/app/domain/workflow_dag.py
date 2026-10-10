@@ -1,15 +1,10 @@
-"""Workflow 的 DAG 校验与就绪节点选择。
+"""Workflow 的 DAG 校验与就绪节点选择：发布期校验依赖，运行期按已完成集合选就绪节点。
 
-调度器只做两件事：
+就绪 = 已启用 且未完成 且依赖全部完成。调度器串行执行，按 (sequence_no, node_code)
+排序后取第一个。`sequence_no` 只用于展示与确定性排序，不代替依赖关系——真正决定能不能
+执行的是 `depends_on`。
 
-1. **校验**：发布期检查缺失依赖、循环依赖、依赖节点未启用；
-2. **选择**：运行期按已完成集合算出「就绪节点」——依赖全部已完成、自己尚未执行的节点。
-
-调度器**串行**执行就绪节点，按 (sequence_no, node_code) 排序后取第一个。
-排序口径是确定的：`sequence_no` 只用于展示与确定性排序，**不代替**依赖关系；
-真正决定能不能执行的是 `depends_on`。
-
-历史 manifest 缺失 `depends_on` 时，`plans_of` 按节点顺序补成线性依赖，保持已发布任务的执行顺序。
+历史 manifest 缺失 `depends_on` 时，`plans_of` 按节点顺序补成线性依赖。
 """
 
 from __future__ import annotations
@@ -185,7 +180,7 @@ def ready_node(
 
     就绪 = 已启用 且 未在 completed 里 且 全部依赖都在 completed 里。
 
-    返回 None 有两种含义，调用方**必须**自己区分（见 `pending_nodes`）：
+    返回 None 有两种含义，调用方必须自己区分（见 `pending_nodes`）：
     「全部执行完」与「有节点因依赖未满足而卡住」。把它们合并成一个布尔值
     会让卡住的任务显示成已完成。
     """

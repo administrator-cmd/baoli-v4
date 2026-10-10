@@ -82,9 +82,9 @@ class TaskUpdateRequest(BaseModel):
     remark: str | None = Field(default=None, max_length=4000)
 
 class TaskCopyRequest(BaseModel):
-    """复制任务：按源任务所属方案的**当前范围**重新创建一个新任务。
+    """复制任务：按源任务所属方案的当前范围重新创建一个新任务。
 
-    它**不是**「复制原任务的执行快照」：新任务冻结的是方案此刻的范围，
+    它不是「复制原任务的执行快照」：新任务冻结的是方案此刻的范围，
     源任务的冻结快照与已发生的执行事实一概不带过来。
     """
 

@@ -1,24 +1,24 @@
 """字段事实与字段抽取。
 
-事实不可变：每次抽取或人工裁决都**新增一个版本**，旧行退出当前位但保留可追溯。
-唯一键 (任务, 字段, 材料位) 上只有一条 `is_current`，且该范围**不含上传版本**——
-旧上传版本的当前事实也必须让位，否则新事实写不进去。
+事实不可变：每次抽取或人工裁决都新增一个版本，旧行退出当前位但保留可追溯。唯一键
+(任务, 字段, 材料位) 上只有一条 `is_current`，且该范围不含上传版本——旧上传版本的当前事实
+也必须让位，否则新事实写不进去。
 
-原文是事实。文本类字段的标准化值是服务端清理后的原文；数值、日期、布尔字段
-由服务端按字段声明的类型/单位/币种对原文重新计算，模型给出的
-`normalized_value` 不反向改变服务端结果。结构化字段由后端按字段 Schema 校验
-业务 JSON，并为每个顶层属性分别核验证据。"""
+原文是事实：文本类字段的标准化值是服务端清理后的原文；数值、日期、布尔字段由服务端按字段
+声明的类型/单位/币种对原文重新计算，模型给出的 `normalized_value` 不反向改变服务端结果；
+结构化字段由后端按字段 Schema 校验业务 JSON，并为每个顶层属性分别核验证据。"""
 
+from .. import task_csv_service
 import json
 from ...domain.audit_vocab import SEAL_ARTIFACT_SOURCE, declared_artifact_source
 from ...domain import fact_snapshot, field_strategy, quality_judgement
 from ...domain.identity import public_no
-from ...domain.manifest import OPERATOR_LABELS, comparison_label, required_field_scope, rule_node_type_of
+from ...domain.manifest import OPERATOR_LABELS, comparison_label, enabled_extraction_field_keys, required_field_scope, rule_node_type_of
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, DocumentUpload, Evidence, ManualReview, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFact, TaskFieldValue
 from ..llm_extraction import extract_document_fields
 from .artifacts import _artifact_payload
-from .evidence import _evidence_snapshot, _evidence_snapshots, _verify_evidence_location
+from .evidence import _evidence_snapshot, _evidence_snapshots, _verify_evidence_content
 from .shared import _applicability_json, _applicability_state, _current_uploads, _extraction_fact_value, _material_names, _not_applicable_message, _task_field_definitions
 from .state import _material_states
 from datetime import date
@@ -38,7 +38,10 @@ def _material_check(db: Session, task: AuditTask, manifest: dict[str, Any], exec
     rules = [
         rule
         for rule in manifest["rules"]
-        if rule_node_type_of(rule) == "MATERIAL_CHECK" and rule["operator"] == "MATERIAL_EXISTS" and rule["rule_key"] in enabled_keys
+        if rule["node"] == execution.node_code
+        and rule_node_type_of(rule) == "MATERIAL_CHECK"
+        and rule["operator"] == "MATERIAL_EXISTS"
+        and rule["rule_key"] in enabled_keys
     ]
     counts: dict[str, int] = {}
     for rule in rules:
@@ -86,7 +89,7 @@ def _material_check(db: Session, task: AuditTask, manifest: dict[str, Any], exec
         "material_rule_count": len(rules),
         "material_rule_status_counts": counts,
         "skipped": not rules and not required_missing,
-        "skip_reason": "本模板未配置材料检查规则" if not rules and not required_missing else None,
+        "skip_reason": "当前场景未配置材料检查规则" if not rules and not required_missing else None,
     }
 
 def _task_field_facts(
@@ -143,6 +146,7 @@ def _current_field_fact_pairs(
             .order_by(TaskFieldValue.id)
         ).all()
     )
+    candidate_rows = task_csv_service.from_index(db, task, TaskFieldValue, candidate_rows)
     candidates: dict[tuple[str, str], TaskFieldValue] = {}
     for row in candidate_rows:
         key = (row.field_key, row.material_key)
@@ -165,6 +169,7 @@ def _current_field_fact_pairs(
             )
         ).all()
     )
+    task_fact_rows = task_csv_service.from_index(db, task, TaskFact, task_fact_rows)
     task_facts: dict[tuple[str, str, str, str, str], TaskFact] = {}
     for row in task_fact_rows:
         identity = (
@@ -385,12 +390,8 @@ def _write_human_field_fact(
                 document_upload_id=source.document_upload_id,
                 field_value_id=fact.id,
                 field_path=source.field_path,
-                page_no=source.page_no,
                 quote_text=source.quote_text,
-                bbox_json=source.bbox_json,
                 artifact_id=source.artifact_id,
-                locator_status=source.locator_status,
-                locator_note=source.locator_note,
             )
             db.add(inherited)
             db.flush()
@@ -426,7 +427,7 @@ def _extraction_artifacts(
     """本次抽取可用的产物。
 
     声明了「产物来源=印章识别」的字段只能取自印章产物：本材料位没有 READY 的印章
-    产物时明确报“缺输入”，**不退回**正文产物抽取，也不把这些字段静默跳过——
+    产物时明确报“缺输入”，不退回正文产物抽取，也不把这些字段静默跳过——
     跳过会让它们留在“未抽取”状态，下游主体核对拿不到待核对主体。
     """
     seal_fields = [item["field_key"] for item in fields if declared_artifact_source(item) is not None]
@@ -446,8 +447,14 @@ def _extraction_scope(
     manifest: dict[str, Any],
     execution: NodeExecution,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Resolve this extraction instance's task fields and enabled rules."""
-    selected_fields = task.task_schema_json["fields"]
+    """按启用抽取规则确定取数范围，再校验当前节点的字段归属。"""
+    extraction_field_keys = enabled_extraction_field_keys(
+        manifest, task.task_schema_json["enabled_rule_keys"],
+    )
+    selected_fields = [
+        field for field in task.task_schema_json["fields"]
+        if field["field_key"] in extraction_field_keys
+    ]
     selected_field_keys = {field["field_key"] for field in selected_fields}
     enabled_rule_keys = set(task.task_schema_json["enabled_rule_keys"])
     extraction_rules = [
@@ -506,7 +513,13 @@ def _extraction_scope(
                         "unexpected_field_keys": sorted(declared_output_fields - actual_output_fields),
                     },
                 )
-            for field_key in contract["field_keys"]:
+            active_output_fields = {
+                field_key for rule in node_rules
+                if node.get("enabled", True) and rule.get("enabled", True)
+                and rule["rule_key"] in enabled_rule_keys
+                for field_key in rule["outputs"]
+            }
+            for field_key in active_output_fields:
                 if field_key in selected_field_keys:
                     previous = owners.setdefault(field_key, node_code)
                     if previous != node_code:
@@ -551,6 +564,10 @@ def _extraction_scope(
     else:
         owners = {}
         for rule in extraction_rules:
+            if not rule.get("enabled", True) or rule["rule_key"] not in enabled_rule_keys:
+                continue
+            if not nodes_by_code[rule["node"]].get("enabled", True):
+                continue
             for field_key in rule["outputs"]:
                 if field_key not in selected_field_keys:
                     continue
@@ -581,6 +598,7 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
     for field in selected_fields:
         by_material.setdefault(field["material_key"], []).append(field)
     extracted = 0
+    field_errors: dict[str, dict[str, Any]] = {}
     for document, upload in _current_uploads(db, task):
         fields = by_material.get(document.material_key, [])
         if not fields:
@@ -602,24 +620,13 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
             fields=fields,
             artifacts=[{"type": item.artifact_type, "content": _artifact_payload(item).content} for item in artifacts],
         )
-        failed_results = [item for item in response.fields if item.status == "EXTRACTION_FAILED"]
-        if failed_results:
-            raise BusinessError(
-                "FIELD_EXTRACTION_FAILED",
-                "字段抽取服务未能完成本材料的字段抽取，请重试当前节点",
-                status_code=502,
-                details={
-                    "material_key": document.material_key,
-                    "material_name": document.material_name,
-                    "field_keys": [item.field_key for item in failed_results],
-                },
-            )
+        field_errors.update(response.errors)
         artifact_by_type = {item.artifact_type: item for item in artifacts}
         field_definitions = {item["field_key"]: item for item in fields}
         for result in response.fields:
             field = field_definitions[result.field_key]
             status, raw_value, normalized_value, status_reason = _extraction_fact_value(field, result)
-            verified_evidence: list[tuple[str | None, Any, str, str | None, int | None, list[float] | None]] = []
+            verified_evidence: list[tuple[str | None, Any]] = []
             evidence_items: list[tuple[str | None, Any, Any, str | None]] = []
             if field_strategy.strategy_of(field) == field_strategy.STRUCTURED and isinstance(normalized_value, dict):
                 property_schemas = ((field.get("structure_schema") or {}).get("properties") or {})
@@ -640,9 +647,8 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
                 evidence_items.append((None, result.evidence, raw_value, field.get("value_type")))
             unsupported_paths: list[str] = []
             for field_path, evidence_item, evidence_value, evidence_value_type in evidence_items:
-                # 定位核对与内容依据分开：页码/坐标对不上只影响高亮，不影响内容；
-                # 只有引文在该产物里确实找不到原文依据时，PRESENT 才降级为证据不足。
-                locator_status, locator_note, page_no, bbox, quote_check = _verify_evidence_location(
+                # 核对所属产物的原文和字段值，不要求模型生成定位信息。
+                quote_check = _verify_evidence_content(
                     artifact_by_type[evidence_item.artifact_type],
                     evidence_item,
                     raw_value=evidence_value,
@@ -653,7 +659,7 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
                 if status == "PRESENT" and quote_check == "NOT_FOUND":
                     unsupported_paths.append(field_path or field["name"])
                 verified_evidence.append(
-                    (field_path, evidence_item, locator_status, locator_note, page_no, bbox)
+                    (field_path, evidence_item)
                 )
             if unsupported_paths:
                 status = "EVIDENCE_UNCLEAR"
@@ -694,19 +700,15 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
             db.add(fact)
             db.flush()
             evidence_ids: list[int] = []
-            for field_path, evidence_item, locator_status, locator_note, page_no, bbox in verified_evidence:
+            for field_path, evidence_item in verified_evidence:
                 evidence = Evidence(
                     evidence_no=public_no("EVD"),
                     audit_task_id=task.id,
                     document_upload_id=upload.id,
                     field_value_id=fact.id,
                     field_path=field_path,
-                    page_no=page_no,
                     quote_text=evidence_item.quote_text,
-                    bbox_json=bbox,
                     artifact_id=artifact_by_type[evidence_item.artifact_type].id,
-                    locator_status=locator_status or "UNVERIFIED",
-                    locator_note=locator_note,
                 )
                 db.add(evidence)
                 db.flush()
@@ -718,7 +720,7 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
             # (字段编号, 期间, 报表口径, 主体范围) 取用。
             #
             # 为什么必须同时写两处：task_field_value 的唯一范围表达不了期间与报表口径，
-            # 而财报场景的同一个科目在本期与上期是两个不同的数。两份记录指向同一次
+            # 同一来源在不同定位口径下可能有不同取值。两份记录指向同一次
             # 抽取（source_execution_id 相同），因此不会出现口径不一致。
             _write_field_task_fact(
                 db,
@@ -755,9 +757,11 @@ def _field_extraction(db: Session, task: AuditTask, manifest: dict[str, Any], ex
                     )
                 )
             extracted += 1
-    rule_summary = _save_extraction_rule_results(db, task, manifest, execution, extraction_rules)
+    rule_summary = _save_extraction_rule_results(db, task, manifest, execution, extraction_rules,
+                                                field_errors=field_errors)
     return {
         "field_results": extracted,
+        "field_errors": field_errors,
         **rule_summary,
         "skipped": not selected_fields and rule_summary["extraction_rule_count"] == 0,
         "skip_reason": "当前节点没有任务范围内的抽取字段或规则" if not selected_fields and rule_summary["extraction_rule_count"] == 0 else None,
@@ -776,14 +780,13 @@ def _write_field_task_fact(
 ) -> None:
     """把抽取或人工纠错写进统一事实表。
 
-    期间与报表口径取自字段配置（03_字段 的声明）。字段把这两列留空时，配置里存的是
-    **显式的「不适用」**——那是这份配置真实表达的意思，不是系统替业务补的默认值，
+    期间与报表口径取自当前场景的字段配置；不涉及这些口径时配置显式声明「不适用」，
     本函数不代填任何具体口径。
 
     有效状态必须同时写入与字段类型匹配的唯一取值列。类型不匹配时在这里明确
     失败，不产生「状态有效、值为空」或把错误金额塞入文本列的统一事实。
     """
-    # 取数期间与报表口径**来自字段自己的声明**：计算参数按这两项定位事实，
+    # 取数期间与报表口径来自字段自己的声明：计算参数按这两项定位事实，
     # 缺了就无法建立定位键。这里不代填默认值——默认成「本期 / 合并」会让一个
     # 声明了上期的计算参数静默取到本期的数，而结果看起来完全正常。
     period_scope = required_field_scope(
@@ -815,12 +818,12 @@ def _write_field_task_fact(
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-            elif value_type == "DECIMAL":
+            elif value_type in {"DECIMAL", "AMOUNT"}:
                 if isinstance(executable_value, bool):
-                    raise ValueError("金额不能是布尔值")
+                    raise ValueError("数值不能是布尔值")
                 decimal_value = Decimal(str(executable_value).strip())
                 if not decimal_value.is_finite():
-                    raise ValueError("金额必须是有限数值")
+                    raise ValueError("数值必须是有限数值")
             elif value_type == "DATE":
                 date_value = (
                     executable_value
@@ -967,6 +970,7 @@ def _save_extraction_rule_results(
     manifest: dict[str, Any],
     execution: NodeExecution,
     rules: list[dict[str, Any]],
+    *, field_errors: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     # 抽取结果可以展示候选原文，但状态与规范值必须已同步写入统一事实。
     current_pairs = _current_field_fact_pairs(db, task)
@@ -987,6 +991,10 @@ def _save_extraction_rule_results(
             result = {"status": "NOT_EXECUTED", "message": "字段抽取失败或未执行"}
         else:
             result = {"status": "EVIDENCE_INSUFFICIENT", "message": "字段抽取未形成充分证据"}
+        errors = {key: field_errors[key] for key in rule["outputs"] if field_errors and key in field_errors}
+        if errors:
+            result["message"] = "；".join(
+                f"{field_definitions[key]['name']}：{error['message']}" for key, error in errors.items())
         db.add(
             RuleResult(
                 audit_task_id=task.id,
@@ -995,7 +1003,8 @@ def _save_extraction_rule_results(
                 rule_name=rule["name"],
                 status=result["status"],
                 message=result["message"],
-                result_json=_extraction_result_payload(rule, field_definitions, material_names, facts),
+                result_json={**_extraction_result_payload(rule, field_definitions, material_names, facts),
+                             **({"field_errors": errors} if errors else {})},
             )
         )
         counts[result["status"]] = counts.get(result["status"], 0) + 1
@@ -1004,10 +1013,11 @@ def _save_extraction_rule_results(
 def _field_inputs(db: Session, task: AuditTask, rule: dict[str, Any]) -> list[dict[str, Any]]:
     """按规则明确 inputs 取统一事实，并从当前字段版本补充原文与证据。
 
-    TaskFact 是规则和计算唯一的有效值来源；TaskFieldValue 保存抽取候选、原文、
+    CSV 是规则和计算的业务值来源；数据库保存候选、事实身份、
     证据与人工版本。两者必须同时存在且状态一致，数据漂移时明确报错，不能靠查询
     顺序选一张表继续执行。
     """
+    pairs = _current_field_fact_pairs(db, task)
     field_definitions = _task_field_definitions(task)
     material_states = _material_states(db, task)
     inputs: list[dict[str, Any]] = []
@@ -1020,44 +1030,14 @@ def _field_inputs(db: Session, task: AuditTask, rule: dict[str, Any]) -> list[di
                 status_code=500,
                 details={"field_key": item["field_key"], "material_key": item["material_key"]},
             )
-        field_value = db.scalar(
-            select(TaskFieldValue)
-            .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
-            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-            .where(
-                TaskFieldValue.audit_task_id == task.id,
-                TaskFieldValue.scenario_version_id == task.scenario_version_id,
-                TaskFieldValue.field_key == item["field_key"],
-                TaskFieldValue.material_key == item["material_key"],
-                # 只取当前事实版本：历史版本即使还挂在旧复核上也不作为有效输入。
-                TaskFieldValue.is_current.is_(True),
-                DocumentUpload.audit_task_id == task.id,
-                DocumentUpload.is_current.is_(True),
-                TaskDocument.material_key == item["material_key"],
-                TaskDocument.audit_task_id == task.id,
-                TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
-            )
-            .order_by(TaskFieldValue.id.desc())
-        )
+        field_value = pairs.get((item["field_key"], item["material_key"]), (None, None))[0]
         period_scope = required_field_scope(
             field, "period_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
         )
         statement_scope = required_field_scope(
             field, "statement_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
         )
-        task_fact = db.scalar(
-            select(TaskFact).where(
-                TaskFact.audit_task_id == task.id,
-                TaskFact.scenario_version_id == task.scenario_version_id,
-                TaskFact.fact_code == str(field.get("source_ref") or field["field_key"]),
-                TaskFact.fact_kind == "EXTRACTED",
-                TaskFact.material_key == item["material_key"],
-                TaskFact.period_scope == period_scope,
-                TaskFact.statement_scope == statement_scope,
-                TaskFact.entity_scope == str(field.get("entity_scope") or "SELF"),
-                TaskFact.is_current.is_(True),
-            )
-        )
+        task_fact = pairs.get((item["field_key"], item["material_key"]), (None, None))[1]
         common = {
             "value_type": field.get("value_type"),
             "unit": field.get("unit"),
@@ -1178,7 +1158,7 @@ def _input_summary(
 ) -> list[dict[str, Any]]:
     """规则实际使用的输入事实，供页面与报告说明“规则输入了什么”。
 
-    原文值与标准化值分开保存：原文是事实本身（合同里真实写着的那几个字），
+    原文值与标准化值分开保存：原文是材料中真实写明的内容，
     标准化值是为比较确定性算出来的（例如 2024年10月11日 → 2024-10-11）。
     只给其中一个都会让工作人员无法对照：只给标准化值看不到原文，
     只给原文看不出系统拿什么参与比较。
@@ -1255,7 +1235,7 @@ def _comparison_view(
 ) -> dict[str, Any] | None:
     """把算子给出的对比过程补齐成可直接展示的事实。
 
-    算子只按输入下标引用左右两侧（它不认识字段中文名），这里按**同一次执行**的输入摘要
+    算子只按输入下标引用左右两侧（它不认识字段中文名），这里按同一次执行的输入摘要
     补上业务名：字段中文名 + 来源材料中文名 + 抽取到的原文。页面与报告据此显示
     「A 材料的合同金额（原文 ¥221252131.69元）= B 材料的结算金额」，
     不必自己去猜下标对应哪个字段，也不会把两个字段的张冠李戴写进结论。
@@ -1379,7 +1359,7 @@ def _refresh_extraction_rule_results(db: Session, task: AuditTask, manifest: dic
             .where(
                 RuleResult.audit_task_id == task.id,
                 RuleResult.rule_key == rule["rule_key"],
-                # 这条抽取规则的归属是**节点实例码**（`rule["node"]`），不是能力类型：
+                # 这条抽取规则的归属是节点实例码（`rule["node"]`），不是能力类型：
                 # 同一场景可以有两个字段抽取节点，写死能力类型当实例码后一条都查不到。
                 RuleResult.node_execution_id == execution.id,
             )

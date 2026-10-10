@@ -20,7 +20,7 @@ const statusLabels: Record<string, string> = {
   NO_BUSINESS_DATA: "无业务数据，已跳过",
   HIDDEN: "隐藏工作表",
   EXCLUDED: "已排除",
-  BOUND: "已绑定",
+  BOUND: "已选择",
   PROPOSED: "已转换",
   PENDING_DECISION: "等待业务确认",
   CONFIRMED: "已确认",
@@ -61,6 +61,7 @@ const statusLabels: Record<string, string> = {
   NOT_EXECUTED: "未执行",
   REVIEWED: "已复核",
   PASSED: "通过",
+  COMPUTED: "已计算",
   PASS: "通过",
   ABNORMAL: "异常",
   EVIDENCE_INSUFFICIENT: "证据不足",
@@ -72,11 +73,8 @@ const statusLabels: Record<string, string> = {
   AUTO: "自动识别",
   MANUAL: "已人工处理",
 
-  // 外部作业阶段、证据定位、依据类型、逐行处置
+  // 外部作业阶段、依据类型、逐行处置
   PROCESSING: "处理中",
-  VERIFIED: "已核实",
-  UNVERIFIED: "未核实",
-  UNLOCATABLE: "无法定位",
   HUMAN_STATEMENT: "人工业务判断",
   DOCUMENT_EVIDENCE: "文档证据",
   UPLOAD_RECORD: "上传记录",
@@ -168,6 +166,7 @@ const statusTones: Record<string, StatusTone> = {
   NOT_EXECUTED: "neutral",
   REVIEWED: "success",
   PASSED: "success",
+  COMPUTED: "info",
   PASS: "success",
   ABNORMAL: "danger",
   EVIDENCE_INSUFFICIENT: "warning",
@@ -192,10 +191,7 @@ const statusTones: Record<string, StatusTone> = {
   INTERRUPT_WAITING: "warning",
   RESULT_UNKNOWN: "warning",
 
-  // 证据定位与依据类型
-  VERIFIED: "success",
-  UNVERIFIED: "warning",
-  UNLOCATABLE: "warning",
+  // 依据类型
   HUMAN_STATEMENT: "info",
   DOCUMENT_EVIDENCE: "info",
   UPLOAD_RECORD: "info",
@@ -216,39 +212,13 @@ const statusTones: Record<string, StatusTone> = {
 };
 
 /**
- * 证据定位核对状态的中文口径与颜色。
+ * 证据内容依据的核对结论：引文或字段值能否在所述材料里找到原文。
  *
- * 这是**位置**结论，不是内容结论：位置对不上不等于这段原文不存在，
- * 因此文案统一带「位置」二字，避免被读成内容有问题。
- */
-const locatorStatusLabels: Record<string, string> = {
-  VERIFIED: "位置已核对",
-  UNVERIFIED: "位置未核实",
-  UNLOCATABLE: "位置无法定位",
-};
-
-export function locatorStatusLabel(status: string | null | undefined): string {
-  return status ? locatorStatusLabels[status] ?? "位置状态未知" : "位置状态未知";
-}
-
-export function locatorStatusTone(status: string | null | undefined): StatusTone {
-  if (status === "VERIFIED") {
-    return "success";
-  }
-  if (status === "UNVERIFIED" || status === "UNLOCATABLE") {
-    return "warning";
-  }
-  return "neutral";
-}
-
-/**
- * 证据**内容依据**的核对结论：引文或字段值能否在所述材料里找到原文。
- *
- * 与位置分开：内容找不到才是真的缺依据，位置对不上只是高亮不了。
+ * 核对依据来自所属处理产物的真实文本。
  */
 const quoteCheckLabels: Record<string, string> = {
   FOUND: "已在所属材料中找到该原文",
-  VALUE_FOUND: "已在处理产物中找到字段值，但引文原文无法直接定位",
+  VALUE_FOUND: "已在所属产物中找到字段值，但未找到完整引文",
   NOT_FOUND: "在所属材料中找不到该原文，缺少原文依据",
   NOT_CHECKABLE: "该产物没有可核对的原文文本，未能核对内容依据",
   PENDING: "写入时尚未按当前口径核对内容依据",
@@ -328,6 +298,7 @@ const operationPhaseLabels: Record<string, string> = {
   BUSINESS_COMMITTED: "业务结果已提交",
   GRAPH_ADVANCED: "流程已推进",
   INTERRUPT_WAITING: "等待人工复核",
+  RESULT_READY: "结果已就绪",
 };
 
 export function operationPhaseLabel(phase: string | null | undefined): string | null {
@@ -402,6 +373,7 @@ export function candidateStateTone(state: string | null | undefined): StatusTone
 /** 后台操作类型，用于「当前步骤」而不是展示内部编码。 */
 const operationTypeLabels: Record<string, string> = {
   IMPORT_CONVERT: "规则解析与转换",
+  SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
   NODE_EXECUTE: "业务节点执行",
   MANUAL_REVIEW_RESUME: "人工复核恢复",
   // 管理模块：业务写操作与命令
@@ -495,26 +467,18 @@ export function progressPercent(done: number | null | undefined, total: number |
   return Math.min(100, Math.round((Math.min(done, total) / total) * 100));
 }
 
-/**
- * base Excel 的 10 个业务 Sheet 用途。
- *
- * 中文名与模板里的工作表名称一致，用户可以直接对照 Excel 里的标签页填写；
- * 模板自带的说明页等元数据不是业务用途，绝不出现在这里。
- *
- * **服务端协议才是权威来源**：绑定步骤优先用 `/rulebook-templates/sheets` 返回的
- * `display_name`（见 profileSheetLabels），这份清单只作为协议不可达时的兜底。
- */
+/** 已存角色码的业务用途标签，不对应固定工作表名称。 */
 export const sheetRoleOptions = [
-  { value: "MATERIAL_LIST", label: "01_材料位" },
-  { value: "MATERIAL_QUALITY", label: "02_文件处理规则" },
-  { value: "FIELD_EXTRACTION", label: "03_字段" },
-  { value: "INTERNAL_VALIDATE", label: "04_文件内部校验规则" },
-  { value: "CROSS_VALIDATE", label: "05_文件交叉校验规则" },
-  { value: "CALC_DEFINITION", label: "06_计算定义" },
-  { value: "CALC_PARAMETER", label: "07_计算参数" },
-  { value: "CALC_JUDGEMENT", label: "08_计算判定" },
-  { value: "RISK", label: "09_风险规则" },
-  { value: "REPORT_TEMPLATE", label: "10_报告模板" },
+  { value: "MATERIAL_LIST", label: "材料配置" },
+  { value: "MATERIAL_QUALITY", label: "文件处理规则" },
+  { value: "FIELD_EXTRACTION", label: "字段抽取" },
+  { value: "INTERNAL_VALIDATE", label: "文件内部校验" },
+  { value: "CROSS_VALIDATE", label: "文件交叉校验" },
+  { value: "CALC_DEFINITION", label: "计算定义" },
+  { value: "CALC_PARAMETER", label: "计算输入" },
+  { value: "CALC_JUDGEMENT", label: "计算判定" },
+  { value: "RISK", label: "风险规则" },
+  { value: "REPORT_TEMPLATE", label: "报告配置" },
 ];
 
 /**
@@ -528,7 +492,7 @@ const nonBusinessSheetRoleLabels: Record<string, string> = {
 };
 
 /**
- * 风险疑点（06_风险疑点）的业务列名。
+ * 风险来源的业务属性标签。
  *
  * 来源节点与来源审核规则的中文文案由服务端返回（source_node_label / source_rule_name），
  * 前端只负责列名，不自行推断来源节点的中文名。
@@ -563,7 +527,8 @@ export function sheetRoleLabel(role: string | null | undefined): string {
 
 const valueTypeLabels: Record<string, string> = {
   STRING: "文本",
-  DECIMAL: "金额",
+  DECIMAL: "数值",
+  AMOUNT: "金额",
   DECIMAL_CN: "大写金额",
   DATE: "日期",
   BOOLEAN: "是否",
@@ -694,7 +659,8 @@ export const nodeOptions = Object.keys(nodeLabels).map((value) => ({ value, labe
  */
 export const valueTypeOptions = [
   { value: "STRING", label: "文本" },
-  { value: "DECIMAL", label: "金额" },
+  { value: "DECIMAL", label: "数值" },
+  { value: "AMOUNT", label: "金额" },
   { value: "DECIMAL_CN", label: "大写金额" },
   { value: "DATE", label: "日期" },
   { value: "BOOLEAN", label: "是否" },
@@ -720,9 +686,9 @@ export function defaultExtractionStrategy(valueType: string): "RAW_TEXT" | "DETE
 }
 
 export function extractionStrategySupports(strategy: string, valueType: string): boolean {
-  if (strategy === "STRUCTURED") return ["STRING", "CLAUSE"].includes(valueType);
-  if (strategy === "RAW_TEXT") return ["STRING", "CLAUSE", "DECIMAL_CN"].includes(valueType);
-  return strategy === "DETERMINISTIC" && ["DECIMAL", "DATE", "BOOLEAN"].includes(valueType);
+  // 普通策略只决定模型返回原文的方式，服务端再按 value_type 规范化；
+  // 不把业务类型和策略硬编码成互斥组合。STRUCTURED 仅要求 Schema 完整。
+  return strategy === "RAW_TEXT" || strategy === "DETERMINISTIC" || strategy === "STRUCTURED";
 }
 
 export const artifactTypeOptions = [
@@ -748,12 +714,11 @@ export function artifactSourceLabel(value: string | null | undefined): string {
 
 /**
  * 取数期间与报表口径：字段自己声明「这个数取的是哪一期、哪个口径」，
- * 计算参数按这两项定位字段事实。取值与统一模板协议里的 `value_labels` 同一口径，
+ * 计算参数按这两项定位字段事实。取值与参考格式里的 `value_labels` 同一口径，
  * 因此页面与 Excel 下拉看到的是同一套中文名。
  */
 export const periodScopeOptions = [
-  // 「不适用」是**显式取值**，不是留空的占位：合同场景没有期间概念，
-  // 该字段声明为不适用后，计算参数不能拿它定位事实（发布期会拦）。
+  // 「不适用」是显式取值，不是留空占位；不涉及期间的字段与计算结果使用该口径。
   { value: "NOT_APPLICABLE", label: "不适用" },
   { value: "CURRENT", label: "本期" },
   { value: "PRIOR", label: "上期" },
@@ -784,22 +749,6 @@ export function statementScopeLabel(value: string | null | undefined): string {
   return value ? statementScopeLabels[value] ?? value : "未声明";
 }
 
-/**
- * 风险等级选项：旧格式用「高/中/低/待确认」，节点版用「最高/一级/二级/三级」。
- * 两套标签都是已确认的业务取值，页面必须都能选；PM 原「高/低」与四级标签之间的
- * 对应关系仍未确认，因此不在这里提供自动映射。
- */
-export const riskLevelOptions = [
-  { value: "最高", label: "最高" },
-  { value: "一级", label: "一级" },
-  { value: "二级", label: "二级" },
-  { value: "三级", label: "三级" },
-  { value: "高", label: "高（旧格式）" },
-  { value: "中", label: "中（旧格式）" },
-  { value: "低", label: "低（旧格式）" },
-  { value: "待确认", label: "待确认" },
-];
-
 export const decimalCompareOperatorOptions = [
   { value: "EQ", label: "等于" },
   { value: "GTE", label: "大于或等于" },
@@ -809,6 +758,7 @@ export const decimalCompareOperatorOptions = [
 
 /** 报告输出格式。当前尚未生成 PDF/Word/Excel 文件，这里维护的是配置目标格式。 */
 export const reportFormatOptions = [
+  { value: "Markdown", label: "Markdown" },
   { value: "PDF", label: "PDF" },
   { value: "Word", label: "Word" },
   { value: "Excel", label: "Excel" },
@@ -850,26 +800,12 @@ export const riskSourceNodeOptions = [
   { value: "CROSS_VALIDATE", label: "文件交叉校验" },
 ];
 
-export const riskConditionOptions = [
-  { value: "ANY_ABNORMAL", label: "任一来源检查不合格" },
-  { value: "ALL_ABNORMAL", label: "全部来源检查不合格" },
-];
-
-export const checkLevelOptions = [
-  { value: "最高", label: "最高" },
-  { value: "一级", label: "一级" },
-  { value: "二级", label: "二级" },
-  { value: "三级", label: "三级" },
-  { value: "高", label: "高（旧格式）" },
-  { value: "低", label: "低（旧格式）" },
-];
-
 /**
- * 规则算子的**兜底**中文名。
+ * 规则算子的兜底中文名。
  *
  * 页面显示检查方式时优先用后端能力目录返回的标签（`/system/capabilities` 的 `label`），
  * 这里只在目录标签取不到时兜底，或用于纯展示的历史文案映射。
- * 它**不用于**下拉选项：选项一律来自能力目录，本地名单与后端漂移过一次
+ * 它不用于下拉选项：选项一律来自能力目录，本地名单与后端漂移过一次
  * （后端 14 个算子、页面只有 7 个），页面上打开一条已导入的规则会找不到它的当前取值。
  */
 export const ruleOperatorOptions = [
@@ -878,8 +814,8 @@ export const ruleOperatorOptions = [
   { value: "FIELD_EQUAL", label: "字段相等" },
   { value: "FIELD_NOT_EQUAL", label: "字段不等" },
   { value: "DATE_COMPARE", label: "日期比较" },
-  { value: "DECIMAL_COMPARE", label: "金额比较" },
-  { value: "DECIMAL_SUM_COMPARE", label: "金额加总比较" },
+  { value: "DECIMAL_COMPARE", label: "数值比较" },
+  { value: "DECIMAL_SUM_COMPARE", label: "数值加总比较" },
   { value: "DECIMAL_CN_EQUAL", label: "大小写金额一致性" },
   { value: "FIELD_NOT_EMPTY", label: "字段非空校验" },
   { value: "CLAUSE_ABSENT", label: "条款不应存在" },
@@ -900,43 +836,45 @@ const failureNextSteps: Record<string, string> = {
   AUDIT_TASK_RUNNING: "任务正在执行当前节点，等待执行结束后再替换材料。",
   BLOCKED_BY_PRECHECK: "历史导入发布检查存在阻断项；新导入请写入场景草稿后，在场景页处理发布问题。",
 
-  // 工作表绑定：未知工作表、用途缺失或表头行无效
-  SHEET_ROLE_REQUIRED: "在「Sheet 绑定」步骤为这张工作表选择用途，或把它设为不参与本次导入。",
-  SHEET_ROLE_INVALID: "该用途不在当前模板支持的范围内，请重新选择用途后再次提交解析。",
-  SHEET_BINDING_INCOMPLETE: "本次作业的每一张工作表都要提交绑定结果，请刷新页面后重新确认用途。",
-  SHEET_BINDING_DUPLICATE: "同一张工作表被提交了两次，请刷新页面后重新确认用途。",
-  SHEET_NOT_FOUND: "该工作表已不在当前导入作业中，请刷新页面后重新确认用途。",
-  SHEET_HEADER_REQUIRED: "为这张业务工作表填写实际存在的表头行（列名所在行）。",
-  SHEET_HEADER_INVALID: "所选表头行不在可转换范围内，请按文件实际情况重新填写表头行。",
-  TEMPLATE_METADATA_IMMUTABLE: "填写说明等模板元数据工作表不能绑定为业务工作表，请把它设为不参与本次导入。",
-  NO_BUSINESS_DATA_SHEET_IMMUTABLE: "这张工作表没有业务数据，系统已跳过，不能绑定为业务用途。",
+  // 工作表选择错误与历史标准格式错误
+  SHEET_ROLE_REQUIRED: "历史标准格式缺少工作表角色；可重新上传规则库，按当前 LLM 流程解析。",
+  SHEET_ROLE_INVALID: "历史工作表角色无法识别；可重新上传规则库，按当前 LLM 流程解析。",
+  SHEET_BINDING_INCOMPLETE: "请提交本次作业的全部工作表选择，且每张表只提交一次；刷新页面后重新确认解析范围。",
+  SHEET_BINDING_DUPLICATE: "同一张工作表被提交了两次，请刷新页面后重新确认解析范围。",
+  SHEET_NOT_FOUND: "该工作表已不在当前导入作业中，请刷新页面后重新确认解析范围。",
+  SHEET_HEADER_REQUIRED: "历史标准格式缺少表头行；可重新上传规则库，按当前 LLM 流程解析。",
+  SHEET_HEADER_INVALID: "历史标准格式的表头行无效；可重新上传规则库，按当前 LLM 流程解析。",
+  TEMPLATE_METADATA_IMMUTABLE: "历史标准格式不将说明页作为业务表；新导入按所选工作表真实内容解析。",
+  NO_BUSINESS_DATA_SHEET_IMMUTABLE: "这张工作表没有业务数据，请核对文件内容和本次解析范围。",
 
   // 规则填写超出系统支持范围
-  RULE_CAPABILITY_UNSUPPORTED: "把它改成两个明确字段之间的一对一比较，或拆成多条规则：系统不会取第一份文件代替，也不会让大模型估算汇总。",
+  RULE_CAPABILITY_UNSUPPORTED: "该规则存在执行能力缺口，请按返回的具体原因核对规则内容和场景节点配置。",
+  LLM_STREAM_INCOMPLETE: "模型流式响应未完整结束，本次生成结果未保存；请查看后端流式请求日志。",
+  LLM_OUTPUT_TRUNCATED: "模型因输出长度限制而截断了响应，本次生成结果未保存；请核对模型接口的输出限制。",
   RETRIEVAL_SCOPE_EMPTY: "本次检索没有明确材料范围。请在任务的字段结果里确认材料是否已上传并完成文件处理，再重新检索。",
   EMBEDDING_MODEL_UNCONFIGURED: "本机没有配置本地嵌入模型路径。需要检索取证的规则无法执行；请配置 BAOLI_EMBEDDING_MODEL_PATH 后重新执行文件处理节点。",
   EMBEDDING_MODEL_MISSING: "本地嵌入模型目录不存在。请在部署机上确认模型已下载到配置的路径，然后重新执行文件处理节点。",
   EMBEDDING_MODEL_INCOMPLETE: "本地嵌入模型目录缺少必要文件（权重或 tokenizer）。请补齐模型后重新执行文件处理节点。",
   EMBEDDING_DEPENDENCY_MISSING: "本机缺少运行本地 Embedding 所需的依赖。请按交付说明安装后重新执行文件处理节点。",
   EMBEDDING_INFERENCE_FAILED: "本地嵌入模型推理失败，索引或检索未完成。请检查部署机资源与模型文件后重试。",
-  EVIDENCE_INDEX_MISSING: "本次范围内还没有可检索的索引。请先执行文件处理节点建立索引；索引为空不等于合同不存在该条款。",
+  EVIDENCE_INDEX_MISSING: "本次范围内还没有可检索的索引。请先执行文件处理节点建立索引；索引为空不等于材料不存在该条款。",
   RULE_CELL_FORMULA_UNSUPPORTED: "把公式单元格改成业务描述文字后重新上传规则库。",
   RULE_REQUIRED_CELL_EMPTY: "补齐该单元格内容后重新上传规则库。",
 
   // 配置编译、场景发布与历史导入发布
-  IMPORT_STATUS_NOT_READY: "当前作业还没有完成规则转换，请先确认工作表用途并提交解析。",
-  PROPOSALS_MISSING: "规则尚未转换，请先确认工作表用途并提交解析。",
+  IMPORT_STATUS_NOT_READY: "当前作业还没有完成规则转换，请先选择参与解析的工作表并提交解析。",
+  PROPOSALS_MISSING: "规则尚未转换，请先选择参与解析的工作表并提交解析。",
   ISSUES_UNRESOLVED: "先为每一项业务问题提交业务结论，再写入场景草稿。",
-  MANIFEST_NO_MATERIAL: "在 01_材料清单里至少配置一个材料位，再重新解析或发布。",
+  MANIFEST_NO_MATERIAL: "在当前场景中至少配置一个材料位，再重新解析或发布。",
   MANIFEST_NO_RULE: "至少配置一条检查规则（或确认本场景只需要字段抽取），再重新解析或发布。",
   MANIFEST_NODE_RULE_MISSING: "为缺失的必需节点补充规则，再重新解析或发布。",
-  MANIFEST_MATERIAL_REF_MISSING: "把 02～06 中引用的材料名称改成 01_材料清单里已有的材料，再重新解析。",
-  MANIFEST_RULE_INPUT_MISSING: "补齐规则引用的材料和字段，使其与 01/03 中的定义一致，再重新解析。",
-  MANIFEST_RULE_INPUT_COUNT_INVALID: "一条规则只比较左右各一个字段，请把多字段的关系拆成多条规则后重新解析。",
+  MANIFEST_MATERIAL_REF_MISSING: "规则引用的材料必须在当前场景中定义，请补齐材料配置或修正引用。",
+  MANIFEST_RULE_INPUT_MISSING: "补齐规则引用的材料和字段，使其与当前场景的定义一致。",
+  MANIFEST_RULE_INPUT_COUNT_INVALID: "规则输入数量不符合所选算子要求，请按具体错误核对输入；多字段业务方法可使用智能校验。",
   MANIFEST_RULE_MATERIAL_MISSING: "补齐规则引用的材料范围，或修改规则的适用材料，再重新解析。",
   MANIFEST_RULE_MATERIAL_REQUIRED: "为这条材料规则写明适用的材料后重新解析。",
-  MANIFEST_RISK_SOURCE_MISSING: "在 06_风险疑点里填写来源节点与来源审核规则，并确保它们指向同一条 02/04/05 规则。",
-  MANIFEST_RISK_SOURCE_REQUIRED: "在 06_风险疑点的「来源审核规则」列填写被引用的审核规则名称，再重新解析。",
+  MANIFEST_RISK_SOURCE_MISSING: "核对风险配置引用的来源规则或计算结果，确保它们在当前场景中存在且已启用。",
+  MANIFEST_RISK_SOURCE_REQUIRED: "为风险配置声明实际依赖的审核规则或计算结果。",
   MANIFEST_RISK_REVIEW_NODE_ORDER_INVALID: "风险评定排在人工复核之后，不能再要求新增人工复核；请去掉该风险规则的人工复核要求后重新解析。",
   MANIFEST_APPLICABILITY_MATERIAL_MISSING: "为「所引用材料均已上传时」的规则补充所引用的材料，或把适用条件改为始终适用。",
   PUBLISH_PRECHECK_FAILED: "这是历史导入发布接口留下的阻断。新导入请写入场景草稿，再在场景页按发布检查处理。",
@@ -966,16 +904,16 @@ const failureNextSteps: Record<string, string> = {
   FIELD_STRUCTURE_SCHEMA_UNEXPECTED: "普通字段不能携带结构定义，请清空后保存。",
   SECTION_FIELD_MISSING: "报告章节引用的字段不存在；请在章节里重新选择字段，或先补上该字段。",
   RULE_SYSTEM_READONLY: "字段抽取与报告生成规则由系统维护，不能在页面上改写；如需调整请改字段定义或报告章节。",
-  RULE_INPUT_COUNT_INVALID: "一条规则只比较左右各一个字段；请把多字段关系拆成多条规则。",
+  RULE_INPUT_COUNT_INVALID: "规则输入数量不符合所选算子要求，请核对具体错误；智能校验支持多个输入字段。",
   RULE_INPUT_FIELD_MISSING: "规则引用的字段不在本场景字段列表中；请先补上字段，或在规则里改选已有的字段。",
   RULE_INTERNAL_MATERIAL_MISMATCH: "规则引用的字段与所选材料对不上；请让字段的材料与规则适用的材料保持一致。",
-  RULE_MATERIAL_MISSING: "规则引用了不存在的材料；请在 01_材料清单里补上该材料，或改掉规则的适用材料。",
+  RULE_MATERIAL_MISSING: "规则引用了不存在的材料；请补齐场景材料配置，或修正规则的材料引用。",
   RULE_MATERIAL_REQUIRED: "这条规则需要指定适用材料；请在规则里选择它检查哪些材料。",
   RULE_NODE_ORDER_INVALID: "规则所在节点排在人工复核之后，不能再要求人工复核；请去掉该规则的人工复核要求。",
   RULE_TYPE_INVALID: "检查方式不在支持范围内，请从页面提供的算子中重新选择。",
   RULE_APPLICABILITY_INVALID: "适用条件不在支持范围内，请选择「始终适用」或「所引用材料均已上传时」。",
-  RULE_RISK_SOURCE_MISSING: "风险规则必须写明来源节点与来源审核规则，且两者要指向同一条校验规则。",
-  RULE_RISK_SOURCE_REQUIRED: "风险规则缺少来源审核规则；请选择它要判定的那条校验规则。",
+  RULE_RISK_SOURCE_MISSING: "核对风险配置引用的来源规则或计算结果，确保它们存在且已启用。",
+  RULE_RISK_SOURCE_REQUIRED: "风险规则缺少来源；请选择实际依赖的审核规则或计算结果。",
   RULE_RISK_SOURCE_INVALID: "风险规则的来源引用无效；请重新选择来源节点与来源审核规则。",
   RULE_RISK_SOURCE_NODE_REQUIRED: "风险规则缺少来源节点；请选择风险来自哪个检查阶段。",
 
@@ -1044,7 +982,7 @@ export const retrievalDecisionOptions = [
 /** 取证方式与判定方式的中文口径：让用户一眼看懂这条检查是怎么判的。 */
 const evidenceRouteLabels: Record<string, string> = {
   DIRECT_FACTS: "直接读取结构化字段",
-  // 只对印章识别产物的主体名称建向量：不是合同全文检索，也不是条款检索。
+  // 只对印章识别产物的主体名称建向量：不是材料全文检索，也不是条款检索。
   SEAL_SUBJECT_RETRIEVAL: "用待核对主体检索印章主体",
   TASK_RETRIEVAL: "在材料中检索相关证据",
 };

@@ -10,7 +10,7 @@ from datetime import datetime
 from io import BytesIO
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,8 @@ from ..database import get_db
 from ..domain.manifest import build_task_schema
 from ..schema.dto.scenarios import (
     DraftDisabledSourceRowUpdateRequest,
-    DraftDisabledSourceRowActivateRequest,
+    DraftSourceActivationPreviewRequest,
+    DraftSourceActivationConfirmRequest,
     DraftFieldRequest,
     DraftFieldUpdateRequest,
     DraftMaterialRequest,
@@ -37,12 +38,12 @@ from ..schema.dto.scenarios import (
 )
 from ..schema.dto import TaskSchemaPreviewRequest
 from ..schema.vo.scenarios import (
-    DraftDisabledSourceRowActivationPreviewResponse,
     ScenarioDetailResponse,
     ScenarioDraftViewResponse,
     ScenarioPublishResponse,
 )
 from ..schema.vo import TaskSchemaPreviewResponse
+from ..schema.vo import OperationAcceptedResponse
 from ..schema.query import validate_page_params
 from ..services import scenario_admin_service
 from ..services.scenario_admin_service import (
@@ -64,7 +65,6 @@ from ..services.scenario_admin_service import (
     list_scenario_options,
     list_scenarios_page,
     publish_draft,
-    restore_scenario,
     scenario_detail,
     set_draft_rule_enabled,
     set_scenario_enabled,
@@ -76,6 +76,8 @@ from ..services.scenario_admin_service import (
     update_draft_section,
     update_scenario,
 )
+from ..services.background_service import operation_view
+from ..services.operation_gateway import submit_source_activation_preview
 from ..services.task_lookup import scenario_or_404
 from ..services.template_export_service import build_scenario_version_export
 from ..schema.vo import PagedResponse
@@ -85,7 +87,7 @@ router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 
 
 def _export_manifest(manifest: dict) -> bytes:
-    """按统一模板协议导出配置实际使用的 Sheet。"""
+    """将场景完整业务 JSON 导出为 Excel。"""
     return build_scenario_version_export(manifest)
 
 
@@ -104,7 +106,6 @@ def list_scenarios(
     enabled: bool | None = None,
     published_from: datetime | None = None,
     published_to: datetime | None = None,
-    deleted: bool = False,
     page: int = Query(default=1),
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
@@ -118,7 +119,6 @@ def list_scenarios(
         enabled=enabled,
         published_from=published_from,
         published_to=published_to,
-        deleted=deleted,
         page=page,
         page_size=page_size,
     )
@@ -127,7 +127,7 @@ def list_scenarios(
 
 @router.get("/options")
 def scenario_options(request: Request, db: Session = Depends(get_db)) -> dict:
-    """**业务用户可用**的场景下拉：只含已启用且已有已发布版本的场景。
+    """业务用户可用的场景下拉：只含已启用且已有已发布版本的场景。
 
     方案与任务的场景选择器用它。草稿、未发布、停用或已删除的场景不出现——
     业务用户只能从已发布且启用的场景创建方案。
@@ -137,9 +137,9 @@ def scenario_options(request: Request, db: Session = Depends(get_db)) -> dict:
 
 @router.get("/admin-options")
 def admin_scenario_options(request: Request, db: Session = Depends(get_db)) -> dict:
-    """**管理员用**的场景下拉：未删除的全部场景及其实时状态。
+    """管理员用的场景下拉：未删除的全部场景及其实时状态。
 
-    导入页与场景管理页在场景**发布之前**就要选中它（先建场景、再上传规则库），
+    导入页与场景管理页在场景发布之前就要选中它（先建场景、再上传规则库），
     因此不能按「已发布」过滤。`available` 如实标出该场景当前能否被业务用户使用。
     """
     return {"request_id": request.state.request_id, "items": list_admin_scenario_options(db)}
@@ -152,7 +152,6 @@ def export_scenarios(
     enabled: bool | None = None,
     published_from: datetime | None = None,
     published_to: datetime | None = None,
-    deleted: bool = False,
     db: Session = Depends(get_db),
 ):
     """按当前筛选导出场景列表 CSV。"""
@@ -163,7 +162,6 @@ def export_scenarios(
         enabled=enabled,
         published_from=published_from,
         published_to=published_to,
-        deleted=deleted,
         page=1,
         page_size=EXPORT_PAGE_SIZE,
     )
@@ -218,18 +216,11 @@ def set_scenario_enabled_endpoint(
     return ScenarioDetailResponse.model_validate({**scenario_detail(db, scenario_code), "request_id": request.state.request_id})
 
 
-@router.delete("/{scenario_code}", response_model=ScenarioDetailResponse)
-def delete_scenario_endpoint(scenario_code: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDetailResponse:
-    """逻辑删除场景；历史版本与任务保留。"""
+@router.delete("/{scenario_code}", status_code=204)
+def delete_scenario_endpoint(scenario_code: str, db: Session = Depends(get_db)) -> Response:
+    """实际删除场景和草稿，成功后无响应正文。"""
     delete_scenario(db, scenario_code)
-    return ScenarioDetailResponse.model_validate({**scenario_detail(db, scenario_code), "request_id": request.state.request_id})
-
-
-@router.post("/{scenario_code}/restore", response_model=ScenarioDetailResponse)
-def restore_scenario_endpoint(scenario_code: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDetailResponse:
-    """恢复已逻辑删除的场景。"""
-    restore_scenario(db, scenario_code)
-    return ScenarioDetailResponse.model_validate({**scenario_detail(db, scenario_code), "request_id": request.state.request_id})
+    return Response(status_code=204)
 
 
 # 配置草稿：材料 / 字段 / 规则 / 报告章节
@@ -259,45 +250,45 @@ def update_disabled_source_row(
     return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
 
 
-@router.post("/{scenario_code}/draft/disabled-source-rows/{row_key}/activate", response_model=ScenarioDraftViewResponse)
-def activate_disabled_source_row(
-    scenario_code: str,
-    row_key: str,
-    payload: DraftDisabledSourceRowActivateRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> ScenarioDraftViewResponse:
-    draft = scenario_admin_service.activate_disabled_source_row(
-        db, scenario_code, row_key, expected_revision=payload.expected_revision
-    )
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
-
-
-@router.get("/{scenario_code}/draft/disabled-source-rows/{row_key}/activation-preview", response_model=DraftDisabledSourceRowActivationPreviewResponse)
-def preview_disabled_source_row_activation(
-    scenario_code: str,
-    row_key: str,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> DraftDisabledSourceRowActivationPreviewResponse:
-    preview = scenario_admin_service.preview_disabled_rule_group(db, scenario_code, row_key)
-    return DraftDisabledSourceRowActivationPreviewResponse.model_validate({
-        **preview, "request_id": request.state.request_id,
-    })
-
-
 @router.put("/{scenario_code}/draft/sheets", response_model=ScenarioDraftViewResponse)
 def select_sheets(
     scenario_code: str, payload: DraftSheetSelectionRequest, request: Request, db: Session = Depends(get_db)
 ) -> ScenarioDraftViewResponse:
-    """拒绝脱离导入作业单独改写 Sheet 绑定，避免形成第二份配置来源。"""
+    """拒绝脱离导入作业单独改写来源工作表清单，避免形成第二份配置来源。"""
     draft = select_draft_sheets(scenario_code, [item.model_dump() for item in payload.sheets])
+    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+
+
+@router.post("/{scenario_code}/draft/source-activations/preview", response_model=OperationAcceptedResponse, status_code=202)
+def preview_source_activation(
+    scenario_code: str, payload: DraftSourceActivationPreviewRequest,
+    request: Request, db: Session = Depends(get_db),
+) -> OperationAcceptedResponse:
+    operation, reused = submit_source_activation_preview(
+        db,
+        scenario_code,
+        row_keys=payload.row_keys,
+        expected_revision=payload.expected_revision,
+        idempotency_key=payload.idempotency_key,
+    )
+    return OperationAcceptedResponse.model_validate(
+        {**operation_view(operation, reused=reused), "request_id": request.state.request_id}
+    )
+
+
+@router.post("/{scenario_code}/draft/source-activations/confirm", response_model=ScenarioDraftViewResponse)
+def confirm_source_activation(
+    scenario_code: str, payload: DraftSourceActivationConfirmRequest,
+    request: Request, db: Session = Depends(get_db),
+) -> ScenarioDraftViewResponse:
+    from ..services import source_activation_service
+    draft = source_activation_service.activate(db, scenario_code, payload.preview_id, payload.expected_revision)
     return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
 
 
 @router.post("/{scenario_code}/draft/nodes", response_model=ScenarioDraftViewResponse, status_code=201)
 def create_node(scenario_code: str, payload: DraftNodeRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
-    """在草稿中新增**节点实例**。
+    """在草稿中新增节点实例。
 
     节点由用户配置：实例码、能力类型、顺序与依赖都由请求给出，系统不按规则内容
     自动生成节点，也不按表头推断流程关系。
@@ -427,13 +418,13 @@ def delete_section(scenario_code: str, section_key: str, request: Request, db: S
 def publish_scenario_draft(
     scenario_code: str, payload: ScenarioPublishRequest, request: Request, db: Session = Depends(get_db)
 ) -> ScenarioPublishResponse:
-    """**发布场景**：把当前草稿编译成一份不可变的已发布版本。
+    """发布场景：把当前草稿编译成一份不可变的已发布版本。
 
     这是管理员确认配置的动作，与「保存草稿」严格分开：保存只写草稿，
     只有本接口会产生业务用户可用的 `scenario_version`。
 
     发布前的检查全部在编译期完成，任一项不通过即 409/400 并附具体原因，
-    **不产生可用版本**：节点依赖与顺序、Sheet 绑定、材料/字段/规则引用、
+    不产生可用版本：节点依赖与顺序、来源工作表、材料/字段/规则引用、
     计算配置、能力缺口、报告章节，以及「至少选用一张 Sheet」。
 
     修订号必须与草稿当前一致；内容与最新已发布版本完全一致时返回原版本，
@@ -462,7 +453,7 @@ def publish_scenario_draft(
 def export_scenario_draft(scenario_code: str, db: Session = Depends(get_db)) -> StreamingResponse:
     """导出当前草稿的有效配置（与发布使用同一编译结果）。
 
-    导出格式由统一模板协议决定。
+    导出保留完整业务 JSON，不依赖固定模板列。
     """
     from ..services.scenario_admin_service import compile_draft_manifest, ensure_draft
 
@@ -491,7 +482,7 @@ def preview_task_schema(
 ) -> TaskSchemaPreviewResponse:
     """在方案编辑/发布前展示实际执行范围（不写库）。
 
-    **范围完全等于用户勾选的规则**——系统不补入任何规则，因此这里展示的
+    范围完全等于用户勾选的规则——系统不补入任何规则，因此这里展示的
     「已启用 / 未启用」就是方案最终会跑与不会跑的全部。
     """
     scenario = scenario_or_404(db, scenario_code, version_no)
@@ -512,7 +503,7 @@ def preview_task_schema(
 def _task_scope_view(manifest: dict, schema: dict) -> dict:
     """任务实际执行范围：区分模板未配置 / 任务未启用 / 已启用。
 
-    **没有「自动补入」这一类**：勾了什么就跑什么，范围完全等于这份方案的规则选择。
+    没有「自动补入」这一类：勾了什么就跑什么，范围完全等于这份方案的规则选择。
     """
     rule_names = {item["rule_key"]: item["name"] for item in manifest.get("rules", [])}
     return {
@@ -524,7 +515,7 @@ def _task_scope_view(manifest: dict, schema: dict) -> dict:
         ],
         "enabled_rule_keys": list(schema["enabled_rule_keys"]),
         "unenabled_rule_keys": list(schema["unenabled_rule_keys"]),
-        # 未配置的检查类别按**能力类型**汇总；页面若要判断某个具体节点，
+        # 未配置的检查类别按能力类型汇总；页面若要判断某个具体节点，
         # 用实例码口径的 unconfigured_check_node_codes，不交叉比较。
         "unconfigured_node_types": list(manifest.get("unconfigured_check_node_types", [])),
         "unconfigured_node_codes": list(manifest.get("unconfigured_check_node_codes", [])),

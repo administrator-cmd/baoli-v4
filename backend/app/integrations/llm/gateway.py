@@ -1,32 +1,24 @@
 """远程大模型 HTTP 网关：把请求发给 OpenAI 兼容的 chat/completions 端点。
 
-这里是**唯一**与远程模型通信的出口。调用方只提供业务 payload 与系统提示词，
-拿回已解析成 dict 的 JSON；供应商的地址、密钥、超时与响应格式细节都不外泄。
+唯一与远程模型通信的出口。调用方只提供业务 payload 与系统提示词，拿回已解析成 dict 的
+JSON；供应商的地址、密钥、超时与响应格式细节都不外泄。
 
-两种调用方式
-------------
-- `call_json()`：只收发 JSON 文本。既有三条路径（规则转换、字段抽取、语义判断）
-  继续用它，行为不变。
-- `call_chat()`：完整的 Chat Completions 契约，支持 `tools` / `tool_choice`
-  与 `tool_calls` 解析；工具循环由审核图显式编排。
+两种调用方式：`call_json()` 只收发 JSON 文本，既有三条路径（规则转换、字段抽取、语义判断）
+继续用它；`call_chat()` 是完整的 Chat Completions 契约，支持 `tools` / `tool_choice` 与
+`tool_calls` 解析，工具循环由审核图显式编排。
 
-供应商限制：
+供应商限制：端点可能是 baseurl 本身（已带 `/chat/completions`）或 baseurl 下的标准路径，
+两种写法都要接受；请求使用 SSE 流式输出，完整组装后再校验 JSON 或工具调用；
+配置缺失（baseurl / apikey / model）明确报 503，不退回本地规则或空结果；
+`tool_calls[].function.arguments` 是 JSON 字符串，需要二次解析，不能当普通文本用。
 
-- 端点可能是 baseurl 本身（已带 `/chat/completions`），也可能是 baseurl 下的
-  标准路径，两种写法都必须接受。
-- 响应可能是纯 JSON，也可能被 Markdown 代码块包裹；后者不是契约变化，
-  而是模型常见的输出习惯，按同一份内容解析。
-- 配置缺失（baseurl / apikey / model）时明确报 503，**不**退回本地规则或空结果：
-  一次配置错误必须暴露成配置错误，不能伪装成「转换完成但没有内容」。
-- `tool_calls[].function.arguments` 是 **JSON 字符串**，需要二次解析；
-  它不是对象，也不能当作普通文本直接使用。
-
-本模块不依赖 domain 的规则契约，只做「发请求、取响应」这件事。
+本模块不依赖 domain 的规则契约，只做「发请求、取响应」。
 """
 
 import json
 import logging
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -39,7 +31,7 @@ from ...common.exceptions import BusinessError
 
 logger = logging.getLogger(__name__)
 
-# 模型响应的种类。它们是**互斥**的四种结果，调用方必须逐类处理：
+# 模型响应的种类。它们是互斥的四种结果，调用方必须逐类处理：
 # 把 TOOL_CALLS 当成 CONTENT、或把 ERROR 当成 CONTENT，都会让「模型没能给出结论」
 # 被读成「模型给出了结论」。
 TURN_TOOL_CALLS = "TOOL_CALLS"
@@ -57,7 +49,7 @@ LLM_RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 class ToolCall:
     """一次工具调用请求。
 
-    `arguments_raw` 与 `arguments` 都保留：原始字符串是**模型的真实输出**，
+    `arguments_raw` 与 `arguments` 都保留：原始字符串是模型的真实输出，
     解析后的对象是本系统的解释结果。两者都留着，事后才能判断
     「是模型给错了，还是我们解析错了」。
     """
@@ -72,9 +64,8 @@ class ToolCall:
 class ModelTurn:
     """一次模型响应的完整契约。
 
-    `raw_message` 是模型原样返回的 message 对象：回填工具结果时必须**原样**把它
-    放回 assistant 消息，不能重新构造——重新构造会让 `tool_call_id` 对不上，
-    供应商会拒绝或按另一条调用处理。
+    `raw_message` 保存流式 delta 完整组装的消息，保留原始工具标识、参数字符串和推理内容。
+    回填工具结果时使用这份消息，不重新生成标识或重新序列化参数。
     """
 
     kind: str
@@ -116,23 +107,212 @@ def _require_settings() -> tuple[str, str, str]:
     return settings.llm_baseurl, api_key, settings.llm_model_name
 
 
+def _stream_invalid(reason: str) -> BusinessError:
+    logger.warning("远程大模型流式响应结构无效 reason=%s", reason)
+    return BusinessError(
+        "LLM_CONTRACT_INVALID",
+        f"远程大模型流式响应不符合调用契约：{reason}",
+        status_code=502,
+    )
+
+
+def _sse_data(response: httpx.Response) -> Iterator[str]:
+    """按 SSE 事件边界读取 data，保留多行数据，忽略协议定义的注释与控制字段。"""
+    data_lines: list[str] = []
+    for line in response.iter_lines():
+        if not line:
+            if data_lines:
+                yield "\n".join(data_lines)
+                data_lines.clear()
+            continue
+        if line.startswith(":"):
+            continue
+        name, _, value = line.partition(":")
+        if name == "data":
+            data_lines.append(value[1:] if value.startswith(" ") else value)
+    if data_lines:
+        yield "\n".join(data_lines)
+
+
+def _merge_stream_delta(
+    message: dict[str, Any], tool_calls: dict[int, dict[str, Any]], delta: dict[str, Any],
+) -> None:
+    """拼接文本及按 index 分段的工具调用；参数保持模型原始字符串。"""
+    for key, value in delta.items():
+        if value is None:
+            continue
+        if key == "tool_calls":
+            if not isinstance(value, list):
+                raise _stream_invalid("tool_calls 不是数组")
+            for entry in value:
+                if not isinstance(entry, dict):
+                    raise _stream_invalid("工具调用片段不是对象")
+                index = entry.get("index")
+                if type(index) is not int or index < 0:
+                    raise _stream_invalid("工具调用片段缺少有效 index")
+                call = tool_calls.setdefault(index, {})
+                for part_key, part_value in entry.items():
+                    if part_key == "index" or part_value is None:
+                        continue
+                    if part_key == "function":
+                        if not isinstance(part_value, dict):
+                            raise _stream_invalid("工具调用 function 不是对象")
+                        function = call.setdefault("function", {})
+                        for function_key, fragment in part_value.items():
+                            if fragment is None:
+                                continue
+                            if not isinstance(fragment, str):
+                                raise _stream_invalid("工具函数片段不是字符串")
+                            function[function_key] = function.get(function_key, "") + fragment
+                    elif part_key == "type":
+                        if not isinstance(part_value, str) or (
+                            "type" in call and call["type"] != part_value
+                        ):
+                            raise _stream_invalid("工具调用 type 无效或发生变化")
+                        call["type"] = part_value
+                    else:
+                        if not isinstance(part_value, str):
+                            raise _stream_invalid("工具调用片段包含不支持的数据类型")
+                        call[part_key] = call.get(part_key, "") + part_value
+        elif key == "role":
+            if not isinstance(value, str) or ("role" in message and message["role"] != value):
+                raise _stream_invalid("消息 role 无效或发生变化")
+            message["role"] = value
+        else:
+            # content、refusal、reasoning_content 等字符串逐段保留，不把推理文本并入正文。
+            if not isinstance(value, str):
+                raise _stream_invalid("消息片段包含不支持的数据类型")
+            message[key] = message.get(key, "") + value
+
+
+def _read_stream(
+    response: httpx.Response, *, attempt: int, started: float, deadline: float,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """接收完整流并还原 Chat Completions 响应；未正常结束的流不能作为业务结果。"""
+    if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
+        raise _stream_invalid("接口未返回 text/event-stream")
+    envelope: dict[str, Any] = {}
+    choices: dict[int, dict[str, Any]] = {}
+    tool_calls: dict[int, dict[int, dict[str, Any]]] = {}
+    chunks = 0
+    done = False
+    for data in _sse_data(response):
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "远程大模型流式请求超过总时限 attempt=%s chunks=%s timeout_seconds=%s elapsed_seconds=%.3f",
+                attempt, chunks, timeout_seconds, time.monotonic() - started,
+            )
+            raise BusinessError(
+                "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
+                details={"service": "LLM", "timeout_seconds": timeout_seconds, "chunks": chunks},
+            )
+        if data == "[DONE]":
+            done = True
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError as exc:
+            raise _stream_invalid("data 不是有效 JSON") from exc
+        if not isinstance(chunk, dict):
+            raise _stream_invalid("data 不是 JSON 对象")
+        chunks += 1
+        if chunks == 1:
+            logger.info(
+                "远程大模型收到首个流式数据块 attempt=%s elapsed_seconds=%.3f",
+                attempt, time.monotonic() - started,
+            )
+        if "error" in chunk:
+            logger.warning("远程大模型流中返回错误 attempt=%s", attempt)
+            raise BusinessError("LLM_EXTERNAL_FAILED", "远程大模型流式响应返回错误", status_code=502)
+        for key in ("id", "model", "created", "system_fingerprint", "usage"):
+            if key in chunk and chunk[key] is not None:
+                envelope[key] = chunk[key]
+        entries = chunk.get("choices")
+        if not isinstance(entries, list):
+            raise _stream_invalid("数据块缺少 choices 数组")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise _stream_invalid("choice 不是对象")
+            index = entry.get("index")
+            if type(index) is not int or index < 0:
+                raise _stream_invalid("choice 缺少有效 index")
+            choice = choices.setdefault(index, {"index": index, "message": {}, "finish_reason": None})
+            delta = entry.get("delta")
+            if not isinstance(delta, dict):
+                raise _stream_invalid("choice 缺少 delta 对象")
+            if choice["finish_reason"] is not None and any(value is not None for value in delta.values()):
+                raise _stream_invalid("choice 结束后仍返回消息片段")
+            _merge_stream_delta(choice["message"], tool_calls.setdefault(index, {}), delta)
+            finish_reason = entry.get("finish_reason")
+            if finish_reason is not None:
+                if not isinstance(finish_reason, str) or (
+                    choice["finish_reason"] is not None and choice["finish_reason"] != finish_reason
+                ):
+                    raise _stream_invalid("finish_reason 无效或发生变化")
+                choice["finish_reason"] = finish_reason
+    if not done or not choices or any(choice["finish_reason"] is None for choice in choices.values()):
+        logger.warning(
+            "远程大模型流未完整结束 attempt=%s chunks=%s done=%s elapsed_seconds=%.3f",
+            attempt, chunks, done, time.monotonic() - started,
+        )
+        raise BusinessError(
+            "LLM_STREAM_INCOMPLETE", "远程大模型流式响应未完整结束，未保存本次生成结果", status_code=502,
+        )
+    if any(choice["finish_reason"] == "length" for choice in choices.values()):
+        logger.warning("远程大模型输出被截断 attempt=%s finish_reason=length", attempt)
+        raise BusinessError("LLM_OUTPUT_TRUNCATED", "远程大模型输出被截断，未保存本次生成结果", status_code=502)
+    for index, choice in choices.items():
+        if tool_calls[index]:
+            choice["message"]["tool_calls"] = [tool_calls[index][key] for key in sorted(tool_calls[index])]
+    envelope["choices"] = [choices[index] for index in sorted(choices)]
+    logger.info(
+        "远程大模型流式接收完成 attempt=%s chunks=%s elapsed_seconds=%.3f finish_reasons=%s",
+        attempt, chunks, time.monotonic() - started,
+        [choice["finish_reason"] for choice in envelope["choices"]],
+    )
+    return envelope
+
+
 def _post(body: dict[str, Any]) -> dict[str, Any]:
-    """调用 chat/completions；临时故障最多重试三次，最终失败明确抛出。"""
+    """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。"""
     baseurl, api_key, _ = _require_settings()
     settings = get_settings()
     max_attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
-    with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+    # LLM 使用独立的长响应时限；普通外部服务的 request_timeout_seconds 不应截断
+    # 仍在持续返回流式数据的规则库解析。
+    deadline = time.monotonic() + settings.llm_timeout_seconds
+    with httpx.Client(timeout=settings.llm_timeout_seconds) as client:
         for attempt in range(1, max_attempts + 1):
-            try:
-                response = client.post(
-                    _endpoint(baseurl),
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json=body,
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BusinessError(
+                    "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
+                    details={"service": "LLM", "timeout_seconds": settings.llm_timeout_seconds},
                 )
-                response.raise_for_status()
-                break
+            started = time.monotonic()
+            logger.info(
+                "远程大模型开始流式请求 attempt=%s max_attempts=%s timeout_seconds=%s",
+                attempt, max_attempts, settings.llm_timeout_seconds,
+            )
+            try:
+                with client.stream(
+                    "POST",
+                    _endpoint(baseurl),
+                    headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
+                    json={**body, "stream": True},
+                    timeout=remaining,
+                ) as response:
+                    response.raise_for_status()
+                    return _read_stream(
+                        response,
+                        attempt=attempt,
+                        started=started,
+                        deadline=deadline,
+                        timeout_seconds=settings.llm_timeout_seconds,
+                    )
             except httpx.TimeoutException as exc:
-                if attempt < max_attempts:
+                if attempt < max_attempts and time.monotonic() < deadline:
                     delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                     logger.warning(
                         "远程大模型请求超时，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
@@ -144,16 +324,17 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                     time.sleep(delay)
                     continue
                 logger.warning(
-                    "远程大模型请求超时，重试已用尽 attempt=%s retry_count=%s error_type=%s",
+                    "远程大模型请求超时，重试已用尽 attempt=%s retry_count=%s timeout_seconds=%s error_type=%s",
                     attempt,
                     len(LLM_RETRY_DELAYS_SECONDS),
+                    settings.llm_timeout_seconds,
                     type(exc).__name__,
                 )
                 raise BusinessError(
                     "LLM_TIMEOUT",
                     "远程大模型请求超时",
                     status_code=504,
-                    details={"service": "LLM"},
+                    details={"service": "LLM", "timeout_seconds": settings.llm_timeout_seconds},
                 ) from exc
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
@@ -211,19 +392,13 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                     status_code=502,
                     details={"service": "LLM"},
                 ) from exc
-    try:
-        return response.json()
-    except ValueError as exc:
-        logger.warning("远程大模型响应不是有效 JSON")
-        raise BusinessError(
-            "LLM_CONTRACT_INVALID",
-            "远程大模型返回内容不符合规则转换契约",
-            status_code=502,
-        ) from exc
 
 
-def call_json(payload: dict[str, Any], system_prompt: str) -> dict[str, Any]:
-    """要求模型以 JSON 对象作答的单轮调用（不带工具，也不做工具循环）。"""
+def call_json(
+    payload: dict[str, Any], system_prompt: str,
+    *, on_content: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """单轮请求 JSON 对象，完整接收流式文本后解析；不带工具或工具循环。"""
     _, _, model = _require_settings()
     request_body = {
         "model": model,
@@ -246,6 +421,12 @@ def call_json(payload: dict[str, Any], system_prompt: str) -> dict[str, Any]:
             "远程大模型返回内容不符合规则转换契约",
             status_code=502,
         ) from exc
+    # 规则库调用方在 JSON 解析之前保存原始正文；保存失败也必须显式失败。
+    if on_content is not None:
+        on_content(content)
+    if envelope["choices"][0]["finish_reason"] != "stop":
+        logger.warning("远程大模型未正常完成 JSON 输出 finish_reason=%s", envelope["choices"][0]["finish_reason"])
+        raise BusinessError("LLM_CONTRACT_INVALID", "远程大模型未正常完成 JSON 输出", status_code=502)
     try:
         return json.loads(content)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -332,13 +513,13 @@ def call_chat(
     response_format: dict[str, Any] | None = None,
     temperature: float = 0,
 ) -> ModelTurn:
-    """发一次 Chat Completions 请求，返回明确的响应契约。
+    """完整接收一次流式 Chat Completions 响应，返回明确的响应契约。
 
-    与 `call_json` 的关键差别：**不把响应当成 JSON 文本**。`tool_calls` 是结构化字段，
+    与 `call_json` 的关键差别：不把响应当成 JSON 文本。`tool_calls` 是结构化字段，
     按它自己的契约解析；只有 `content` 才可能是 JSON 文本。
 
     请求带 `tools` 时，响应必须能归类为四种结果之一。归类不了就报
-    `LLM_TOOL_CALL_UNSUPPORTED`——**不退回**按普通文本解析，
+    `LLM_TOOL_CALL_UNSUPPORTED`——不退回按普通文本解析，
     因为那会把「供应商不支持工具调用」伪装成「模型给了一段文字」。
     """
     _, _, model = _require_settings()

@@ -13,7 +13,7 @@ from ..domain import scenario_schema
 from ..domain.proposals import ProposalBundle
 from ..domain.workbook import WorkbookIR
 from ..common.exceptions import BusinessError
-from ..runtime.checkpoint import mysql_saver
+from ..runtime.checkpoint import is_storage_unavailable, mysql_saver
 from ..services.llm_service import convert_workbook_with_notes
 from ..services.storage_service import resolve_storage_path
 from ..services.workbook_service import read_workbook_ir
@@ -31,6 +31,7 @@ IMPORT_DECISION_NODE = "await_import_decision"
 
 class ImportGraphState(TypedDict, total=False):
     job_no: str
+    operation_no: str
     graph_namespace: str
     start_stage: str
     source_path: str
@@ -172,7 +173,7 @@ def _read_workbook(state: ImportGraphState) -> dict[str, Any]:
         source_filename=_required_string(state, "source_filename"),
         source_size=_required_int(state, "source_size"),
         source_sha256=_required_string(state, "source_sha256"),
-        profile=scenario_schema.effective_profile(schema),
+        profile_version=schema["profile_version"],
         scenario_code=_required_string(state, "scenario_code"),
         schema_key=schema["schema_key"],
         schema_version=schema["schema_version"],
@@ -199,17 +200,17 @@ def _convert_sheet_chunks(state: ImportGraphState) -> dict[str, Any]:
     if workbook.schema_key != schema["schema_key"] or workbook.schema_version != schema["schema_version"]:
         raise _state_error("导入流程的场景 schema 与工作簿读取时不一致")
     bundle, node_payload = convert_workbook_with_notes(
-        workbook, bindings, profile=scenario_schema.effective_profile(schema)
+        workbook, bindings, operation_no=_required_string(state, "operation_no"),
     )
     notes = _node_notes_of(node_payload)
     proposal_json = bundle.model_dump(mode="json")
-    questions = [*_decision_targets(bundle), *_node_note_targets(notes)]
+    questions = _questions_of_bundle_and_notes(bundle, notes)
     return _stage_update(
         state,
         "convert_sheet_chunks",
         proposals=proposal_json,
         node_notes=notes,
-        needs_decision=bool(questions),
+        needs_decision=False,
         decision_count=len(questions),
         decision_signature=import_decision_signature(questions),
     )
@@ -242,7 +243,8 @@ def _questions_of_bundle_and_notes(
     bundle: ProposalBundle,
     node_notes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [*_decision_targets(bundle), *_node_note_targets(node_notes)]
+    # 保留检查点结构兼容现有作业；业务合理性和口径说明不形成审批集合。
+    return []
 
 
 def _resolve_field(resolve: Any, key: str, note: dict[str, Any]) -> str:
@@ -259,13 +261,13 @@ def _resolve_field(resolve: Any, key: str, note: dict[str, Any]) -> str:
 def _node_note_targets(node_notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """把节点版的待确认事项投影成与模型 questions 同构的裁决目标。
 
-    只有带 `resolve` 的事项才需要业务作答（确认口径、指定单位币种、明确停用）；
-    纯说明性事项（能力缺口、等级差异提醒）不进入裁决集合，它们随覆盖对账与
-    能力缺口一起展示，不会因为无法作答而卡住流程。
+    只有带 `resolve` 的事项才需要业务作答（确认口径、指定单位币种、明确停用）；纯说明性
+    事项（能力缺口、等级差异提醒）不进入裁决集合，随覆盖对账一起展示，不因为无法作答而
+    卡住流程。
 
-    目标身份取自 `resolve` 里的真实业务对象（MATERIAL/FIELD/RULE/REPORT_SECTION + 候选引用）与被裁决属性：
-    落库的 `ImportIssue.source_json` 与恢复期的 `import_decision_signature` 用的是同一套口径，
-    在这里另造一套合成身份会让转换期与恢复期算出两个不同的 decision_signature。
+    目标身份取自 `resolve` 里的真实业务对象与被裁决属性：落库的 `ImportIssue.source_json`
+    与恢复期的 `import_decision_signature` 用同一套口径，另造一套会让转换期与恢复期算出
+    两个不同的 signature。
     """
     targets: list[dict[str, Any]] = []
     for note in node_notes:
@@ -307,7 +309,7 @@ def _validate_proposals(state: ImportGraphState) -> dict[str, Any]:
     questions = _questions_of_bundle_and_notes(bundle, notes)
     expected_count = len(questions)
     expected_signature = import_decision_signature(questions)
-    if state.get("needs_decision") != bool(questions):
+    if state.get("needs_decision") is not False:
         raise _state_error("规则转换的待裁决状态与提案内容不一致")
     if state.get("decision_count") != expected_count or state.get("decision_signature") != expected_signature:
         raise _state_error("规则转换的待裁决检查点与提案内容不一致")
@@ -315,7 +317,7 @@ def _validate_proposals(state: ImportGraphState) -> dict[str, Any]:
         state,
         "validate_proposals",
         proposals=bundle.model_dump(mode="json"),
-        needs_decision=bool(questions),
+        needs_decision=False,
         decision_count=expected_count,
         decision_signature=expected_signature,
     )
@@ -371,15 +373,16 @@ _builder.add_edge("validate_proposals", "await_import_decision")
 _builder.add_edge("await_import_decision", END)
 
 
-def _config(job_no: str) -> dict[str, dict[str, str]]:
-    """恢复身份只由 thread_id（作业号）决定。
+def _config(job_no: str, conversion_batch: str | None = None) -> dict[str, dict[str, str]]:
+    """转换与裁决使用同一个批次身份，旧转换不能覆盖新批次的检查点。
 
     业务批次（本次转换的检查点命名空间）保存在图 state 的 graph_namespace 里，
     不使用 checkpoint_ns 承载业务批次信息。
     """
     if not job_no:
         raise _state_error("导入流程检查点缺少作业标识")
-    return {"configurable": {"thread_id": job_no}}
+    thread_id = f"{job_no}:{conversion_batch}" if conversion_batch is not None else job_no
+    return {"configurable": {"thread_id": thread_id}}
 
 
 def _compiled(saver: Any) -> Any:
@@ -397,20 +400,15 @@ def _storage_unavailable(exc: Exception) -> BusinessError:
     )
 
 
-# 数据库驱动/连接层的异常模块前缀。只有来自它们的失败才是「存储暂时不可达」。
-_STORAGE_MODULES = ("sqlalchemy", "pymysql", "MySQLdb", "MySQLdb.connections")
-
-
 def _graph_failure(exc: Exception) -> BusinessError:
-    """图执行失败分类：**存储故障**与**代码缺陷**必须分开报。
+    """图执行失败分类：存储故障与代码缺陷必须分开报。
 
     图入口的 `.invoke()` 会执行全部节点，因此节点里抛出的 `NameError` / `KeyError`
     一类的代码缺陷也会走到这里。把它们统一包装成「检查点存储暂时不可达，可稍后重试」
     会让真实原因完全不可见——而重试永远不会成功，问题只能靠翻日志才发现。
-    因此只有来自数据库驱动/连接层的异常才按存储故障报，其余原样报出异常类型与消息。
+    因此只把连接及数据库运行故障按不可达报，约束、SQL 和序列化错误保留异常类型与消息。
     """
-    module = type(exc).__module__ or ""
-    if module.startswith(_STORAGE_MODULES):
+    if is_storage_unavailable(exc):
         return _storage_unavailable(exc)
     return BusinessError(
         "IMPORT_GRAPH_EXECUTION_FAILED",
@@ -476,6 +474,7 @@ def run_workbook_read(
 def run_sheet_conversion(
     *,
     job_no: str,
+    operation_no: str,
     checkpoint_ns: str,
     workbook_ir: dict[str, Any],
     bindings: dict[str, dict[str, Any]],
@@ -483,13 +482,14 @@ def run_sheet_conversion(
     schema_json: dict[str, Any],
 ) -> dict[str, Any]:
     """导入图入口：按工作表绑定转换出候选、问题与覆盖对账。"""
-    config = _config(job_no)
+    config = _config(job_no, checkpoint_ns)
     try:
         with mysql_saver() as saver:
             result = _compiled(saver).invoke(
             {
                 "job_no": job_no,
                 "graph_namespace": checkpoint_ns,
+                "operation_no": operation_no,
                 "start_stage": "convert_sheet_chunks",
                 "workbook_ir": workbook_ir,
                 "bindings": bindings,
@@ -516,7 +516,7 @@ def resume_import_decision(
     decisions: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """导入图入口：从裁决等待点继续执行，裁决集合身份不符时明确拒绝。"""
-    config = _config(job_no)
+    config = _config(job_no, checkpoint_ns)
     try:
         with mysql_saver() as saver:
             graph = _compiled(saver)

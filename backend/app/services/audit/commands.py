@@ -5,13 +5,14 @@
 再走「恢复图等待点」的路径，不留下绕开图的旁路。
 
 失败语义：图运行时异常会把任务标记为 FAILED 并返回带摘要的错误，不重试、不静默；
-checkpoint 存储暂时不可达只让本次操作失败（可重试），不改变任务状态。"""
+checkpoint 存储暂时不可达保留确认/复核等待状态；若本次节点已经开始执行，则明确记录
+执行中断并置 BLOCKED，不能留下没有实际执行过程的 RUNNING。"""
 
 import logging
 from ...config import get_settings
 from ...domain.identity import public_no
 from ...common.exceptions import BusinessError, exception_summary
-from ...graphs.audit_graph import resume_audit_confirmation, resume_audit_manual_review
+from ...graphs.audit_graph import CHECKPOINT_STORAGE_UNAVAILABLE, resume_audit_confirmation, resume_audit_manual_review
 from . import flow as audit_flow
 from ...entity import (
     AuditTask,
@@ -27,7 +28,7 @@ from ..task_lookup import task_or_404
 from .artifacts import _artifact_for_upload, _ocr_job_metadata, _submit_authorized_ocr_retry
 from .evidence import _evidence_snapshot, _evidence_snapshots
 from .facts import _current_field_fact_pairs, _refresh_extraction_rule_results, _write_human_field_fact
-from .flow import _raise_graph_error
+from .flow import _fail_running_execution, _raise_graph_error
 from .graph_runtime import _ensure_audit_interrupt, _mark_graph_runtime_failed
 from .interrupt import start_audit_interrupt
 from .recovery import failed_node_recovery
@@ -139,7 +140,17 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
     graph_namespace = _ensure_audit_interrupt(db, task, "AWAITING_CONFIRMATION")
     try:
         state = resume_audit_confirmation(task.thread_id, graph_namespace, request.node_code, db, audit_flow)
-    except BusinessError:
+    except BusinessError as exc:
+        if exc.code == "AUDIT_GRAPH_EXECUTION_FAILED":
+            _mark_graph_runtime_failed(
+                db, task_no, failure_code=exc.code,
+                failure_message=str(exc.details.get("reason") or exc.message),
+            )
+        elif exc.code in {CHECKPOINT_STORAGE_UNAVAILABLE, "CHECKPOINT_CONNECT_FAILED"}:
+            _fail_running_execution(
+                db, task_no, graph_namespace, code=exc.code,
+                message=str(exc.details.get("reason") or exc.message),
+            )
         raise
     except Exception as exc:
         logger.exception("审核流程恢复发生未处理异常", extra={"task_no": task_no, "node_code": request.node_code})
@@ -248,7 +259,17 @@ def submit_manual_reviews(db: Session, task_no: str, request: ManualReviewReques
     decisions = [item.model_dump(mode="json") for item in request.reviews]
     try:
         state = resume_audit_manual_review(task.thread_id, graph_namespace, decisions, db, audit_flow)
-    except BusinessError:
+    except BusinessError as exc:
+        if exc.code == "AUDIT_GRAPH_EXECUTION_FAILED":
+            _mark_graph_runtime_failed(
+                db, task_no, failure_code=exc.code,
+                failure_message=str(exc.details.get("reason") or exc.message),
+            )
+        elif exc.code in {CHECKPOINT_STORAGE_UNAVAILABLE, "CHECKPOINT_CONNECT_FAILED"}:
+            _fail_running_execution(
+                db, task_no, graph_namespace, code=exc.code,
+                message=str(exc.details.get("reason") or exc.message),
+            )
         raise
     except Exception as exc:
         logger.exception("人工复核流程恢复发生未处理异常", extra={"task_no": task_no})
@@ -403,7 +424,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     db.flush()
     manifest = _task_manifest(task)
     _, nodes, current_index = _scenario_nodes(db, task)
-    # 节点实例码由用户配置：按**能力类型**解析成实例码，不写死能力类型当实例码。
+    # 节点实例码由用户配置：按能力类型解析成实例码，不写死能力类型当实例码。
     extraction_codes = _node_codes_of_type(manifest, "FIELD_EXTRACTION")
     extraction_indexes = [index for index, item in enumerate(nodes) if item["node_code"] in extraction_codes]
     # 只有已经越过字段抽取节点才有可重算的抽取规则结果；否则抽取重跑时会自然重建。

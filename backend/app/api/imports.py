@@ -139,11 +139,11 @@ async def create_job(
     scenario_code: str = Form(..., min_length=2, max_length=80, pattern=r"^[A-Za-z0-9_-]+$"),
     db: Session = Depends(get_db),
 ) -> ImportJobResponse:
-    """在**指定场景**下上传规则库 Excel，读取为工作簿 IR 并返回新建作业。
+    """在指定场景下上传规则库 Excel，读取为工作簿 IR 并返回新建作业。
 
     `scenario_code` 必填：上传流程以场景为起点（用户先建场景、再在该场景下上传），
-    场景不由 Excel 表头推断。此时还没有规则候选，也没有绑定关系——
-    Sheet 与业务节点的对应关系由用户在绑定步骤确认。
+    场景不由 Excel 表头推断。此时还没有规则候选；管理员选择参与解析的工作表，
+    LLM 将表内字段、规则和计算分别归到当前场景的实际节点。
     """
     job = await create_import_job(db, file, scenario_code=scenario_code)
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
@@ -157,7 +157,7 @@ def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> Imp
 
 @router.put("/{job_no}/sheet-bindings", response_model=ImportJobResponse)
 def put_sheet_bindings(job_no: str, payload: SheetBindingsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
-    """保存工作表用途与表头行绑定；与后台转换互斥（先锁作业行再检查活跃操作）。"""
+    """保存参与解析的工作表；与后台转换互斥（先锁作业行再检查活跃操作）。"""
     job = update_sheet_bindings(db, job_no, payload)
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 

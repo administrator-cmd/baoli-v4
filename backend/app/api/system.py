@@ -47,7 +47,7 @@ def upload_policy(request: Request) -> UploadPolicyResponse:
     会在配置变更后与后端实际校验不一致。实际写入时的最终校验仍在
     storage_service.save_upload，超限显式抛 FILE_TOO_LARGE。
 
-    该上限只覆盖**本系统上传入口**。8018 / 8010 / OCR 与部署入口各自的体量上限
+    该上限只覆盖本系统上传入口。8018 / 8010 / OCR 与部署入口各自的体量上限
     是独立的外部契约，本接口不声明、也未经验证。
     """
     settings = get_settings()
@@ -93,7 +93,7 @@ def capability_catalog(request: Request) -> CapabilityCatalogResponse:
 
     每项能力声明：能力标识、业务标签、可挂载节点、输入形态、参数契约（必填/可选与口径）、
     结果里可能出现的状态、是否支持证据与比较、输出键、取证与判定方式、扩展数据命名空间、
-    版本，以及**当前是否已实现**。
+    版本，以及当前是否已实现。
 
     页面从这里取检查方式下拉与参数口径，不再在本地维护第二份名单——两份名单漂移过一次
     （后端 12 个算子、页面只有 7 个），结果是页面上打开一条已导入的规则，
@@ -122,8 +122,8 @@ def capability_catalog(request: Request) -> CapabilityCatalogResponse:
 def rule_status_catalog(request: Request) -> RuleStatusCatalogResponse:
     """审核结论状态目录：每个状态码的标准中文含义与分档。
 
-    页面用它区分「已判定 / 尚未判定 / 不适用」，而不是把不认识的码显示成「未开始」。
-    分档之外的状态**不进入任何分档**：页面必须把原始码单独计数并显示出来，
+    页面用它区分「已判定 / 仅计算完成 / 尚未判定 / 不适用」，未知码单独显示。
+    分档之外的状态不进入任何分档：页面必须把原始码单独计数并显示出来，
     不能静默消失，也不能按兜底文案显示成正常状态。
     """
     return RuleStatusCatalogResponse(

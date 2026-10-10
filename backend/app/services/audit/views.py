@@ -5,7 +5,9 @@
 - 报告正文从 `audit_report.content_md` 读（正文的唯一存放处）；执行过报告节点却没有
   可读正文时如实说明是记录缺失，不显示成「报告尚未生成」。
 - 风险命中只统计 ABNORMAL；「没有风险记录」不能写成「无风险」。
-- 证据的位置结论与内容依据结论分别透出，页面不能把「无法定位」显示成「原文不存在」。"""
+- 证据只返回原文、来源和内容依据结论，不返回页码、坐标或定位状态。"""
+
+from .. import task_csv_service
 
 from ...domain.manifest import rule_node_type_of
 from ...common.exceptions import BusinessError
@@ -14,7 +16,7 @@ from ..task_lookup import task_or_404
 from .evidence import _quote_check_of
 from .reporting import _configured_format_support
 from .shared import QUOTE_CHECK_LABELS, _task_manifest
-from .state import _current_execution_ids, _node_codes_of_type
+from .state import _current_node_executions, _node_codes_of_type
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
@@ -33,7 +35,11 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
     risk_configured = bool(risk_rules)
     risk_keys = {item["rule_key"] for item in risk_rules}
     # 只取当前有效执行批次的风险结果：失效批次与旧上传版本不进入当前结论。
-    current_execution_ids = _current_execution_ids(db, task)
+    current_executions = _current_node_executions(db, task)
+    risk_node_codes = {item["node"] for item in risk_rules}
+    current_execution_ids = {
+        item.id for item in current_executions.values() if item.node_code in risk_node_codes
+    }
     results = (
         db.scalars(
             select(RuleResult)
@@ -47,6 +53,7 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
         if current_execution_ids and risk_keys
         else []
     )
+    results = task_csv_service.from_index(db, task, RuleResult, results)
     status_counts: dict[str, int] = {}
     for item in results:
         status_counts[item.status] = status_counts.get(item.status, 0) + 1
@@ -81,7 +88,7 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
 def report_view(db: Session, task_no: str) -> dict[str, Any]:
     """报告只读视图：正文取自 audit_report.content_md，三信号与范围快照取自本次执行结果。"""
     task = task_or_404(db, task_no)
-    # 报告节点的**实例码**由用户配置，不能写死能力类型当实例码查询。
+    # 报告节点的实例码由用户配置，不能写死能力类型当实例码查询。
     report_node_codes = _node_codes_of_type(_task_manifest(task), "REPORT_OUTPUT")
     if not report_node_codes:
         raise BusinessError(
@@ -144,7 +151,7 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
         "pending_reviews": "存在待处理的人工复核项",
         # 两种材料类型状态对已完成结论的影响不同，合并成一句会让人以为普通审核也被阻断。
         "material_type_mismatches": "存在尚未定案或已确认不符的材料类型（待确认事项，普通审核结论仍按真实原文有效）",
-        "risk_not_configured": "本模板未配置风险评级规则，本次审核未形成风险结论",
+        "risk_not_configured": "当前场景未配置风险评级规则，本次审核未形成风险结论",
         "risk_inconclusive": "已配置的风险规则尚未全部形成可用结论，风险不可判定",
         "missing_rule_keys": "有已启用规则尚未形成任何结果",
         "missing_required_materials": "存在尚未上传的必传材料",
@@ -214,7 +221,7 @@ def report_view(db: Session, task_no: str) -> dict[str, Any]:
     }
 
 def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]:
-    """单条证据只读视图：引用原文、依据类型与定位核对结论。"""
+    """单条证据只读视图：引用原文、来源与内容依据核对结论。"""
     task = task_or_404(db, task_no)
     evidence = db.scalar(
         select(Evidence).where(Evidence.audit_task_id == task.id, Evidence.evidence_no == evidence_no)
@@ -236,6 +243,8 @@ def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]
         result = db.get(RuleResult, evidence.rule_result_id)
         if not result or result.audit_task_id != task.id:
             raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
+        # 校验该结果的业务内容仍能从任务 CSV 恢复；身份与当前执行批次仍由数据库索引判断。
+        task_csv_service.from_index(db, task, RuleResult, [result])
         is_current_target = (
             db.scalar(
                 select(NodeExecution.id).where(
@@ -249,8 +258,9 @@ def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]
         fact = db.get(TaskFieldValue, evidence.field_value_id)
         if not fact or fact.audit_task_id != task.id:
             raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
+        fact_csv = task_csv_service.from_index(db, task, TaskFieldValue, [fact])[0]
         # 结构化字段可以有多条属性证据；只要所属事实仍是当前版本，这些证据都属于当前事实。
-        is_current_target = bool(fact.is_current)
+        is_current_target = bool(fact_csv.is_current)
     elif evidence.artifact_id is None:
         raise BusinessError("EVIDENCE_NOT_FOUND", "证据不存在", status_code=404)
     artifact = db.get(StoredArtifact, evidence.artifact_id) if evidence.artifact_id else None
@@ -259,13 +269,7 @@ def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]
         "evidence_no": evidence.evidence_no,
         "document_name": upload.original_filename if upload else None,
         "field_path": evidence.field_path,
-        "page_no": evidence.page_no,
         "quote_text": evidence.quote_text,
-        "bbox": evidence.bbox_json,
-        # 位置核对与内容依据是两个结论，必须分别透出：定位失败不影响内容可用于审核，
-        # 页面也不能把「无法定位」显示成「这段原文不存在」。
-        "locator_status": evidence.locator_status,
-        "locator_note": evidence.locator_note,
         "quote_check": quote_check,
         "quote_check_label": QUOTE_CHECK_LABELS.get(quote_check, "内容依据状态未知"),
         "document_upload_no": upload.upload_no if upload else None,

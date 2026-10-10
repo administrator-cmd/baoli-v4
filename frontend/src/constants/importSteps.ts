@@ -5,7 +5,7 @@ import { isOperationActive, type OperationView } from "@/api/http";
  * 导入流程的四个业务步骤。
  *
  * 每一步的可进入状态完全由服务端数据推导：
- * 作业没有 proposals 就不能进入转换结果；还有未处理问题就不能写入场景草稿。
+ * 作业没有 proposals 就不能进入转换结果；解析得到的候选可以直接写入草稿。
  * 导入只生成草稿，不在此处发布场景。
  */
 export type StepState = "not-started" | "current" | "done" | "blocked" | "running" | "failed";
@@ -21,9 +21,10 @@ export interface ImportStep {
   enabled: boolean;
 }
 
-/** 人工复核项：候选里存在待处理问题的数量。 */
+/** 真正的技术错误单独展示；业务审批说明不进入步骤状态。 */
 export function importBlockingIssues(job: ImportJob | null): number {
-  return job?.issues.filter((issue) => issue.status === "OPEN").length ?? 0;
+  return job?.issues.filter((issue) => issue.status === "OPEN"
+    && issue.category !== "BUSINESS_AMBIGUITY" && issue.category !== "BUSINESS_CONFIRMATION").length ?? 0;
 }
 
 /** 按当前服务端数据算出四个导入步骤的可进入性与阻断原因。 */
@@ -34,7 +35,7 @@ export function buildImportSteps(options: {
   blockingIssues: number;
   published: boolean;
 }): ImportStep[] {
-  const { job, operation, hasProposals, blockingIssues, published } = options;
+  const { job, operation, hasProposals, published } = options;
   const operationRunning = isOperationActive(operation?.status);
   const operationFailed = operation?.status === "FAILED" || operation?.status === "INTERRUPTED";
   const hasFile = Boolean(job);
@@ -42,28 +43,28 @@ export function buildImportSteps(options: {
   const steps: Array<Omit<ImportStep, "index">> = [
     {
       label: "上传规则 Excel",
-      description: "选择规则库文件并确认模板格式",
+      description: "上传当前场景的 Excel 规则库",
       enabled: true,
       state: "current",
       blockedReason: null,
     },
     {
-      label: "确认工作表用途和表头",
-      description: "为每张工作表指定用途、绑定节点，或设为不参与本次导入",
+      label: "选择工作表",
+      description: "选择参与解析的工作表，模型根据内容识别字段和规则",
       enabled: true,
       state: "not-started",
       blockedReason: null,
     },
     {
-      label: "规则转换、候选和歧义处理",
-      description: "提交解析后逐项处理需要业务判断的候选与歧义",
+      label: "解析结果",
+      description: "查看解析得到的候选及未导入项目",
       enabled: true,
       state: "not-started",
       blockedReason: null,
     },
     {
       label: "写入场景草稿",
-      description: "把已确认的配置写入所属场景草稿，不发布场景",
+      description: "把解析配置写入所属场景草稿，不发布场景",
       enabled: true,
       state: "not-started",
       blockedReason: null,
@@ -96,23 +97,19 @@ export function buildImportSteps(options: {
   // 第 3 步
   if (!hasProposals) {
     steps[2].enabled = false;
-    steps[2].blockedReason = operationRunning ? "解析仍在进行，完成后才能确认候选。" : "请先完成工作表绑定与解析。";
-  } else if (blockingIssues > 0) {
-    steps[2].state = "current";
-    steps[2].description = `还有 ${blockingIssues} 项需要业务判断`;
+    steps[2].blockedReason = operationRunning ? "解析仍在进行，完成后才能确认候选。" : "请先选择工作表并完成解析。";
   } else {
     steps[2].state = "done";
-    steps[2].description = "没有需要业务判断的歧义项";
+    const rejectedCount = job?.coverage?.rejected_candidates?.length ?? 0;
+    steps[2].description = rejectedCount
+      ? `有 ${rejectedCount} 个项目未导入，其余候选可写入草稿`
+      : "解析结果可直接写入草稿";
   }
 
   // 第 4 步（写入场景草稿）
   if (!hasProposals) {
     steps[3].enabled = false;
     steps[3].blockedReason = "解析完成后才能写入场景草稿。";
-  } else if (blockingIssues > 0) {
-    steps[3].enabled = false;
-    steps[3].state = "blocked";
-    steps[3].blockedReason = `先处理完 ${blockingIssues} 项业务问题，再写入场景草稿。`;
   } else if (published) {
     steps[3].state = "done";
     steps[3].description = "已写入场景草稿；发布请到场景配置页执行";

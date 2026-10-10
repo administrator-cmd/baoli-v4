@@ -31,6 +31,8 @@ export interface CapabilityItem {
   kind: "OPERATOR" | "QUALITY_ITEM" | string;
   parent: string | null;
   nodes: string[];
+  /** 新建规则可选节点；历史规则读取和执行使用 nodes。 */
+  new_rule_nodes: string[];
   input_kind: string;
   parameters: CapabilityParameterSpec;
   output_keys: string[];
@@ -73,7 +75,7 @@ export interface ToolCatalogItem {
   registered: boolean;
   /** 当前能被真实执行（节点级实现或 Agent 工具都可以为 true）。 */
   implemented: boolean;
-  /** **模型在规则评估循环里能选它**。与 implemented 是两件事。 */
+  /** 模型在规则评估循环里能选它。与 implemented 是两件事。 */
   agent_selectable: boolean;
   /** 已实现但没有模型调用入口（由确定性节点执行）。 */
   node_level_only: boolean;

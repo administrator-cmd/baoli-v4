@@ -1,13 +1,11 @@
 """本地 Embedding 的加载与推理。
 
-范围与边界：
+只使用本机已经存在的本地模型目录（`BAOLI_EMBEDDING_MODEL_PATH`）：系统不会自动下载权重，
+也不会切换到远程模型或云 Embedding，权重缺失、依赖缺失或模型不可读时抛明确错误。
 
-- 只使用本机**已经存在**的本地模型目录（`BAOLI_EMBEDDING_MODEL_PATH`）。系统不会自动下载
-  权重，也不会切换到远程模型或云 Embedding；权重缺失、依赖缺失或模型不可读时抛出明确错误。
-- 向量以十进制文本保存（`format(Decimal, 'f')`），避免浮点二进制在不同进程/平台上的
-  不可复现差异；余弦相似度在检索端用 Decimal 计算。
-- 查询与分块必须使用**同一个模型实例与同一份预处理**：本模块只暴露一个加载入口，
-  查询与建索引用它取到的是同一份对象。
+向量以十进制文本保存（`format(Decimal, 'f')`），避免浮点二进制在不同进程/平台上的不可复现
+差异；余弦相似度在检索端用 Decimal 计算。查询与分块必须使用同一个模型实例与同一份预处理：
+本模块只暴露一个加载入口，查询与建索引用它取到的是同一份对象。
 """
 
 from __future__ import annotations
@@ -59,15 +57,14 @@ def _revision_files(model_dir: Path) -> list[Path]:
 def _assert_revision_matches(model_dir: Path, configured_revision: str) -> None:
     """核对配置的模型修订与实际加载的文件目录。
 
-    `BAOLI_EMBEDDING_MODEL_REVISION` 参与索引版本标识，如果它与磁盘上的模型不一致，
-    新索引会带着一个错误的“模型修订”入库，事后无法判断当初用的到底是哪份权重。
-    因此这里做两件事：
-      1. 目录名本身就是修订号（HF snapshot 布局 `<...>/snapshots/<rev>/`）时直接比对；
-      2. 目录里存在 `refs/main` / `.revision` / `revision.txt` 时比对其中记录的修订号。
+    `BAOLI_EMBEDDING_MODEL_REVISION` 参与索引版本标识，与磁盘上的模型不一致会让新索引带着
+    一个错误的模型修订入库，事后无法判断当初用的是哪份权重。因此这里比对两处：目录名本身就是
+    修订号（HF snapshot 布局 `<...>/snapshots/<rev>/`）时直接比；目录里存在 `refs/main` /
+    `.revision` / `revision.txt` 时比其中记录的修订号。
 
-    两者都取不到时**不阻断**启动，但明确记录一次告警：本地导出目录（例如手动复制出的
-    `text2vec-base-chinese/`）通常没有修订记录，此时无法自动核对。
-    这属于“无法核对”而不是“核对通过”，不会伪造通过结论，也不会因为缺少记录就拒绝可用模型。
+    两者都取不到时不阻断启动，但记录一次告警：本地导出目录（例如手动复制出的
+    `text2vec-base-chinese/`）通常没有修订记录。这属于「无法核对」而不是「核对通过」，
+    不会伪造通过结论，也不会因为缺少记录就拒绝可用模型。
     """
     detected: str | None = None
     if model_dir.parent.name == "snapshots" and model_dir.name:
@@ -314,7 +311,7 @@ def cosine_similarity(
 ) -> Decimal:
     """余弦相似度：只用于候选排序，不构成主体一致或审核通过的证明。
 
-    维度不一致、零范数与非有限分量都**明确报错**，不返回 0 分：
+    维度不一致、零范数与非有限分量都明确报错，不返回 0 分：
     0 分会被当成“相似度最低的合法候选”参与排序并进入候选列表，
     把一份损坏或维度不符的向量伪装成一次正常检索的结果。
     """

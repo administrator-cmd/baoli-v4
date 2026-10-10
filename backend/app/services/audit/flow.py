@@ -1,39 +1,25 @@
 """审核图的节点实现：状态推进、节点分发与人工复核等待点。
 
-节点分发按任务当前节点走，业务任务表是「当前节点」的权威来源：人工复核或材料裁决
-会把任务退回更早的节点，此时图 state 里记录的仍是退回前的节点，按图 state 执行会被
-误判成「提交节点不一致」。
+分发按任务当前节点走，业务任务表是「当前节点」的权威来源：人工复核或材料裁决会把任务
+退回更早的节点，此时图 state 里记录的仍是退回前的节点，按图 state 执行会被误判成
+「提交节点不一致」。分发方式是查节点注册表，注册在应用启动时完成，因此 domain 层不必
+反向依赖 services。
 
-分发方式：**查节点注册表**（domain.node_registry）。
-注册发生在应用启动（`register_node_handlers`），因此 domain 层不必反向依赖 services。
+一次节点执行拆成四步：graph_execute_current_node 建执行记录与确定执行模式 →
+graph_run_deterministic_node 确定性路径（Agent 路径走 load_evaluation → … →
+save_evaluation_result → advance_rule_cursor）→ graph_finalize_node_execution 写终态 →
+graph_advance_workflow 按 DAG 选下一个节点。Agent 评估期间任务仍停在当前节点上，
+`task.current_node` 不能被提前推进，否则 Agent 会读取下一个节点并重复写规则结果。
 
-一次节点执行被拆成四步，同一规则实例只会由其中一条路径写结果：
+执行模式在执行之前由冻结 manifest 决定，依据是节点能力类型是否属于按规则执行的校验节点、
+以及该节点是否有启用规则且引用了可调用的 Agent 工具。节点里没有授权工具的规则仍由确定性
+路径执行，每条规则实例只由一条路径写结果，不存在「两边都写」或「两边都不写」。
 
-    graph_execute_current_node     开始执行：建执行记录、按冻结配置确定执行模式
-    graph_run_deterministic_node   确定性路径（固定流程 + 按规则分发）
-    （Agent 路径：load_evaluation → … → save_evaluation_result → advance_rule_cursor）
-    graph_finalize_node_execution  收尾：写执行记录的终态与结果
-    graph_advance_workflow         推进：按 DAG 选下一个节点、更新任务状态与检查点
-
-Agent 评估期间任务仍停在**当前节点**上，`task.current_node` 不能被提前推进，
-否则 Agent 会读取下一个节点，并导致规则结果被重复写入。
-
-执行模式在执行**之前**由冻结 manifest 决定（`_execution_mode`），依据是：
-
-- 节点能力类型是否属于按规则执行的校验节点（内部/交叉校验、风险评定）；
-- 该节点是否有启用规则、且这些规则引用了**可调用的 Agent 工具**。
-
-节点里没有授权工具的规则仍由确定性路径执行，与 Agent 规则互补——
-每条规则实例只由一条路径写结果，不存在「两边都写」或「两边都不写」。
-
-事务边界（必须保持）：
-
-- 节点执行前先把执行记录与任务状态提交，节点内部**不做**跨调用的事务；
-- `DOCUMENT_PREPARE` 不加嵌套事务——它要真实调用外部服务，产物的幂等占位必须在
-  调用前就已提交（见 `artifacts`）；其余节点用 `begin_nested()` 包住业务写入，
-  失败时业务写入整体回滚，执行记录与任务状态另行落 FAILED/BLOCKED；
-- Agent 的模型调用与工具执行期间**不持有**数据库行锁：登记、执行、写回各是短事务；
-- 图节点函数只推进状态并提交，不承载业务规则本身。"""
+事务边界：执行前先把执行记录与任务状态提交，节点内部不做跨调用的事务；`DOCUMENT_PREPARE`
+不加嵌套事务（它要真实调用外部服务，产物的幂等占位必须在调用前就已提交），其余节点用
+`begin_nested()` 包住业务写入，失败时业务写入整体回滚；Agent 的模型调用与工具执行期间
+不持有数据库行锁。图节点函数只推进状态并提交，不承载业务规则本身。
+"""
 
 import hashlib
 import logging
@@ -64,10 +50,11 @@ from .reviews import (
     _review_hash,
     _validate_review_payloads,
 )
-from .rules import _execute_rules, _risk_source_result_keys
+from .rules import _execute_rules, _risk_result_context, _risk_source_result_refs, _risk_source_payloads
 from .shared import _material_names, _rule_applicability, _scenario, _task_manifest
+from .. import task_csv_service
 from .state import (
-    _current_execution_ids,
+    _current_node_executions,
     _flow_checkpoint_state,
     _is_node_of_type,
     _save_flow_checkpoint,
@@ -77,6 +64,7 @@ from .state import (
     _validate_graph_namespace,
 )
 from datetime import UTC, datetime
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -134,7 +122,7 @@ def register_node_handlers() -> None:
 
 
 def node_type_of(task: AuditTask, manifest: dict[str, Any]) -> str:
-    """任务当前节点的**能力类型**。
+    """任务当前节点的能力类型。
 
     节点的能力类型决定谁来执行。旧 manifest 的节点没有 `node_type`：
     那时节点码本身就是能力类型，因此直接用它——这不是兜底，是旧格式的确定性语义。
@@ -154,12 +142,12 @@ def _dispatch(db: Session, task: AuditTask, manifest: dict[str, Any], execution:
         node_registry.NODE_TYPE_INTERNAL_VALIDATE,
         node_registry.NODE_TYPE_CROSS_VALIDATE,
         node_registry.NODE_TYPE_RISK_RATING,
-        # 计算节点同样按**实例码**归属规则：同一份计算规则可以被多个计算节点引用，
+        # 计算节点同样按实例码归属规则：同一份计算规则可以被多个计算节点引用，
         # 不传实例码会让它拿能力类型当实例码去过滤，一条规则都匹配不上、
-        # 节点静默报「本模板未配置计算规则」并记为 SKIPPED。
+        # 节点静默报「当前节点未配置计算规则」并记为 SKIPPED。
         node_registry.NODE_TYPE_CALCULATION,
     }:
-        # 这些节点的规则执行需要知道**节点实例码**（规则按它归属），
+        # 这些节点的规则执行需要知道节点实例码（规则按它归属），
         # 因此把当前节点码显式传进去；其余节点不需要这个参数。
         return handler(db, task, manifest, execution, task.current_node)
     return handler(db, task, manifest, execution)
@@ -220,18 +208,15 @@ def _running_execution(db: Session, task: AuditTask) -> NodeExecution | None:
 
 
 def _execution_mode(task: AuditTask, manifest: dict[str, Any]) -> str:
-    """本次节点执行的模式。**在执行之前**由冻结配置决定。
+    """本次节点执行的模式。在执行之前由冻结配置决定。
 
-    依据只有两条，都是确定性事实，不看模型的任何输出：
+    依据只有两条，都是确定性事实，不看模型的任何输出：节点的能力类型是否属于按规则执行的
+    校验节点（内部/交叉校验、风险评定）——其余节点的执行方式是固定的，不存在「让模型选工具」
+    的空间；该节点是否有启用规则、且这些规则引用了可调用的 Agent 工具（`manifest.allowed_tools`
+    由发布期按规则实际引用的能力算出）。两者同时成立才走 Agent 路径。
 
-    1. 节点的能力类型是否属于按规则执行的校验节点（内部/交叉校验、风险评定）——
-       其余节点的执行方式是固定的，不存在「让模型选工具」的空间；
-    2. 该节点是否有启用规则、且这些规则引用了**可调用的 Agent 工具**
-       （`manifest.allowed_tools` 由发布期按规则实际引用的能力算出）。
-
-    两者同时成立才走 Agent 路径；否则走确定性路径。
-    判定发生在执行之前，因此「当前节点」在执行期间不会被提前推进，
-    同一条规则实例也只可能由其中一条路径写结果。
+    判定发生在执行之前，因此「当前节点」在执行期间不会被提前推进，同一条规则实例也只可能由
+    其中一条路径写结果。
     """
     node_type = node_type_of(task, manifest)
     if node_type not in _AGENT_NODE_TYPES:
@@ -247,7 +232,7 @@ def _enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) ->
     return [
         rule
         for rule in manifest["rules"]
-        if rule.get("node") == node_code and rule.get("rule_key") in enabled_keys
+        if rule.get("enabled", True) and rule.get("node") == node_code and rule.get("rule_key") in enabled_keys
     ]
 
 
@@ -258,13 +243,11 @@ def _partition_rules(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """把本节点的启用规则分成（Agent 规则, 确定性规则）。
 
-    划分依据是「这条规则引用的能力是否有可调用的 Agent 工具」——它就是
-    `allowed_tools` 的生成口径（见 `domain/tool_catalog.allowed_tools_of`），
-    因此两边不会各算一套。两类规则互斥且互补：每条规则实例只由一条路径写结果。
+    划分依据是「这条规则引用的能力是否有可调用的 Agent 工具」——它就是 `allowed_tools` 的
+    生成口径（见 `domain/tool_catalog.allowed_tools_of`），因此两边不会各算一套。两类规则
+    互斥且互补，每条规则实例只由一条路径写结果。
 
-    这样划分是必要的：主体检索、语义判断等能力没有独立可调用的工具，
-    若把它们一并交给 Agent，模型既没有工具可用、也无法得出这几类结论，
-    规则会被静默丢掉。
+    语义判断即使没有工具也进入 Agent；专用抽取和报告等节点继续使用其真实入口。
     """
     agent = _agent_module()
     rules = _enabled_rules(task, manifest, node_code)
@@ -272,7 +255,7 @@ def _partition_rules(
     deterministic_rules: list[dict[str, Any]] = []
     for rule in rules:
         rule_code = str(rule.get("rule_code") or rule.get("rule_key") or "")
-        if agent.tools_for_node(
+        if rule.get("operator") == "LLM_VALIDATE" or agent.tools_for_node(
             manifest, node_code=node_code, rule_codes=(rule_code,), rule_keys=(rule["rule_key"],),
         ):
             agent_rules.append(rule)
@@ -290,7 +273,7 @@ def graph_execute_current_node(
 ) -> dict[str, Any]:
     """开始执行当前节点：建执行记录、确定执行模式并提交。
 
-    这里**不执行**节点本身。执行由确定性路径或 Agent 路径完成，两条路径共用
+    这里不执行节点本身。执行由确定性路径或 Agent 路径完成，两条路径共用
     同一条执行记录，最后由 `graph_finalize_node_execution` 写终态、由
     `graph_advance_workflow` 推进任务。
     """
@@ -432,7 +415,7 @@ def graph_run_deterministic_node(
     execution = _execution_in_progress(db, task, execution_id)
     try:
         # 文件处理节点不套嵌套事务：它要真实调用外部服务，产物占位必须先提交。
-        # 按**能力类型**判断，不写死实例码。
+        # 按能力类型判断，不写死实例码。
         if node_type_of(task, manifest) == "DOCUMENT_PREPARE":
             result = _dispatch(db, task, manifest, execution)
         else:
@@ -483,13 +466,11 @@ def graph_finalize_node_execution(
 ) -> dict[str, Any]:
     """收尾当前节点执行：写执行记录的终态与结果。
 
-    两条路径共用这一处：
+    两条路径共用这一处：确定性路径的结果来自节点实现（`node_result`），Agent 路径的结果来自
+    `advance_rule_cursor` 汇总的逐规则结论（`agent_summary`）。
 
-    - 确定性路径的结果来自节点实现（`node_result`）；
-    - Agent 路径的结果来自 `advance_rule_cursor` 汇总的逐规则结论（`agent_summary`）。
-
-    已经写过终态的记录（必传材料缺失的 BLOCKED、或在执行中途被服务重启打断的 FAILED）
-    不再覆盖，只如实回报：把一次未完成说成完成，比失败本身更危险。
+    已经写过终态的记录（必传材料缺失的 BLOCKED、被服务重启打断的 FAILED）不再覆盖，只如实
+    回报——把一次未完成说成完成，比失败本身更危险。
     """
     task = task_or_404(db, task_no, lock=True)
     _validate_graph_namespace(task, graph_namespace)
@@ -512,7 +493,7 @@ def graph_finalize_node_execution(
         execution.result_json = summary
         if summary.get("loop_status") == LOOP_BLOCKED:
             # 规则评估整体无法继续（轮次上限、模型响应不可用、工具未授权……）：
-            # 执行记录写**阻断终态**，任务与检查点一起停在这里，由既有重试路径重跑。
+            # 执行记录写阻断终态，任务与检查点一起停在这里，由既有重试路径重跑。
             # 不能写成 SUCCEEDED 再在结果里附一个错误字段——那会让节点显示「已完成」
             # 并让 DAG 继续推进，而实际有规则从未形成结论。
             execution.status = "BLOCKED"
@@ -533,7 +514,7 @@ def graph_finalize_node_execution(
                 "failure_message": recovered_message,
             },
         }
-        # 覆盖被中断的 FAILED 只在本次执行**确实成功**时做：本次又阻断/失败时，
+        # 覆盖被中断的 FAILED 只在本次执行确实成功时做：本次又阻断/失败时，
         # 当前失败码是真实结论，不能被「上次是中断」擦掉。
         if execution.status not in {"BLOCKED", "FAILED"}:
             execution.failure_code = None
@@ -565,7 +546,7 @@ def graph_advance_workflow(
     _, _, current_index = _scenario_nodes(db, task)
     execution = _execution_in_progress(db, task, execution_id)
     if execution.status == "BLOCKED":
-        # 必传材料缺失：任务显式阻断在**当前节点**，检查点不动，用户补传后可重新执行。
+        # 必传材料缺失：任务显式阻断在当前节点，检查点不动，用户补传后可重新执行。
         return {
             "current_node": task.current_node,
             "node_index": current_index,
@@ -667,8 +648,8 @@ def _next_node_after(
 ) -> dict[str, Any] | None:
     """按 DAG 选出下一个可执行节点；没有就绪节点时返回 None。
 
-    节点按**依赖是否满足**选择；`sequence_no` 只决定多个就绪节点之间的稳定顺序。
-    财报场景因此按字段抽取 → 计算 → 风险的数据流推进。
+    节点按依赖是否满足选择；`sequence_no` 只决定多个就绪节点之间的稳定顺序。
+    数据流由当前场景的节点依赖决定，不按场景类型预设执行顺序。
 
     没有就绪节点时区分两种情况：全部完成（返回 None，任务置 COMPLETED）与
     DAG 卡住（抛错，任务保持可诊断状态）。把卡住当成完成会让任务显示为已完成
@@ -881,7 +862,7 @@ def _raise_graph_error(state: dict[str, Any]) -> None:
 # 执行一批工具、校验候选结论、落库结果、推进游标。没有函数内部循环——
 # 循环由图的节点与条件边表达，因此每一步都可 checkpoint、可 interrupt、可恢复。
 #
-# 一次评估只处理**一条规则实例**：State 里保存当前规则实例与游标，
+# 一次评估只处理一条规则实例：State 里保存当前规则实例与游标，
 # 消息、工具调用与结果都属于这条规则，不与其他规则的混在一起。
 
 def _agent_module() -> Any:
@@ -902,7 +883,7 @@ def _evaluation_scope(
 ) -> dict[str, Any]:
     """本节点的评估范围：节点级授权工具与工具策略版本。
 
-    两者都在评估开始时**冻结**，本次评估的全部工具调用共用同一份身份——
+    两者都在评估开始时冻结，本次评估的全部工具调用共用同一份身份——
     这是「工具结果绑定到当时的事实快照与工具策略版本」的落点。
     """
     agent = _agent_module()
@@ -915,7 +896,7 @@ def _evaluation_scope(
 def _plan_entry(node_code: str, cursor: int, rule: dict[str, Any]) -> dict[str, Any]:
     """评估计划里的一条规则实例。
 
-    计划只包含**引用了可调用 Agent 工具**的启用规则，与 `_execution_mode` 的划分
+    计划只包含引用了可调用 Agent 工具的启用规则，与 `_execution_mode` 的划分
     同源（同一个 `_partition_rules`）。其余规则由确定性路径执行，不会被漏掉、
     也不会被两条路径各写一次。
     """
@@ -935,7 +916,7 @@ def _plan_rule(
 ) -> dict[str, Any]:
     """按游标取本节点的第 `rule_cursor` 条 Agent 规则（顺序与评估计划一致）。
 
-    取的是 `_partition_rules` 划分出的**Agent 规则**，不是本节点全部规则：
+    取的是 `_partition_rules` 划分出的Agent 规则，不是本节点全部规则：
     没有授权工具的规则由确定性路径执行，指到它会得到一条永远评估不了的规则。
     """
     agent_rules, _ = _partition_rules(task, manifest, node_code)
@@ -950,7 +931,7 @@ def _plan_rule(
 
 
 def _evaluation_id(task: AuditTask, graph_namespace: str, execution_id: int, rule_instance_id: str) -> str:
-    """一次规则实例评估的批次标识。**由身份推导**，不随机生成。
+    """一次规则实例评估的批次标识。由身份推导，不随机生成。
 
     推导而非随机是刻意的：恢复与重跑必须得到同一个标识，否则
     「同一次评估」会分裂成两次，账本里的工具调用也无法复用。
@@ -970,21 +951,21 @@ def _evaluation_id(task: AuditTask, graph_namespace: str, execution_id: int, rul
 
 
 def _rule_instance_id(node_code: str, rule_identity: str, execution_id: int) -> str:
-    """规则实例标识：同一条规则在**不同节点执行批次**里是不同实例。"""
+    """规则实例标识：同一条规则在不同节点执行批次里是不同实例。"""
     return f"{node_code}:{rule_identity}:NE{execution_id}"
 
 
 def _openai_tools(allowed_tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """按冻结的工具定义构造模型的 `tools` 参数。
 
-    模型看到的必须是**发布期冻结的那一份定义**，不是当前工具目录：目录升级后
+    模型看到的必须是发布期冻结的那一份定义，不是当前工具目录：目录升级后
     旧任务仍按冻结定义执行，用当前目录重算会让历史结论无法复现，也会让
     「模型当时看到的是什么」失去答案。清单里缺少冻结定义时由
     `agent.frozen_tool_definitions` 显式报错，不静默改用当前目录。
     """
     definitions = _agent_module().frozen_tool_definitions(allowed_tools)
     return [
-        {"type": "function", "function": dict(definition)}
+        convert_to_openai_tool(definition)
         for definition in sorted(definitions, key=lambda item: str(item.get("name")))
     ]
 
@@ -993,35 +974,31 @@ def _openai_tools(allowed_tools: list[dict[str, Any]] | None) -> list[dict[str, 
 def _agent_step(db: Session, task_no: str, graph_namespace: str) -> Iterator[None]:
     """Agent 路径单步的失败处理：先落成显式的节点失败，再原样抛出。
 
-    模型调用与工具执行会失败（配置缺失、供应商超时、快照过期、凭据失效），
-    也可能抛出**未预期异常**（唯一键冲突、JSON 序列化失败、工具参数错误）。
-    两类都必须写进执行记录并把任务置 BLOCKED，**异常摘要原样保留**：
-    不记录的话任务会停在 RUNNING、执行记录停在 RUNNING，用户既不能重跑也看不到原因。
+    模型调用与工具执行会失败（配置缺失、供应商超时、快照过期、凭据失效），也可能抛出未预期
+    异常（唯一键冲突、JSON 序列化失败、工具参数错误）。两类都必须写进执行记录并把任务置
+    BLOCKED，异常摘要原样保留——不记录的话任务与执行记录都停在 RUNNING，用户既不能重跑也
+    看不到原因。
 
-    错误码的分工是刻意的：
+    错误码的分工是刻意的：`BusinessError` 的码原样上抛（快照冲突、输入缺失、工具参数非法……）；
+    其余异常写 `AUDIT_NODE_UNEXPECTED_ERROR` 并把异常类型、消息与出错位置落进
+    `failure_message`，同时以同一错误码抛出。这样图包装层不会把它再包成「检查点不可达」——
+    那会把快照唯一键冲突、序列化失败这类真实缺陷伪装成存储故障。
 
-    - `BusinessError` 的码**原样上抛**（快照冲突、输入缺失、工具参数非法……），
-      调用方据此知道真实原因；
-    - 其余异常写 `AUDIT_NODE_UNEXPECTED_ERROR` 并把异常类型、消息与出错位置
-      一起落进 `failure_message`，同时以**同一个错误码的 BusinessError** 抛出。
-      这样图包装层不会把它再包成「检查点不可达」——那会把快照唯一键冲突、
-      序列化失败这类真实缺陷伪装成存储故障。
-
-    只对「确实有一次执行正在进行」的情况落失败：任务号、执行记录与图命名空间三者
-    都对得上才写。对不上说明这次调用根本不属于当前流程（例如等待点已被材料替换取代），
-    此时不碰任何记录，只把原错误抛出。
+    只对「确实有一次执行正在进行」的情况落失败：任务号、执行记录与图命名空间三者都对得上才写。
+    对不上说明这次调用根本不属于当前流程（例如等待点已被材料替换取代），此时不碰任何记录，
+    只把原错误抛出。
     """
     try:
         yield
     except BusinessError as exc:
-        _fail_agent_execution(db, task_no, graph_namespace, code=exc.code, message=exc.message)
+        _fail_running_execution(db, task_no, graph_namespace, code=exc.code, message=exc.message)
         raise
     except Exception as exc:  # noqa: BLE001 - 未预期异常必须落库后再暴露
         logger.exception(
             "规则评估发生未处理异常 task_no=%s graph_namespace=%s", task_no, graph_namespace, exc_info=exc
         )
         summary = exception_summary(exc)
-        _fail_agent_execution(
+        _fail_running_execution(
             db,
             task_no,
             graph_namespace,
@@ -1036,7 +1013,7 @@ def _agent_step(db: Session, task_no: str, graph_namespace: str) -> Iterator[Non
         ) from exc
 
 
-def _fail_agent_execution(
+def _fail_running_execution(
     db: Session,
     task_no: str,
     graph_namespace: str,
@@ -1046,10 +1023,11 @@ def _fail_agent_execution(
 ) -> None:
     """把当前执行记录写成 FAILED、任务置 BLOCKED，并提交。
 
-    对不上任务号 / 执行记录 / 图命名空间时不写任何记录（见 `_agent_step` 的说明）。
+    Agent 单步和图执行期间的存储故障共用此处。只终止匹配当前批次的 RUNNING
+    执行；尚未开始或已进入确认/复核等待点的任务保持原状态。
     """
     db.rollback()
-    task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no))
+    task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no).with_for_update())
     checkpoint = task.checkpoint_json if task is not None and isinstance(task.checkpoint_json, dict) else {}
     execution = _running_execution(db, task) if task is not None else None
     if (
@@ -1082,7 +1060,7 @@ def graph_load_evaluation(
 ) -> dict[str, Any]:
     """加载节点评估：评估计划、节点级授权工具与工具策略版本。
 
-    本节点只在**执行模式为 Agent** 时进入（见 `_execution_mode`），因此计划必然非空：
+    本节点只在执行模式为 Agent 时进入（见 `_execution_mode`），因此计划必然非空：
     没有任何规则引用可调用工具时该节点走确定性路径，根本到不了这里。
 
     节点里没有授权工具的规则在这里由确定性实现执行掉（`deterministic_result`）：
@@ -1135,7 +1113,7 @@ def graph_load_rule_instance(
     rule_cursor: int,
     execution_id: int | None,
 ) -> dict[str, Any]:
-    """冻结**一条**规则实例：评估身份、事实快照、授权工具与输入事实。
+    """冻结一条规则实例：评估身份、事实快照、授权工具与输入事实。
 
     评估身份由身份推导（`_evaluation_id`），快照按
     (评估批次, 规则实例, 输入修订) 幂等冻结：重复执行不会产生第二份输入，
@@ -1161,6 +1139,7 @@ def graph_load_rule_instance(
             snapshot = agent.freeze_snapshot(
                 db,
                 task=task,
+                rule=rule,
                 node_code=node_code,
                 rule_instance_id=rule_instance_id,
                 evaluation_id=evaluation_id,
@@ -1213,14 +1192,11 @@ def graph_prepare_agent_context(
 ) -> dict[str, Any]:
     """准备模型上下文：系统提示 + 这条规则的要求与可用字段事实。
 
-    消息历史只在**首次**进入这条规则实例时生成；已有历史就原样保留——
-    重新生成等于把模型已经看到的内容换掉，恢复后的判断会与中断前不一致。
+    消息历史只在首次进入这条规则实例时生成，已有历史就原样保留——重新生成等于把模型已经看到
+    的内容换掉，恢复后的判断会与中断前不一致。
 
-    输入门禁先于消息复用：恢复或重放时即使已有消息，也不能让无效字段事实
-    绕过当前规则的输入校验。正常恢复的输入没有变化，仍会原样复用消息。
-
-    提示里只用**本规则实际使用的**事实与标识：给全量事实会让模型在无关字段上
-    做判断，也会让它有机会引用不属于这条规则的输入。
+    提示里只用本规则实际使用的事实与标识：给全量事实会让模型在无关字段上做判断，也会让它有机会
+    引用不属于这条规则的输入。
     """
     with _agent_step(db, task_no, graph_namespace):
         task = task_or_404(db, task_no, lock=True)
@@ -1230,37 +1206,21 @@ def graph_prepare_agent_context(
         rule = _rule_of_instance(manifest, node_code, instance)
         agent = _agent_module()
         inputs = list(instance.get("inputs") or [])
-        invalid = [
-            item for item in inputs
-            if item.get("status") not in {"PRESENT", "REVIEWED"}
-            or item.get("normalized_value") is None
-        ]
-        if invalid:
-            # Agent 规则无论使用哪个算子，都只能读取已经定型的字段事实。
-            # 候选原文保留给人工复核，但不会进入提示词或工具调用参数。
-            return {
-                "messages": [],
-                "loop_status": LOOP_NEEDS_HUMAN,
-                "unresolved_items": [{
-                    "kind": "INCOMPLETE_FIELD_FACTS",
-                    "message": (
-                        "规则输入没有全部形成有效字段事实，未调用大模型："
-                        + "、".join(
-                            f"{item.get('field_key')}@{item.get('material_key')}（{item.get('status')}）"
-                            for item in invalid
-                        )
-                    ),
-                    "missing_inputs": [
-                        f"{item.get('field_key')}@{item.get('material_key')}" for item in invalid
-                    ],
-                }],
-                "last_error": None,
-            }
+        # 输入缺项交给模型结合实际条件判断，不能在调用前拒绝整条规则。
         if messages:
             return {"messages": list(messages), "last_error": None}
+        context_rule = dict(rule)
+        if rule.get("operator") == "RISK_TRIGGER":
+            runtime, result_context = _risk_execution_data(db, task, rule)
+            context_rule.update(runtime)
+            instance = {**instance, "risk_context": {**runtime, **result_context}}
+        if rule.get("operator") == "LLM_VALIDATE" and (rule.get("parameters") or {}).get("evidence_source") == "RETRIEVAL":
+            from .rules import _rule_retrieval
+            context_rule["retrieval"] = _rule_retrieval(db, task, rule, inputs)
         return {
+            "rule_instance": instance,
             "messages": agent.initial_messages(
-                rule,
+                context_rule,
                 inputs,
                 material_names=_material_names(manifest),
                 manifest=manifest,
@@ -1272,7 +1232,7 @@ def graph_prepare_agent_context(
 def _loop_limit_reached(loop_count: int) -> int | None:
     """本节点这一轮是否已经到达工具循环上限；到达时返回上限值。
 
-    **轮次的定义全链路只有一种：一次模型调用算一轮**（与 `loop_count` 的计数口径一致）。
+    轮次的定义全链路只有一种：一次模型调用算一轮（与 `loop_count` 的计数口径一致）。
     批次不是轮次：一次模型调用可以请求多个工具，它们仍属于同一轮。
 
     `settings.llm_tool_max_rounds` 为 0 表示不设上限（由调用方自行控制终止），
@@ -1287,7 +1247,7 @@ def _loop_limit_reached(loop_count: int) -> int | None:
 
 
 def _loop_limit_state(max_rounds: int, loop_count: int, executed_tool_calls: list[str]) -> dict[str, Any]:
-    """到达上限时的显式阻断状态：原因、已用轮次与**已经执行过**的工具调用。"""
+    """到达上限时的显式阻断状态：原因、已用轮次与已经执行过的工具调用。"""
     return {
         "loop_status": LOOP_BLOCKED,
         "unresolved_items": [
@@ -1317,21 +1277,19 @@ def graph_call_model(
     state_evaluation_id: str | None,
     executed_tool_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """**调用模型一次**，把这一轮的响应写回 State。
+    """调用模型一次，把这一轮的响应写回 State。
 
-    这里不执行工具：模型请求了工具就由 `graph_execute_tool_calls` 执行，
-    再由 `graph_append_tool_results` 生成 tool 消息，然后回到本节点问下一轮。
-    每次调用模型都发生在图节点里，因此每一轮都是可 checkpoint 的状态。
+    这里不执行工具：模型请求了工具就由 `graph_execute_tool_calls` 执行、由
+    `graph_append_tool_results` 生成 tool 消息，然后回到本节点问下一轮。每次调用模型都发生在
+    图节点里，因此每一轮都是可 checkpoint 的状态。
 
-    轮次上限（`settings.llm_tool_max_rounds`，按**模型调用次数**计）在这里兜底：
-
-    - 已用完额度时不再调用模型，直接进 `LOOP_BLOCKED`；
-    - 这一轮是最后一轮、而模型仍请求工具时，**不执行这一批工具**，
-      同样进 `LOOP_BLOCKED`。
+    轮次上限（`settings.llm_tool_max_rounds`，按模型调用次数计）在这里兜底：已用完额度时不再
+    调用模型，直接进 `LOOP_BLOCKED`；这一轮是最后一轮而模型仍请求工具时，不执行这一批工具，
+    同样进 `LOOP_BLOCKED`。
 
     两种情况都写入 `LLM_TOOL_LOOP_LIMIT` 与未解决事项，并保留已执行的工具账本
-    （`executed_tool_results`）与已得到的模型响应，交后续按阻断处理——
-    既不默认通过，也不静默结束。
+    （`executed_tool_results`）与已得到的模型响应，交后续按阻断处理——既不默认通过，
+    也不静默结束。
     """
     with _agent_step(db, task_no, graph_namespace):
         from ...integrations.llm.gateway import TURN_CONTENT, TURN_REFUSAL, TURN_TOOL_CALLS
@@ -1432,12 +1390,12 @@ def graph_execute_tool_calls(
     rule_instance: dict[str, Any] | None,
     existing_unresolved: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """执行 State 中的**这一批**待执行工具调用。
+    """执行 State 中的这一批待执行工具调用。
 
     每次只执行 `pending_tool_calls` 里的调用，执行完即清空——「下一批」由模型
     下一轮请求产生。因此本节点不构成循环，重复进入只会执行新的一批。
 
-    工具输入从**冻结快照**解析，运行期状态（风险来源结论）由这里注入；
+    工具输入从冻结快照解析，运行期状态（风险来源结论）由这里注入；
     模型给的只是身份引用与业务参数。账本负责「同一次调用不重复执行」。
     """
     with _agent_step(db, task_no, graph_namespace):
@@ -1474,7 +1432,7 @@ def graph_execute_tool_calls(
             rule_instance_id=str(instance.get("rule_instance_id") or ""),
             material_refs=tuple(instance.get("material_refs") or ()),
         )
-        runtime = _tool_runtime(db, task, rule)
+        runtime, result_context = _tool_execution_data(db, task, rule)
         results: list[dict[str, Any]] = []
         unresolved: list[dict[str, Any]] = []
         for call in calls:
@@ -1488,7 +1446,10 @@ def graph_execute_tool_calls(
                 unresolved.append({"kind": "TOOL_NOT_AUTHORIZED", "tool_name": tool_name, "message": result["message"]})
                 results.append(agent.tool_result_entry(call, result))
                 continue
-            result, _ = agent.invoke_tool(db, call=call, inputs=inputs, context=context, runtime=runtime, rule=rule, manifest=manifest)
+            result, _ = agent.invoke_tool(
+                db, call=call, inputs=inputs, context=context, runtime=runtime,
+                result_context=result_context, rule=rule, manifest=manifest,
+            )
             if result.get("status") in {"NEEDS_RECONCILE", "FAILED"}:
                 unresolved.append(
                     {
@@ -1514,14 +1475,13 @@ def graph_append_tool_results(
 ) -> dict[str, Any]:
     """把本批工具结果生成 `tool` 角色消息并追加到消息历史。
 
-    单独成一个节点而不是塞进 `execute_tool_calls`：消息历史与工具执行是两件事，
-    合在一起会让「工具执行成功但消息没写进 State」这种半成品状态无法分辨。
+    单独成一个节点而不是塞进 `execute_tool_calls`：消息历史与工具执行是两件事，合在一起会让
+    「工具执行成功但消息没写进 State」这种半成品状态无法分辨。
 
-    **同一个供应商调用标识在消息历史里只能有一条 `tool` 消息**：`tool_results`
-    会跨轮累积（供最终证据校验使用），若把整份累积结果逐项追加，第 N 轮会把
-    前 N-1 轮的消息再追加一遍——同一 `tool_call_id` 出现多条，上下文平方级膨胀，
-    还可能被供应商判为协议错误。因此这里只追加历史中尚未出现的标识，
-    Graph checkpoint 重放也不会重复生成同一条消息。
+    同一个供应商调用标识在消息历史里只能有一条 `tool` 消息：`tool_results` 会跨轮累积（供最终
+    证据校验使用），若把整份累积结果逐项追加，第 N 轮会把前 N-1 轮的消息再追加一遍——同一
+    `tool_call_id` 出现多条，上下文平方级膨胀，还可能被供应商判为协议错误。因此这里只追加历史
+    中尚未出现的标识，checkpoint 重放也不会重复生成同一条消息。
     """
     agent = _agent_module()
     appended = list(messages or [])
@@ -1533,7 +1493,7 @@ def graph_append_tool_results(
     for item in tool_results or []:
         if not isinstance(item, dict) or not item.get("tool_call_id"):
             continue
-        # 回填消息用**供应商**的调用标识：模型认的是它自己给出的那个；
+        # 回填消息用供应商的调用标识：模型认的是它自己给出的那个；
         # 账本标识写在结果内容里，模型引用证据时用它。
         provider_call_id = item.get("provider_tool_call_id") or item["tool_call_id"]
         if str(provider_call_id) in appended_ids:
@@ -1565,10 +1525,9 @@ def graph_produce_candidate_verdict(
     loop_status: str,
     unresolved_items: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """校验模型给出的候选结论，形成**可采信的结论**或明确的未解决事项。
+    """校验模型给出的候选结论，形成可采信的结论或明确的未解决事项。
 
-    服务端校验在 `services.audit.agent.validate_verdict`：状态枚举、证据引用、
-    与确定性工具结果的冲突、以及不得越过 EVIDENCE_INSUFFICIENT / FAILED / NEEDS_RECONCILE。
+    服务端只核对 `services.audit.agent.validate_verdict` 所定义的结果结构与真实引用。
     模型没有给出可解析结论时按 BLOCKED 处理并说明原因，不猜测状态。
     """
     with _agent_step(db, task_no, graph_namespace):
@@ -1621,6 +1580,8 @@ def graph_produce_candidate_verdict(
                 ],
                 "last_error": None,
             }
+        if rule.get("operator") == "RISK_TRIGGER" and instance.get("risk_context"):
+            verdict["risk_context"] = instance["risk_context"]
         return {
             "candidate_verdict": verdict,
             "loop_status": status,
@@ -1645,12 +1606,10 @@ def graph_prepare_agent_review(
 ) -> dict[str, Any]:
     """把「需要人工复核」变成真实的待办与合法的等待状态。
 
-    顺序不能颠倒——必须先把规则结果与待办落库、再切等待状态：
-
-    1. 写规则结果（候选结论，`origin=AGENT`），待办才有可关联的业务对象；
-    2. 建 `manual_review` 待办，保存模型候选结论、确定性工具结果与冲突原因；
-    3. 生成复核集合哈希与条数，把任务状态与检查点切成 `WAITING_REVIEW`；
-    4. 返回进入 interrupt 所需的集合身份。
+    顺序不能颠倒——必须先把规则结果与待办落库、再切等待状态：写规则结果（候选结论，
+    `origin=AGENT`），待办才有可关联的业务对象；建 `manual_review` 待办，保存模型候选结论、
+    确定性工具结果与冲突原因；生成复核集合哈希与条数，把任务状态与检查点切成 `WAITING_REVIEW`；
+    返回进入 interrupt 所需的集合身份。
 
     切换期间任务当前节点临时指向人工复核节点，复核提交因此走既有入口；
     `graph_apply_agent_reviews` 会把当前节点恢复成正在评估的节点。
@@ -1752,11 +1711,11 @@ def graph_apply_agent_reviews(
 ) -> dict[str, Any]:
     """应用 Agent 复核裁决，并把任务恢复到正在评估的节点上。
 
-    裁决落库与人工复核节点**共用同一实现**（`reviews._apply_review_decisions`），
+    裁决落库与人工复核节点共用同一实现（`reviews._apply_review_decisions`），
     这里只负责两件它不做的事：
 
     1. 校验提交的集合与进入等待时的集合逐条一致（哈希 + 条数）；
-    2. 恢复任务当前节点与检查点——Agent 复核发生在某个校验节点**执行期间**，
+    2. 恢复任务当前节点与检查点——Agent 复核发生在某个校验节点执行期间，
        不能像人工复核节点那样推进到下一个节点，否则该节点剩下的规则会被跳过。
     """
     with _agent_step(db, task_no, graph_namespace):
@@ -1927,7 +1886,7 @@ def graph_save_evaluation_result(
     evaluation_id: str | None,
     fact_snapshot_ref: str | None = None,
 ) -> dict[str, Any]:
-    """保存**这一条规则实例**的评估结果。
+    """保存这一条规则实例的评估结果。
 
     保存是确定性生命周期的一部分：Agent 不能跳过或改写。按
     (节点执行记录, 规则编号) 唯一写一条结果——人工复核已经改写过它时是更新而非新增，
@@ -1987,7 +1946,7 @@ def graph_advance_rule_cursor(
     """推进规则游标：还有规则就冻结下一条，没有就收尾节点执行。
 
     这一步是纯状态推进，因此不碰数据库、也不动已累积的逐规则结论：
-    是否还有规则由**冻结的评估计划**回答，不重新查询任务或配置。
+    是否还有规则由冻结的评估计划回答，不重新查询任务或配置。
     """
     plan = [item for item in (evaluation_plan or []) if isinstance(item, dict)]
     next_cursor = rule_cursor + 1
@@ -2012,7 +1971,7 @@ def _rule_of_instance(manifest: dict[str, Any], node_code: str, instance: dict[s
     )
 
 
-# 工具结果里进页面/报告的**分析字段**。它们是节点路径同样产出的结构
+# 工具结果里进页面/报告的分析字段。它们是节点路径同样产出的结构
 # （审核标准 / 实际比较 / 算式 / 加总 / 逐份材料 / 检索），Agent 路径不能只留下
 # 「工具名 + 状态」，否则「事项 → 标准 → 原文 → 比较 → 结论」这条链缺中间环。
 _TOOL_RESULT_ANALYSIS_KEYS = (
@@ -2038,7 +1997,7 @@ _TOOL_RESULT_ANALYSIS_KEYS = (
 def _project_tool_result(item: dict[str, Any]) -> dict[str, Any]:
     """把一次工具结果投影成页面可读的规则结果片段。
 
-    键集合来自**工具目录**：该工具对应能力声明的 `output_keys`，加上节点路径
+    键集合来自工具目录：该工具对应能力声明的 `output_keys`，加上节点路径
     同构的分析字段。白名单方式而不是原样透传：工具结果里可能带外部服务载荷或
     与本次判定无关的大对象，原样落进规则结果会同时扩大页面体积与泄露面。
     """
@@ -2059,7 +2018,7 @@ def _project_tool_result(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _agent_standard_of(rule: dict[str, Any]) -> dict[str, Any]:
-    """本条规则的**审核标准**：比对什么、按什么方式比、阈值与口径。
+    """本条规则的审核标准：比对什么、按什么方式比、阈值与口径。
 
     与节点路径的 `standard` 同构，取自已发布配置（不可变），不由模型改写。
     """
@@ -2094,17 +2053,13 @@ def _upsert_agent_rule_result(
 ) -> RuleResult:
     """把一条规则实例的 Agent 评估结果写成规则结果（按执行记录 + 规则编号唯一）。
 
-    已存在时**只补齐系统侧字段**：`status` 与 `message` 一旦被人工复核改写过，
-    就保留人工结论——保存候选结论不能把人工裁决覆盖回模型候选值。
+    已存在时只补齐系统侧字段：`status` 与 `message` 一旦被人工复核改写过就保留人工结论——
+    保存候选结论不能把人工裁决覆盖回模型候选值。
 
-    结果里必须能回答完整的阅读链，而不只是「结论 + 一句说明 + 工具名」：
-
-    - 审核标准：`standard`（本条规则比对什么、按什么方式、阈值与口径）；
-    - 实际输入：`inputs`（从冻结快照解析出的字段事实）；
-    - 调用了哪些工具、工具返回了什么确定性比较结果：`tool_calls`（按工具目录的
-      `output_keys` 投影，含 `comparison` / `expression` / `sum_value` / `per_material`）；
-    - 模型结论引用了哪些证据：`verdict.evidence`；
-    - 为什么通过 / 异常 / 不可判定 / 转人工：`status` + `loop_status` + `unresolved_items`。
+    结果里必须能回答完整的阅读链，而不只是「结论 + 一句说明 + 工具名」：审核标准 `standard`；
+    实际输入 `inputs`（从冻结快照解析出的字段事实）；调用了哪些工具、返回了什么确定性比较结果
+    `tool_calls`（按工具目录的 `output_keys` 投影）；模型结论引用了哪些证据 `verdict.evidence`；
+    以及为什么是这个结论（`status` + `loop_status` + `unresolved_items`）。
     """
     record = db.scalar(
         select(RuleResult).where(
@@ -2127,6 +2082,23 @@ def _upsert_agent_rule_result(
         ],
         "verdict": verdict,
     }
+    if rule.get("operator") == "RISK_TRIGGER":
+        # 直接模型判断与工具调用共用本条评估时冻结的真实上游结果。
+        payload.update((verdict or {}).get("risk_context") or {})
+        payload["risk_level"] = (rule.get("parameters") or {}).get("risk_level")
+        payload["action"] = (rule.get("parameters") or {}).get("action")
+        # 来源来自成功工具调用的账本结果，不在保存阶段重查当前结论。
+        # 重放与人工复核继续保留工具当时依据的结果版本和材料范围。
+        for item in tool_results or []:
+            if item.get("tool_name") != "RISK_TRIGGER":
+                continue
+            result = item.get("result") or {}
+            for key in (
+                "source_rules", "source_instances", "source_rule_key", "source_rule_name",
+                "risk_condition", "risk_level", "action", "evidence_sources",
+            ):
+                if key in result:
+                    payload[key] = result[key]
     if verdict is None:
         status = "NOT_EXECUTED"
         message = "规则评估未能形成候选结论，原因见未解决事项"
@@ -2166,59 +2138,89 @@ def _upsert_agent_rule_result(
                 or ([item["evidence_id"]] if item.get("evidence_id") else [])
             )
         ]
+        if rule.get("operator") == "RISK_TRIGGER":
+            source_evidence_ids.extend(
+                evidence_id
+                for source in payload.get("source_rules", [])
+                for evidence_id in source["evidence_ids"]
+            )
         evidence_numbers = _copy_evidence_to_rule(db, task, record, source_evidence_ids)
     record.result_json = {**(record.result_json or {}), "evidence_nos": evidence_numbers}
     return record
 
 
-def _tool_runtime(db: Session, task: AuditTask, rule: dict[str, Any]) -> dict[str, Any] | None:
-    """本次工具调用需要的**运行期状态**，由调用方按身份解析后注入。
+def _tool_execution_data(
+    db: Session, task: AuditTask, rule: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """返回工具运行期参数及成功结果需保存的系统来源信息。
 
     这些值模型不能提供：它们是数据库里的真实结果（来源检查的当前有效结论）或
     已发布配置事实（风险成立条件、规则适用条件、审核要求原文）。模型只给身份引用。
 
-    返回 None 表示本规则的工具不需要任何运行期状态；工具目录声明了 `runtime_keys`
+    返回的第一项为 None 表示工具不需要运行期参数；目录声明了 `runtime_keys`
     却拿不到时，`services.tool_service._merge_runtime` 会显式报缺失，不静默放行。
     """
     capability_id = capabilities.capability_id_of_rule(rule)
     if capability_id == "RISK_TRIGGER":
-        return _risk_runtime(db, task, rule)
+        return _risk_execution_data(db, task, rule)
     if capability_id == "MATERIAL_EXISTS":
-        # 材料存在性检查的适用条件与检查口径原文来自**已发布配置**：
+        # 材料存在性检查的适用条件与检查口径原文来自已发布配置：
         # 模型填一个适用条件就等于它自己决定这条规则适不适用。
         applicability = _rule_applicability(rule)
         return {
             "applicability": applicability,
             "requirement": rule.get("requirement"),
             "check_level": rule.get("check_level"),
-        }
-    return None
+        }, {}
+    return None, {}
 
 
-def _risk_runtime(db: Session, task: AuditTask, rule: dict[str, Any]) -> dict[str, Any] | None:
+def _risk_execution_data(
+    db: Session, task: AuditTask, rule: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """风险规则需要的运行期状态：来源检查的当前有效结论与成立条件。
 
     模型不能提供这些值（它们是数据库里的真实结果与冻结配置），
     也不能由 domain 层查库，因此在这里解析后注入。
     """
-    if rule.get("operator") != "RISK_TRIGGER":
-        return None
-    source_keys = _risk_source_result_keys(rule, _task_manifest(task))
-    current_ids = _current_execution_ids(db, task)
-    prior = (
-        {
-            item.rule_key: item.status
-            for item in db.scalars(
+    source_refs = _risk_source_result_refs(rule, _task_manifest(task))
+    source_keys = [key for _, key in source_refs]
+    current_executions = _current_node_executions(db, task)
+    current_ids = {item.id for item in current_executions.values()}
+    execution_node_by_id = {item.id: item.node_code for item in current_executions.values()}
+    prior_rows = (
+        list(
+            db.scalars(
                 select(RuleResult).where(
                     RuleResult.audit_task_id == task.id,
                     RuleResult.node_execution_id.in_(current_ids),
+                    RuleResult.rule_key.in_(source_keys),
                 )
             ).all()
-        }
+        )
         if current_ids
-        else {}
+        else []
     )
-    return {
-        "source_statuses": [prior.get(key) for key in source_keys],
-        "risk_condition": rule.get("risk_condition"),
+    prior = {
+        (execution_node_by_id[item.node_execution_id], item.rule_key): item
+        for item in task_csv_service.from_index(db, task, RuleResult, prior_rows)
+        if (execution_node_by_id[item.node_execution_id], item.rule_key) in source_refs
     }
+    result_context = _risk_result_context(rule, source_refs, prior)
+    evidence_by_result: dict[int, list[int]] = {}
+    source_result_ids = [item.id for item in prior.values()]
+    if source_result_ids:
+        for source_id, evidence_id in db.execute(
+            select(Evidence.rule_result_id, Evidence.id).where(
+                Evidence.audit_task_id == task.id,
+                Evidence.rule_result_id.in_(source_result_ids),
+            ).order_by(Evidence.id)
+        ).all():
+            evidence_by_result.setdefault(source_id, []).append(evidence_id)
+    for source in result_context["source_rules"]:
+        source["evidence_ids"] = evidence_by_result.get(source["rule_result_id"], [])
+    return {
+        "source_results": _risk_source_payloads(source_refs, prior),
+        "requirement": rule.get("requirement"),
+        "risk_condition": rule.get("risk_condition"),
+    }, result_context

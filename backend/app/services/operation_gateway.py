@@ -18,17 +18,19 @@ from ..schema.dto import ExecuteNodeRequest, ManualReviewRequest
 from . import background_service
 from .audit.state import _single_node_code_of_type
 from .background_service import (
+    PHASE_LLM_REQUEST,
     PHASE_GRAPH_ADVANCED,
     PHASE_INTERRUPT_WAITING,
+    PHASE_RESULT_READY,
     normalized_request_hash,
 )
-from .operation_types import OBJECT_AUDIT_TASK, OBJECT_IMPORT_JOB
+from .operation_types import OBJECT_AUDIT_TASK, OBJECT_IMPORT_JOB, OBJECT_SCENARIO
 
 
 def _manifest_of_task(task: AuditTask) -> dict[str, Any]:
     """任务创建时冻结的方案 manifest。
 
-    节点归属必须按它解析：`task.current_node` 是**节点实例码**（用户配置的），
+    节点归属必须按它解析：`task.current_node` 是节点实例码（用户配置的），
     拿它与能力类型比较在用户改了实例码之后恒为假，人工复核等待点会永远判定不成立。
     """
     manifest = task.manifest_json
@@ -51,7 +53,7 @@ def _idempotency_key(provided: str | None) -> str:
 
 
 def _import_bindings_hash(db: Session, job: ImportJob) -> str:
-    """工作表绑定的规范化摘要：绑定被改动后旧命令必须被识别为过期。"""
+    """工作表选择的规范化摘要：选择被改动后旧命令必须被识别为过期。"""
     sheets = db.scalars(
         select(ImportSheet).where(ImportSheet.import_job_id == job.id).order_by(ImportSheet.sheet_key)
     ).all()
@@ -61,8 +63,6 @@ def _import_bindings_hash(db: Session, job: ImportJob) -> str:
                 {
                     "sheet_key": item.sheet_key,
                     "status": item.status,
-                    "bound_role": item.bound_role,
-                    "header_row": item.header_row,
                 }
                 for item in sheets
             ]
@@ -133,7 +133,10 @@ def submit_conversion(
         if not current:
             raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": content["job_no"]})
         _assert_import_command_current(session, current, content)
-        converted = import_service.retry_conversion(session, content["job_no"])
+        command.phase(PHASE_LLM_REQUEST)
+        converted = import_service.retry_conversion(
+            session, content["job_no"], operation_no=command.operation_no,
+        )
         # retry_conversion 内部同时完成草稿落库与导入图转换；转换后若停在裁决等待点即处于等待 interrupt。
         command.phase(PHASE_INTERRUPT_WAITING if converted.status == "PENDING_DECISION" else PHASE_GRAPH_ADVANCED)
         return {
@@ -153,6 +156,73 @@ def submit_conversion(
         runner=runner,
         target_node=None,
         input_version=str(job.draft_revision),
+        validate=validate,
+    )
+
+
+def submit_source_activation_preview(
+    db: Session,
+    scenario_code: str,
+    *,
+    row_keys: list[str],
+    expected_revision: int,
+    idempotency_key: str | None,
+) -> tuple[Any, bool]:
+    """提交自由规则库来源的 LLM 增量解析。
+
+    模型调用必须在后台执行；命令中固化场景、草稿修订和来源行，runner 只使用
+    这份已持久化请求，不能在后台读取页面当前选择后重新拼请求。
+    """
+    from . import scenario_admin_service, source_activation_service
+
+    template = scenario_admin_service.template_or_404(db, scenario_code, lock=True)
+    draft = scenario_admin_service.ensure_draft(db, template)
+    source_rows = source_activation_service._source_rows(draft.config_json, row_keys)
+    request = {
+        "scenario_code": scenario_code,
+        "row_keys": list(row_keys),
+        "expected_revision": int(expected_revision),
+        "config_fingerprint": source_activation_service._fingerprint(
+            draft.config_json, draft.schema_json, draft.profile_version
+        ),
+    }
+
+    def validate() -> None:
+        if draft.revision_no != expected_revision:
+            raise BusinessError(
+                "SCENARIO_DRAFT_REVISION_CONFLICT",
+                "场景草稿已变化，请刷新最新配置后重新解析",
+                status_code=409,
+                details={"expected": expected_revision, "actual": draft.revision_no},
+            )
+        # 受理时就校验行身份和来源类型，避免把明显无效的长操作写入后台队列。
+        source_activation_service._source_rows(draft.config_json, row_keys)
+
+    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
+        content = command.request
+        result = source_activation_service.preview(
+            session,
+            content["scenario_code"],
+            list(content["row_keys"]),
+            int(content["expected_revision"]),
+            content["config_fingerprint"],
+            operation_no=command.operation_no,
+        )
+        command.phase(PHASE_RESULT_READY)
+        return result
+
+    # source_rows 的读取同时确保 selected rows 非空且不重复；变量保留在这里是为了
+    # 让受理阶段明确完成这项校验，不把它推迟到模型线程才暴露。
+    del source_rows
+    return background_service.submit_operation(
+        db,
+        object_type=OBJECT_SCENARIO,
+        object_no=scenario_code,
+        operation_type="SOURCE_ACTIVATION_PREVIEW",
+        idempotency_key=_idempotency_key(idempotency_key),
+        request=request,
+        runner=runner,
+        input_version=str(expected_revision),
         validate=validate,
     )
 
@@ -218,7 +288,7 @@ def submit_manual_reviews(
 
     def validate() -> None:
         _reject_deleted_task(task)
-        # 人工复核等待点按**能力类型**解析实例码：`task.current_node` 是实例码，
+        # 人工复核等待点按能力类型解析实例码：`task.current_node` 是实例码，
         # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
         review_node_code = _single_node_code_of_type(
             _manifest_of_task(task), "MANUAL_REVIEW", purpose="人工复核等待点"
@@ -246,7 +316,7 @@ def submit_manual_reviews(
         idempotency_key=_idempotency_key(idempotency_key),
         request=request,
         runner=runner,
-        # 目标节点记**实例码**：它是本次命令真实落在哪个节点上的执行事实，
+        # 目标节点记实例码：它是本次命令真实落在哪个节点上的执行事实，
         # 能力类型在不同场景里对应不同的实例码。
         target_node=_single_node_code_of_type(
             _manifest_of_task(task), "MANUAL_REVIEW", purpose="人工复核等待点"

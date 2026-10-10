@@ -125,7 +125,7 @@ def export_plans(
 
 @router.post("", response_model=PlanSelectionResponse, status_code=201)
 def create_plan_endpoint(payload: PlanCreateRequest, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
-    """创建方案：按请求携带的**页面预览版本号**固定场景版本，并同事务算一次范围。
+    """创建方案：按请求携带的页面预览版本号固定场景版本，并同事务算一次范围。
 
     版本号与当前可建方案的已发布版本不一致时返回 409 `PLAN_VERSION_CHANGED`，
     不静默改取「当前最新版本」。

@@ -4,15 +4,13 @@ import type {
   JsonValue,
   OperationAccepted,
   Paged,
-  ProfileSheet,
-  ProfileSummary,
 } from "./contracts";
-import { apiFileUrl, request, type OperationView } from "./http";
+import { request, type OperationView } from "./http";
 import { toQuery } from "./query";
 
 /** 一条草稿裁决：问题作答、候选原地修正、候选排除/恢复共用同一接口。 */
 export interface ImportDecision {
-  target_type: "ISSUE" | "MATERIAL" | "FIELD" | "RULE" | "REPORT_SECTION";
+  target_type: "ISSUE" | "MATERIAL" | "FIELD" | "RULE" | "REPORT_SECTION" | "CALC_RULE";
   target_ref: string;
   action: "RESOLVE" | "EXCLUDE" | "ACCEPT";
   /** RESOLVE 时为属性字典（问题作答为 {selected: ...}）；EXCLUDE/ACCEPT 用空对象。 */
@@ -74,43 +72,6 @@ export function abortImportJob(jobNo: string): Promise<OperationView> {
   return request<OperationView>(`/import-jobs/${encodeURIComponent(jobNo)}/abort`, { method: "POST" });
 }
 
-/**
- * 规则库模板下载地址。
- *
- * 不传 selection 时只带场景编码：已有确认绑定的场景由服务端按绑定导出。
- * 还没有确认绑定时，必须由用户勾选本次要下载的工作表；该选择不写场景。
- * 下载按该场景冻结的 Schema 生成，勾选哪些表就下载哪些表。
- */
-export function unifiedTemplateUrl(
-  scenarioCode: string,
-  selection?: { sheetRoles: string[] },
-): string {
-  const params = new URLSearchParams();
-  params.set("scenario_code", scenarioCode);
-  if (selection) {
-    for (const role of selection.sheetRoles) {
-      params.append("sheet_roles", role);
-    }
-  }
-  return apiFileUrl(`/rulebook-templates/download?${params.toString()}`);
-}
-
-/** 统一模板协议声明的 Sheet 与列协议（页面据此渲染 Sheet 绑定步骤）。 */
-export function getProfileSheets(scenarioCode?: string): Promise<{
-  request_id: string;
-  profile_version: string | null;
-  display_name: string | null;
-  scenario_schema_key?: string | null;
-  scenario_schema_version?: string | null;
-  schema_version: string | null;
-  instruction_sheet: string;
-  node_types: ProfileSummary["node_types"];
-  sheets: Array<ProfileSheet & { aliases: string[]; header_signature: string[]; columns: Array<Record<string, unknown>> }>;
-}> {
-  const query = scenarioCode ? `?scenario_code=${encodeURIComponent(scenarioCode)}` : "";
-  return request(`/rulebook-templates/sheets${query}`);
-}
-
 /** 「更新已有模板」下拉用：未删除的场景及最新版本号（不含已发布状态字段）。 */
 export interface TemplateOption {
   scenario_code: string;
@@ -121,9 +82,9 @@ export interface TemplateOption {
 }
 
 /**
- * **管理员**用的场景下拉：未删除的全部场景与最新版本号。
+ * 管理员用的场景下拉：未删除的全部场景与最新版本号。
  *
- * 导入页在场景**发布之前**就要选中它（先建场景、再上传规则库），
+ * 导入页在场景发布之前就要选中它（先建场景、再上传规则库），
  * 因此走 `/scenarios/admin-options`；业务用户用的 `/scenarios/options`
  * 只返回已发布且启用的场景，选不到刚建好的场景。
  */
@@ -132,11 +93,11 @@ export function listTemplates(): Promise<TemplateOption[]> {
 }
 
 /**
- * 在**指定场景**下上传规则库 Excel，读取为工作簿 IR；此时还没有规则候选。
+ * 在指定场景下上传规则库 Excel，读取为工作簿 IR；此时还没有规则候选。
  *
  * `scenarioCode` 必填：上传流程以场景为起点（用户先建场景、再在该场景下上传），
- * 场景不由 Excel 表头推断。此时也没有绑定关系——Sheet 与业务节点的对应关系
- * 由用户在绑定步骤确认。
+ * 场景不由 Excel 表头推断。管理员选择参与解析的工作表，模型生成的字段、规则
+ * 和计算各自引用场景实际节点，不按工作表绑定一个节点。
  */
 export function createImportJob(file: File, scenarioCode: string): Promise<ImportJob> {
   const formData = new FormData();
@@ -151,18 +112,13 @@ export function getImportJob(jobNo: string): Promise<ImportJob> {
 }
 
 /**
- * 保存 Sheet → 节点实例的绑定。
- *
- * `node_code` 是用户在当前场景里建立的**节点实例**：一张 Sheet 只能绑定一个节点，
- * 一个节点可以绑定多张 Sheet。未绑定或已排除的 Sheet 不进入转换与执行范围。
+ * 保存参与解析的工作表。
+ * 表内业务分别引用实际节点，已排除的工作表不进入转换范围。
  */
 export function updateSheetBindings(
   jobNo: string,
   bindings: Array<{
     sheet_key: string;
-    role: string | null;
-    node_code: string | null;
-    header_row: number | null;
     excluded: boolean;
   }>,
 ): Promise<ImportJob> {
