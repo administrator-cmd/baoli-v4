@@ -5,9 +5,8 @@ import json
 import logging
 from typing import Any
 
-from ..domain import capabilities, field_strategy
+from ..domain import field_strategy
 from ..domain.proposals import ProposalBundle
-from ..domain.manifest import RESOLVABLE_PROPERTIES
 from ..domain.workbook import WorkbookIR
 from ..domain.workbook_proposals import (
     PreparedSheet, WorkbookProposals, assemble_bundle, parse_workbook_proposals, prepare_sheets,
@@ -25,26 +24,25 @@ Excel 的表名、表头、布局和工作表数量可以不同；按实际内�
 不审核规则的业务正确性，不替管理员修改规则，也不要求先确认完整参数或补齐业务口径。
 config_status 保留 Excel 的启停及待确认状态；PENDING 是原始说明，不阻断导入或执行。
 只有规则库明确禁用、停用或 enabled=false 的规则才设置 DISABLED。
-questions 必须为空；不生成合理性审查、口径确认、阈值确认或业务作答事项。
+不生成合理性审查、口径确认、阈值确认或业务作答事项。
 有实际字段或规则定义时，即使业务口径未完整也保留候选与原文；不要仅因待确认而只生成问题。
 原文中的缺项和待确认说明保留在候选 instruction、requirement 或 remark 中，不能捏造业务答案。
 
 字段 instruction 按材料、字段名称和原文抽取要求填写。抽取由 LLM 执行。
 普通字段按 field_contract 声明 extraction_strategy；完整记录集合使用 STRUCTURED，给出其结构。
-业务计算使用 execution_engine=LLM，formula 保留完整自然语言、公式、条件分支、汇总及舍入方法。
+计算 formula 保留完整自然语言、公式、条件分支、汇总及舍入方法；requirement 保留完整判断要求。
+分档、阈值、校验逻辑、风险等级和建议等实际业务内容写入 requirement 或 business_context，保留原文标签与内容。
+不要求计算定义选择固定执行引擎、计算用途或分档结构；LLM 按原文决定需要计算、判断或两者都执行。
 parameters 只声明实际来源字段、上游结果或明确常量，不造数、不填默认业务答案。
-明确只计算中间值时 execution_mode=VALUE_ONLY；需要判断时为 CHECK，保留已有判断要求。
 缺少单位、币种、公式参数或判断标准也保留该条规则，执行时由 LLM 说明是否能够完成。
 只有实际涉及期间或报表口径时才填写对应值；不涉及的字段和计算可以省略，系统内部按 NOT_APPLICABLE 定位，不猜测本期、上期、合并或母公司。
 
-规则选择 available_nodes 中真实节点实例，node_type 与实例一致，不生成新的节点代码。
-内部和交叉业务判断使用 LLM_VALIDATE，完整执行要求保存在 parameters.instruction。
+规则不需要 node、node_type 或固定算子映射。operator 可保留原业务动作名称，执行要求完整保存在 requirement 与 parameters。
 LLM 能执行的抽取、计算、比较、日期、汇总和业务判断直接由 LLM 执行；
 需要额外能力时在运行中选择可用工具。没有适用工具、数据或明确判断条件时该条规则报告无法执行。
 只按执行需要填写 inputs、material_refs、输出字段和来源规则引用，不强制把规则改成固定两字段比较。
 字段事实能支持时 evidence_source=FIELD_FACTS，需要材料原文时为 RETRIEVAL。
-文件处理用 FILE_QUALITY_CHECK，材料检查、字段抽取和报告按其节点的已有能力声明。
-风险使用 RISK_TRIGGER，risk_condition 保留完整原文，关联实际检查或计算结果。
+材料检查、文件处理、风险判断也按原文作为规则保留；risk_condition 保留完整原文，关联实际检查或计算结果。
 capability_catalog 描述执行入口，不因预先标为能力未实现而排除或拒收业务规则。
 未知或不确定的要求保留原文，由执行阶段说明；不得伪造一个已实现的工具或成功结果。
 
@@ -64,20 +62,9 @@ source 填真实 sheet_key、row_no、非空单元格地址，不生成 source.t
 """
 
 
-def _conversion_capability_catalog() -> list[dict[str, Any]]:
-    """解析只提供本次可生成的能力；历史程序规则仍由全局目录支持读取。"""
-    catalog = []
-    for item in capabilities.catalog_payload():
-        nodes = item["new_rule_nodes"]
-        if nodes:
-            catalog.append({**item, "nodes": nodes})
-    return catalog
-
-
 def _conversion_response_schema() -> dict[str, Any]:
     """将目录中的配置参数键关联到候选算子；不使用运行工具的调用参数 Schema。"""
     schema = WorkbookProposals.model_json_schema()
-    schema["$defs"]["ModelSheet"]["properties"].pop("questions", None)
     # 停用候选存档由后端写入，模型只需返回真实来源与原始单元格。
     schema["$defs"]["DisabledSourceRow"]["properties"].pop("raw_configuration", None)
     return schema
@@ -112,7 +99,7 @@ existing_config 仅供引用，不允许修改、复制生成或重新编号已�
 edited_rows 是管理员提交的当前业务值，优先按它解释本行；其中原文的停用标识由本次启用请求解除。
 source 仍指向真实原始单元格，管理员编辑会单独记录，不能把编辑值伪装为 Excel 原文。
 只生成本次选中来源的业务配置，不重新生成无关规则；所有原停用业务必须转成候选。
-不能再次返回 disabled_rows 或将请求启用的业务排除。缺失或矛盾的业务说明随候选原文保留，不生成 questions。
+不能再次返回 disabled_rows 或将请求启用的业务排除。缺失或矛盾的业务说明随候选原文保留，不生成业务作答事项。
 新增规则候选必须为 CLEAR 或 PENDING，不能仍返回 DISABLED；已有上下文中的停用配置保持原状。
 """
     response_schema = _conversion_response_schema()
@@ -141,10 +128,7 @@ source 仍指向真实原始单元格，管理员编辑会单独记录，不能�
         "scenario_code": scenario_code,
         "selected_sheet_keys": list(sheets),
         "workbook": workbook_payload,
-        "available_nodes": next(iter(sheets.values())).nodes,
-        "capability_catalog": _conversion_capability_catalog(),
         "field_contract": field_strategy.contract_payload(),
-        "resolvable_properties": {key: sorted(value) for key, value in RESOLVABLE_PROPERTIES.items()},
         "response_schema": response_schema,
         **({"existing_config": existing_config} if existing_config is not None else {}),
     }

@@ -56,8 +56,6 @@ def _comparison(
 # 来自已下线为“仅供参考”的自动识别（或人工的“证据不足”），它既不是人的否定结论，
 # 也不能把真实原文依据判定成不可用：此时规则按材料里的真实内容照常判定，
 # 类型问题本身作为一条待确认事项单独暴露（见 services.audit.rules）。
-# 服务端已把历史上由已下线的自动识别写下的旧 `TYPE_MISMATCH` 按「待复核」归一
-# （见 domain.audit_vocab.read_material_type_status）。
 REVIEW_MATERIAL_STATUS = "TYPE_REVIEW"
 REJECTED_MATERIAL_STATUS = "TYPE_REJECTED"
 
@@ -118,7 +116,7 @@ def _unavailable_status(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
     if unavailable:
         # 字段级原因必须逐项写清：抽取失败、原文未形成标准化值、尚未抽取是三种不同的
         # 缺什么，统一写成“证据不足”会让人无法判断该去补哪一步。
-        reasons = "、".join(f"{_input_label(item)}（{_status_text(item)}）" for item in unavailable)
+        reasons = "、".join(f"{_input_label(item)}（状态：{item.get('status')}；原因：{item.get('reason') or item.get('message') or '没有可用标准值'}）" for item in unavailable)
         return {
             "status": "EVIDENCE_INSUFFICIENT",
             "message": f"参与比较的字段没有可用的标准值，规则未能判断：{reasons}",

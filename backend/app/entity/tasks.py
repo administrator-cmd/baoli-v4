@@ -55,7 +55,7 @@ class AuditTask(Base, TimestampMixin):
     # 本任务的执行快照：方案的编译产物整份冻结（材料/字段/规则/报告章节/节点/Sheet）。
     # 执行期只读它，不读场景版本、也不读方案当前配置——方案后来怎么改都不影响已建任务。
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    # 本任务的规则范围（启用/未启用、字段清单、未配置节点）。从上面的 manifest 算出。
+    # 本任务的规则范围（启用/未启用规则与字段清单）。从上面的 manifest 算出。
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     checkpoint_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     pending_review_hash: Mapped[str | None] = mapped_column(CHAR(64))

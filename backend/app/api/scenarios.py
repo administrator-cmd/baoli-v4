@@ -23,14 +23,11 @@ from ..schema.dto.scenarios import (
     DraftFieldRequest,
     DraftFieldUpdateRequest,
     DraftMaterialRequest,
-    DraftNodeRequest,
-    DraftNodeUpdateRequest,
     DraftMaterialUpdateRequest,
     DraftRuleEnabledRequest,
     DraftRuleRequest,
     DraftSectionRequest,
     DraftSectionUpdateRequest,
-    DraftSheetSelectionRequest,
     ScenarioCreateRequest,
     ScenarioEnabledRequest,
     ScenarioPublishRequest,
@@ -49,15 +46,12 @@ from ..services import scenario_admin_service
 from ..services.scenario_admin_service import (
     create_draft_field,
     create_draft_material,
-    create_draft_node,
     create_draft_rule,
     create_draft_section,
     create_scenario,
     list_admin_scenario_options,
-    select_draft_sheets,
     delete_draft_field,
     delete_draft_material,
-    delete_draft_node,
     delete_draft_rule,
     delete_draft_section,
     delete_scenario,
@@ -71,7 +65,6 @@ from ..services.scenario_admin_service import (
     template_or_404,
     update_draft_field,
     update_draft_material,
-    update_draft_node,
     update_draft_rule,
     update_draft_section,
     update_scenario,
@@ -250,13 +243,6 @@ def update_disabled_source_row(
     return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
 
 
-@router.put("/{scenario_code}/draft/sheets", response_model=ScenarioDraftViewResponse)
-def select_sheets(
-    scenario_code: str, payload: DraftSheetSelectionRequest, request: Request, db: Session = Depends(get_db)
-) -> ScenarioDraftViewResponse:
-    """拒绝脱离导入作业单独改写来源工作表清单，避免形成第二份配置来源。"""
-    draft = select_draft_sheets(scenario_code, [item.model_dump() for item in payload.sheets])
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
 
 
 @router.post("/{scenario_code}/draft/source-activations/preview", response_model=OperationAcceptedResponse, status_code=202)
@@ -283,33 +269,6 @@ def confirm_source_activation(
 ) -> ScenarioDraftViewResponse:
     from ..services import source_activation_service
     draft = source_activation_service.activate(db, scenario_code, payload.preview_id, payload.expected_revision)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
-
-
-@router.post("/{scenario_code}/draft/nodes", response_model=ScenarioDraftViewResponse, status_code=201)
-def create_node(scenario_code: str, payload: DraftNodeRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
-    """在草稿中新增节点实例。
-
-    节点由用户配置：实例码、能力类型、顺序与依赖都由请求给出，系统不按规则内容
-    自动生成节点，也不按表头推断流程关系。
-    """
-    draft = create_draft_node(db, scenario_code, payload.model_dump())
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
-
-
-@router.put("/{scenario_code}/draft/nodes/{node_code}", response_model=ScenarioDraftViewResponse)
-def update_node(
-    scenario_code: str, node_code: str, payload: DraftNodeUpdateRequest, request: Request, db: Session = Depends(get_db)
-) -> ScenarioDraftViewResponse:
-    """修改草稿中的节点实例（只覆盖请求里出现的字段）。"""
-    draft = update_draft_node(db, scenario_code, node_code, payload.model_dump(exclude_unset=True))
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
-
-
-@router.delete("/{scenario_code}/draft/nodes/{node_code}", response_model=ScenarioDraftViewResponse)
-def delete_node(scenario_code: str, node_code: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
-    """删除草稿中的节点实例；仍被规则或下游节点引用时明确 409，不级联删除。"""
-    draft = delete_draft_node(db, scenario_code, node_code)
     return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
 
 
@@ -493,8 +452,6 @@ def preview_task_schema(
         request_id=request.state.request_id,
         enabled_rule_keys=schema["enabled_rule_keys"],
         unenabled_rule_keys=schema["unenabled_rule_keys"],
-        unconfigured_check_node_types=schema["unconfigured_check_node_types"],
-        unconfigured_check_node_codes=schema["unconfigured_check_node_codes"],
         scope=scope,
         field_count=len(schema["fields"]),
     )
@@ -515,13 +472,4 @@ def _task_scope_view(manifest: dict, schema: dict) -> dict:
         ],
         "enabled_rule_keys": list(schema["enabled_rule_keys"]),
         "unenabled_rule_keys": list(schema["unenabled_rule_keys"]),
-        # 未配置的检查类别按能力类型汇总；页面若要判断某个具体节点，
-        # 用实例码口径的 unconfigured_check_node_codes，不交叉比较。
-        "unconfigured_node_types": list(manifest.get("unconfigured_check_node_types", [])),
-        "unconfigured_node_codes": list(manifest.get("unconfigured_check_node_codes", [])),
-        "capability_gaps": list(manifest.get("capability_gaps", [])),
-        # 能力覆盖随版本冻结（含能力版本与每条规则的实现状态）：任务范围据此说明
-        # 本次实际执行的是哪些能力、哪一版，以及哪些引用当前没有判定实现。
-        "capability_coverage": dict(manifest.get("capability_coverage") or {}),
-        "capability_version": manifest.get("capability_version"),
     }

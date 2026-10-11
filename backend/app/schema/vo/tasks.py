@@ -12,11 +12,6 @@ class TaskSchemaPreviewResponse(ApiResponse):
 
     enabled_rule_keys: list[str]
     unenabled_rule_keys: list[str] = Field(default_factory=list)
-    # 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
-    # `..._codes` 是这些类型下真实存在的节点实例码（「这个节点是不是未配置的类别」）。
-    # 两者口径不同，页面不得交叉比较。
-    unconfigured_check_node_types: list[str] = Field(default_factory=list)
-    unconfigured_check_node_codes: list[str] = Field(default_factory=list)
     scope: dict[str, Any] = Field(default_factory=dict)
     field_count: int = 0
 
@@ -55,12 +50,6 @@ class AuditTaskResponse(ApiResponse):
     pending_review_batch: dict[str, Any] = Field(default_factory=dict)
     pending_review_hash: str | None = None
     pending_review_count: int = 0
-    # 当前场景未配置的业务校验类别与对应的节点实例；这些节点会显式跳过，不代表检查通过。
-    # 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
-    # `..._codes` 是这些类型下真实存在的节点实例码（「这个节点是不是未配置的类别」）。
-    # 两者口径不同，页面不得交叉比较。
-    unconfigured_check_node_types: list[str] = Field(default_factory=list)
-    unconfigured_check_node_codes: list[str] = Field(default_factory=list)
     # 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。
     # 提交执行/复核命令时带上它，过期修订的命令会被明确拒绝。
     input_revision: int = 0

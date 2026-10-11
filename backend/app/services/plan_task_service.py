@@ -88,7 +88,9 @@ def create_from_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> di
 
     plan = plan_or_404(db, plan_code)
     scenario = scenario_repository.find_template_by_code(db, plan.scenario_code)
-    if scenario is None or scenario.deleted_at is not None:
+    # 场景模板当前采用物理删除，没有 deleted_at 软删除字段；
+    # 这里只需判断查询不到，避免把实体当成旧模型读取不存在的属性。
+    if scenario is None:
         raise BusinessError(
             "SCENARIO_NOT_FOUND",
             "方案所属场景不存在或已被删除",

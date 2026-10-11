@@ -714,13 +714,11 @@ function adjustmentValue(value: unknown): string {
 
             <el-tab-pane :label="`计算规则（${config.calculation_rules.length}）`" name="calculations">
               <el-table :data="config.calculation_rules" border stripe size="small" max-height="420" empty-text="当前方案没有计算规则">
-                <el-table-column type="expand" width="48"><template #default="{ row }"><CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" :band-sources="row.band_sources" /></template></el-table-column>
+                <el-table-column type="expand" width="48"><template #default="{ row }"><CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" /></template></el-table-column>
                 <el-table-column label="启用" width="80"><template #default="{ row }"><el-switch v-model="row.enabled" :aria-label="`启用计算规则 ${row.rule_code}`" /></template></el-table-column>
                 <el-table-column prop="rule_name" label="指标名称" min-width="220" show-overflow-tooltip />
-                <el-table-column label="计算方式" min-width="220"><template #default="{ row }">{{ row.execution_engine === 'LLM' ? 'AI 辅助计算与判断' : '旧程序计算，需重新解析规则库' }}</template></el-table-column>
-                <el-table-column label="计算用途" min-width="160"><template #default="{ row }">{{ row.execution_mode === 'VALUE_ONLY' ? '仅计算中间值' : '计算并判定' }}</template></el-table-column>
                 <el-table-column prop="formula" label="计算方法" min-width="220" show-overflow-tooltip />
-                <el-table-column prop="judgement_instruction" label="判断标准" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="requirement" label="业务要求" min-width="220" show-overflow-tooltip />
                 <el-table-column prop="rule_code" label="编号" width="150" />
                 <el-table-column label="计算节点" min-width="150"><template #default="{ row }">{{ nodeName(row.node_code) }}</template></el-table-column>
               </el-table>

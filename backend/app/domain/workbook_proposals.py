@@ -7,16 +7,15 @@ import re
 from typing import Any, Literal
 from types import SimpleNamespace
 
-from pydantic import Field, PrivateAttr, ValidationError, model_validator
+from pydantic import Field, PrivateAttr, ValidationError
 
 from ..common.exceptions import BusinessError
-from . import calculation as calc, capabilities, field_strategy
 from .manifest import (
     draft_config_of_import,
     refresh_calculation_references,
 )
 from .proposals import (
-    BusinessQuestion, CalculationCandidate, FieldProposal, MaterialProposal,
+    CalculationCandidate, FieldProposal, MaterialProposal,
     ProposalBundle, ReportSectionProposal, RuleProposal, SourceRef, StrictModel,
     CoverageRow, DisabledSourceColumn, DisabledSourceRow, coverage_totals,
 )
@@ -28,46 +27,29 @@ class ModelMaterial(MaterialProposal):
 
 
 class ModelField(FieldProposal):
-    node_code: str
-    config_status: Literal["CLEAR", "PENDING"]
-
-    @model_validator(mode="after")
-    def validate_extraction_contract(self) -> "ModelField":
-        # 只核对实际抽取结构，不评审业务 CLEAR/PENDING；与保存、发布使用同一契约。
-        try:
-            field_strategy.validate_field_strategy(
-                value_type=self.value_type, extraction_strategy=self.extraction_strategy,
-                structure_schema=self.structure_schema, field_name=self.name,
-            )
-        except BusinessError as exc:
-            raise ValueError(exc.message) from exc
-        return self
+    config_status: Literal["CLEAR", "PENDING", "DISABLED"]
 
 
 class ModelRule(RuleProposal):
-    node_type: str
     config_status: Literal["CLEAR", "PENDING", "DISABLED"]
-
 
 
 class ModelReportSection(ReportSectionProposal):
     config_status: Literal["CLEAR", "PENDING", "DISABLED"]
 
 
-class ModelCalculationParameter(calc.CalculationParameter):
+class ModelCalculationParameter(StrictModel):
+    model_config = {"extra": "allow"}
+    parameter_code: str
+    source_type: str
+    source_code: str | None = None
     source: SourceRef
 
 
-class ModelJudgementBand(calc.JudgementBand):
-    source: SourceRef
 
 
 class ModelCalculation(CalculationCandidate):
-    execution_engine: Literal["LLM"] = Field(...)
-    execution_mode: calc.CalculationExecutionMode = Field(...)
-    judgement_instruction: str = Field(...)
     parameters: list[ModelCalculationParameter] = Field(default_factory=list)
-    bands: list[ModelJudgementBand] = Field(default_factory=list)
 
 
 class ModelSheet(StrictModel):
@@ -76,7 +58,6 @@ class ModelSheet(StrictModel):
     fields: list[ModelField] = Field(default_factory=list)
     rules: list[ModelRule] = Field(default_factory=list)
     report_sections: list[ModelReportSection] = Field(default_factory=list)
-    questions: list[BusinessQuestion] = Field(default_factory=list)
     disabled_rows: list[DisabledSourceRow] = Field(default_factory=list)
     # 表头、说明、停用行、多行合并等处置由模型按内容声明；后端核对全部非空行。
     row_dispositions: list[CoverageRow] = Field(default_factory=list)
@@ -91,7 +72,7 @@ class WorkbookProposals(StrictModel):
 _COLLECTION_MODELS = {
     "materials": (ModelMaterial, "MATERIAL"), "fields": (ModelField, "FIELD"),
     "rules": (ModelRule, "RULE"), "report_sections": (ModelReportSection, "REPORT_SECTION"),
-    "questions": (BusinessQuestion, "QUESTION"), "disabled_rows": (DisabledSourceRow, "DISABLED_ROW"),
+    "disabled_rows": (DisabledSourceRow, "DISABLED_ROW"),
     "row_dispositions": (CoverageRow, "ROW_DISPOSITION"),
 }
 
@@ -128,9 +109,6 @@ def parse_workbook_proposals(response: Any) -> tuple[WorkbookProposals, list[dic
             sheet = ModelSheet.model_validate({**raw_sheet, **{key: [] for key in _COLLECTION_MODELS}})
             for collection, (model, kind) in _COLLECTION_MODELS.items():
                 raw_items = raw_sheet.get(collection, [])
-                if collection == "questions":
-                    # 导入不受理模型自行提出的业务审批，原始返回另行完整存档。
-                    continue
                 if not isinstance(raw_items, list):
                     raise _invalid("模型候选集合必须是列表", sheet_key=sheet.sheet_key, collection=collection)
                 for index, raw in enumerate(raw_items):
@@ -176,7 +154,6 @@ def parse_workbook_proposals(response: Any) -> tuple[WorkbookProposals, list[dic
 @dataclass
 class PreparedSheet:
     sheet: WorkbookSheet
-    nodes: list[dict[str, Any]]
     edited_rows: dict[int, list[dict[str, Any]]] = dataclass_field(default_factory=dict)
 
     def model_input(self) -> dict[str, Any]:
@@ -212,7 +189,9 @@ def existing_references(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def existing_calculations(config: dict[str, Any]) -> list[dict[str, Any]]:
     raw = config["calculation_json"]
-    return raw["frozen"] if isinstance(raw, dict) else (raw or [])
+    if not isinstance(raw, list):
+        raise BusinessError("RULE_LIBRARY_CALCULATION_FORMAT_INVALID", "计算配置必须是原始定义列表")
+    return raw
 
 
 def _invalid(message: str, **details: Any) -> BusinessError:
@@ -224,7 +203,7 @@ def prepare_sheets(ir: WorkbookIR, bindings: dict[str, dict[str, Any]]) -> dict[
     for sheet in ir.sheets:
         binding = bindings[sheet.sheet_key]
         if not binding["excluded"]:
-            sheets[sheet.sheet_key] = PreparedSheet(sheet, binding["available_nodes"])
+            sheets[sheet.sheet_key] = PreparedSheet(sheet)
     if not sheets:
         raise BusinessError("IMPORT_NO_BOUND_SHEET", "本次导入没有选入任何工作表")
     return sheets
@@ -258,6 +237,8 @@ def _validate_references(
     for entry in candidates.values():
         candidate, kind = entry["value"], entry["kind"]
         current_ref = candidate.candidate_ref
+        if getattr(candidate, "enabled", True) is False or getattr(candidate, "config_status", None) == "DISABLED":
+            continue
         if kind == "FIELD":
             resolve(candidate.material_ref, "MATERIAL")
         if kind in {"RULE", "REPORT_SECTION"}:
@@ -266,15 +247,11 @@ def _validate_references(
         if kind == "REPORT_SECTION":
             for field_ref in candidate.field_refs:
                 field = resolve(field_ref, "FIELD")
-                if candidate.material_refs and field.material_ref not in candidate.material_refs:
-                    raise _invalid("报告字段不在声明的材料范围内", candidate_ref=candidate.candidate_ref)
         if kind != "RULE":
             continue
         for item in candidate.inputs:
             field = resolve(item.field_ref, "FIELD")
             resolve(item.material_ref, "MATERIAL")
-            if field.material_ref != item.material_ref:
-                raise _invalid("规则字段与材料归属不一致", candidate_ref=candidate.candidate_ref, field_ref=item.field_ref)
         for ref in candidate.output_field_refs:
             resolve(ref, "FIELD")
         for ref in [*candidate.source_rule_refs, *([candidate.source_rule_ref] if candidate.source_rule_ref else [])]:
@@ -287,9 +264,7 @@ def _assemble_bundle(
     references = existing_references(existing_config) if existing_config is not None else {}
     candidates: dict[str, dict[str, Any]] = {}
     counts: Counter = Counter()
-    question_counts: Counter = Counter()
     seen: set[str] = set()
-    nodes = {node["node_code"]: node for sheet in sheets.values() for node in sheet.nodes}
 
     def register(candidate: Any, kind: str, sheet_key: str | None = None) -> None:
         try:
@@ -300,20 +275,6 @@ def _assemble_bundle(
             raise _invalid("候选引用为空或重复", candidate_ref=candidate.candidate_ref)
         candidates[candidate.candidate_ref] = {"kind": kind, "value": candidate}
         counts[(candidate.source.sheet_key, candidate.source.row_no)] += 1
-        if kind in {"RULE", "CALC_RULE"}:
-            code = candidate.node if kind == "RULE" else candidate.node_code
-            node = nodes.get(code)
-            disabled_rule = kind == "RULE" and candidate.config_status == "DISABLED"
-            if node is None or node["node_type"] != candidate.node_type or (not node["enabled"] and not disabled_rule):
-                raise _invalid("候选节点不在当前场景的有效节点中", candidate_ref=candidate.candidate_ref, node_code=code)
-        if kind == "FIELD":
-            node = nodes.get(candidate.node_code)
-            if node is None or not node["enabled"] or node["node_type"] != "FIELD_EXTRACTION":
-                raise _invalid("字段未引用有效抽取节点", candidate_ref=candidate.candidate_ref, node_code=candidate.node_code)
-        if kind == "RULE":
-            capability = capabilities.capability_of(candidate.operator)
-            if capability is None or candidate.node_type not in capability.nodes:
-                raise _invalid("规则算子不适用于该节点", candidate_ref=candidate.candidate_ref)
         # source_id 只保留 Excel 中真实存在的业务编号；内部身份用 candidate_ref。
         source_id = getattr(candidate, "source_id", None)
         # 编辑值单独保存，不能伪装成 Excel 原文；编号也可来自管理员实际提交的编辑。
@@ -333,12 +294,6 @@ def _assemble_bundle(
         for collection, kind in (("materials", "MATERIAL"), ("fields", "FIELD"), ("rules", "RULE"), ("report_sections", "REPORT_SECTION")):
             for candidate in getattr(sheet, collection):
                 register(candidate, kind, sheet.sheet_key)
-        for question in sheet.questions:
-            try:
-                _source(question.source, sheets, sheet_key=sheet.sheet_key)
-            except BusinessError as exc:
-                raise _invalid(exc.message, **{**exc.details, "question_ref": question.question_ref}) from exc
-            question_counts[(sheet.sheet_key, question.source.row_no)] += 1
         for row in sheet.disabled_rows:
             try:
                 _source(row.source, sheets, sheet_key=sheet.sheet_key)
@@ -354,7 +309,7 @@ def _assemble_bundle(
         raise _invalid("遗漏了选入的工作表", missing_sheet_keys=sorted(set(sheets) - seen))
     for candidate in proposals.calculations:
         register(candidate, "CALC_RULE")
-        for collection in ("parameters", "bands"):
+        for collection in ("parameters",):
             for entry in getattr(candidate, collection):
                 try:
                     _source(entry.source, sheets)
@@ -376,19 +331,19 @@ def _assemble_bundle(
         if item.get("status") != "DISABLED"
     }
     for entry in candidates.values():
-        if entry["kind"] == "RULE":
+        if entry["kind"] == "RULE" and getattr(entry["value"], "config_status", None) != "DISABLED":
             unknown = set(entry["value"].source_rule_codes) - available_result_codes
             if unknown:
                 raise _invalid("风险规则引用的计算结果不存在", candidate_ref=entry["value"].candidate_ref, references=sorted(unknown))
     if len(result_codes) != len(calculations) or len({item["rule_code"] for item in calculations}) != len(calculations):
         raise _invalid("计算规则或结果编号重复")
     for calculation in calculations:
+        if calculation.get("status") == "DISABLED":
+            continue
         for parameter in calculation["parameters"]:
             allowed = available_field_codes if parameter["source_type"] == "FIELD" else available_result_codes
             if parameter["source_type"] != "CONSTANT" and parameter["source_code"] not in allowed:
                 raise _invalid("计算引用的字段或上游结果不存在", candidate_ref=calculation["candidate_ref"], rule_code=calculation["rule_code"], parameter=parameter["parameter_code"])
-        for band in calculation["bands"]:
-            calc.JudgementBand.model_validate({key: value for key, value in band.items() if key != "source"})
     output = []
     coverage = []
     for model_sheet in proposals.sheets:
@@ -405,8 +360,6 @@ def _assemble_bundle(
             declaration = dispositions.get(row_no)
             if counts[key]:
                 disposition, reason = "CANDIDATE", None
-            elif question_counts[key]:
-                disposition, reason = "QUESTION", None
             elif row_no in disabled:
                 disposition, reason = "DISABLED", "原始停用配置已保留"
             elif declaration is not None and declaration.merged_into in candidates:
@@ -414,7 +367,7 @@ def _assemble_bundle(
             elif declaration is not None and declaration.disposition == "EXCLUDED" and declaration.reason:
                 disposition, reason = "EXCLUDED", declaration.reason
             else:
-                disposition, reason = "QUESTION", "该行未形成候选、合并对象或明确排除说明；保留原文，未导入该行配置"
+                disposition, reason = "UNPARSED", "该行未形成候选、合并对象或明确排除说明；保留原文，未导入该行配置"
                 if not any(isinstance(item.get("source"), dict)
                            and item["source"].get("sheet_key") == raw.sheet_key
                            and item["source"].get("row_no") == row_no for item in rejected):
@@ -430,12 +383,11 @@ def _assemble_bundle(
                               and item["source"].get("sheet_key") == raw.sheet_key
                               and item["source"].get("row_no") == row_no]
             if rejected_notes and not counts[key]:
-                disposition, reason = "QUESTION", "该行有候选未导入，具体原因见未导入项目"
+                disposition, reason = "UNPARSED", "该行有候选未导入，具体原因见未导入项目"
             coverage_rows.append({"row_no": row_no, "disposition": disposition, "reason": reason,
-                                  "candidate_count": counts[key], "question_count": question_counts[key],
+                                  "candidate_count": counts[key],
                                   "merged_into": declaration.merged_into if declaration else None,
-                                  "notes": [*rejected_notes, *[question.resolution_notice for question in model_sheet.questions
-                                            if question.source.row_no == row_no and question.resolution_notice]]})
+                                  "notes": rejected_notes})
         output.append({**model_sheet.model_dump(mode="json", exclude={"row_dispositions"}), "suggested_role": "RULE_LIBRARY:" + raw.sheet_key, "column_mapping": {}})
         coverage.append({"sheet_key": raw.sheet_key, "sheet_name": raw.name, "business_rows": len(rows), "rows": coverage_rows})
     bundle = ProposalBundle.model_validate({"sheets": output, "calculations": calculations,
@@ -451,7 +403,6 @@ def assemble_bundle(
 ) -> ProposalBundle:
     """逐项暴露配置错误并隔离依赖项；每次只移除已明确失败的候选，不修造业务内容。"""
     rejected = list(rejected or [])
-    node_types = {node["node_code"]: node["node_type"] for sheet in sheets.values() for node in sheet.nodes}
 
     def entries() -> list[tuple[list[Any], Any, str, str]]:
         result = []
@@ -479,8 +430,6 @@ def assemble_bundle(
             keys.append(("candidate_ref", item.candidate_ref))
         if kind == "CALC_RULE":
             keys.extend((key, getattr(item, key)) for key in ("rule_code", "result_code"))
-        if kind == "QUESTION":
-            keys.append(("question_ref", item.question_ref))
         if kind == "ROW_DISPOSITION":
             keys.append(("row_disposition", path.split(".")[1], item.row_no))
         # 材料来源编号允许共享；具体对象始终由唯一 candidate_ref 引用。
@@ -505,11 +454,11 @@ def assemble_bundle(
             # 使用真正的草稿投影核对身份与引用，避免候选接收后在写草稿时整批失败。
             # 此内部命名空间只用于核对键是否冲突，不写入任何场景或生成业务默认值。
             draft_config_of_import(
-                proposals=bundle.model_dump(mode="json"), decisions=[], namespace="candidate-acceptance",
+                proposals=bundle.model_dump(mode="json"), namespace="candidate-acceptance",
                 selected_sheets=[{"sheet_key": sheet.sheet_key, "sheet_name": sheets[sheet.sheet_key].sheet.name,
                                   "sheet_role": "RULE_LIBRARY:" + sheet.sheet_key, "node_code": None}
                                  for sheet in proposals.sheets],
-                import_job_no="", existing_config=existing_config, node_types=node_types,
+                import_job_no="", existing_config=existing_config,
             )
             return bundle
         except BusinessError as exc:
@@ -523,9 +472,6 @@ def assemble_bundle(
                 elif getattr(item, "candidate_ref", None) in details.get("candidate_refs", []):
                     failed.append(entry)
                 elif any(getattr(item, "candidate_ref", None) in refs for refs in details.get("conflicting_refs", [])):
-                    failed.append(entry)
-                elif (details.get("question_ref") is not None and kind == "QUESTION"
-                      and item.question_ref == details["question_ref"]):
                     failed.append(entry)
                 elif (kind == "DISABLED_ROW" and details.get("item_kind") == kind
                       and item.source.model_dump() == details.get("source")):

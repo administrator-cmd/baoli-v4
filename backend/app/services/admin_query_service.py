@@ -6,8 +6,7 @@
 「当前 / 历史」的口径：材料以 `task_document.current_upload_id` 指向的上传为当前，其余是历史
 版本；证据的当前 = 属于当前上传且仍支撑当前有效对象，失效只表示不再支撑当前结论、历史证据仍
 可按历史身份查看；报告取该任务最新生成的一份，来源执行已失效或输入修订已变化标为已失效；
-风险只取当前有效执行批次（每个 RISK_RATING 节点最新的未失效执行）的规则结果；节点的
-执行顺序由 DAG 依赖决定，不能按展示用的 sequence_no 截断。
+风险只取当前有效批次的真实风险规则结果，不按业务节点分类筛选。
 """
 
 import logging
@@ -676,8 +675,7 @@ def list_import_jobs_page(
     if job_ids:
         for job_id, count in db.execute(
             select(ImportIssue.import_job_id, func.count())
-            .where(ImportIssue.import_job_id.in_(job_ids), ImportIssue.status == "OPEN",
-                   ImportIssue.category.notin_(["BUSINESS_AMBIGUITY", "BUSINESS_CONFIRMATION"]))
+            .where(ImportIssue.import_job_id.in_(job_ids), ImportIssue.status == "OPEN")
             .group_by(ImportIssue.import_job_id)
         ).all():
             issue_counts[int(job_id)] = int(count)
@@ -1021,13 +1019,7 @@ def list_risk_results_page(
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
-    """风险结果分页列表（跨任务，只取当前有效执行批次）。
-
-    归属按能力类型判定：`node_execution.node_code` 是用户配置的实例码，
-    拿它与能力类型比较在用户改了实例码之后一条风险都查不到。这里按
-    `scenario_node.node_type == RISK_RATING` 先解析出该版本下的全部风险节点实例，
-    再取这些实例的未失效执行。
-    """
+    """按真实风险结果读取当前有效批次，不依赖业务节点类型。"""
     later_execution = aliased(NodeExecution)
     latest_execution = (
         select(func.max(later_execution.id))
@@ -1039,25 +1031,16 @@ def list_risk_results_page(
         .correlate(NodeExecution)
         .scalar_subquery()
     )
-    # 与任务详情一致：按节点取最新未失效执行。
-    # 节点执行由 depends_on 决定，sequence_no 只用于展示排序；按当前节点序号
-    # 截断会漏掉高序号依赖节点已经形成的真实风险结果。
+    # 只取当前有效批次的风险项，风险结果包含 risk_level，即使等级未声明也不漏项。
     base_query = (
         select(RuleResult.id)
         .select_from(RuleResult)
         .join(NodeExecution, NodeExecution.id == RuleResult.node_execution_id)
         .join(AuditTask, AuditTask.id == RuleResult.audit_task_id)
-        .join(
-            ScenarioNode,
-            and_(
-                ScenarioNode.scenario_version_id == NodeExecution.scenario_version_id,
-                ScenarioNode.node_code == NodeExecution.node_code,
-            ),
-        )
         .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
         .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
         .where(
-            ScenarioNode.node_type == "RISK_RATING",
+            func.json_contains_path(RuleResult.result_json, "one", "$.risk_level") == 1,
             NodeExecution.id == latest_execution,
         )
     )

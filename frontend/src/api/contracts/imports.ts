@@ -9,7 +9,6 @@ export interface ProfileSummary {
   /** 业务场景冻结的 Schema 身份；与内部能力目录版本分开。 */
   scenario_schema_key?: string | null;
   scenario_schema_version?: string | null;
-  node_types: Array<{ node_type: string; display_name: string; depends_on_types: string[] }>;
   /** 作业所属场景（上传时指定）；历史作业为 null。 */
   scenario_code?: string | null;
   scenario_name?: string | null;
@@ -36,10 +35,6 @@ export interface ImportSheet {
     cells: Record<string, JsonValue>;
   }>;
 }
-export interface ImportIssueOption {
-  label: string;
-  value: JsonValue;
-}
 export interface ImportIssueSource {
   target_type: string | null;
   sheet_name: string | null;
@@ -55,15 +50,7 @@ export interface ImportIssue {
   title: string;
   description: string;
   source: ImportIssueSource;
-  /** SELECT=选择题；DECIMAL/TEXT=业务输入控件，没有候选选项。 */
-  input_kind: "SELECT" | "DECIMAL" | "TEXT";
-  /** 非空时仅展示说明，不提供无法落到候选的作答控件。 */
-  resolution_notice?: string | null;
-  options: ImportIssueOption[];
-  decision: JsonValue;
 }
-
-export type CandidateDecisionState = "AUTO" | "PENDING" | "MANUAL" | "EXCLUDED";
 
 export interface RuleComparison {
   operator_label: string;
@@ -75,8 +62,6 @@ export interface RuleComparison {
   check_level?: string | null;
   risk_level_value?: string | null;
   config_status?: string | null;
-  support_status?: string;
-  support_message?: string;
   left: { material_name: string | null; field_name: string | null } | null;
   right: { material_name: string | null; field_name: string | null } | null;
   extra_inputs: Array<{ material_name: string | null; field_name: string | null }>;
@@ -90,9 +75,6 @@ export interface RuleComparison {
   applicability_label: string;
   direction_label: string | null;
   threshold: JsonValue;
-  /** 风险疑点规则的来源节点：契约值 + 服务端给出的中文文案；未提供时不显示。 */
-  source_node: string | null;
-  source_node_label: string | null;
   source_rule_name: string | null;
   source_rule_refs: string[];
   source_rule_names: string[];
@@ -114,7 +96,6 @@ export interface ProposalMaterial {
   name: string;
   required: boolean;
   description?: string | null;
-  decision_state: CandidateDecisionState;
   original: Record<string, JsonValue> | null;
   source_sheet: string;
   source_row: number;
@@ -132,7 +113,6 @@ export interface ProposalField {
   instruction: string;
   material_ref: string;
   material_name: string | null;
-  decision_state: CandidateDecisionState;
   original: Record<string, JsonValue> | null;
   source_sheet: string;
   source_row: number;
@@ -142,11 +122,8 @@ export interface ProposalField {
 export interface ProposalRule {
   candidate_ref: string;
   name: string;
-  node: string;
-  node_name: string | null;
   operator: string;
   config_status?: "CLEAR" | "PENDING" | "DISABLED" | null;
-  decision_state: CandidateDecisionState;
   original: Record<string, JsonValue> | null;
   comparison: RuleComparison;
   source_sheet: string;
@@ -157,34 +134,26 @@ export interface ProposalRule {
 export interface ProposalSheet {
   sheet_key: string;
   sheet_name: string;
-  excluded: boolean;
   suggested_role: string;
   materials: ProposalMaterial[];
   fields: ProposalField[];
   rules: ProposalRule[];
   report_sections: Array<{ section_name: string }>;
-  question_count: number;
 }
 
-export interface ProposalCalculation extends Pick<DraftCalculationItem, "origin" | "parameter_sources" | "band_sources"> {
-  // PROGRAM 仅用于展示旧配置，已不支持发布或执行。
-  execution_engine: "PROGRAM" | "LLM";
-  judgement_instruction: string;
-  execution_mode: "CHECK" | "VALUE_ONLY";
+export interface ProposalCalculation extends Pick<DraftCalculationItem, "origin" | "parameter_sources"> {
   candidate_ref: string;
   rule_code: string;
   rule_name: string;
   formula: string;
+  requirement: string;
+  business_context: Record<string, JsonValue>;
   result_code: string;
   result_type: string;
   node_code: string;
   node_name: string | null;
   status: string;
   parameters: Array<Record<string, JsonValue>>;
-  bands: Array<Record<string, JsonValue>>;
-  bands_text: string;
-  unresolved_identifiers: string[];
-  decision_state: CandidateDecisionState;
   source_sheet: string;
   source_row: number;
   source_cells: string[];
@@ -235,17 +204,16 @@ export interface ImportJob extends ApiResponse {
       business_rows: number;
       rows: Array<{
         row_no: number;
-        disposition: "CANDIDATE" | "DISABLED" | "EXCLUDED" | "QUESTION";
+        disposition: "CANDIDATE" | "DISABLED" | "EXCLUDED" | "UNPARSED";
         reason: string | null;
         candidate_count: number;
-        question_count: number;
         merged_into: string | null;
         notes: string[];
       }>;
     }>;
     totals: Record<string, number>;
   } | null;
-  /** 草稿修订号：绑定、排除、裁决、候选原地修正都会递增。 */
+  /** 草稿修订号：工作表选择与解析结果变更时递增。 */
   draft_revision: number;
   failure: { code: string; message: string } | null;
   latest_operation: OperationAccepted | null;

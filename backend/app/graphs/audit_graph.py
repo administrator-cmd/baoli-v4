@@ -47,12 +47,11 @@ class AuditGraphState(TypedDict, total=False):
     # 节点执行
     # 本次节点执行记录。开始执行时建立并提交，收尾时按它写终态。
     execution_id: int | None
-    # DETERMINISTIC / AGENT / MANUAL_REVIEW_PREPARE。执行之前由冻结配置确定。
+    # 统一规则执行模式 AGENT。
     execution_mode: str | None
-    # 确定性路径的执行结果（供收尾写执行记录）。
+    # 执行批次收尾摘要。
     node_result: dict[str, Any] | None
-    # 节点里没有授权工具、仍由确定性实现执行的规则结果。
-    deterministic_result: dict[str, Any] | None
+    # 没有可调用工具时，模型仍按规则直接执行。
 
     # Agent 运行契约
     # 本节点是否走规则评估 Agent 路径。
@@ -130,13 +129,6 @@ class AuditNodeRunner(Protocol):
         confirmed_node: str | None,
     ) -> dict[str, Any]: ...
 
-    def graph_run_deterministic_node(
-        self,
-        db: Any,
-        task_no: str,
-        graph_namespace: str,
-        execution_id: int | None,
-    ) -> dict[str, Any]: ...
 
     def graph_finalize_node_execution(
         self,
@@ -157,17 +149,6 @@ class AuditNodeRunner(Protocol):
         execution_id: int | None,
     ) -> dict[str, Any]: ...
 
-    def graph_prepare_manual_review(self, db: Any, task_no: str, graph_namespace: str) -> dict[str, Any]: ...
-
-    def graph_apply_manual_reviews(
-        self,
-        db: Any,
-        task_no: str,
-        graph_namespace: str,
-        review_hash: str | None,
-        review_count: int | None,
-        decisions: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]: ...
 
     def graph_save_node_result(self, db: Any, task_no: str, graph_namespace: str) -> dict[str, Any]: ...
 
@@ -322,9 +303,7 @@ LOOP_DONE = "DONE"
 LOOP_BLOCKED = "BLOCKED"
 
 # 执行模式取值。与 `services.audit.flow` 的常量一致。
-MODE_DETERMINISTIC = "DETERMINISTIC"
 MODE_AGENT = "AGENT"
-MODE_MANUAL_REVIEW = "MANUAL_REVIEW_PREPARE"
 
 
 def _flow(runtime: Runtime[AuditGraphContext]) -> AuditNodeRunner:
@@ -385,7 +364,6 @@ def _execute_current_node(state: AuditGraphState, runtime: Runtime[AuditGraphCon
         "review_hash": None,
         "review_count": None,
         "review_decisions": None,
-        "deterministic_result": None,
         "agent_mode": False,
         "evaluation_plan": None,
         "rule_cursor": None,
@@ -414,16 +392,6 @@ def _execute_current_node(state: AuditGraphState, runtime: Runtime[AuditGraphCon
     }
 
 
-def _run_deterministic_node(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
-    flow = _flow(runtime)
-    return flow.graph_run_deterministic_node(
-        _db(runtime),
-        state["task_no"],
-        state["graph_namespace"],
-        state.get("execution_id"),
-    )
-
-
 def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
     """收尾当前节点执行：两条路径的终态都写在这一处。
 
@@ -432,7 +400,7 @@ def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraph
     预判）：收尾要写的是真实发生的事。
     """
     flow = _flow(runtime)
-    mode = state.get("execution_mode") or MODE_DETERMINISTIC
+    mode = state["execution_mode"]
     agent_mode = bool(state.get("agent_mode"))
     summary = _collect_agent_summary(state) if agent_mode else None
     return flow.graph_finalize_node_execution(
@@ -456,15 +424,6 @@ def _advance_workflow(state: AuditGraphState, runtime: Runtime[AuditGraphContext
     )
 
 
-def _prepare_manual_review(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
-    flow = _flow(runtime)
-    return flow.graph_prepare_manual_review(
-        _db(runtime),
-        state["task_no"],
-        state["graph_namespace"],
-    )
-
-
 def _await_manual_review(state: AuditGraphState) -> dict[str, Any]:
     review_hash = state.get("review_hash")
     review_count = state.get("review_count")
@@ -482,18 +441,6 @@ def _await_manual_review(state: AuditGraphState) -> dict[str, Any]:
     if not isinstance(decisions, list) or not all(isinstance(item, dict) for item in decisions):
         raise BusinessError("MANUAL_REVIEW_PAYLOAD_INVALID", "人工复核提交内容无效", status_code=409)
     return {"review_decisions": decisions, "last_error": None}
-
-
-def _apply_manual_reviews(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
-    flow = _flow(runtime)
-    return flow.graph_apply_manual_reviews(
-        _db(runtime),
-        state["task_no"],
-        state["graph_namespace"],
-        state.get("review_hash"),
-        state.get("review_count"),
-        state.get("review_decisions"),
-    )
 
 
 def _apply_agent_reviews(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
@@ -520,7 +467,7 @@ def _save_node_result(state: AuditGraphState, runtime: Runtime[AuditGraphContext
 
 # 规则评估 Agent 循环：图负责确定性生命周期（加载评估 → 冻结规则实例 → 准备上下文 →
 # 调用模型 → 路由响应 → 执行工具 → 回填结果 → 形成候选结论 → 必要时人工复核 →
-# 保存结果 → 推进游标 → 收尾节点），Agent 只负责在授权范围内选择工具。
+# 保存结果 → 推进游标 → 收尾节点），Agent 按规则直接执行，并在授权范围内选择所需工具。
 #
 # 每一步都是一个图节点：call_model 每次只调一次模型，execute_tool_calls 每次只执行 State
 # 里那一批待执行调用，append_tool_results 只生成 tool 消息。因此每个节点结束后 State 都可
@@ -745,7 +692,6 @@ def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
         "rule_outcomes": outcomes,
         "loop_status": overall,
         "loop_count": state.get("loop_count") or 0,
-        "deterministic_result": state.get("deterministic_result"),
         "unresolved_items": [
             item
             for outcome in outcomes
@@ -763,44 +709,11 @@ def _after_load(state: AuditGraphState) -> str:
 
 
 def _after_execute(state: AuditGraphState) -> str:
-    """执行模式决定走哪条路径。
-
-    模式在 `execute_current_node` 里、执行之前就已确定，因此这里只是分发：
-    人工复核节点先去准备待办；Agent 模式进入规则评估循环；其余进入确定性节点实现。
-    """
-    if state.get("last_error") is not None:
-        # 校验未通过时没有执行记录可收尾，交由结果节点抛出真实错误。
-        return "save_node_result"
-    mode = state.get("execution_mode")
-    if mode == MODE_MANUAL_REVIEW:
-        return "prepare_manual_review"
-    if mode == MODE_AGENT:
-        return "load_evaluation"
-    return "run_deterministic_node"
-
-
-def _after_prepare_manual_review(state: AuditGraphState) -> str:
-    return "await_manual_review" if state.get("phase") == "WAITING_REVIEW" else "save_node_result"
-
-
-def _after_await_manual_review(state: AuditGraphState) -> str:
-    """本次等待是 Agent 复核批还是人工复核节点批。
-
-    Agent 复核发生在某个校验节点执行期间：提交后要回到该节点继续评估，
-    不能像人工复核节点那样推进到下一个节点。两条路径共用同一个等待节点与 interrupt，
-    因此 `probe_interrupt` 与复核提交入口对两者完全一致。
-    """
-    return "apply_agent_reviews" if state.get("agent_review_pending") else "apply_manual_reviews"
-
-
-def _after_apply_manual_reviews(state: AuditGraphState) -> str:
-    # 本批提交后仍有有效待办时，任务留在同一等待点并重建集合哈希，
-    # 必须回到 await_manual_review 等下一批；只有没有剩余待办时才推进节点。
-    return "await_manual_review" if state.get("phase") == "WAITING_REVIEW" else "save_node_result"
+    return "save_node_result" if state.get("last_error") is not None else "load_evaluation"
 
 
 def _after_apply_agent_reviews(state: AuditGraphState) -> str:
-    # 字段事实变化后，原评估快照已失效；等待重新执行 DAG 选出的节点。
+    # 字段事实变化后，原评估快照已失效；等待按生效规则重新执行。
     return "save_node_result" if state.get("agent_review_recalculate") else "save_evaluation_result"
 
 
@@ -846,7 +759,6 @@ _builder = StateGraph(AuditGraphState, context_schema=AuditGraphContext)
 _builder.add_node("load_task", _load_task)
 _builder.add_node("await_node_confirmation", _await_node_confirmation)
 _builder.add_node("execute_current_node", _execute_current_node)
-_builder.add_node("run_deterministic_node", _run_deterministic_node)
 _builder.add_node("finalize_node_execution", _finalize_node_execution)
 _builder.add_node("advance_workflow", _advance_workflow)
 # 规则评估 Agent 循环：确定性生命周期，模型只在授权范围内选工具。
@@ -860,9 +772,7 @@ _builder.add_node("produce_candidate_verdict", _produce_candidate_verdict)
 _builder.add_node("prepare_agent_review", _prepare_agent_review)
 _builder.add_node("save_evaluation_result", _save_evaluation_result)
 _builder.add_node("advance_rule_cursor", _advance_rule_cursor)
-_builder.add_node("prepare_manual_review", _prepare_manual_review)
 _builder.add_node("await_manual_review", _await_manual_review)
-_builder.add_node("apply_manual_reviews", _apply_manual_reviews)
 _builder.add_node("apply_agent_reviews", _apply_agent_reviews)
 _builder.add_node("save_node_result", _save_node_result)
 _builder.add_edge(START, "load_task")
@@ -876,18 +786,19 @@ _builder.add_conditional_edges(
     "execute_current_node",
     _after_execute,
     {
-        "run_deterministic_node": "run_deterministic_node",
         "load_evaluation": "load_evaluation",
-        "prepare_manual_review": "prepare_manual_review",
         "save_node_result": "save_node_result",
     },
 )
 # 节点执行的收尾与推进：两条路径在这里汇合。
-_builder.add_edge("run_deterministic_node", "finalize_node_execution")
 _builder.add_edge("finalize_node_execution", "advance_workflow")
 _builder.add_edge("advance_workflow", "save_node_result")
 # Agent 循环的边：冻结规则实例 → 准备上下文 → 调模型 →（按响应路由）。
-_builder.add_edge("load_evaluation", "load_rule_instance")
+_builder.add_conditional_edges(
+    "load_evaluation",
+    lambda state: "load_rule_instance" if state.get("evaluation_plan") else "finalize_node_execution",
+    {"load_rule_instance": "load_rule_instance", "finalize_node_execution": "finalize_node_execution"},
+)
 _builder.add_edge("load_rule_instance", "prepare_agent_context")
 _builder.add_conditional_edges(
     "prepare_agent_context",
@@ -914,6 +825,7 @@ _builder.add_conditional_edges(
 )
 # 人工复核等待点：Agent 复核批与人工复核节点批共用同一个 interrupt 节点。
 _builder.add_edge("prepare_agent_review", "await_manual_review")
+_builder.add_edge("await_manual_review", "apply_agent_reviews")
 _builder.add_conditional_edges(
     "apply_agent_reviews",
     _after_apply_agent_reviews,
@@ -925,21 +837,6 @@ _builder.add_conditional_edges(
     "advance_rule_cursor",
     _after_advance_rule_cursor,
     {"load_rule_instance": "load_rule_instance", "finalize_node_execution": "finalize_node_execution"},
-)
-_builder.add_conditional_edges(
-    "prepare_manual_review",
-    _after_prepare_manual_review,
-    {"await_manual_review": "await_manual_review", "save_node_result": "save_node_result"},
-)
-_builder.add_conditional_edges(
-    "await_manual_review",
-    _after_await_manual_review,
-    {"apply_agent_reviews": "apply_agent_reviews", "apply_manual_reviews": "apply_manual_reviews"},
-)
-_builder.add_conditional_edges(
-    "apply_manual_reviews",
-    _after_apply_manual_reviews,
-    {"await_manual_review": "await_manual_review", "save_node_result": "save_node_result"},
 )
 _builder.add_conditional_edges(
     "save_node_result",

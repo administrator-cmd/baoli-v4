@@ -1,5 +1,5 @@
 import type {
-  CapabilityCatalog,
+  ToolCatalog,
   MaterialTypeItem,
   OperationLogRow,
   Paged,
@@ -33,15 +33,9 @@ export function getSystemServices(): Promise<SystemServices> {
   return request<SystemServices>("/system/services");
 }
 
-/**
- * 审核能力目录：后端能力的单一事实来源。
- *
- * 检查方式下拉、节点约束与参数口径都从这里取，页面不再本地维护名单——
- * 本地名单与后端漂移过一次（后端 12 个算子、页面 7 个），
- * 结果是打开一条已导入的规则时下拉框里找不到它当前的检查方式。
- */
-export function getCapabilityCatalog(): Promise<CapabilityCatalog> {
-  return request<CapabilityCatalog>("/system/capabilities");
+/** 模型按需调用的工具目录，不限制规则执行路径。 */
+export function getToolCatalog(): Promise<ToolCatalog> {
+  return request<ToolCatalog>("/system/tools");
 }
 
 /**

@@ -60,18 +60,7 @@ class ScenarioDraft(Base, TimestampMixin):
 
 
 class ScenarioDraftNode(Base, TimestampMixin):
-    """场景配置草稿里的节点实例：用户配置的流程节点。
-
-    节点的存在、顺序与依赖由用户配置，不由系统按规则内容或固定序列自动生成。一个场景可以
-    有两个同类节点（例如两张报表各一个字段抽取），因此 `node_code` 是实例码，`node_type`
-    才是能力类型，两者不能混用。
-
-    `depends_on` 保存上游实例码列表：依赖表达的是数据流，必须指向真实存在的实例。缺失依赖、
-    自依赖、循环依赖与顺序冲突在发布期校验，运行期不再遇到。
-
-    来源工作表不绑定节点；同一表中的字段、规则与计算按各自配置引用实际节点实例。
-    此类是 config_json.nodes 的内部投影，不对应单独的节点明细存储表。
-    """
+    """config_json 中的执行记录技术容器投影，不提供业务节点编排。"""
 
     __tablename__ = "scenario_draft_node"
     __table_args__ = (
@@ -84,13 +73,13 @@ class ScenarioDraftNode(Base, TimestampMixin):
     draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
     # 节点实例码：同一场景内唯一，规则按它归属。
     node_code: Mapped[str] = mapped_column(String(80), nullable=False)
-    # 能力类型：来自节点能力目录，决定谁执行这个节点。
+    # 技术类型 RULE_EXECUTION，不决定业务规则执行路径。
     node_type: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
-    # 上游节点实例码列表。
+    # 技术关联属性，统一容器没有上游业务节点。
     depends_on: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    # 节点级配置（例如计算节点参与的计算规则编号）。为空表示该节点没有额外配置。
+    # 技术执行记录的配置。
     config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
@@ -228,7 +217,7 @@ class ScenarioDraftSection(Base, TimestampMixin):
     content_instruction: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
     field_keys: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    # 以下为节点版报告分组属性；旧格式留空。
+    # 规则库报告分组属性。
     report_code: Mapped[str | None] = mapped_column(String(80))
     report_name: Mapped[str | None] = mapped_column(String(255))
     material_keys: Mapped[list[str] | None] = mapped_column(JSON)

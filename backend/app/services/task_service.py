@@ -20,7 +20,7 @@ from .audit.evidence import result_content_view, review_content_view
 # 任务视图给出的本批、提交校验用的本批、检查点里的哈希必须是同一个集合，
 # 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
 from .audit.reviews import _current_review_batch, _review_hash
-from .audit.state import _node_codes_of_type
+from .audit.artifacts import _material_classify_content
 from ..entity import (
     AuditPlan,
     AuditTask,
@@ -41,9 +41,9 @@ from ..entity import (
 from . import rag_service
 from .background_service import assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
-from ..domain.node_registry import legacy_node_type_of
 from ..domain.manifest import build_task_schema, enabled_extraction_field_keys
-from ..domain import fact_snapshot, workflow_dag
+from ..domain import fact_snapshot
+from ..domain.rule_library import execution_container_of
 from ..integrations.http_services import list_material_types
 from .operation_types import OBJECT_AUDIT_TASK
 from .operation_log_service import record_operation
@@ -362,20 +362,8 @@ def create_task_from_plan(
     schema["plan_scope_hash"] = plan.scope_hash
     schema["node_plan"] = [dict(item) for item in manifest.get("nodes") or []]
     schema["selected_sheets"] = [dict(item) for item in manifest.get("selected_sheets") or []]
-    nodes = list(manifest.get("nodes") or [])
-    if not nodes:
-        raise BusinessError(
-            "SCENARIO_NODE_REQUIRED",
-            "该场景版本没有配置任何节点，不能创建任务：请先在场景配置里建立节点并重新发布",
-            status_code=409,
-            details={"scenario_code": scenario.scenario_code, "version_no": scenario.version_no},
-        )
-    first_ready = workflow_dag.ready_node(workflow_dag.plans_of(manifest), completed=set())
-    if first_ready is None:
-        raise BusinessError("SCENARIO_NODE_NOT_READY", "该场景没有可执行的起始节点", status_code=409)
-    ordered_nodes = sorted(nodes, key=lambda item: item["sequence_no"])
-    first_node = next(item for item in ordered_nodes if item["node_code"] == first_ready.node_instance_code)
-    first_node_index = ordered_nodes.index(first_node)
+    first_node = execution_container_of(manifest)
+    first_node_index = 0
     task = AuditTask(
         task_no=task_no or public_no("TASK"),
         scenario_version_id=scenario.id,
@@ -552,15 +540,8 @@ def _invalidate_for_input_change(
         .where(TaskFact.audit_task_id == task.id, TaskFact.is_current.is_(True))
         .values(is_current=False)
     )
-    # 全部有效执行已失效，从 DAG 的首个就绪节点重新开始；场景可以不配置材料检查。
-    first_ready = workflow_dag.ready_node(workflow_dag.plans_of(manifest), completed=set())
-    if first_ready is None:
-        raise BusinessError("AUDIT_WORKFLOW_NO_START", "材料变化后流程没有可执行的起始节点", status_code=500)
-    first_node_code = first_ready.node_instance_code
-    first_node_index = next(
-        index for index, item in enumerate(sorted(manifest["nodes"], key=lambda row: row["sequence_no"]))
-        if item["node_code"] == first_node_code
-    )
+    first_node_code = execution_container_of(manifest)["node_code"]
+    first_node_index = 0
     task.current_node = first_node_code
     task.status = "READY"
     task.pending_review_hash = None
@@ -653,12 +634,10 @@ async def upload_document(
     # 输入变化不止“替换”：首次补传此前缺失的当前文件，同样改变任务已经依据的结论。
     # 只要任务已越过起始节点（移动过节点或执行过任何节点），补传就必须与替换走同一套失效流程。
     task_manifest = task.manifest_json
-    first_ready = workflow_dag.ready_node(workflow_dag.plans_of(task_manifest), completed=set())
-    if first_ready is None:
-        raise BusinessError("AUDIT_WORKFLOW_NO_START", "任务流程没有可执行的起始节点", status_code=500)
+    first_node_code = execution_container_of(task_manifest)["node_code"]
     input_changed = (
         bool(previous_upload_id)
-        or task.current_node != first_ready.node_instance_code
+        or task.current_node != first_node_code
         or execution_count > 0
     )
     # 类型核对放在所有任务侧校验之后、写文件之前：请求本身不合法时不必打扰 8018，
@@ -904,7 +883,7 @@ def _task_display_structure(
                 # 能力类型：缺 `node_type` 的旧节点只有在其实例码本身就是已知能力类型时
                 # 才能确定性迁移；无法确定时如实返回 null，页面按「未识别」处理，
                 # 不拿实例码冒充能力类型去匹配工作区。
-                "node_type": node.get("node_type") or legacy_node_type_of(str(node["node_code"])),
+                "node_type": node.get("node_type"),
                 "name": str(node.get("name") or node["node_code"]),
                 "sequence_no": int(node.get("sequence_no") or 0),
                 "depends_on": [str(code) for code in (node.get("depends_on") or [])],
@@ -976,17 +955,11 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             .where(TaskDocument.audit_task_id == task.id, DocumentUpload.is_current.is_(True))
         ).all()
     }
-    # 各材料位的 8018 识别结论，来自文件处理节点的真实执行结果；没有产物时为空。
-    # 只作展示：识别结论与置信度不参与材料状态判定，也不影响后续节点执行。
-    prepare_codes = _node_codes_of_type(manifest, "DOCUMENT_PREPARE")
-    document_prepare_result = next(
-        (executions[code].result_json for code in prepare_codes if code in executions), None
-    )
-    material_classify = (
-        document_prepare_result.get("material_classify") or {}
-        if isinstance(document_prepare_result, dict)
-        else {}
-    )
+    # 材料识别来自该材料当前上传的真实产物，不依赖文件处理业务阶段。
+    material_classify = {
+        item.material_key: _material_classify_content(db, uploads[item.current_upload_id])
+        for item in documents if item.current_upload_id in uploads
+    }
     evidence_rows = db.scalars(
         select(Evidence).where(Evidence.audit_task_id == task.id).order_by(Evidence.id)
     ).all()
@@ -1050,19 +1023,6 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     }
     scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
     scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
-    # 未配置的检查类别优先读任务冻结的快照：它随任务一起冻结，之后场景发布新版本
-    # 不会改写历史任务的范围说明。历史任务没有这两个键时按该任务所钉版本的 manifest 读取，
-    # 都取不到时返回空列表（不编造「都没配」）。
-    unconfigured_node_types = list(
-        schema.get("unconfigured_check_node_types")
-        or manifest.get("unconfigured_check_node_types")
-        or []
-    )
-    unconfigured_node_codes = list(
-        schema.get("unconfigured_check_node_codes")
-        or manifest.get("unconfigured_check_node_codes")
-        or []
-    )
     current_execution = executions.get(current_node_definition["node_code"])
     current_node = {
         **current_node_definition,
@@ -1111,7 +1071,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         str(item["node_code"]): str(item.get("node_type") or item["node_code"])
         for item in nodes
     }
-    extraction_codes = _node_codes_of_type(manifest, "FIELD_EXTRACTION")
+    extraction_codes = [execution_container_of(manifest)["node_code"]]
     extraction_finished = any(
         executions[code].status == "SUCCEEDED" for code in extraction_codes if code in executions
     )
@@ -1120,7 +1080,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     # 会把后续节点尚未开始的字段提前显示成已执行失败。
     extraction_owner_by_field: dict[str, str] = {}
     for node in manifest.get("nodes") or []:
-        if str(node.get("node_type") or node.get("node_code")) != "FIELD_EXTRACTION":
+        if str(node.get("node_type") or node.get("node_code")) != "RULE_EXECUTION":
             continue
         contract = node.get("execution_contract")
         if not isinstance(contract, dict) or not isinstance(contract.get("field_keys"), list):
@@ -1230,9 +1190,6 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         "scope": {
             "enabled_rule_keys": scope_enabled_keys,
             "unenabled_rule_keys": scope_unenabled_keys,
-            # 未配置的检查类别：类型级与实例级分开返回，页面按各自口径使用。
-            "unconfigured_node_types": unconfigured_node_types,
-            "unconfigured_node_codes": unconfigured_node_codes,
             "enabled_rules": [
                 {"rule_key": key, "name": rule_name_by_key.get(key, key)} for key in scope_enabled_keys
             ],
@@ -1259,9 +1216,6 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         ],
         # 当前场景没有配置这类检查；页面和执行都必须明确说明，不能显示成通过。
         # 两个口径分开：类型级说明「哪一类检查没配」，实例级让页面判断
-        # 「当前这个节点是不是未配置的类别」——拿实例码与类型列表交叉比较恒为假。
-        "unconfigured_check_node_types": unconfigured_node_types,
-        "unconfigured_check_node_codes": unconfigured_node_codes,
         # 展示结构由当前任务的场景配置动态决定，前端按它通用渲染。
         # 页面不按场景名称或固定条件分支写死展示内容；这里给出本任务真实使用的
         # 节点、Sheet、字段及其数据，统一协议里未被本场景选中的内容不出现。

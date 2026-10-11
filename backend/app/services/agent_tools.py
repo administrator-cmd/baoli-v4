@@ -18,15 +18,83 @@ adapter 的职责就是把后者的形状转成前者的输入，再调同一个
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any
 
 from langchain_core.tools import InjectedToolArg, tool
 
 from ..domain import quality_judgement
-from ..domain.audit_vocab import read_material_type_status
 from ..common.exceptions import BusinessError
 from ..entity import DocumentUpload, EvaluationSnapshot, TaskDocument
 from sqlalchemy import select
+
+
+@tool("RULE_LIBRARY_QUERY")
+def query_rule_library_tool(
+    parameters: dict[str, Any],
+    inputs: list[dict[str, Any]],
+    *,
+    context: Annotated[Any, InjectedToolArg],
+) -> dict[str, Any]:
+    """查询本次审核任务冻结的生效规则库。
+
+    查询只读任务创建时固化的 manifest：不会读取场景草稿、当前数据库规则或模型自行提供的规则。
+    规则由审核图按任务范围与事实快照执行；该工具只负责在需要时返回规则原文和依赖配置。
+    """
+    if context is None or context.database_session is None or context.task_id is None:
+        raise BusinessError("TOOL_CONTEXT_MISSING", "规则库查询需要审核任务上下文", status_code=500)
+    from ..entity import AuditTask
+
+    task = context.database_session.get(AuditTask, context.task_id)
+    if task is None:
+        raise BusinessError("TOOL_TASK_MISSING", "规则库查询关联的审核任务不存在", status_code=409)
+    manifest = task.manifest_json
+    schema = task.task_schema_json
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("rules"), list):
+        raise BusinessError("TOOL_RULE_LIBRARY_MISSING", "审核任务没有冻结的规则库", status_code=409)
+    if not isinstance(schema, dict) or not isinstance(schema.get("enabled_rule_keys"), list):
+        raise BusinessError("TOOL_RULE_SCOPE_MISSING", "审核任务没有冻结的规则启用范围", status_code=409)
+    enabled_keys = set(schema["enabled_rule_keys"])
+    rules = manifest["rules"]
+    query = str(parameters.get("query") or "").strip().casefold()
+    kind = str(parameters.get("kind") or "ALL").upper()
+    if kind not in {"ALL", "RULE", "CALCULATION"}:
+        raise BusinessError("TOOL_ARGUMENTS_INVALID", "规则库查询的 kind 只能是 ALL、RULE 或 CALCULATION")
+    requested_codes = {
+        str(value).strip().casefold()
+        for value in (parameters.get("rule_codes") or [])
+        if str(value).strip()
+    }
+    requested_keys = {
+        str(value).strip().casefold()
+        for value in (parameters.get("rule_keys") or [])
+        if str(value).strip()
+    }
+
+    def matches(item: dict[str, Any]) -> bool:
+        if item["rule_key"] not in enabled_keys or not item.get("enabled", True):
+            return False
+        calculation = item.get("kind") == "CALCULATION"
+        if (kind == "RULE" and calculation) or (kind == "CALCULATION" and not calculation):
+            return False
+        codes = {str(item.get(name) or "").strip().casefold() for name in ("rule_code", "result_code")}
+        if requested_codes and not codes & requested_codes:
+            return False
+        if requested_keys and str(item["rule_key"]).casefold() not in requested_keys:
+            return False
+        return not query or query in json.dumps(item, ensure_ascii=False).casefold()
+
+    items = [{"kind": item.get("kind") or "RULE", "rule_code": item.get("rule_code"),
+              "name": item.get("name"), "config": item} for item in rules if matches(item)]
+    return {
+        "status": "SUCCEEDED",
+        "message": f"已从本次任务冻结规则库查询到 {len(items)} 条生效规则",
+        "items": items,
+        "source": "TASK_FROZEN_MANIFEST",
+        "scenario_version_no": schema.get("scenario_version_no"),
+        "plan_scope_hash": schema.get("plan_scope_hash"),
+        "manifest_hash": manifest.get("manifest_hash"),
+    }
 
 
 def _snapshot_record(context: Any) -> EvaluationSnapshot:
@@ -70,11 +138,91 @@ def _snapshot_record(context: Any) -> EvaluationSnapshot:
     return record
 
 
+def _requested_uploads(context: Any, material_keys: list[str]):
+    from ..entity import AuditTask
+    task = context.database_session.get(AuditTask, context.task_id)
+    if task is None:
+        raise BusinessError("TOOL_TASK_MISSING", "工具关联的任务不存在")
+    material_scope(context, material_keys=_scope_materials(context, material_keys))
+    frozen = {m["material_key"]: m for m in _frozen_materials(context)}
+    for key in material_keys:
+        identity = frozen[key]
+        upload = context.database_session.get(DocumentUpload, identity.get("upload_id")) if identity.get("upload_id") else None
+        if upload is None:
+            raise BusinessError("TOOL_DOCUMENT_NOT_UPLOADED", "选定材料没有实际上传", details={"material_key": key})
+        yield task, key, upload
+
+
+@tool("TASK_DATA_READ")
+def read_task_data_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]], *, context: Annotated[Any, InjectedToolArg]) -> dict[str, Any]:
+    """读取冻结上传的完整原文或已生成的真实产物。"""
+    from pathlib import Path
+    import hashlib
+    from openpyxl import load_workbook
+    from .storage_service import resolve_storage_path
+    from .audit.artifacts import _artifact_for_upload, _artifact_payload
+    items = []
+    kind = parameters.get("artifact_type") or "ORIGINAL"
+    for task, key, upload in _requested_uploads(context, parameters["material_keys"]):
+        if kind != "ORIGINAL":
+            artifact = _artifact_for_upload(context.database_session, upload, kind)
+            if artifact is None or artifact.status != "READY":
+                raise BusinessError("TOOL_ARTIFACT_NOT_READY", "请求的材料产物尚未生成", details={"material_key": key, "artifact_type": kind})
+            content = _artifact_payload(artifact).content
+            items.append({"material_key": key, "upload_id": upload.id, "artifact_id": artifact.id, "artifact_type": kind, "content": content})
+            continue
+        path = resolve_storage_path(upload.relative_path)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != upload.sha256:
+            raise BusinessError("TOOL_DOCUMENT_CONTENT_CHANGED", "实际文件内容与冻结上传不一致")
+        suffix = Path(upload.original_filename).suffix.lower()
+        if suffix in {".xlsx", ".xlsm"}:
+            workbook = load_workbook(path, data_only=False, read_only=True)
+            cached = load_workbook(path, data_only=True, read_only=True)
+            try:
+                content = [{"sheet": sheet.title, "cells": [{"cell": cell.coordinate, "value": str(cell.value),
+                            "cached_value": str(cached[sheet.title][cell.coordinate].value) if cell.data_type == "f" else None}
+                            for row in sheet for cell in row if cell.value is not None]} for sheet in workbook]
+            finally:
+                workbook.close()
+                cached.close()
+        elif suffix in {".txt", ".csv", ".json", ".md", ".html", ".xml"}:
+            content = path.read_text(encoding="utf-8-sig")
+        else:
+            raise BusinessError("TOOL_ORIGINAL_FORMAT_UNSUPPORTED", "当前原始文件读取工具无法读取该格式；可显式调用DOCUMENT_PROCESS生成OCR后读取", details={"format": suffix, "material_key": key})
+        items.append({"material_key": key, "upload_id": upload.id, "sha256": upload.sha256, "filename": upload.original_filename, "content": content})
+    return {"status": "SUCCEEDED", "message": "已读取实际材料内容", "items": items}
+
+
+@tool("DOCUMENT_PROCESS")
+def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]], *, context: Annotated[Any, InjectedToolArg]) -> dict[str, Any]:
+    """按模型明确选择的服务处理材料，不执行固定处理阶段。"""
+    from .storage_service import resolve_storage_path
+    from .audit.document_ports import document_service
+    from .audit.artifacts import _ensure_external_artifact, _artifact_for_upload, _artifact_payload, _submit_ocr_job, _complete_ocr_job
+    service = parameters["service"]
+    db = context.database_session
+    items = []
+    for task, key, upload in _requested_uploads(context, parameters["material_keys"]):
+        kwargs = {"file_path": resolve_storage_path(upload.relative_path), "filename": upload.original_filename, "content_type": upload.content_type}
+        if service == "OCR":
+            parsed = _artifact_for_upload(db, upload, "DOCUMENT_PARSE")
+            if parsed is None or parsed.status != "READY":
+                raise BusinessError("PROCESSED_ARTIFACT_MISSING", "OCR需要文件处理产物；请先明确调用DOCUMENT_PARSE", details={"material_key": key})
+            artifact = _complete_ocr_job(db, task, upload, _submit_ocr_job(db, task, upload, parsed))
+        else:
+            functions = {"DOCUMENT_PARSE": document_service().process_document, "SEAL": document_service().detect_seals, "MATERIAL_CLASSIFY": document_service().validate_material_type}
+            if service == "MATERIAL_CLASSIFY":
+                kwargs["material_type"] = upload.declared_material_type
+            artifact = _ensure_external_artifact(db, task, upload, service, lambda: functions[service](**kwargs))
+        items.append({"material_key": key, "upload_id": upload.id, "artifact_id": artifact.id, "artifact_type": service, "content": _artifact_payload(artifact).content})
+    return {"status": "SUCCEEDED", "message": "指定服务已返回实际产物", "items": items}
+
+
 def _frozen_materials(context: Any) -> list[dict[str, Any]]:
     record = _snapshot_record(context)
     payload = record.facts_json if isinstance(record.facts_json, dict) else {}
     materials = payload.get("materials")
-    if not isinstance(materials, list) or not materials:
+    if not isinstance(materials, list):
         raise BusinessError(
             "TOOL_SNAPSHOT_INVALID",
             "冻结事实快照里没有材料位身份，无法核对材料，本次调用未执行",
@@ -326,7 +474,7 @@ def check_file_quality_tool(
             continue
         # 人工已确认与材料位不符的材料位：依据不可用，不能判定通过。
         # 与节点同一口径——类型待复核不算「依据不可用」。
-        if read_material_type_status(scope["identity"][material_key].get("document_status")) == "TYPE_REJECTED":
+        if scope["identity"][material_key].get("document_status") == "TYPE_REJECTED":
             per_material.append(
                 {
                     "material_key": material_key,

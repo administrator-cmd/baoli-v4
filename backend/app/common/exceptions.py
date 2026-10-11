@@ -90,7 +90,6 @@ SAFE_DETAIL_KEYS = frozenset(
         "node_code",
         "node_type",
         "node_codes",
-        "missing_source_nodes",
         "downstream_nodes",
         "calculation_rules",
         "sheet_role",

@@ -16,7 +16,6 @@ from ..entity import ImportJob, ImportSheet
 from ..entity import AuditTask
 from ..schema.dto import ExecuteNodeRequest, ManualReviewRequest
 from . import background_service
-from .audit.state import _single_node_code_of_type
 from .background_service import (
     PHASE_LLM_REQUEST,
     PHASE_GRAPH_ADVANCED,
@@ -37,8 +36,6 @@ def _manifest_of_task(task: AuditTask) -> dict[str, Any]:
     if not isinstance(manifest, dict) or not manifest:
         raise BusinessError("TASK_MANIFEST_MISSING", "任务缺少已冻结的执行配置", status_code=500)
     return manifest
-
-
 
 
 def _idempotency_key(provided: str | None) -> str:
@@ -137,8 +134,8 @@ def submit_conversion(
         converted = import_service.retry_conversion(
             session, content["job_no"], operation_no=command.operation_no,
         )
-        # retry_conversion 内部同时完成草稿落库与导入图转换；转换后若停在裁决等待点即处于等待 interrupt。
-        command.phase(PHASE_INTERRUPT_WAITING if converted.status == "PENDING_DECISION" else PHASE_GRAPH_ADVANCED)
+        # 导入解析完成后图直接结束，没有业务裁决等待点。
+        command.phase(PHASE_GRAPH_ADVANCED)
         return {
             "job_no": converted.job_no,
             "status": converted.status,
@@ -290,9 +287,7 @@ def submit_manual_reviews(
         _reject_deleted_task(task)
         # 人工复核等待点按能力类型解析实例码：`task.current_node` 是实例码，
         # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
-        review_node_code = _single_node_code_of_type(
-            _manifest_of_task(task), "MANUAL_REVIEW", purpose="人工复核等待点"
-        )
+        review_node_code = task.current_node
         if task.status != "WAITING_REVIEW" or task.current_node != review_node_code:
             raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
         _reject_stale_input_revision(task, input_revision)
@@ -318,9 +313,7 @@ def submit_manual_reviews(
         runner=runner,
         # 目标节点记实例码：它是本次命令真实落在哪个节点上的执行事实，
         # 能力类型在不同场景里对应不同的实例码。
-        target_node=_single_node_code_of_type(
-            _manifest_of_task(task), "MANUAL_REVIEW", purpose="人工复核等待点"
-        ),
+        target_node=task.current_node,
         input_version=str(task.input_revision),
         validate=validate,
     )

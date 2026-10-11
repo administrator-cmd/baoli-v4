@@ -71,7 +71,6 @@ import { useRetrievalWorkbench } from "@/composables/useRetrievalWorkbench";
 import { useReviewWorkbench } from "@/composables/useReviewWorkbench";
 import {
   isDetailTab,
-  manualReviewNodeType,
   workspacesOfNodes,
   type DetailTab,
 } from "@/constants/auditWorkspaces";
@@ -81,7 +80,6 @@ import {
   evidenceIndexStatusTone,
   formatDate,
   nodeLabel,
-  progressPercent,
   reviewDecisionLabel,
   reviewObjectKindLabel,
   statusLabel,
@@ -471,18 +469,12 @@ const currentNode = computed(() => task.value?.current_node ?? null);
  * 旧任务没有 `display` 时读取任务自己的 `nodes`——
  * 那里同样只有本任务真实配置的节点，不凭空补一份固定阶段表。
  */
-/** 本任务真实配置的校验阶段（能力类型），供规则结果页的阶段下拉使用。 */
-const taskWorkspaceNodeTypes = computed(() => {
-  const types = taskWorkspaces.value.map((item) => item.nodeType);
-  return types.filter((item, index) => types.indexOf(item) === index);
-});
-
 const taskWorkspaces = computed(() =>
   workspacesOfNodes(task.value?.display?.nodes ?? task.value?.nodes ?? []),
 );
 const currentNodeName = computed(() => task.value?.current_node.name || nodeLabel(currentNodeCode.value));
 const isManualReviewNode = computed(
-  () => currentNode.value?.node_type === manualReviewNodeType,
+  () => task.value?.status === "WAITING_REVIEW",
 );
 const currentStepIndex = computed(() => {
   if (!task.value) return 0;
@@ -501,7 +493,7 @@ function stepStatus(node: { node_code: string; status: string }): "wait" | "proc
   if (node.status === "FAILED" || node.status === "BLOCKED") return "error";
   if (isCurrent) return "process";
   if (node.status === "SUCCEEDED") return "success";
-  // 已明确跳过（未配置该节点检查）：用 finish 表示流程已走过，不用 gray 的 wait。
+  // 已跳过的执行记录使用结束状态展示，实际原因保留在结果中。
   if (node.status === "SKIPPED") return "finish";
   // 被失效等待重算的记录不代表最终状态，按未执行呈现。
   return "wait";
@@ -522,7 +514,6 @@ const uploadedDocumentCount = computed(() => task.value?.documents.filter((docum
 const missingRequiredMaterials = computed(
   () => task.value?.documents.filter((document) => document.required && !document.filename) ?? [],
 );
-const hasAnyUpload = computed(() => uploadedDocumentCount.value > 0);
 /**
  * 节点实例码 → 能力类型。
  *
@@ -530,32 +521,26 @@ const hasAnyUpload = computed(() => uploadedDocumentCount.value > 0);
  * （`INTERNAL_VALIDATE`）。页面判断「这是哪一类节点」必须用能力类型：拿实例码与
  * 能力类型比较，在用户改了实例码之后恒为假，对应的工作区与进度会静默失效。
  *
- * 历史任务没有 `node_type` 时按后端同一口径回退（那时实例码本身就是能力类型）。
+ * 只读取明确类型，不由旧阶段名称推断执行能力。
  */
 function nodeTypeOf(code: string | null | undefined): string | null {
   if (!code) {
     return null;
   }
   const node = task.value?.nodes.find((item) => item.node_code === code);
-  return node?.node_type ?? code;
+  return node?.node_type ?? null;
 }
 const extractionFinished = computed(
   () =>
     task.value?.nodes.some(
-      (node) => nodeTypeOf(node.node_code) === "FIELD_EXTRACTION" && node.status === "SUCCEEDED",
+      (node) => nodeTypeOf(node.node_code) === "RULE_EXECUTION" && node.status === "SUCCEEDED",
     ) ?? false,
 );
-const riskNode = computed(() => task.value?.nodes.find((node) => nodeTypeOf(node.node_code) === "RISK_RATING") ?? null);
-const riskNodeExecuted = computed(() => riskNode.value?.status === "SUCCEEDED");
-// 未配置的检查类别：类型级汇总用于「这类检查有没有配」；实例级清单用于
-// 「当前这个节点是不是未配置的类别」。两者口径不同，不能交叉比较。
+const riskNodeExecuted = computed(() => risks.value?.risk_executed ?? false);
 const riskConfigured = computed(
-  () => !(task.value?.unconfigured_check_node_types ?? []).includes("RISK_RATING"),
+  () => risks.value?.risk_configured ?? false,
 );
-const currentNodeUnconfigured = computed(
-  () => !!task.value && (task.value.unconfigured_check_node_codes ?? []).includes(task.value.current_node.node_code),
-);
-const canEnterManualReview = computed(() => task.value?.status === "READY" && isManualReviewNode.value);
+const canEnterManualReview = computed(() => task.value?.status === "WAITING_REVIEW");
 const atWaitingReview = computed(() => task.value?.status === "WAITING_REVIEW");
 const canRecoverFailedNode = computed(() => {
   const current = task.value;
@@ -566,8 +551,6 @@ const prerequisites = computed(() => {
   if (!task.value) {
     return [] as Array<{ label: string; satisfied: boolean }>;
   }
-  // 前置条件按能力类型判断：当前节点的 `node_code` 是用户配置的实例码。
-  const nodeType = nodeTypeOf(task.value.current_node.node_code);
   const items: Array<{ label: string; satisfied: boolean }> = [
     { label: "任务不在后台执行中", satisfied: task.value.status !== "RUNNING" && !watching.value },
     { label: "没有仍在执行的后台操作", satisfied: !isOperationActive(task.value.latest_operation?.status) },
@@ -577,18 +560,6 @@ const prerequisites = computed(() => {
       satisfied: task.value.status !== "COMPLETED" && task.value.status !== "FAILED",
     },
   ];
-  if (nodeType === "MATERIAL_CHECK") {
-    items.push({
-      label: `必传材料已全部上传（还缺 ${missingRequiredMaterials.value.length} 项）`,
-      satisfied: missingRequiredMaterials.value.length === 0,
-    });
-  }
-  if (nodeType === "DOCUMENT_PREPARE") {
-    items.push({ label: "至少已上传一份材料", satisfied: hasAnyUpload.value });
-  }
-  if (nodeType === "MANUAL_REVIEW" && task.value.status === "WAITING_REVIEW") {
-    items.push({ label: "任务已停在人工复核等待点（提交复核结论，不再执行节点）", satisfied: true });
-  }
   return items;
 });
 
@@ -678,7 +649,7 @@ const primaryAction = computed<PrimaryAction>(() => {
     };
   }
   return {
-    label: canEnterManualReview.value ? "进入人工复核" : "执行当前节点",
+    label: canEnterManualReview.value ? "进入人工复核" : "执行生效规则",
     run: () => void executeCurrentNode(),
     disabled: !canExecuteNode.value,
     reason: executeDisabledReason.value,
@@ -739,13 +710,6 @@ const blockers = computed<BlockerItem[]>(() => {
       tabLabel: "查看执行记录",
     });
   }
-  if (currentNodeUnconfigured.value) {
-    items.push({
-      tone: "warning",
-      title: `当前场景未配置「${currentNodeName.value}」的检查规则`,
-      description: "执行后会记为跳过并说明原因，不代表该检查通过。",
-    });
-  }
   if (unsatisfiedPrerequisites.value.length && !canRecoverFailedNode.value) {
     items.push({
       tone: "warning",
@@ -759,7 +723,7 @@ const blockers = computed<BlockerItem[]>(() => {
       title: queuedReviewCount.value
         ? `本批 ${task.value.pending_reviews.length} 项待复核，其后还有 ${queuedReviewCount.value} 项排队`
         : `有 ${task.value.pending_reviews.length} 项等待人工复核`,
-      description: "系统无法自动判定的项需要逐条给出业务结论；先提交字段事实，重算后再裁决规则。页面只提交本批。",
+      description: "规则明确要求人工确认的项需要提交结论；先提交字段事实，重算后再裁决规则。页面只提交本批。",
       tab: "reviews",
       tabLabel: "进入复核",
     });
@@ -845,18 +809,7 @@ const fieldExtractedCount = computed(
 const ruleAbnormalCount = computed(() => task.value?.rules.filter((rule) => rule.status === "ABNORMAL").length ?? 0);
 /* 阶段与进度 */
 
-const executionPercent = computed(() => {
-  const execution = lastExecution.value;
-  const executedNode = executingNode.value;
-  if (!execution || !executedNode || !task.value) return null;
-  const summary = execution.result_summary;
-  const counter = (key: string) => (typeof summary[key] === "number" ? (summary[key] as number) : null);
-  const executedType = nodeTypeOf(executedNode.code);
-  if (executedType === "MATERIAL_CHECK") return progressPercent(counter("uploaded"), task.value.documents.length);
-  if (executedType === "DOCUMENT_PREPARE") return progressPercent(counter("processed_documents"), uploadedDocumentCount.value);
-  if (executedType === "FIELD_EXTRACTION") return progressPercent(counter("field_results"), task.value.fields.length);
-  return null;
-});
+const executionPercent = computed(() => null);
 
 const reportDownloadUrl = computed(() => {
   if (!task.value || !report.value?.content || !report.value.report_generated || !report.value.current) return null;
@@ -1326,10 +1279,9 @@ async function submitReviews(): Promise<void> {
     };
   });
   await run(async () => {
-    // 人工复核等待点的实例码由用户配置：从任务冻结的节点里按能力类型取出，
-    // 不写死 MANUAL_REVIEW 当实例码（用户改过实例码后那条记录就找不到对应节点）。
-    const reviewNode = task.value?.nodes.find((node) => nodeTypeOf(node.node_code) === manualReviewNodeType) ?? null;
-    const attemptKey = executionAttemptKey ?? operationIdempotencyKey(reviewNode?.node_code ?? manualReviewNodeType, currentTaskNo);
+    // 人工确认恢复当前规则执行容器，不另设业务复核阶段。
+    const reviewNode = task.value?.current_node ?? null;
+    const attemptKey = executionAttemptKey ?? operationIdempotencyKey("RULE_REVIEW", currentTaskNo);
     executionAttemptKey = attemptKey;
     executingNode.value = { code: reviewNode?.node_code ?? "", name: reviewNode?.name ?? "人工复核" };
     replacementImpact.value = null;
@@ -1588,9 +1540,7 @@ watch(
           <el-tab-pane label="规则结果" name="rules">
             <AuditRuleResults
               :rules="task.rules"
-              :unconfigured-nodes="task.unconfigured_check_node_types ?? []"
               :task-no="task.task_no"
-              :node-type-options="taskWorkspaceNodeTypes"
             />
           </el-tab-pane>
 
@@ -1598,7 +1548,7 @@ watch(
             <template #label>人工复核（{{ task.pending_reviews.length }}）</template>
             <template v-if="task.pending_reviews.length">
               <p class="text-muted">
-                系统无法自动判定的项在这里逐条给出业务结论；先提交字段事实，重算后再裁决规则。
+                规则明确要求人工确认的项在这里提交结论；先提交字段事实，重算后再裁决规则。
                 页面只提交<strong>本批</strong>（{{ task.pending_reviews.length }} 项）<template v-if="queuedReviewCount">
                   ，另有 {{ queuedReviewCount }} 项在本批之后处理</template>；提交后由服务端恢复流程。
               </p>
@@ -1728,7 +1678,7 @@ watch(
             <AuditReportPanel
               :report="report"
               :download-url="reportDownloadUrl"
-              :running="watching && nodeTypeOf(executingNode?.code) === 'REPORT_OUTPUT'"
+              :running="watching"
               :loading="reportLoading"
               :error="reportError"
             />

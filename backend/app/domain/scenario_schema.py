@@ -41,11 +41,6 @@ def normalize_schema(value: Any | None) -> dict[str, Any]:
     if not isinstance(schema_version, str) or not schema_version.strip():
         raise BusinessError("SCENARIO_SCHEMA_VERSION_REQUIRED", "场景 schema 缺少 schema_version", status_code=400)
     profile_version = value.get("profile_version", NODE_PROFILE_VERSION)
-    if profile_version != NODE_PROFILE_VERSION:
-        raise BusinessError(
-            "SCENARIO_SCHEMA_PROFILE_UNSUPPORTED", f"场景依赖的节点能力版本“{profile_version}”当前不受支持",
-            status_code=400, details={"profile_version": profile_version},
-        )
     return {
         "schema_key": schema_key.strip(), "schema_version": schema_version.strip(),
         "profile_version": profile_version,

@@ -49,7 +49,6 @@ const deleteError = ref<string | null>(null);
 const statusOptions = [
   { value: "PARSED", label: "已解析" },
   { value: "PROPOSED", label: "已生成候选" },
-  { value: "PENDING_DECISION", label: "待裁决" },
   { value: "CONFIRMED", label: "已确认" },
   { value: "APPLIED", label: "已写入场景配置" },
   // 保留历史作业的 PUBLISHED 状态；新导入写入后为 APPLIED。
@@ -270,7 +269,7 @@ watch(scopedScenarioCode, () => {
       <el-table-column label="导入状态" width="130">
         <template #default="{ row }">
           <el-tag
-            :type="row.status === 'PUBLISHED' ? 'success' : row.status === 'PENDING_DECISION' ? 'warning' : 'primary'"
+            :type="row.status === 'PUBLISHED' ? 'success' : 'primary'"
             size="small"
             effect="light"
             disable-transitions

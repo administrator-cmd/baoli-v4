@@ -23,8 +23,7 @@ export interface ImportStep {
 
 /** 真正的技术错误单独展示；业务审批说明不进入步骤状态。 */
 export function importBlockingIssues(job: ImportJob | null): number {
-  return job?.issues.filter((issue) => issue.status === "OPEN"
-    && issue.category !== "BUSINESS_AMBIGUITY" && issue.category !== "BUSINESS_CONFIRMATION").length ?? 0;
+  return job?.issues.filter((issue) => issue.status === "OPEN").length ?? 0;
 }
 
 /** 按当前服务端数据算出四个导入步骤的可进入性与阻断原因。 */

@@ -451,10 +451,11 @@ def download_report(task_no: str, db: Session = Depends(get_db)) -> StreamingRes
     content = report["content"]
     if report["status"] == "NOT_GENERATED" or not isinstance(content, str) or not content:
         raise BusinessError("REPORT_NOT_GENERATED", "审核报告尚未生成，无法下载", status_code=409)
-    filename = f"{task_no}-审核报告.md"
+    extension = {"text/markdown": "md", "text/plain": "txt", "text/html": "html"}[report["content_type"]]
+    filename = f"{task_no}-审核报告.{extension}"
     return StreamingResponse(
         BytesIO(content.encode("utf-8")),
-        media_type="text/markdown; charset=utf-8",
+        media_type=report["content_type"] + "; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
 

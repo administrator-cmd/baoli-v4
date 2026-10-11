@@ -5,11 +5,10 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..database import get_db
-from ..domain import capabilities, tool_catalog
+from ..domain import audit_vocab, tool_catalog
 from ..common.exceptions import BusinessError
 from ..schema.vo import (
-    CapabilityCatalogResponse,
-    CapabilityItem,
+    ToolCatalogResponse,
     MaterialTypeCatalogResponse,
     MaterialTypeItem,
     RuleCapabilityStatusResponse,
@@ -87,30 +86,10 @@ def material_types(request: Request) -> MaterialTypeCatalogResponse:
     )
 
 
-@router.get("/capabilities", response_model=CapabilityCatalogResponse)
-def capability_catalog(request: Request) -> CapabilityCatalogResponse:
-    """审核能力目录：后端能力的单一事实来源。
-
-    每项能力声明：能力标识、业务标签、可挂载节点、输入形态、参数契约（必填/可选与口径）、
-    结果里可能出现的状态、是否支持证据与比较、输出键、取证与判定方式、扩展数据命名空间、
-    版本，以及当前是否已实现。
-
-    页面从这里取检查方式下拉与参数口径，不再在本地维护第二份名单——两份名单漂移过一次
-    （后端 12 个算子、页面只有 7 个），结果是页面上打开一条已导入的规则，
-    下拉框里找不到它当前的检查方式。
-
-    `implemented=false` 的能力仍然可以被配置，但发布前必须逐条确认，
-    运行时明确返回「不可判定」：不默认通过，也不伪装成已执行。
-
-    `tools` 是同一份目录的工具视图（`domain/tool_catalog.py` 从能力目录派生）：
-    模型可调用的工具、参数 Schema、权限范围与真实错误码。只有 `implemented=true`
-    的工具才会进模型请求的 `tools`；不可调用的工具仍如实列出并写明原因，
-    页面据此不把它们显示成可执行选项。
-    """
-    return CapabilityCatalogResponse(
-        capability_version=capabilities.CAPABILITY_VERSION,
-        rule_statuses=sorted(capabilities.RULE_STATUSES),
-        items=[CapabilityItem.model_validate(item) for item in capabilities.catalog_payload()],
+@router.get("/tools", response_model=ToolCatalogResponse)
+def tools_catalog(request: Request) -> ToolCatalogResponse:
+    """供模型按需选择的真实工具、参数和实现信息；不决定规则执行路径。"""
+    return ToolCatalogResponse(
         tool_catalog_version=tool_catalog.TOOL_CATALOG_VERSION,
         tool_catalog_fingerprint=tool_catalog.catalog_fingerprint(),
         tools=[ToolCatalogItem.model_validate(item) for item in tool_catalog.catalog_payload()],
@@ -128,12 +107,12 @@ def rule_status_catalog(request: Request) -> RuleStatusCatalogResponse:
     """
     return RuleStatusCatalogResponse(
         statuses=[
-            RuleCapabilityStatusResponse(**capabilities.status_view(status))
-            for status in capabilities.RULE_STATUSES
+            RuleCapabilityStatusResponse(**audit_vocab.status_view(status))
+            for status in audit_vocab.RULE_STATUSES
         ],
         categories=[
             {"category": category, "label": label}
-            for category, label in capabilities.STATUS_CATEGORY_LABELS.items()
+            for category, label in audit_vocab.STATUS_CATEGORY_LABELS.items()
         ],
         request_id=request.state.request_id,
     )
@@ -149,26 +128,11 @@ SERVICE_CAPABILITIES: tuple[tuple[str, str], ...] = (
 )
 
 
-def _service_rows(settings) -> list[SystemServiceItem]:
-    configuration = {
-        "大模型": {
-            "BAOLI_LLM_BASEURL": bool(settings.llm_baseurl),
-            "BAOLI_LLM_APIKEY": bool(settings.llm_api_key_value),
-            "BAOLI_LLM_MODEL_NAME": bool(settings.llm_model_name),
-        },
-        "材料识别": {"BAOLI_SERVICE_8018_URL": bool(settings.service_8018_url)},
-        "文件解析": {"BAOLI_SERVICE_8010_URL": bool(settings.service_8010_url)},
-        "文字识别": {
-            "BAOLI_OCR_SERVICE_URL": bool(settings.ocr_service_url),
-            "BAOLI_OCR_TOKEN": bool(settings.ocr_token_value),
-            "BAOLI_OCR_MODEL": bool(settings.ocr_model),
-        },
-        "印章识别": {"BAOLI_SEAL_SERVICE_URL": bool(settings.seal_service_url)},
-    }
+def _service_rows(configuration: dict[str, dict]) -> list[SystemServiceItem]:
     rows: list[SystemServiceItem] = []
     for name, capability in SERVICE_CAPABILITIES:
-        status = _configuration_status(configuration[name])
-        if status.status == "CONFIGURED_UNVERIFIED":
+        status = configuration[name]
+        if status["status"] == "CONFIGURED_UNVERIFIED":
             connection = "UNVERIFIED"
             note = "必需配置项已填写，未做真实连通验证；执行相关操作时若失败会返回明确错误"
         else:
@@ -178,10 +142,10 @@ def _service_rows(settings) -> list[SystemServiceItem]:
             SystemServiceItem(
                 name=name,
                 capability=capability,
-                configuration_status=status.status,
+                configuration_status=status["status"],
                 connection_status=connection,
                 last_checked_at=None,
-                missing=status.missing,
+                missing=status["missing"],
                 note=note,
             )
         )
@@ -196,8 +160,9 @@ def system_services(request: Request) -> SystemServicesResponse:
     不在状态接口里代替业务操作做供应商探测。
     """
     settings = get_settings()
-    database_status = _database_status()
-    services = _service_rows(settings)
+    status = system_status_service.status_view()
+    database_status = status["database"]
+    services = _service_rows(status["external_services"])
     # 本地嵌入模型是审核任务检索取证的基础。它只报告配置状态与“未验证”，
     # 不在状态接口里加载模型或做推理；缺模型时相关规则会明确报错而不是静默降级。
     embedding = embedding_status()

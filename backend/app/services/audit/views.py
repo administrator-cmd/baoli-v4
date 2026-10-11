@@ -9,14 +9,12 @@
 
 from .. import task_csv_service
 
-from ...domain.manifest import rule_node_type_of
 from ...common.exceptions import BusinessError
 from ...entity import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
 from ..task_lookup import task_or_404
 from .evidence import _quote_check_of
-from .reporting import _configured_format_support
 from .shared import QUOTE_CHECK_LABELS, _task_manifest
-from .state import _current_node_executions, _node_codes_of_type
+from .state import _current_node_executions
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
@@ -30,7 +28,7 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
     risk_rules = [
         item
         for item in manifest["rules"]
-        if rule_node_type_of(item) == "RISK_RATING" and item["operator"] == "RISK_TRIGGER" and item["rule_key"] in enabled_keys
+        if (item.get("operator") == "RISK_TRIGGER" or bool(item.get("risk_condition"))) and item["rule_key"] in enabled_keys
     ]
     risk_configured = bool(risk_rules)
     risk_keys = {item["rule_key"] for item in risk_rules}
@@ -57,7 +55,7 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
     status_counts: dict[str, int] = {}
     for item in results:
         status_counts[item.status] = status_counts.get(item.status, 0) + 1
-    risk_level_by_key = {item["rule_key"]: item.get("parameters", {}).get("risk_level") for item in risk_rules}
+    risk_level_by_key = {item["rule_key"]: item.get("risk_level_value") or item.get("parameters", {}).get("risk_level") for item in risk_rules}
     # 命中只统计 ABNORMAL，不能用结果总数冒充命中数。
     hit_count = sum(1 for item in results if item.status == "ABNORMAL")
     risk_conclusion_available = (
@@ -86,139 +84,29 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
     }
 
 def report_view(db: Session, task_no: str) -> dict[str, Any]:
-    """报告只读视图：正文取自 audit_report.content_md，三信号与范围快照取自本次执行结果。"""
+    """读取真实保存的报告，不要求固定报告阶段或节点结果格式。"""
     task = task_or_404(db, task_no)
-    # 报告节点的实例码由用户配置，不能写死能力类型当实例码查询。
-    report_node_codes = _node_codes_of_type(_task_manifest(task), "REPORT_OUTPUT")
-    if not report_node_codes:
-        raise BusinessError(
-            "AUDIT_NODE_UNKNOWN",
-            "本任务绑定的场景没有配置报告输出节点",
-            status_code=500,
-            details={"task_no": task.task_no},
-        )
-    execution = db.scalar(
-        select(NodeExecution)
-        .where(
-            NodeExecution.audit_task_id == task.id,
-            NodeExecution.node_code.in_(report_node_codes),
-            NodeExecution.status != "INVALIDATED",
-        )
-        .order_by(NodeExecution.id.desc())
-    )
-    if not execution or execution.status == "SKIPPED" or not execution.result_json:
-        if execution and execution.status == "SKIPPED" and execution.result_json:
-            reason = execution.result_json["skip_reason"]
-        else:
-            stale_report = db.scalar(
-                select(NodeExecution.id)
-                .where(
-                    NodeExecution.audit_task_id == task.id,
-                    NodeExecution.node_code.in_(report_node_codes),
-                    NodeExecution.status == "INVALIDATED",
-                )
-                .limit(1)
-            )
-            reason = (
-                "此前生成的报告已随字段、规则或材料变化失效，需要重新执行报告输出节点"
-                if stale_report
-                else "报告输出节点尚未执行"
-            )
-        return {
-            "task_no": task.task_no,
-            "status": "NOT_GENERATED",
-            "content_type": "text/markdown",
-            "content": None,
-            "reasons": [reason],
-            "report_generated": False,
-            "scope_execution_complete": False,
-            "risk_conclusion_available": False,
-            "results_scope": "CURRENT_RUN",
-            "current": False,
-            "input_revision": task.input_revision,
-            "snapshot": None,
-            # 报告未生成时也要给出声明格式的支持状态：模板要求 PDF 而系统只产 Markdown，
-            # 这件事不因报告尚未生成而消失。
-            "conclusion": None,
-            "format_support": _configured_format_support(task),
-            "business_section_count": 0,
-        }
-    result = execution.result_json
-    # 不可判定的原因必须分开表达，不能都写成“未配置风险”。
-    reason_labels = {
-        "unfinished_fields": "存在未形成有效结果的字段",
-        "unfinished_rules": "存在未执行、证据不足或待复核的规则，或有已启用规则尚未形成结果",
-        "pending_reviews": "存在待处理的人工复核项",
-        # 两种材料类型状态对已完成结论的影响不同，合并成一句会让人以为普通审核也被阻断。
-        "material_type_mismatches": "存在尚未定案或已确认不符的材料类型（待确认事项，普通审核结论仍按真实原文有效）",
-        "risk_not_configured": "当前场景未配置风险评级规则，本次审核未形成风险结论",
-        "risk_inconclusive": "已配置的风险规则尚未全部形成可用结论，风险不可判定",
-        "missing_rule_keys": "有已启用规则尚未形成任何结果",
-        "missing_required_materials": "存在尚未上传的必传材料",
-        "failed_nodes": "存在执行失败或被阻断的审核节点",
-    }
-    reasons: list[str] = []
-    for key, value in (result.get("reasons") or {}).items():
-        label = reason_labels.get(key)
-        if label is None:
-            continue
-        if isinstance(value, list):
-            if value:
-                reasons.append(label)
-        elif value:
-            reasons.append(label)
-    # 报告的三信号、范围快照与结构化结论都随执行结果保存，这里直接读它。
-    # 报告规则结果（RuleResult）只作为「报告已生成」的逐条结果供规则页展示，不再承载这些内容。
-    snapshot = result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
-    generated_revision = snapshot.get("task_input_revision") if snapshot else result.get("input_revision")
-    current = isinstance(generated_revision, int) and generated_revision == task.input_revision
-    if not current:
-        reasons.append(
-            "报告对应的输入修订已过期，需要重新执行报告输出节点"
-            if snapshot is not None
-            else "报告缺少输入修订快照，无法确认它是否对应当前输入，请重新执行报告输出节点"
-        )
-    # 结构化结论：页面优先读它，不再靠匹配正文行首文案。
-    # 结论随执行结果保存（与三信号同一个载荷），不再依赖报告规则结果的 result_json。
-    conclusion = result.get("conclusion") if isinstance(result.get("conclusion"), dict) else None
-    format_support = result.get("format_support") if isinstance(result.get("format_support"), list) else []
-    if not isinstance(result.get("format_support"), list):
-        # 报告结果里没有时从任务冻结配置取，
-        # 保证页面对旧报告也能显示格式缺口，而不是显示成「没有声明」。
-        configured_manifest = _task_manifest(task)
-        groups = configured_manifest.get("report_groups") or {}
-        format_support = [
-            entry
-            for report in (groups.get("reports") or [])
-            for entry in (report.get("format_support") or [])
-        ]
-    # 正文从 report.content_md 读：它是正文的唯一存放处（本节点执行、发生失效时都一并处理）。
-    report = db.scalar(
-        select(AuditReport)
-        .where(AuditReport.node_execution_id == execution.id)
-        .order_by(AuditReport.id.desc())
-    )
-    if report is None or not report.content_md:
-        # 报告节点执行过却没有可读正文：如实说明是记录缺失，不能显示成「报告尚未生成」。
-        reasons.append("本次报告输出没有留下可读的报告正文记录，请重新执行报告输出节点")
-    return {
-        "task_no": task.task_no,
-        "status": result["report_status"],
-        "content_type": result["content_type"],
-        "content": report.content_md if report else None,
-        "reasons": reasons,
-        # 三个信号分开表达：报告是否生成 / 已配置范围是否执行完整 / 风险是否可判定。
-        "report_generated": bool(result.get("report_generated", True)),
-        "scope_execution_complete": bool(result.get("scope_execution_complete", result["report_status"] == "COMPLETE")),
-        "risk_conclusion_available": bool(result.get("risk_conclusion_available", False)),
-        "results_scope": result.get("results_scope", "CURRENT_RUN"),
-        "current": current,
-        "input_revision": task.input_revision,
-        "snapshot": snapshot,
-        "conclusion": conclusion,
-        "format_support": format_support,
-        "business_section_count": int(result.get("business_section_count") or 0),
-    }
+    report = db.scalar(select(AuditReport).where(AuditReport.audit_task_id == task.id).order_by(AuditReport.id.desc()))
+    if report is None:
+        report_keys = {r["rule_key"] for r in _task_manifest(task)["rules"] if r.get("kind") == "REPORT" and r["rule_key"] in task.task_schema_json["enabled_rule_keys"]}
+        results = task_csv_service.records(db, task, RuleResult)
+        reasons = [r.message for r in results if r.rule_key in report_keys and r.status not in {"PASSED", "ABNORMAL"}]
+        return {"task_no": task.task_no, "status": "NOT_GENERATED", "content_type": "text/markdown", "content": None,
+                "reasons": reasons or ["生效报告执行项尚未产生正文" if report_keys else "本任务没有生效的报告执行项"],
+                "report_generated": False, "scope_execution_complete": False, "risk_conclusion_available": False,
+                "results_scope": "CURRENT_RUN", "current": False, "input_revision": task.input_revision, "snapshot": None,
+                "conclusion": None, "format_support": [], "business_section_count": 0}
+    execution = db.get(NodeExecution, report.node_execution_id) if report.node_execution_id else None
+    current = report.input_revision == task.input_revision and execution is not None and execution.status != "INVALIDATED"
+    unresolved = (report.reasons_json or {}).get("unresolved") or []
+    return {"task_no": task.task_no, "status": "COMPLETE" if current and report.scope_execution_complete and not unresolved else "INCOMPLETE",
+            "content_type": report.content_type, "content": report.content_md, "reasons": [i["message"] for i in unresolved] + ([] if current else ["报告对应的输入或执行批次已失效"]),
+            "report_generated": report.report_generated, "scope_execution_complete": report.scope_execution_complete,
+            "risk_conclusion_available": report.risk_conclusion_available, "results_scope": "CURRENT_RUN", "current": current,
+            "input_revision": task.input_revision, "snapshot": report.snapshot_json, "conclusion": None,
+            "format_support": [{"format": report.content_type, "supported": True}],
+            "business_section_count": len(_task_manifest(task).get("report_template") or [])}
+
 
 def evidence_view(db: Session, task_no: str, evidence_no: str) -> dict[str, Any]:
     """单条证据只读视图：引用原文、来源与内容依据核对结论。"""

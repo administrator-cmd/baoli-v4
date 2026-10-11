@@ -57,12 +57,6 @@ export interface ReportConclusion {
     report_name: string | null;
     message: string;
   }>;
-  capability_gaps: Array<{
-    rule_name: string | null;
-    capability_id: string | null;
-    gap: string | null;
-    message: string | null;
-  }>;
 }
 
 export interface ReportRow {

@@ -28,35 +28,6 @@ class ScenarioEnabledRequest(BaseModel):
 class ScenarioPublishRequest(BaseModel):
     expected_revision: int = Field(ge=0)
     change_summary: str | None = Field(default=None, max_length=500)
-    acknowledged_capability_gaps: list[str] = Field(default_factory=list, max_length=500)
-
-
-class DraftNodeRequest(BaseModel):
-    node_code: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
-    node_type: str = Field(min_length=1, max_length=40)
-    name: str = Field(default="", max_length=120)
-    sequence_no: int | None = Field(default=None, ge=1)
-    depends_on: list[str] = Field(default_factory=list)
-    config_json: dict[str, Any] | None = None
-    enabled: bool = True
-
-
-class DraftNodeUpdateRequest(BaseModel):
-    node_type: str | None = Field(default=None, min_length=1, max_length=40)
-    name: str | None = Field(default=None, max_length=120)
-    sequence_no: int | None = Field(default=None, ge=1)
-    depends_on: list[str] | None = None
-    config_json: dict[str, Any] | None = None
-    enabled: bool | None = None
-
-
-class DraftSheetSelection(BaseModel):
-    sheet_role: str = Field(min_length=1, max_length=80)
-    node_code: str | None = Field(default=None, max_length=80)
-
-
-class DraftSheetSelectionRequest(BaseModel):
-    sheets: list[DraftSheetSelection] = Field(default_factory=list)
 
 
 class DraftDisabledSourceRowUpdateRequest(BaseModel):
@@ -99,8 +70,8 @@ class DraftFieldRequest(BaseModel):
     unit: str | None = Field(default=None, max_length=40)
     currency: str | None = Field(default=None, max_length=40)
     artifact_source: Literal["SEAL"] | None = None
-    period_scope: Literal["CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
-    statement_scope: Literal["CONSOLIDATED", "PARENT", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
+    period_scope: str = "NOT_APPLICABLE"
+    statement_scope: str = "NOT_APPLICABLE"
     required: bool = False
     instruction: str = Field(default="", max_length=4000)
     source_ref: str | None = Field(default=None, max_length=80)
@@ -116,8 +87,8 @@ class DraftFieldUpdateRequest(BaseModel):
     unit: str | None = Field(default=None, max_length=40)
     currency: str | None = Field(default=None, max_length=40)
     artifact_source: Literal["SEAL"] | None = None
-    period_scope: Literal["CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING", "NOT_APPLICABLE"] | None = None
-    statement_scope: Literal["CONSOLIDATED", "PARENT", "NOT_APPLICABLE"] | None = None
+    period_scope: str | None = None
+    statement_scope: str | None = None
     required: bool | None = None
     instruction: str | None = Field(default=None, max_length=4000)
     source_ref: str | None = Field(default=None, max_length=80)
@@ -134,8 +105,8 @@ class DraftRuleApplicability(BaseModel):
 
 class DraftRuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    node: str = Field(min_length=1, max_length=80)
-    operator: str = Field(min_length=1, max_length=40)
+    node: str = "RULE_EXECUTION"
+    operator: str = "LLM_EXECUTE"
     enabled: bool = True
     inputs: list[DraftRuleInput] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
@@ -145,7 +116,6 @@ class DraftRuleRequest(BaseModel):
     check_level: str | None = Field(default=None, max_length=40)
     risk_condition: str | None = None
     applicability: DraftRuleApplicability = Field(default_factory=DraftRuleApplicability)
-    source_node: str | None = Field(default=None, max_length=40)
     source_rule_key: str | None = Field(default=None, max_length=40)
     source_rule_keys: list[str] = Field(default_factory=list)
     source_rule_codes: list[str] = Field(default_factory=list)
@@ -164,7 +134,7 @@ class DraftSectionRequest(BaseModel):
     report_name: str | None = Field(default=None, max_length=255)
     material_keys: list[str] = Field(default_factory=list)
     formats: list[str] = Field(default_factory=list)
-    section_order: int | None = Field(default=None, ge=1)
+    section_order: int | None = None
     content_type: ReportContentType | None = None
     result_sort: ReportResultSort | None = None
     risk_level_order: list[str] = Field(default_factory=list)
@@ -179,7 +149,7 @@ class DraftSectionUpdateRequest(BaseModel):
     report_name: str | None = Field(default=None, max_length=255)
     material_keys: list[str] | None = None
     formats: list[str] | None = None
-    section_order: int | None = Field(default=None, ge=1)
+    section_order: int | None = None
     content_type: ReportContentType | None = None
     result_sort: ReportResultSort | None = None
     risk_level_order: list[str] | None = None

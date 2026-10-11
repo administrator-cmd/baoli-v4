@@ -44,7 +44,7 @@ const matchedKeywords = computed(() => {
 function materialStatusTone(status: string | null | undefined): StatusTone {
   if (status === "PREPARED" || status === "PROCESSED") return "success";
   if (status === "TYPE_REJECTED") return "danger";
-  if (status === "TYPE_REVIEW" || status === "TYPE_MISMATCH" || status === "WAITING_UPLOAD") return "warning";
+  if (status === "TYPE_REVIEW" || status === "WAITING_UPLOAD") return "warning";
   if (status === "UPLOADED") return "info";
   return "neutral";
 }

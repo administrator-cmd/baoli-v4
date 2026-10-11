@@ -1,7 +1,7 @@
 """审核执行的分层实现。
 
 各模块职责与依赖方向见 `docs/后端分层约定.md`。依赖顺序（只允许向下）：commands → flow →
-reviews → {reporting, views, quality, rules} → facts → state → evidence → artifacts → shared。
+reviews → {rule_execution, views, facts} → state → evidence → artifacts → shared。
 对外只暴露命令入口与只读视图。
 
 导出必须保持惰性（PEP 562 `__getattr__`）：急切 `import commands` 会让「只要导入本包的

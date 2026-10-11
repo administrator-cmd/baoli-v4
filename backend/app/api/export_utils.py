@@ -34,7 +34,6 @@ EXPORT_LABELS: dict[str, str] = {
     "PREPARED": "处理完成",
     "TYPE_REVIEW": "材料类型待复核",
     "TYPE_REJECTED": "材料类型不符",
-    "TYPE_MISMATCH": "材料类型待复核",
     "PENDING_REVIEW": "待复核",
     "EVIDENCE_INSUFFICIENT": "证据不足",
     "NOT_APPLICABLE": "不适用",

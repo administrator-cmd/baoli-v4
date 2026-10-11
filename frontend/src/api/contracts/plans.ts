@@ -1,6 +1,6 @@
 /** 审核方案与任务创建：方案选择、范围预览与任务创建结果。 */
 
-import type { ApiResponse } from "./common";
+import type { ApiResponse, JsonValue } from "./common";
 import type { DraftCalculationItem } from "./scenes";
 
 export interface PlanListItem {
@@ -108,12 +108,10 @@ export interface PlanRuleItem {
   sort_no?: number;
 }
 
-export interface PlanCalculationRuleItem extends Pick<DraftCalculationItem, "origin" | "parameter_sources" | "band_sources"> {
-  // PROGRAM 仅用于展示旧配置，已不支持发布或执行。
-  execution_engine: "PROGRAM" | "LLM";
+export interface PlanCalculationRuleItem extends Pick<DraftCalculationItem, "origin" | "parameter_sources"> {
   formula: string;
-  judgement_instruction: string;
-  execution_mode: "CHECK" | "VALUE_ONLY";
+  requirement: string;
+  business_context: Record<string, JsonValue>;
   rule_code: string;
   rule_name: string;
   node_code: string | null;

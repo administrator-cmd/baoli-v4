@@ -35,17 +35,10 @@ def declared_artifact_source(item: dict[str, Any]) -> str | None:
     return source
 
 
-# 材料位类型不可用的两种来源，必须分开：
-#   TYPE_REVIEW   类型待复核，尚未由人定案（人工裁决为证据不足，或旧自动识别写入且从未裁决）
-#   TYPE_REJECTED 类型已否，人工已明确确认与材料位不符
-# 旧值 TYPE_MISMATCH 无法区分两者，一律按待复核读取（它只可能由已下线的自动识别写入），
-# 沿用旧名会让从未裁决过的材料位被当成人工否定结论。
+# 材料类型待复核与已确认不符分别记录。
 MATERIAL_TYPE_REVIEW = "TYPE_REVIEW"
 MATERIAL_TYPE_REJECTED = "TYPE_REJECTED"
-# 历史状态值：只用于读取旧记录。
-LEGACY_TYPE_MISMATCH = "TYPE_MISMATCH"
-# 下游「材料类型不可用」判定用的完整集合：两种状态的法律后果相同，但展示文案不同。
-MATERIAL_TYPE_UNAVAILABLE_STATUSES = (MATERIAL_TYPE_REVIEW, MATERIAL_TYPE_REJECTED, LEGACY_TYPE_MISMATCH)
+MATERIAL_TYPE_UNAVAILABLE_STATUSES = (MATERIAL_TYPE_REVIEW, MATERIAL_TYPE_REJECTED)
 
 
 def is_type_unavailable(status: str | None) -> bool:
@@ -53,6 +46,118 @@ def is_type_unavailable(status: str | None) -> bool:
     return status in MATERIAL_TYPE_UNAVAILABLE_STATUSES
 
 
-def read_material_type_status(status: str | None) -> str | None:
-    """把历史状态值归一成当前语义：旧的 `TYPE_MISMATCH` 是自动识别留下的、从未裁决。"""
-    return MATERIAL_TYPE_REVIEW if status == LEGACY_TYPE_MISMATCH else status
+
+
+# 规则结果可能出现的状态。执行端与页面共用这一份集合：
+# 不在集合里的状态码必须显式暴露，不能被页面当成「未开始」静默吞掉。
+RULE_STATUSES: tuple[str, ...] = (
+    "COMPUTED",
+    "PASSED",
+    "ABNORMAL",
+    "EVIDENCE_INSUFFICIENT",
+    "NOT_APPLICABLE",
+    "NOT_EXECUTED",
+    "PENDING_REVIEW",
+    "REVIEWED",
+    "SKIPPED",
+    "RUNNING",
+)
+
+# 状态分类：页面分档与统计共用同一口径。
+#   已判定：系统或人工已经给出可用的业务结论（含人工改判后的「已复核」）。
+#   未判定：应当判定但还没有形成可用结论（证据不足、待复核、未执行、执行中、已跳过）。
+#   不适用：适用条件明确不成立，本次就不该判定。
+#   仅计算完成：已有中间值，本条没有配置合格/异常判定。
+# 「未执行 / 已跳过 / 未配置」与「证据不足」都不能算合格，也不能互相冒充。
+STATUS_CATEGORY_DECIDED = "DECIDED"
+STATUS_CATEGORY_UNDECIDED = "UNDECIDED"
+STATUS_CATEGORY_NOT_APPLICABLE = "NOT_APPLICABLE"
+STATUS_CATEGORY_COMPUTED = "COMPUTED"
+STATUS_CATEGORY_UNKNOWN = "UNKNOWN"
+
+STATUS_CATEGORIES: dict[str, str] = {
+    "COMPUTED": STATUS_CATEGORY_COMPUTED,
+    "PASSED": STATUS_CATEGORY_DECIDED,
+    "ABNORMAL": STATUS_CATEGORY_DECIDED,
+    "REVIEWED": STATUS_CATEGORY_DECIDED,
+    "EVIDENCE_INSUFFICIENT": STATUS_CATEGORY_UNDECIDED,
+    "PENDING_REVIEW": STATUS_CATEGORY_UNDECIDED,
+    "NOT_EXECUTED": STATUS_CATEGORY_UNDECIDED,
+    "RUNNING": STATUS_CATEGORY_UNDECIDED,
+    "SKIPPED": STATUS_CATEGORY_UNDECIDED,
+    "NOT_APPLICABLE": STATUS_CATEGORY_NOT_APPLICABLE,
+}
+
+# 状态的标准中文含义。它是系统对状态码的解释，与业务话术无关；
+# 页面显示状态时用这一份，未知状态码明确标为未识别，不用兜底文案冒充正常。
+RULE_STATUS_LABELS: dict[str, str] = {
+    "COMPUTED": "已计算（不作合格/异常判定）",
+    "PASSED": "合格",
+    "ABNORMAL": "不合格",
+    "EVIDENCE_INSUFFICIENT": "无法判断（证据或能力不足）",
+    "NOT_APPLICABLE": "不适用",
+    "NOT_EXECUTED": "未执行",
+    "PENDING_REVIEW": "待人工复核",
+    "REVIEWED": "已人工复核",
+    "SKIPPED": "已跳过",
+    "RUNNING": "执行中",
+}
+
+STATUS_CATEGORY_LABELS: dict[str, str] = {
+    STATUS_CATEGORY_COMPUTED: "仅计算完成",
+    STATUS_CATEGORY_DECIDED: "已判定",
+    STATUS_CATEGORY_UNDECIDED: "尚未判定",
+    STATUS_CATEGORY_NOT_APPLICABLE: "不适用",
+    STATUS_CATEGORY_UNKNOWN: "未识别状态",
+}
+
+# 每种「未判定」到底缺什么。统一写成「证据不足」会让人不知道该去补哪一步。
+STATUS_NOTES: dict[str, str] = {
+    "COMPUTED": "已产生可供下游使用的中间值，本条没有合格或异常结论。",
+    "EVIDENCE_INSUFFICIENT": "尚未形成可用结论，具体缺什么见该条结果的原因；它既不是合格，也不是不合格。",
+    "PENDING_REVIEW": "系统已给出待确认的判断，等待人工确认后才是最终结论。",
+    "NOT_EXECUTED": "该检查本次没有执行，不能据此认为检查通过。",
+    "SKIPPED": "该规则本次已跳过，具体原因见执行结果；跳过不等于通过。",
+    "RUNNING": "该检查正在执行，尚未形成结果。",
+    "NOT_APPLICABLE": "适用条件明确不成立，本次不该执行这条检查；不适用不等于通过。",
+}
+
+
+def status_category_of(status: str | None) -> str:
+    """规则结果状态的分档。未知状态码返回 UNKNOWN，不归入任何已知分档。"""
+    if not isinstance(status, str):
+        return STATUS_CATEGORY_UNKNOWN
+    return STATUS_CATEGORIES.get(status, STATUS_CATEGORY_UNKNOWN)
+
+def status_label_of(status: str | None) -> str | None:
+    """状态的标准中文含义；未知状态码返回 None（调用方必须显式显示原始码）。"""
+    if not isinstance(status, str):
+        return None
+    return RULE_STATUS_LABELS.get(status)
+
+def status_category_label_of(status: str | None) -> str | None:
+    """状态分档的中文名；未知状态码归入「未识别状态」。"""
+    category = status_category_of(status)
+    return STATUS_CATEGORY_LABELS.get(category)
+
+def status_note(status: str | None) -> str | None:
+    """某个「未判定」状态到底缺什么；未知状态码返回 None。"""
+    if not isinstance(status, str):
+        return None
+    return STATUS_NOTES.get(status)
+
+def status_view(status: str | None) -> dict[str, Any]:
+    """一个状态码的标准解释，供接口与页面共用。
+
+    未知状态码 `known=False` 且 `label=None`：页面必须显示原始码并标注「未识别」，
+    不能用「未开始」这类兜底文案把它伪装成正常状态。
+    """
+    known = isinstance(status, str) and status in RULE_STATUSES
+    return {
+        "status": status,
+        "known": known,
+        "label": status_label_of(status),
+        "category": status_category_of(status),
+        "category_label": status_category_label_of(status),
+        "note": status_note(status),
+    }

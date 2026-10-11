@@ -184,73 +184,11 @@ def _assert_spec_shape(spec: tool_catalog.ToolSpec) -> None:
     _assert_supported_schema(spec.output_schema, path=f"{spec.tool_id}.output_schema")
 
 
-def _scene_node_types(scene_code: str) -> frozenset[str] | None:
-    """一个场景实际配置的节点能力类型。
-
-    场景用哪些节点由用户在 config_json 中配置；节点能力目录定义系统可执行类型，
-    一个场景只使用实际配置的那部分节点实例。
-    这里读该场景草稿里的节点实例类型；场景不存在或没有配置节点时返回 None，
-    调用方据此跳过场景校验而不是当成「不允许」——把配置未就绪读成「越权」
-    会让一次正常的调用被误拒。
-    """
-    from ..entity import ScenarioDraft, ScenarioDraftNode
-    from ..database import SessionLocal
-
-    with SessionLocal() as session:
-        draft = session.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == scene_code))
-        if draft is None:
-            return None
-        types = {
-            str(item.node_type)
-            for item in config_store.rows(session, ScenarioDraftNode, draft.id)
-            if item.node_type
-        }
-    return frozenset(types) if types else None
-
-
-def _assert_scene_scope(
-    spec: tool_catalog.ToolSpec,
-    scene_code: str | None,
-    *,
-    declared_nodes: frozenset[str] | None = None,
-) -> None:
-    """工具是否适用于该场景。
-
-    `allowed_scenes` 显式声明时按它判断（精确名单优先）。未声明时不是「无约束」，而是按两件
-    已声明的事实推导：工具的 `allowed_nodes` 与该场景实际配置的节点类型是否相交——一个工具
-    只能挂在某几类节点上，而场景根本没配那类节点，这个工具在该场景里就没有位置，这是确定性
-    结论而不是猜测。
-
-    例如日期比较只挂「文件内部校验 / 文件交叉校验」，某场景没配这两类节点，就不能调用它。
-    """
-    if scene_code is None:
-        return
-    if spec.allowed_scenes is not None:
-        if scene_code not in spec.allowed_scenes:
-            raise BusinessError(
-                "TOOL_SCENE_NOT_ALLOWED",
-                f"工具“{spec.label}”不适用于当前场景",
-                details={"tool_id": spec.tool_id, "scene_code": scene_code},
-            )
-        return
-    if not spec.allowed_nodes:
-        # 工具本身不限定节点，场景层面因此没有可推导的约束。
-        return
-    declared = declared_nodes if declared_nodes is not None else _scene_node_types(scene_code)
-    if declared is None:
-        # 场景 Profile 不可读：配置问题，不当作越权。
-        return
-    if not (declared & spec.allowed_nodes):
-        raise BusinessError(
-            "TOOL_SCENE_NOT_ALLOWED",
-            f"工具“{spec.label}”不适用于当前场景：该场景没有声明它可挂载的节点类型",
-            details={
-                "tool_id": spec.tool_id,
-                "scene_code": scene_code,
-                "tool_nodes": sorted(spec.allowed_nodes),
-                "scene_nodes": sorted(declared),
-            },
-        )
+def _assert_scene_scope(spec: tool_catalog.ToolSpec, scene_code: str | None) -> None:
+    """仅遵守工具明确声明的场景权限，不根据业务节点推导权限。"""
+    if spec.allowed_scenes is not None and scene_code is not None and scene_code not in spec.allowed_scenes:
+        raise BusinessError("TOOL_SCENE_NOT_ALLOWED", f"工具“{spec.label}”不适用于当前场景",
+                            details={"tool_id": spec.tool_id, "scene_code": scene_code})
 
 
 def _resolve_policy_version(spec: tool_catalog.ToolSpec, context: ToolExecutionContext | None) -> None:
@@ -369,44 +307,7 @@ def resolve(
             details={"tool_id": spec.tool_id},
         )
     effective_scene = scene_type if scene_type is not None else (context.scene_code if context else None)
-    effective_node = node_code if node_code is not None else (context.node_code if context else None)
-    manifest = None
-    if context is not None and context.task_id is not None and context.database_session is not None:
-        from ..entity import AuditTask
-
-        task = context.database_session.get(AuditTask, context.task_id)
-        if task is None:
-            raise BusinessError("TOOL_TASK_MISSING", "工具调用关联的审核任务不存在", status_code=500)
-        manifest = task.manifest_json
-    node_types = None
-    if isinstance(manifest, dict):
-        node_types = {
-            str(item["node_code"]): str(item.get("node_type") or item["node_code"])
-            for item in manifest.get("nodes", [])
-            if isinstance(item, dict) and item.get("node_code")
-        }
-    _assert_scene_scope(
-        spec,
-        effective_scene,
-        declared_nodes=frozenset(node_types.values()) if node_types is not None else None,
-    )
-    if effective_node is not None and node_types is not None and effective_node not in node_types:
-        raise BusinessError(
-            "TOOL_NODE_NOT_ALLOWED",
-            "工具调用的节点不在任务冻结的流程中",
-            details={"tool_id": spec.tool_id, "node_code": effective_node},
-        )
-    effective_node_type = (
-        node_types[effective_node]
-        if effective_node is not None and node_types is not None
-        else effective_node
-    )
-    if spec.allowed_nodes and effective_node_type is not None and effective_node_type not in spec.allowed_nodes:
-        raise BusinessError(
-            "TOOL_NODE_NOT_ALLOWED",
-            f"工具“{spec.label}”不能挂在这个节点上",
-            details={"tool_id": spec.tool_id, "node_code": effective_node, "node_type": effective_node_type, "allowed": sorted(spec.allowed_nodes)},
-        )
+    _assert_scene_scope(spec, effective_scene)
     _resolve_policy_version(spec, context)
     _assert_catalog_identity(spec, context)
     _assert_spec_shape(spec)

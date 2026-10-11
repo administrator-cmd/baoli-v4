@@ -22,10 +22,8 @@ const statusLabels: Record<string, string> = {
   EXCLUDED: "已排除",
   BOUND: "已选择",
   PROPOSED: "已转换",
-  PENDING_DECISION: "等待业务确认",
   CONFIRMED: "已确认",
   // 仅用于历史作业展示，不是当前可写入状态。
-  PRECHECKED: "检查完成（历史）",
   PUBLISHED: "已发布",
   APPLIED: "已写入场景草稿",
   CONTRACT_INVALID: "转换结果无效",
@@ -51,7 +49,6 @@ const statusLabels: Record<string, string> = {
   RESOLVED: "已解决",
   TYPE_REVIEW: "材料类型待复核",
   TYPE_REJECTED: "材料类型不符",
-  TYPE_MISMATCH: "材料类型待复核",
   SUPERSEDED: "已替换",
   PRESENT: "已抽取",
   NOT_PRESENT: "未抽取到",
@@ -124,9 +121,7 @@ const statusTones: Record<string, StatusTone> = {
   EXCLUDED: "neutral",
   BOUND: "info",
   PROPOSED: "info",
-  PENDING_DECISION: "warning",
   CONFIRMED: "success",
-  PRECHECKED: "success",
   PUBLISHED: "success",
   CONTRACT_INVALID: "danger",
   SOURCE_REF_INVALID: "danger",
@@ -155,7 +150,6 @@ const statusTones: Record<string, StatusTone> = {
   SUPERSEDED: "neutral",
   TYPE_REVIEW: "warning",
   TYPE_REJECTED: "danger",
-  TYPE_MISMATCH: "warning",
 
   // 字段与规则结果
   PRESENT: "success",
@@ -341,40 +335,10 @@ export function statusTagType(status: string | null | undefined): TagType {
   return toneTagType(statusTone(status));
 }
 
-/**
- * 候选的业务状态。与工作流状态不同名（PENDING 在节点上是「待处理」，在候选上是「待补充」），
- * 所以单独一张表，不能靠 statusLabel 猜。
- */
-const candidateStateLabels: Record<string, string> = {
-  AUTO: "自动识别",
-  PENDING: "待补充",
-  MANUAL: "已人工处理",
-  EXCLUDED: "已排除",
-};
-
-export function candidateStateLabel(state: string | null | undefined): string {
-  return state ? candidateStateLabels[state] ?? "状态未知" : "状态未知";
-}
-
-/** 候选处理方式对应的颜色：待补充是橙，已排除是灰，不能显示成通过。 */
-export function candidateStateTone(state: string | null | undefined): StatusTone {
-  if (state === "PENDING") {
-    return "warning";
-  }
-  if (state === "MANUAL") {
-    return "success";
-  }
-  if (state === "AUTO") {
-    return "info";
-  }
-  return "neutral";
-}
-
-/** 后台操作类型，用于「当前步骤」而不是展示内部编码。 */
 const operationTypeLabels: Record<string, string> = {
   IMPORT_CONVERT: "规则解析与转换",
   SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
-  NODE_EXECUTE: "业务节点执行",
+  NODE_EXECUTE: "规则执行",
   MANUAL_REVIEW_RESUME: "人工复核恢复",
   // 管理模块：业务写操作与命令
   CREATE: "新增",
@@ -404,7 +368,6 @@ const operationTypeLabels: Record<string, string> = {
   APPLY_DRAFT: "导入写入场景草稿",
   IMPORT_APPLY: "规则库写入场景草稿",
   TASK_CREATE: "创建审核任务",
-  SAVE_FROM_TASK: "历史任务另存为方案",
   FIELD_CORRECTION: "字段纠错",
   REPORT_REMARK: "编辑报告备注",
   REPORT_ARCHIVE: "归档报告",
@@ -430,6 +393,7 @@ export function objectTypeLabel(objectType: string | null | undefined): string {
 
 /** 业务节点中文名，用于节点编码兜底展示。 */
 const nodeLabels: Record<string, string> = {
+  RULE_EXECUTION: "执行生效规则",
   MATERIAL_CHECK: "材料检查",
   DOCUMENT_PREPARE: "文件处理",
   FIELD_EXTRACTION: "字段抽取",
@@ -494,10 +458,8 @@ const nonBusinessSheetRoleLabels: Record<string, string> = {
 /**
  * 风险来源的业务属性标签。
  *
- * 来源节点与来源审核规则的中文文案由服务端返回（source_node_label / source_rule_name），
- * 前端只负责列名，不自行推断来源节点的中文名。
+ * 来源规则名称由服务端按实际引用返回，前端不推断其业务阶段。
  */
-export const riskSourceNodeColumnLabel = "来源节点";
 export const riskSourceRuleColumnLabel = "来源审核规则";
 
 /** 规则结果状态的中文口径；未识别的状态码连同原始码一起显示。 */
@@ -794,19 +756,11 @@ export const dateCompareOperatorOptions = [
   { value: "LT", label: "早于" },
 ];
 
-export const riskSourceNodeOptions = [
-  { value: "MATERIAL_QUALITY", label: "材料质量" },
-  { value: "INTERNAL_VALIDATE", label: "文件内部校验" },
-  { value: "CROSS_VALIDATE", label: "文件交叉校验" },
-];
 
 /**
  * 规则算子的兜底中文名。
  *
- * 页面显示检查方式时优先用后端能力目录返回的标签（`/system/capabilities` 的 `label`），
- * 这里只在目录标签取不到时兜底，或用于纯展示的历史文案映射。
- * 它不用于下拉选项：选项一律来自能力目录，本地名单与后端漂移过一次
- * （后端 14 个算子、页面只有 7 个），页面上打开一条已导入的规则会找不到它的当前取值。
+ * 仅用于展示规则原文中的动作名称；不构成可执行能力或工具选项清单。
  */
 export const ruleOperatorOptions = [
   { value: "FILE_QUALITY_CHECK", label: "文件质量检查" },
@@ -830,11 +784,10 @@ const failureNextSteps: Record<string, string> = {
   REQUEST_TIMEOUT: "已提交的后台操作不会丢失，可稍后重新查询状态；不要重复提交。",
   OPERATION_ALREADY_ACTIVE: "该对象已有正在执行的后台操作，请等待其结束或用「再次查询」查看真实状态。",
   INVALID_RESPONSE: "服务返回的内容无法识别，请查看后端日志确认接口版本是否一致。",
-  MANUAL_REVIEW_NOT_WAITING: "任务当前不在人工复核等待状态，请先执行到人工复核节点。",
+  MANUAL_REVIEW_NOT_WAITING: "任务当前不在人工复核等待状态，请先进入规则要求的人工确认等待点。",
   TASK_DOCUMENT_REPLACE_CONFIRMATION_REQUIRED: "该材料位已有文件，替换上传需要先明确确认替换。",
   TASK_DOCUMENT_LOCKED: "任务已结束，材料不可再替换；如需继续请新建审核任务。",
   AUDIT_TASK_RUNNING: "任务正在执行当前节点，等待执行结束后再替换材料。",
-  BLOCKED_BY_PRECHECK: "历史导入发布检查存在阻断项；新导入请写入场景草稿后，在场景页处理发布问题。",
 
   // 工作表选择错误与历史标准格式错误
   SHEET_ROLE_REQUIRED: "历史标准格式缺少工作表角色；可重新上传规则库，按当前 LLM 流程解析。",
@@ -864,7 +817,7 @@ const failureNextSteps: Record<string, string> = {
   // 配置编译、场景发布与历史导入发布
   IMPORT_STATUS_NOT_READY: "当前作业还没有完成规则转换，请先选择参与解析的工作表并提交解析。",
   PROPOSALS_MISSING: "规则尚未转换，请先选择参与解析的工作表并提交解析。",
-  ISSUES_UNRESOLVED: "先为每一项业务问题提交业务结论，再写入场景草稿。",
+  ISSUES_UNRESOLVED: "查看解析失败详情，再写入场景草稿。",
   MANIFEST_NO_MATERIAL: "在当前场景中至少配置一个材料位，再重新解析或发布。",
   MANIFEST_NO_RULE: "至少配置一条检查规则（或确认本场景只需要字段抽取），再重新解析或发布。",
   MANIFEST_NODE_RULE_MISSING: "为缺失的必需节点补充规则，再重新解析或发布。",
@@ -877,8 +830,6 @@ const failureNextSteps: Record<string, string> = {
   MANIFEST_RISK_SOURCE_REQUIRED: "为风险配置声明实际依赖的审核规则或计算结果。",
   MANIFEST_RISK_REVIEW_NODE_ORDER_INVALID: "风险评定排在人工复核之后，不能再要求新增人工复核；请去掉该风险规则的人工复核要求后重新解析。",
   MANIFEST_APPLICABILITY_MATERIAL_MISSING: "为「所引用材料均已上传时」的规则补充所引用的材料，或把适用条件改为始终适用。",
-  PUBLISH_PRECHECK_FAILED: "这是历史导入发布接口留下的阻断。新导入请写入场景草稿，再在场景页按发布检查处理。",
-  PUBLISH_PRECHECK_REQUIRED: "这是历史导入发布接口的结果。新导入不能从这里发布，请写入场景草稿后再到场景页发布。",
   PUBLISH_PREVIEW_MISMATCH: "历史导入发布的内容与当时的检查结果不一致。新导入请写入场景草稿，再在场景页发布。",
   IMPORT_DOES_NOT_PUBLISH_SCENE: "规则库导入不能直接发布场景。请先写入该场景草稿，核对配置后在场景页执行「发布场景」。",
   IMPORT_ALREADY_APPLIED: "该导入作业已经写入场景草稿，不能再改。请到场景草稿里修改，或重新上传一份规则库。",

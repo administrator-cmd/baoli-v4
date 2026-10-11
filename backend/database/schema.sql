@@ -139,7 +139,6 @@ CREATE TABLE import_job (
     status VARCHAR(40) NOT NULL,
     workbook_ir_json JSON NOT NULL,
     proposals_json JSON NULL,
-    decisions_json JSON NULL,
     manifest_draft_json JSON NULL,
     -- 每条来源业务记录的处置（候选 / 明确排除 / 待处理问题）及合并拆分关系。
     coverage_json JSON NULL,

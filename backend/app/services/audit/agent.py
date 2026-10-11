@@ -1,7 +1,7 @@
-"""规则评估 Agent：在授权范围内选择取证与比较工具，形成候选结论。
+"""规则执行 Agent：直接抽取、计算、判断，按需选择真实工具。
 
-Agent 只负责选工具与形成候选结论。任务加载、模型调用、人工审核、保存结果、报告渲染
-全部由 Graph 控制。这里没有函数内部循环——循环由 `graphs/audit_graph.py` 的节点与条件边
+模型按规则生成实际产出；任务加载、模型调用、按需人工确认与结果保存由 Graph 控制。
+这里没有函数内部循环——循环由 `graphs/audit_graph.py` 的节点与条件边
 表达，因此每一步都是可 checkpoint 的状态，interrupt / resume 能停在循环中间。
 
 为什么不在这里循环：一旦在函数内部跑完整个「模型 → 工具 → 模型」，interrupt 就只能停在
@@ -20,7 +20,7 @@ import json
 import logging
 from typing import Any
 
-from ...domain import capabilities, fact_snapshot, tool_catalog
+from ...domain import fact_snapshot, tool_catalog
 from ...domain.tool_context import ToolExecutionContext
 from ...common.exceptions import BusinessError
 from ...integrations.llm.gateway import ModelTurn, call_chat
@@ -40,7 +40,7 @@ LOOP_DONE = "DONE"
 HUMAN_REVIEW_STATUSES = frozenset({"PENDING_REVIEW"})
 
 # 模型能给出的结论状态。与能力目录的规则状态口径一致：模型不是另立一套状态。
-VERDICT_STATUSES = frozenset({"PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT", "PENDING_REVIEW"})
+VERDICT_STATUSES = frozenset({"PASSED", "ABNORMAL", "COMPUTED", "NOT_APPLICABLE", "EVIDENCE_INSUFFICIENT", "PENDING_REVIEW"})
 
 # 候选结论的固定 Schema。模型按它输出，服务端按它校验；两者是同一份清单
 # （见 `validate_verdict`），任何一侧单独改动都会被校验当场发现。
@@ -52,6 +52,8 @@ VERDICT_SCHEMA: dict[str, Any] = {
         # 证据引用：本次评估的工具调用标识，或冻结快照里的事实身份。
         # 提供的引用必须能在本次评估里找到。
         "evidence": {"type": "array"},
+        "outputs": {"type": "array"},
+        "report": {"type": "object"},
     },
     "required": ["status", "message", "evidence"],
     "additionalProperties": False,
@@ -66,13 +68,23 @@ _SYSTEM_PROMPT = """你是场景共用的辅助规则执行器。按本次传入
 不审核规则的业务正确性，不替管理员修改方法、阈值或条件。
 能由 LLM 完成的计算、日期处理、比较、汇总和判断直接完成，不要求必须调用工具。
 需要额外能力时从本次工具列表选择合适工具，通过 tool_calls 执行；参数按规则原文和工具 Schema 填写。
+需要查阅关联规则、计算公式或 Excel 原文时调用 RULE_LIBRARY_QUERY，inputs 填 []。
+parameters 可按 rule_codes（规则或计算结果编号）、rule_keys、query（原文关键词）和 kind 查询；
+不填写条件则列出本任务全部生效规则。多个条件同时填写时取交集。
+查询返回的是规则配置，查询成功不代表业务检查通过；不得据此编造材料事实或来源检查结果。
 inputs 只使用提供的 field_key/material_key，真实数值由系统按这些身份读取，不编造数据。
 工具不可用或调用失败时保留具体错误；若已有其他真实依据足以执行，可按该依据完成并说明。
 LLM 和可用工具都不能完成时返回 EVIDENCE_INSUFFICIENT，message 明确说明“无法执行”及原因，
 不要假装通过。只有业务明确要求工作人员确认时使用 PENDING_REVIEW。
-状态使用 PASSED、ABNORMAL、EVIDENCE_INSUFFICIENT、PENDING_REVIEW。
+状态使用 PASSED、ABNORMAL、COMPUTED、NOT_APPLICABLE、EVIDENCE_INSUFFICIENT、PENDING_REVIEW。
+业务原文仅要求计算中间值、未要求审核判断时，成功返回 COMPUTED；业务适用条件不成立时返回 NOT_APPLICABLE。
 保留工具实际返回值，说明本次使用的原文、字段事实、计算过程或工具结果。
-最终只输出 JSON：{"status":"...","message":"...","evidence":[]}。
+抽取与计算必须返回 outputs，不得只描述已经完成。每项为 {"code":"声明的输出字段键或result_code","value":真实结果,"raw_value":"来源原文或计算过程"}。
+只允许产出本规则 output_definitions 和 result_code 声明的身份，STRUCTURED字段value为声明Schema对应的JSON对象。
+报告返回 report:{"content":"完整正文","content_type":"实际正文MIME类型"}，支持text/markdown、text/plain、text/html，按 report_definition 原要求输出；格式无法实现时明确无法执行。
+需要实际材料内容时调用 TASK_DATA_READ，parameters.material_keys 填提供的材料身份；inputs 填 []。
+执行抽取和计算不需要调用另一个LLM工具，直接依据读取的材料和 upstream_facts 完成。
+最终只输出 JSON：{"status":"...","message":"...","evidence":[],"outputs":[],"report":...}。
 evidence 可引用实际工具结果的 tool_call_id，或事实身份 {"fact_code":"...","material_key":"..."}。
 """
 
@@ -89,7 +101,7 @@ def build_rule_context(
     只给本次规则实际使用的事实与标识。给全量事实会让模型在无关字段上做判断，
     也会让它有机会引用不属于这条规则的输入。
     """
-    tool_id = capabilities.capability_id_of_rule(rule)
+    tool_id = "LLM 与可用工具"
     published_parameters = dict(rule.get("parameters") or {})
     lines = [
         f"规则编号：{rule.get('rule_code') or rule.get('rule_key')}",
@@ -319,6 +331,8 @@ def validate_verdict(
         "status": raw["status"],
         "message": raw["message"].strip(),
         "evidence": refs,
+        "outputs": raw.get("outputs", []),
+        "report": raw.get("report"),
         "rule_key": rule.get("rule_key"),
         "rule_name": rule.get("name"),
     }
@@ -649,9 +663,8 @@ def freeze_snapshot(
     冻结发生在评估开始时、调模型之前：本次评估的全部工具调用都从这份内容解析事实，
     不再读「当前数据」。
 
-    新快照只读取本规则声明的字段身份，不复制其它字段或派生计算值；没有字段输入时
-    facts 为空。材料位身份仍完整保留，文件查重需要对照同任务其它上传。历史未声明
-    facts_scope 的快照仍按全任务事实范围核对，不覆盖、不自动迁移。
+    新快照读取本规则声明的字段与上游计算事实；报告读取其消费的任务事实集合。
+    材料位身份仍完整保留。旧事实范围协议明确拒绝，不做兼容转换。
 
     幂等的口径是「先按作用域查，再逐列核对内容」：同一 (评估批次, 规则实例, 输入修订) 已有
     记录且事实与材料内容、工具目录身份、策略身份、授权工具定义完全一致时复用原记录；内容
@@ -670,22 +683,30 @@ def freeze_snapshot(
     existing = _snapshot_of_scope(
         db, evaluation_id=evaluation_id, rule_instance_id=rule_instance_id, input_revision=input_revision,
     )
-    rule_inputs: list[dict[str, Any]] | None = fact_snapshot.declared_inputs_of(rule)
+    rule_inputs = fact_snapshot.declared_inputs_of(rule)
     if existing is not None:
         load_snapshot(db, task=task, snapshot_ref=existing.snapshot_ref)
-        # 未声明 facts_scope 的版本 8 记录是历史全任务快照。恢复时仍按它的原有
-        # 范围核对，不能用较小的新快照替换、或把范围变化误报成业务输入变化。
-        if "facts_scope" not in existing.facts_json:
-            rule_inputs = None
-        elif existing.facts_json["facts_scope"] != "RULE_INPUTS":
+        if existing.facts_json.get("facts_scope") != "RULE_CONTEXT":
             raise BusinessError(
                 "AGENT_SNAPSHOT_INVALID",
                 "冻结事实快照的取数范围协议无法识别，本次调用未执行",
                 status_code=500,
-                details={"snapshot_ref": existing.snapshot_ref, "facts_scope": existing.facts_json["facts_scope"]},
+                details={"snapshot_ref": existing.snapshot_ref, "facts_scope": existing.facts_json.get("facts_scope")},
             )
     materials = _task_materials(db, task)
-    facts = _task_facts(db, task, materials, rule_inputs=rule_inputs)
+    facts = _task_facts(db, task, materials, rule_inputs=None if rule.get("kind") == "REPORT" else rule_inputs)
+    # 上游计算是真实输入，同字段一起冻结，供模型结论引用其实际事实身份。
+    from ...entity import TaskFact
+    definition = rule.get("calculation_definition") or {}
+    result_codes = set(rule.get("source_rule_codes") or []) | set(definition.get("depends_on_result_codes") or [])
+    result_codes.update(p["source_code"] for p in definition.get("parameters") or []
+                        if p.get("source_type") == "CALC_RESULT" and p.get("source_code"))
+    known = {(f["fact_code"], f.get("material_key"), f.get("revision_no")) for f in facts}
+    derived = [f for f in task_csv_service.records(db, task, TaskFact)
+               if f.is_current and f.fact_kind == "DERIVED"
+               and (rule.get("kind") == "REPORT" or f.fact_code in result_codes)
+               and (f.fact_code, f.material_key, f.revision_no) not in known]
+    facts.extend(fact_snapshot.facts_of_task_fact_rows(derived))
     scope = fact_snapshot.scope_of(
         evaluation_id=evaluation_id,
         rule_instance_id=rule_instance_id,
@@ -701,9 +722,8 @@ def freeze_snapshot(
         rule_instance_id=rule_instance_id,
         input_revision=input_revision,
     )
-    if rule_inputs is not None:
-        payload["facts_scope"] = "RULE_INPUTS"
-        payload["declared_inputs"] = rule_inputs
+    payload["facts_scope"] = "RULE_CONTEXT"
+    payload["declared_inputs"] = rule_inputs
     if existing is not None:
         _assert_snapshot_same(
             existing,
@@ -1083,38 +1103,6 @@ def execution_context(
     )
 
 
-def published_tool_parameters(
-    rule: dict[str, Any],
-    manifest: dict[str, Any],
-    tool_id: str | None,
-) -> dict[str, Any]:
-    spec = tool_catalog.tool_spec(tool_id)
-    if spec is None:
-        raise BusinessError(
-            "TOOL_NOT_REGISTERED",
-            "已发布规则引用的执行能力不在工具目录中",
-            status_code=500,
-            details={"rule_key": rule.get("rule_key"), "tool_id": tool_id},
-        )
-    rule_parameters = rule.get("parameters")
-    if not isinstance(rule_parameters, dict):
-        raise BusinessError(
-            "TOOL_RULE_PARAMETERS_MISSING",
-            "已发布规则缺少参数对象，本次工具调用未执行",
-            status_code=500,
-            details={"rule_key": rule.get("rule_key")},
-        )
-    accepted = spec.input_schema["properties"]["parameters"]["properties"]
-    published = {key: value for key, value in rule_parameters.items() if key in accepted}
-    if "material_refs" in accepted:
-        published["material_refs"] = list(rule.get("materials") or [])
-    if "source_rule_codes" in accepted:
-        from .rules import _risk_source_result_keys
-
-        published["source_rule_codes"] = _risk_source_result_keys(rule, manifest)
-    return published
-
-
 def invoke_tool(
     db: Session,
     *,
@@ -1154,21 +1142,18 @@ def invoke_tool(
     # 留下的 RUNNING 正是「状态未知、必须核查」的真实表达。提交后即释放行锁。
     db.commit()
     try:
-        semantic = rule.get("operator") == "LLM_VALIDATE"
-        published_tool_id = None if semantic else capabilities.capability_id_of_rule(rule)
-        published_parameters = None if semantic else published_tool_parameters(rule, manifest, published_tool_id)
+        query_tool = call["tool_name"] == "RULE_LIBRARY_QUERY"
         result = tool_service.invoke(
             call["tool_name"],
             call.get("arguments"),
             inputs=inputs,
-            runtime=runtime,
+            runtime=None if query_tool else runtime,
             context=context,
-            published_parameters=published_parameters,
-            published_tool_id=published_tool_id,
         )
         # 风险来源及实际材料由系统从同一批来源结果生成，与判定一起写入账本。
         # 恢复时直接复用账本的原内容，不重查并替换当时的来源结论。
-        result = {**result, **result_context}
+        if not query_tool:
+            result = {**result, **result_context}
     except BusinessError as exc:
         ledger.mark_failed(db, record, exc)
         db.commit()

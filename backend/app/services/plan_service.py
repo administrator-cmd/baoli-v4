@@ -42,8 +42,7 @@ from ..domain.identity import public_no, stable_key
 from .operation_log_service import record_operation
 from .operation_types import OBJECT_PLAN
 from . import operation_log_service
-# 计算配置的解析口径只有一处（草稿与方案共用）：它区分「候选列表」与「历史版本留下的
-# 已编译结果」，各写一份会让同一份 calculation_json 在两个入口解释成不同的东西。
+# 草稿与方案共用原始计算定义读取口径，不转换旧编译产物。
 from .scenario_admin_service import (
     _calculation_store, _calculation_view_rows,
     _calculations_referencing_field, _remap_calculation_field_codes,
@@ -164,8 +163,6 @@ def _latest_published_version_of(db: Session, scenario_code: str) -> ScenarioVer
     )
 
 
-
-
 def _selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
     """方案视图。
 
@@ -176,8 +173,8 @@ def _selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
     materials = sorted(config_store.rows(db, PlanMaterial, plan.id), key=lambda item: (item.sort_no, item.id,))
     field_count = len(plan.config_json["fields"])
     context = plan.context_json if isinstance(plan.context_json, dict) else {}
-    calculation_candidates, frozen_calculations, calculation_enabled = _plan_calculation_config(context)
-    calculation_source = frozen_calculations if frozen_calculations is not None else calculation_candidates
+    calculation_candidates, calculation_enabled = _plan_calculation_config(context)
+    calculation_source = calculation_candidates
     # 场景版本只是溯源：这份方案从哪一版复制而来，执行与范围都不读它。
     version = db.get(ScenarioVersion, plan.scenario_version_id) if plan.scenario_version_id else None
     return {
@@ -210,7 +207,7 @@ def _selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
                 "node": item.node_code,
                 "enabled": item.enabled,
             }
-            for item in rules
+            for item in rules if not item.rule_json.get("calculation_ref")
         ],
         "calculation_rules": [
             {
@@ -317,7 +314,7 @@ def list_plans_page(
                 "base_scenario_version_no": base_version.version_no if base_version else None,
                 "effective": plan.sync_error is None and plan.scope_json is not None,
                 "sync_error": plan.sync_error,
-                "enabled_rule_count": len(scope.get("enabled_rule_keys", [])) + sum(calculation_enabled.values()),
+                "enabled_rule_count": len(scope.get("enabled_rule_keys", [])),
                 "explicit_rule_count": rule_counts.get(plan.id, 0) + sum(calculation_enabled.values()),
                 "updated_at": plan.updated_at,
             }
@@ -420,7 +417,6 @@ def create_plan(db: Session, payload: dict[str, Any]) -> AuditPlan:
     db.commit()
     db.refresh(plan)
     return plan
-
 
 
 def update_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> AuditPlan:
@@ -583,13 +579,14 @@ def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, A
     for index, item in enumerate(config["fields"], start=1):
         config_store.add_mapping(db, PlanField, plan.id, item, index)
     for index, item in enumerate(config["rules"], start=1):
-        config_store.add_mapping(db, PlanRule, plan.id, {key: value for key, value in item.items() if key != "is_system"}, index)
+        if not item["rule_json"].get("calculation_ref"):
+            config_store.add_mapping(db, PlanRule, plan.id, {key: value for key, value in item.items() if key != "is_system"}, index)
     for index, item in enumerate(config["sections"], start=1):
         config_store.add_mapping(db, PlanSection, plan.id, item, index)
     # 节点与选用 Sheet 是场景级执行结构：方案里只读，随方案冻结一份供编译使用。
     # 计算定义沿用场景版本，方案单独保存逐条启停选择。
-    calculation_candidates, frozen_calculations = _calculation_store(config["calculation_json"])
-    calculation_source = frozen_calculations if frozen_calculations is not None else calculation_candidates
+    calculation_candidates = _calculation_store(config["calculation_json"])
+    calculation_source = calculation_candidates
     plan.context_json = {
         "nodes": config["nodes"],
         "selected_sheets": config["sheets"],
@@ -606,9 +603,9 @@ def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, A
 
 def _plan_calculation_config(
     context: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, dict[str, bool]]:
-    candidates, frozen = _calculation_store(context.get("calculation_json"))
-    source = frozen if frozen is not None else candidates
+) -> tuple[list[dict[str, Any]], dict[str, bool]]:
+    candidates = _calculation_store(context.get("calculation_json"))
+    source = candidates
     codes = [str(item.get("rule_code") or "") for item in source]
     if not all(codes) or len(set(codes)) != len(codes):
         raise BusinessError("PLAN_CALC_CODE_INVALID", "方案的计算规则编号缺失或重复，无法确定启停范围")
@@ -620,39 +617,24 @@ def _plan_calculation_config(
         enabled = dict(saved)
     else:
         raise BusinessError("PLAN_CALC_SELECTION_INVALID", "方案的计算规则启停选择与规则集合不一致")
-    return candidates, frozen, enabled
+    return candidates, enabled
 
 
 def _selected_calculations(
     context: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-    candidates, frozen, enabled = _plan_calculation_config(context)
+) -> list[dict[str, Any]]:
+    candidates, enabled = _plan_calculation_config(context)
     selected_candidates = [
         {
             **item,
+            "enabled": enabled[str(item["rule_code"])],
             "status": (
                 item.get("status") if item.get("status") != "DISABLED" else "CLEAR"
             ) if enabled[str(item["rule_code"])] else "DISABLED",
         }
         for item in candidates
     ]
-    if frozen is None:
-        return selected_candidates, None
-    result_owner = {
-        str(item.get("result_code")): str(item["rule_code"])
-        for item in frozen
-    }
-    selected_frozen = [item for item in frozen if enabled[str(item["rule_code"])]]
-    for item in selected_frozen:
-        for dependency in item.get("depends_on_result_codes") or []:
-            owner = result_owner.get(str(dependency))
-            if owner is not None and not enabled[owner]:
-                raise BusinessError(
-                    "CALC_DEPENDENCY_DISABLED",
-                    f"计算规则“{item['rule_code']}”依赖的上游规则“{owner}”已在方案中停用",
-                    details={"rule_code": item["rule_code"], "owner": owner},
-                )
-    return selected_candidates, selected_frozen
+    return selected_candidates
 
 
 def _recompile_plan(db: Session, plan: AuditPlan) -> None:
@@ -681,6 +663,8 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
         system_rule_enabled: dict[str, bool] = {}
         business_rules: list[dict[str, Any]] = []
         for rule in inputs["rules"]:
+            if rule.get("calculation_ref"):
+                continue
             if not manifest_module.is_system_rule(rule):
                 business_rules.append(rule)
                 continue
@@ -690,8 +674,10 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
             if rule_code in system_rule_enabled:
                 raise BusinessError("PLAN_SYSTEM_RULE_DUPLICATE", "方案系统规则编号重复", details={"rule_code": rule_code})
             system_rule_enabled[rule_code] = bool(rule["enabled"])
+            if rule.get("generated_from") == "REPORT":
+                system_rule_enabled[f"report:{rule['report_ref']}"] = bool(rule["enabled"])
         inputs["rules"] = business_rules
-        calculation_candidates, frozen_calculations = _selected_calculations(context)
+        calculation_candidates = _selected_calculations(context)
         source_version = db.get(ScenarioVersion, plan.scenario_version_id)
         if source_version is None:
             raise BusinessError("SCENARIO_VERSION_MISSING", "方案关联的场景版本不存在，无法编译方案")
@@ -703,7 +689,6 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
             **inputs,
             compiled_at=datetime.now(UTC),
             calculation_candidates=calculation_candidates,
-            frozen_calculations=frozen_calculations,
             system_rule_enabled=system_rule_enabled,
             import_proposals=plan.config_json.get("import_proposals"),
         )
@@ -782,7 +767,6 @@ def _sync_plan_system_rules(
     db.flush()
 
 
-
 def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
     """方案的可编辑配置：材料 / 字段 / 全部规则 / 报告章节 / 计算规则启停。
 
@@ -791,8 +775,8 @@ def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
     """
     materials, fields, rules, sections = _plan_config_rows(db, plan.id)
     context = plan.context_json if isinstance(plan.context_json, dict) else {}
-    calculation_candidates, frozen_calculations, calculation_enabled = _plan_calculation_config(context)
-    calculation_source = frozen_calculations if frozen_calculations is not None else calculation_candidates
+    calculation_candidates, calculation_enabled = _plan_calculation_config(context)
+    calculation_source = calculation_candidates
     calculation_views = {
         item["rule_code"]: item for item in _calculation_view_rows(context.get("calculation_json"))
     }
@@ -875,15 +859,13 @@ def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
             {
                 "rule_code": item["rule_code"],
                 "rule_name": item.get("rule_name") or item["rule_code"],
-                "execution_mode": item.get("execution_mode", "CHECK"),
-                "execution_engine": item.get("execution_engine", "PROGRAM"),
                 "formula": item.get("formula", ""),
-                "judgement_instruction": item.get("judgement_instruction", ""),
+                "requirement": item.get("requirement", ""),
+                "business_context": item.get("business_context", {}),
                 "node_code": item.get("node_code") or item.get("node_instance_code"),
                 "enabled": calculation_enabled[str(item["rule_code"])],
                 "origin": calculation_views[item["rule_code"]]["origin"],
                 "parameter_sources": calculation_views[item["rule_code"]]["parameter_sources"],
-                "band_sources": calculation_views[item["rule_code"]]["band_sources"],
             }
             for item in calculation_source
         ],
@@ -919,7 +901,6 @@ _RULE_DEFINITION_LABELS = {
     "parameters": "判定参数",
     "requirement": "审核要求",
     "applicability": "适用条件",
-    "source_node": "来源节点",
     "source_rule_key": "来源规则",
     "source_rule_keys": "来源规则集合",
     "source_rule_codes": "来源结果编号",
@@ -1015,8 +996,8 @@ def plan_adjustments_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
         for category, original, edited, identity, name_key in groups
         for item in _adjustment_items(category, original, edited, identity, name_key)
     ]
-    candidates, frozen = _calculation_store(baseline["calculation_json"])
-    original_calculations = frozen if frozen is not None else candidates
+    candidates = _calculation_store(baseline["calculation_json"])
+    original_calculations = candidates
     items.extend(_adjustment_items(
         "计算规则",
         [

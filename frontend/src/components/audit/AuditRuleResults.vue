@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 
 import type {
   AuditRule,
@@ -19,7 +19,6 @@ import {
   evidenceRouteLabel,
   formatBusinessValue,
   judgeRouteLabel,
-  nodeLabel,
   statusTone,
 } from "@/constants/labels";
 
@@ -37,16 +36,6 @@ import {
  */
 const props = defineProps<{
   rules: AuditRule[];
-  /** 当前场景未配置检查规则的业务节点，用于解释为什么某些规则没有结果。 */
-  unconfiguredNodes: string[];
-  /** 打开时预置的节点筛选（例如从「跨文件校验」工作区进入）。 */
-  initialNodeFilter?: string | null;
-  /**
-   * 本任务真实配置的校验阶段（节点能力类型）。阶段下拉只列出它们——
-   * 固定列出全部阶段会让用户筛到一个本场景根本没配的阶段，然后看到空列表。
-   * 未给出时不提供阶段下拉。
-   */
-  nodeTypeOptions?: string[];
   /**
    * 任务编号。给出时，Agent 规则详情会按 `task_no + evaluation_id` 读取真实账本，
    * 而不是只展示 `result_json.tool_calls` 摘要——摘要是投影，账本才是取证过程的事实来源。
@@ -109,21 +98,6 @@ function materialsOf(rule: AuditRule): string {
   return Array.from(names).join("、");
 }
 
-/**
- * 规则所属节点。
- *
- * 节点类型与实例码都由服务端从实际执行记录返回。阶段筛选使用能力类型，
- * 不能按材料数量或规则名推断一条检查属于哪个阶段。
- */
-function nodeOf(rule: AuditRule): string | null {
-  const payload = payloadOf(rule);
-  const value = payload.node_type ?? payload.node;
-  return typeof value === "string" && value ? value : null;
-}
-
-/** 规则结果里是否带节点信息：为 false 时页面必须说明筛选不可用。 */
-const nodeMetaAvailable = computed(() => props.rules.some((rule) => nodeOf(rule) !== null));
-
 /** 审核标准：只在标准不明确时才提示缺什么，不代填默认条件。 */
 function standardText(rule: AuditRule): string {
   const standard = standardOf(rule);
@@ -180,14 +154,6 @@ function reasonText(rule: AuditRule): string | null {
   const payload = payloadOf(rule);
   const blocked = payload.blocked_reason;
   const missing = payload.missing_inputs;
-  if (blocked === "CAPABILITY_UNIMPLEMENTED") {
-    const capability = payload.unimplemented_capability;
-    const label =
-      capability && typeof capability === "object" && !Array.isArray(capability)
-        ? ((capability as Record<string, JsonValue>).label as string | null)
-        : null;
-    return `能力未实现：本项引用的能力${label ? `“${label}”` : ""}当前没有判定实现，系统不能给出结论`;
-  }
   if (blocked === "STANDARD_UNDEFINED") {
     return "标准不明确：缺少已确认的换算口径，系统不代填默认条件";
   }
@@ -355,21 +321,6 @@ function formatInputValue(item: RuleInputSnapshot): string {
 
 const search = ref("");
 const statusFilter = ref("ALL");
-const nodeFilter = ref<string | null>(props.initialNodeFilter ?? null);
-
-/**
- * 父页面从工作区进入时带来的阶段筛选。
- *
- * 只在父值真正变化时同步；父值清空（null）时也同步清空，这样从「跨文件校验」
- * 进入后再点「通用规则结果」不会残留上一次的阶段筛选。
- */
-watch(
-  () => props.initialNodeFilter,
-  (value) => {
-    nodeFilter.value = value ?? null;
-  },
-);
-
 /**
  * 服务端规则状态目录。分档以它为准，页面不再本地维护一份名单——
  * 本地名单与后端漂移过（`NOT_APPLICABLE`、`SKIPPED` 曾被漏出分档）。
@@ -449,10 +400,6 @@ const unknownStatusTotal = computed(() => Object.values(unknownStatusCounts.valu
 const rows = computed(() => {
   const selected = filters.find((item) => item.value === statusFilter.value)!;
   const query = search.value.trim().toLocaleLowerCase();
-  // 只有服务端确实返回了节点信息时才按阶段筛选：否则每一条规则的 node 都是 null，
-  // 筛选会把全部结果清空——用户从「跨文件校验」工作区进来会看到一个空列表，
-  // 而真实结果明明存在。缺少节点信息由上面的提示条说明，不在这里静默丢结果。
-  const selectedNode = nodeMetaAvailable.value ? nodeFilter.value : null;
   return props.rules.filter((rule) => {
     const text = [
       rule.name,
@@ -474,24 +421,14 @@ const rows = computed(() => {
       .toLocaleLowerCase();
     return (
       matchesFilter(rule, selected) &&
-      (!selectedNode || nodeOf(rule) === selectedNode) &&
       (!query || text.includes(query))
     );
   });
 });
 
-/** 已选节点筛选时，服务端没有返回节点的结果数量：不能静默少显示。 */
-const nodeFilterUnavailableCount = computed(() => {
-  if (!nodeFilter.value) {
-    return 0;
-  }
-  return props.rules.filter((rule) => nodeOf(rule) === null).length;
-});
-
 function clearFilters(): void {
   search.value = "";
   statusFilter.value = "ALL";
-  nodeFilter.value = null;
 }
 
 /* 详情抽屉 */
@@ -521,7 +458,6 @@ const detailMaterialRows = computed(() => (detailRule.value ? materialRowsOf(det
 
 /** 抽屉里的一次性读取：避免在模板里反复调用 payloadOf。 */
 const detailCapability = computed(() => (detailRule.value ? capabilityOf(detailRule.value) : null));
-const detailNode = computed(() => (detailRule.value ? nodeOf(detailRule.value) : null));
 const detailManualNote = computed(() => (detailRule.value ? manualNote(detailRule.value) : null));
 const detailManualStatus = computed(() => (detailRule.value ? manualEffectiveStatus(detailRule.value) : null));
 const detailReason = computed(() => (detailRule.value ? reasonText(detailRule.value) : null));
@@ -666,11 +602,7 @@ function toolMessage(row: Record<string, JsonValue>): string {
     v-if="!rules.length"
     kind="empty"
     title="当前还没有规则结果"
-    :description="
-      unconfiguredNodes.length
-        ? `当前场景未配置以下检查类别：${unconfiguredNodes.map((node) => nodeLabel(node)).join('、')}。未配置的检查不会产生结果，也不代表检查通过。`
-        : '规则节点执行后，这里会显示每条检查的标准、实际比较与结论；未执行的检查不会显示成通过。'
-    "
+    description="规则执行后，这里会显示每条生效规则的实际结果与结论。"
   />
 
   <div v-else class="rule-list">
@@ -681,40 +613,8 @@ function toolMessage(row: Record<string, JsonValue>): string {
           {{ filter.label }}（{{ rules.filter((rule) => matchesFilter(rule, filter)).length }}）
         </el-radio-button>
       </el-radio-group>
-      <el-select
-        v-if="nodeMetaAvailable"
-        v-model="nodeFilter"
-        clearable
-        placeholder="全部校验阶段"
-        aria-label="按校验阶段筛选"
-        class="rule-node-filter"
-      >
-        <el-option
-          v-for="nodeType in props.nodeTypeOptions ?? []"
-          :key="nodeType"
-          :value="nodeType"
-          :label="nodeLabel(nodeType)"
-        />
-      </el-select>
-    </div>
 
-    <el-alert
-      v-if="nodeFilter && !nodeMetaAvailable"
-      type="warning"
-      show-icon
-      :closable="false"
-      title="按校验阶段筛选当前不可用"
-    >
-      服务端在规则结果里没有返回该条检查所属的节点，页面无法按阶段筛选，也不会用规则名或材料推断它属于哪个阶段。
-      需要后端在规则结果里补 `node` 字段；补齐前请用「审核事项 / 材料 / 原文」搜索或直接用任务详情的节点流程条定位。
-    </el-alert>
-    <el-alert
-      v-else-if="nodeFilter && nodeMetaAvailable && nodeFilterUnavailableCount"
-      type="warning"
-      show-icon
-      :closable="false"
-      :title="`有 ${nodeFilterUnavailableCount} 条结果没有返回所属节点，未计入本次筛选`"
-    />
+    </div>
 
     <el-alert
       v-if="catalogError"
@@ -747,7 +647,6 @@ function toolMessage(row: Record<string, JsonValue>): string {
       <el-table-column label="审核事项" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="cell-strong">{{ row.name }}</span>
-          <div v-if="nodeOf(row)" class="table-note">{{ nodeLabel(nodeOf(row)) }}</div>
         </template>
       </el-table-column>
 
@@ -799,7 +698,7 @@ function toolMessage(row: Record<string, JsonValue>): string {
     <template v-if="detailRule">
       <div class="detail-head">
         <StatusBadge :status="detailRule.status" :tone="statusTone(detailRule.status)" size="default" />
-        <span v-if="detailNode" class="text-hint">所属阶段：{{ nodeLabel(detailNode) }}</span>
+
         <span v-if="detailTypeNotice" class="text-hint">{{ detailTypeNotice }}</span>
       </div>
 

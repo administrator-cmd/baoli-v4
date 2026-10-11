@@ -140,10 +140,11 @@ def download_report(report_no: str, db: Session = Depends(get_db)) -> StreamingR
             status_code=409,
             details={"report_no": report_no},
         )
-    filename = f"{report.report_name}.md"
+    extension = {"text/markdown": "md", "text/plain": "txt", "text/html": "html"}[report.content_type]
+    filename = f"{report.report_name}.{extension}"
     return StreamingResponse(
         BytesIO(content.encode("utf-8")),
-        media_type="text/markdown; charset=utf-8",
+        media_type=report.content_type + "; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
 

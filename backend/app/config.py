@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str | None = None
     data_dir: Path = Path("data")
-    # 节点能力类型及预置依赖；场景业务字段和规则来自 LLM 解析的 JSON。
+    # 执行契约的版本与名称；业务规则来自 LLM 解析的 JSON。
     node_profile_path: Path = Path("backend/config/node_profile.json")
     # 上传入口的体量上限。两者互相独立：规则库是配置表，业务材料是合同/协议扫描件，
     # 不是一回事，不能共用一个数值。
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
 
     @property
     def resolved_node_profile_path(self) -> Path:
-        """节点能力目录的绝对路径。"""
+        """执行契约目录的绝对路径。"""
         path = self.node_profile_path
         if not path.is_absolute():
             path = PROJECT_DIR / path

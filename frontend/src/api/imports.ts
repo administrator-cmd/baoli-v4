@@ -1,21 +1,11 @@
 import type {
   ImportJob,
   ImportJobSummary,
-  JsonValue,
   OperationAccepted,
   Paged,
 } from "./contracts";
 import { request, type OperationView } from "./http";
 import { toQuery } from "./query";
-
-/** 一条草稿裁决：问题作答、候选原地修正、候选排除/恢复共用同一接口。 */
-export interface ImportDecision {
-  target_type: "ISSUE" | "MATERIAL" | "FIELD" | "RULE" | "REPORT_SECTION" | "CALC_RULE";
-  target_ref: string;
-  action: "RESOLVE" | "EXCLUDE" | "ACCEPT";
-  /** RESOLVE 时为属性字典（问题作答为 {selected: ...}）；EXCLUDE/ACCEPT 用空对象。 */
-  value: Record<string, JsonValue>;
-}
 
 /** 工作台作业选择列表（完整摘要数组）。 */
 export function listImportJobs(): Promise<ImportJobSummary[]> {
@@ -138,33 +128,6 @@ export function startImportConversion(jobNo: string, idempotencyKey: string): Pr
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ idempotency_key: idempotencyKey }),
-  });
-}
-
-/**
- * 提交完整裁决集合。expected_revision 必须带页面看到的 job.draft_revision：
- * 任一草稿改动（绑定、排除、裁决、候选修正）都会递增它，服务端据此拒绝过期提交。
- */
-export function saveImportDecisions(
-  jobNo: string,
-  decisions: ImportDecision[],
-  expectedRevision: number,
-): Promise<ImportJob> {
-  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/decisions`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decisions, expected_revision: expectedRevision }),
-  });
-}
-
-/**
- * 暂存问题答案（不改变候选与问题状态）。用户刷新后从 job.issues[].decision 恢复。
- */
-export function saveDecisionDraft(jobNo: string, answers: Record<string, JsonValue>): Promise<ImportJob> {
-  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/decision-draft`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ answers }),
   });
 }
 

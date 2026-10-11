@@ -5,7 +5,6 @@ import type { ConfigOrigin, DraftCalculationItem } from "@/api/contracts/scenes"
 defineProps<{
   origin?: ConfigOrigin | null;
   parameterSources: DraftCalculationItem["parameter_sources"];
-  bandSources: DraftCalculationItem["band_sources"];
   showJobLink?: boolean;
 }>();
 
@@ -33,11 +32,6 @@ function openSource(origin: ConfigOrigin): void {
       <strong>参数 {{ parameter.code || "未填写编号" }}</strong>
       <span>{{ sourceText(parameter.origin) }}</span>
       <el-button v-if="showJobLink !== false && parameter.origin?.import_job_no" link type="primary" @click="openSource(parameter.origin)">查看导入作业</el-button>
-    </div>
-    <div v-for="(band, index) in bandSources" :key="`band-${index}`" class="calculation-source-row">
-      <strong>判定 {{ band.code || "未填写编号" }}</strong>
-      <span>{{ sourceText(band.origin) }}</span>
-      <el-button v-if="showJobLink !== false && band.origin?.import_job_no" link type="primary" @click="openSource(band.origin)">查看导入作业</el-button>
     </div>
   </div>
 </template>

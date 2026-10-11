@@ -5,7 +5,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { CircleCheck, FileUp, Pencil, Plus, Power, Rocket, Save, Trash2 } from "lucide-vue-next";
 
 import type {
-  ConfigSyncError,
   DraftDisabledSourceRow,
   DraftSourceActivationPreview,
   DraftSourceActivationPreviewData,
@@ -27,14 +26,13 @@ import {
 } from "@/api/scenes";
 import SceneFieldsPanel from "@/components/scenes/SceneFieldsPanel.vue";
 import SceneMaterialsPanel from "@/components/scenes/SceneMaterialsPanel.vue";
-import SceneNodesPanel from "@/components/scenes/SceneNodesPanel.vue";
 import SceneRulesPanel from "@/components/scenes/SceneRulesPanel.vue";
 import SceneSectionsPanel from "@/components/scenes/SceneSectionsPanel.vue";
 import CalculationSources from "@/components/CalculationSources.vue";
 import BackButton from "@/components/BackButton.vue";
 
 /**
- * 场景配置按基本信息、材料、字段、规则、流程和报告组织。
+ * 场景配置按来源、材料、字段、规则、计算和报告组织。
  * 保存只更新草稿；管理员在场景页显式发布后才生成生效版本。
  */
 const publishing = ref(false);
@@ -51,13 +49,12 @@ const loadError = ref<string | null>(null);
 const saving = ref(false);
 const deleting = ref(false);
 const refreshToken = ref(0);
-const acknowledgedGaps = ref<string[]>([]);
 let loadSequence = 0;
 
 /**
  * 场景详情分区。`?tab=` 是当前分区的唯一真相源：URL 变分区就变，分区变就写回 URL。
  */
-const TAB_NAMES = ["basic", "source", "materials", "fields", "rules", "calculations", "flow", "sections"];
+const TAB_NAMES = ["basic", "source", "materials", "fields", "rules", "calculations", "sections"];
 
 const tabs = computed({
   get: () => {
@@ -130,7 +127,7 @@ async function parseSourceRows(rows: DraftDisabledSourceRow[]): Promise<void> {
         }
         const result = finished.result as unknown as DraftSourceActivationPreviewData | null;
         if (!result || typeof result.preview_id !== "string" || typeof result.revision_no !== "number"
-          || !Array.isArray(result.rows) || !Array.isArray(result.items) || !Array.isArray(result.questions)) {
+          || !Array.isArray(result.rows) || !Array.isArray(result.items) || !Array.isArray(result.notices)) {
           throw new Error("后台解析完成，但没有返回有效的预览结果");
         }
         sourcePreview.value = { ...result, request_id: finished.request_id };
@@ -173,19 +170,6 @@ async function confirmParsedSources(): Promise<void> {
 
 const basicForm = reactive({ scenario_name: "", category: "", description: "", enabled: true });
 
-function gapKeysOf(error: ConfigSyncError | null | undefined): string[] {
-  if (!error || error.code !== "CAPABILITY_UNIMPLEMENTED") {
-    return [];
-  }
-  const raw = error.details?.rule_keys;
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  return raw.filter((item): item is string => typeof item === "string" && item.length > 0);
-}
-
-const capabilityGapKeys = computed(() => gapKeysOf(detail.value?.draft?.sync_error));
-
 const publishBlockedReason = computed(() => {
   if (!detail.value?.draft) {
     return "还没有场景草稿";
@@ -197,10 +181,6 @@ const publishBlockedReason = computed(() => {
   if (!error) {
     return null;
   }
-  if (error.code === "CAPABILITY_UNIMPLEMENTED" && capabilityGapKeys.value.length > 0) {
-    const pending = capabilityGapKeys.value.filter((key) => !acknowledgedGaps.value.includes(key));
-    return pending.length ? `还有 ${pending.length} 项未实现能力没有确认` : null;
-  }
   return error.message;
 });
 
@@ -208,12 +188,10 @@ async function load(): Promise<void> {
   const sequence = ++loadSequence;
   const code = scenarioCode.value;
   const previousCode = detail.value?.scenario_code;
-  const previousRevision = detail.value?.draft?.revision_no ?? null;
   if (previousCode && previousCode !== code) {
     detail.value = null;
     configDraft.value = null;
     configError.value = null;
-    acknowledgedGaps.value = [];
   }
   loading.value = true;
   loadError.value = null;
@@ -225,9 +203,6 @@ async function load(): Promise<void> {
     basicForm.category = payload.category ?? "";
     basicForm.description = payload.description ?? "";
     basicForm.enabled = payload.enabled;
-    if (payload.scenario_code !== previousCode || (payload.draft?.revision_no ?? null) !== previousRevision) {
-      acknowledgedGaps.value = [];
-    }
     try {
       const draft = await getSceneDraft(payload.scenario_code);
       if (sequence !== loadSequence || code !== scenarioCode.value) return;
@@ -251,16 +226,6 @@ async function load(): Promise<void> {
 async function onChildChanged(): Promise<void> {
   refreshToken.value += 1;
   await load();
-}
-
-function toggleGap(key: string, checked: boolean): void {
-  if (checked) {
-    if (!acknowledgedGaps.value.includes(key)) {
-      acknowledgedGaps.value = [...acknowledgedGaps.value, key];
-    }
-    return;
-  }
-  acknowledgedGaps.value = acknowledgedGaps.value.filter((item) => item !== key);
 }
 
 watch(() => scenarioCode.value, () => void load(), { immediate: true });
@@ -311,7 +276,7 @@ async function publishScene(): Promise<void> {
   }
   let summary = "";
   try {
-    const result = await ElMessageBox.prompt("确认未实现能力后使配置生效。已有方案和任务不变。", "确认并生效", {
+    const result = await ElMessageBox.prompt("发布当前规则库配置。已有方案和任务继续使用各自冻结的版本。", "确认并生效", {
       inputPlaceholder: "本次改了什么",
       confirmButtonText: "确认并生效",
       cancelButtonText: "取消",
@@ -325,8 +290,6 @@ async function publishScene(): Promise<void> {
     const published = await publishSceneDraft(detail.value.scenario_code, {
       expected_revision: detail.value.draft.revision_no,
       change_summary: summary || null,
-      acknowledged_capability_gaps:
-        detail.value.draft.sync_error?.code === "CAPABILITY_UNIMPLEMENTED" ? [...acknowledgedGaps.value] : [],
     });
     ElMessage.success(published.reused ? "配置与当前版本一致" : `第 ${published.version_no} 版已生效`);
     await load();
@@ -629,44 +592,23 @@ function openPlanCreation(): void {
             <el-table v-else :data="calculations" border empty-text="当前草稿没有计算规则">
               <el-table-column type="expand" width="48">
                 <template #default="{ row }">
-                  <CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" :band-sources="row.band_sources" />
+                  <CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" />
                 </template>
               </el-table-column>
               <el-table-column prop="rule_code" label="规则编号" min-width="120" />
               <el-table-column prop="name" label="名称" min-width="160" />
-              <el-table-column label="计算方式" min-width="220">
-                <template #default="{ row }">{{ row.execution_engine === 'LLM' ? 'AI 辅助计算与判断' : '旧程序计算，需重新解析规则库' }}</template>
-              </el-table-column>
-              <el-table-column label="计算用途" min-width="160">
-                <template #default="{ row }">{{ row.execution_mode === 'VALUE_ONLY' ? '仅计算中间值' : '计算并判定' }}</template>
-              </el-table-column>
-              <el-table-column prop="node_code" label="节点实例" min-width="140" />
               <el-table-column prop="formula" label="计算方法" min-width="220" show-overflow-tooltip />
-              <el-table-column prop="judgement_instruction" label="判断标准" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="requirement" label="业务要求" min-width="220" show-overflow-tooltip />
               <el-table-column prop="result_code" label="结果编号" min-width="120" />
               <el-table-column prop="unit" label="单位" width="90" />
               <el-table-column prop="currency" label="币种" width="90" />
               <el-table-column prop="status" label="状态" width="110" />
-              <el-table-column label="配置形态" width="90">
-                <template #default="{ row }">{{ row.frozen ? "已冻结" : "候选" }}</template>
-              </el-table-column>
             </el-table>
-          </el-tab-pane>
-          <el-tab-pane label="流程" name="flow">
-            <SceneNodesPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />
           </el-tab-pane>
           <el-tab-pane label="报告" name="sections">
             <SceneSectionsPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />
           </el-tab-pane>
         </el-tabs>
-        <el-alert v-if="capabilityGapKeys.length" class="block-gap" type="warning" show-icon :closable="false" title="有检查引用的能力尚未实现">
-          <div v-for="key in capabilityGapKeys" :key="key" class="gap-row">
-            <span>{{ key }}</span>
-            <el-checkbox :model-value="acknowledgedGaps.includes(key)" @change="(value: string | number | boolean) => toggleGap(key, Boolean(value))">
-              我确认该项本次不可判定
-            </el-checkbox>
-          </div>
-        </el-alert>
       </template>
     </div>
     <el-dialog v-model="editDisabledVisible" title="编辑停用来源行" width="680px" :close-on-click-modal="false">
@@ -686,8 +628,8 @@ function openPlanCreation(): void {
     <el-dialog v-model="sourcePreviewVisible" title="来源解析预览" width="min(1100px, 94vw)" :close-on-click-modal="false">
       <template v-if="sourcePreview">
         <p>本次解析 {{ sourcePreview.rows.length }} 行，生成 {{ sourcePreview.items.length }} 项配置。</p>
-        <el-alert v-if="sourcePreview.questions.length" type="warning" :closable="false" title="以下说明不阻断已有候选追加；未导入的原始来源会保留。" />
-        <p v-for="question in sourcePreview.questions" :key="question">{{ question }}</p>
+        <el-alert v-if="sourcePreview.notices.length" type="warning" :closable="false" title="以下说明不阻断已有候选追加；未导入的原始来源会保留。" />
+        <p v-for="notice in sourcePreview.notices" :key="notice">{{ notice }}</p>
         <el-table :data="sourcePreview.items" border max-height="480">
           <el-table-column prop="kind" label="类型" width="100" />
           <el-table-column prop="name" label="名称" min-width="200" />

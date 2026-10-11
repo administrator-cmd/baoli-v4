@@ -43,7 +43,7 @@ const form = reactive({
   title: "",
   content_instruction: "",
   field_keys: [] as string[],
-  // 节点版的报告分组属性。没有报告编号时这些键全部留空，章节按旧语义处理。
+  // 报告分组属性；未声明编号时由规则库内部身份组织章节。
   report_code: "",
   report_name: "",
   material_keys: [] as string[],
@@ -264,7 +264,7 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
             />
           </el-form-item>
 
-          <h4 class="app-section-title">报告分组（节点版格式；留空表示旧格式的报告章节）</h4>
+          <h4 class="app-section-title">报告分组</h4>
           <el-form-item label="报告编号">
             <el-input v-model="form.report_code" maxlength="80" style="width: 220px" placeholder="例如：RPT-001" />
             <span class="text-hint" style="margin-left: 8px">同一编号的章节组成一份报告</span>

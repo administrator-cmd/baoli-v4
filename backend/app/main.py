@@ -11,7 +11,7 @@ from .api import audits, imports, materials, operations, plans, reports, reviews
 from .config import PROJECT_DIR, get_settings
 from .domain import node_profile
 from .integrations import http_services
-from .services.audit import document_ports, flow as audit_flow
+from .services.audit import document_ports
 from .database import SessionLocal, check_database_connection
 from .common.exceptions import (
     BusinessError,
@@ -64,10 +64,8 @@ def _configure_logging(level_name: str) -> None:
 
 
 settings = get_settings()
-# 节点能力目录路径从配置注入，domain 不直接读取全局配置。
+# 执行契约目录路径从配置注入，domain 不直接读取全局配置。
 node_profile.configure_node_profile(settings.resolved_node_profile_path)
-# 注册审核节点执行实现。
-audit_flow.register_node_handlers()
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
 document_ports.register_document_service(http_services)
 _configure_logging(settings.log_level)

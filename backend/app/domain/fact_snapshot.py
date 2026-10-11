@@ -407,7 +407,7 @@ def facts_of_task_fact_rows(
             else None
         )
         decimal_projection = None
-        if executable and row.value_type in {"DECIMAL", "AMOUNT"}:
+        if executable and row.value_type in {"DECIMAL", "AMOUNT", "PERCENT", "INTEGER"}:
             if field_definitions and field_key in field_definitions:
                 # 统一事实的执行值已经按字段契约归一成十进制文本；快照指纹也必须使用
                 # 这个业务口径，不能把数据库 DECIMAL 的固定 scale 当成业务差异。
@@ -471,7 +471,7 @@ def task_fact_value(row: Any, *, field_definition: dict[str, Any] | None = None)
                 details={"fact_code": row.fact_code, "field_key": field_definition.get("field_key")},
             ) from exc
     value_type = str(row.value_type or "")
-    if value_type in {"DECIMAL", "AMOUNT"}:
+    if value_type in {"DECIMAL", "AMOUNT", "PERCENT", "INTEGER"}:
         if row.decimal_value is None:
             return None
         # 字段执行契约一直使用 JSON 安全的十进制字符串；派生事实留在内部快照时

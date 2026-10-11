@@ -144,44 +144,6 @@ export function confirmSourceActivation(
   );
 }
 
-/* 节点实例
- *
- * 节点由用户配置：实例码、能力类型、顺序与依赖都由请求给出。系统不按规则内容
- * 自动生成节点，也不按表头推断流程关系。一个场景可以有两个同类节点，
- * 因此 node_code 是实例码、node_type 才是能力类型。
- */
-
-export interface DraftNodePayload {
-  node_code: string;
-  node_type: string;
-  name: string;
-  sequence_no?: number;
-  /** 上游节点实例码列表。 */
-  depends_on?: string[];
-  config_json?: Record<string, unknown> | null;
-  enabled?: boolean;
-}
-
-/** 修改草稿中的节点实例（只覆盖提交的字段）。 */
-export function updateDraftNode(
-  scenarioCode: string,
-  nodeCode: string,
-  payload: Partial<Omit<DraftNodePayload, "node_code">>,
-): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/nodes/${encodeURIComponent(nodeCode)}`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
-  );
-}
-
-/** 删除草稿中的节点实例；仍被规则或下游节点引用时后端返回 409。 */
-export function deleteDraftNode(scenarioCode: string, nodeCode: string): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/nodes/${encodeURIComponent(nodeCode)}`,
-    { method: "DELETE" },
-  );
-}
-
 /** 草稿内的每次写入都返回最新的完整草稿视图，页面据服务端结果刷新。 */
 export interface DraftMaterialPayload {
   name: string;
@@ -218,7 +180,6 @@ export function deleteDraftMaterial(scenarioCode: string, materialKey: string): 
 
 export interface DraftFieldPayload {
   material_key: string;
-  node_code?: string | null;
   source_ref?: string | null;
   name: string;
   value_type: string;
@@ -277,7 +238,6 @@ export interface DraftRulePayload {
   parameters: Record<string, JsonValue>;
   requirement: string;
   applicability: { kind: string };
-  source_node: string | null;
   source_rule_key: string | null;
   source_rule_keys: string[];
   source_rule_codes: string[];
@@ -368,8 +328,6 @@ export function publishSceneDraft(
   payload: {
     expected_revision: number;
     change_summary?: string | null;
-    /** 仅当发布阻断是未实现能力时，逐条带上已确认的规则键。 */
-    acknowledged_capability_gaps?: string[];
   },
 ): Promise<ScenarioPublishResult> {
   return request<ScenarioPublishResult>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/publish`, {

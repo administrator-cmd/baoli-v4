@@ -51,7 +51,7 @@ def _source_rows(config: dict[str, Any], row_keys: list[str]) -> list[dict[str, 
     return rows
 
 
-def _sheets(rows: list[dict[str, Any]], nodes: list[dict[str, Any]]) -> dict[str, PreparedSheet]:
+def _sheets(rows: list[dict[str, Any]]) -> dict[str, PreparedSheet]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[row["source"]["sheet_key"]].append(row)
@@ -76,7 +76,7 @@ def _sheets(rows: list[dict[str, Any]], nodes: list[dict[str, Any]]) -> dict[str
             preview_rows=[], rows_truncated=False, columns_truncated=False, cells_truncated=False,
         )
         result[sheet_key] = PreparedSheet(
-            sheet, nodes, {row["source"]["row_no"]: row["columns"] for row in sources},
+            sheet, {row["source"]["row_no"]: row["columns"] for row in sources},
         )
     return result
 
@@ -99,10 +99,9 @@ def _reference_context(config: dict[str, Any]) -> dict[str, Any]:
 def _merge_calculations(existing: Any, additions: list[dict[str, Any]]) -> Any:
     if not additions:
         return deepcopy(existing)
-    if isinstance(existing, dict):
-        old = manifest.calculation_definitions_of_frozen(existing["frozen"])
-    else:
-        old = existing or []
+    if not isinstance(existing, list):
+        raise BusinessError("RULE_LIBRARY_CALCULATION_FORMAT_INVALID", "计算配置须为规则库原始定义列表，不再转换旧编译格式", status_code=409)
+    old = existing
     for key in ("rule_code", "result_code"):
         identifiers = [item[key] for item in [*old, *additions]]
         if len(set(identifiers)) != len(identifiers):
@@ -167,10 +166,10 @@ def _items(bundle: dict[str, Any], config: dict[str, Any]) -> list[dict[str, str
             for parameter in calculation["parameters"]
         )
         items.append({"kind": "计算", "name": calculation["rule_name"], "description": "；".join([
-            "仅计算" if calculation["execution_mode"] == "VALUE_ONLY" else "计算并判定", calculation["formula"], parameters,
-            "判断标准：" + calculation.get("judgement_instruction", ""),
+            calculation["formula"], parameters,
+            "业务要求：" + calculation.get("requirement", ""),
             calculation["unit"] or "未声明单位", calculation["currency"] or "未声明币种",
-            "区间：" + json.dumps([{key: value for key, value in band.items() if key != "source"} for band in calculation["bands"]], ensure_ascii=False),
+            "业务补充：" + json.dumps(calculation.get("business_context", {}), ensure_ascii=False),
         ])})
     return items
 
@@ -201,26 +200,26 @@ def preview(
         )
     db.commit()  # 模型调用期间不保留数据库事务或写锁。
     bundle, _ = convert_prepared_sheets(
-        scenario_code, _sheets(sources, config["nodes"]), operation_no=operation_no,
+        scenario_code, _sheets(sources), operation_no=operation_no,
         existing_config=_reference_context(config),
     )
     proposals = bundle.model_dump(mode="json")
-    questions: list[str] = []
+    notices: list[str] = []
     if (any(sheet["disabled_rows"] for sheet in proposals["sheets"])
             or any(rule.get("config_status") == "DISABLED" for sheet in proposals["sheets"] for rule in sheet["rules"])):
         raise BusinessError("DISABLED_SOURCE_ACTIVATION_INCOMPLETE", "请求启用的来源仍被模型保留为停用，草稿未修改", status_code=502)
     coverage = {(sheet["sheet_key"], row["row_no"]): row for sheet in proposals["coverage"]["sheets"] for row in sheet["rows"]}
     for source in sources:
         row = coverage[(source["source"]["sheet_key"], source["source"]["row_no"])]
-        if row["disposition"] not in {"CANDIDATE", "QUESTION"}:
+        if row["disposition"] not in {"CANDIDATE", "UNPARSED"}:
             raise BusinessError("DISABLED_SOURCE_ACTIVATION_INCOMPLETE", "请求启用的业务行没有转换为候选或问题", status_code=502)
     preview_id = uuid4().hex
     rejected = proposals["coverage"]["rejected_candidates"]
-    questions.extend(f"{item.get('name') or '未导入项目'}：{item['message']}" for item in rejected)
+    notices.extend(f"{item.get('name') or '未导入项目'}：{item['message']}" for item in rejected)
     selected_sheets = [{"sheet_key": sheet["sheet_key"], "sheet_name": next(item["sheet_name"] for item in sources if item["source"]["sheet_key"] == sheet["sheet_key"]),
                         "sheet_role": sheet["suggested_role"], "node_code": None} for sheet in proposals["sheets"]]
     delta = manifest.draft_config_of_import(
-        proposals=proposals, decisions=[], namespace=scenario_code, selected_sheets=selected_sheets,
+        proposals=proposals, namespace=scenario_code, selected_sheets=selected_sheets,
         import_job_no="", existing_config=config,
     )
     _assert_additions(config, delta)
@@ -239,7 +238,7 @@ def preview(
             mark_activation(item["origin_json"])
     for item in delta["calculation_json"] or []:
         mark_activation(item["origin"])
-        for entry in [*item["parameters"], *item["bands"]]:
+        for entry in item["parameters"]:
             mark_activation(entry["origin"])
     failed_rows = {(item["source"].get("sheet_key"), item["source"].get("row_no"))
                    for item in rejected if isinstance(item.get("source"), dict)}
@@ -254,7 +253,7 @@ def preview(
     content = {
         "preview_id": preview_id, "scenario_code": scenario_code, "revision_no": expected_revision,
         "config_hash": fingerprint, "row_keys": row_keys, "proposals": proposals,
-        "delta": delta if has_additions else None, "questions": questions,
+        "delta": delta if has_additions else None, "notices": notices,
         "activated_row_keys": activated_row_keys,
     }
     path = resolve_storage_path(f"source-activations/{preview_id}.json")
@@ -264,7 +263,7 @@ def preview(
     return {
         "preview_id": preview_id, "revision_no": expected_revision, "can_activate": has_additions,
         "rows": [{"row_key": row["row_key"], "sheet_role": row["sheet_role"], "sheet_name": row["sheet_name"], "row_no": row["source"]["row_no"], "source_id": row.get("source_id")} for row in sources],
-        "items": _items(proposals, config), "questions": questions,
+        "items": _items(proposals, config), "notices": notices,
     }
 
 

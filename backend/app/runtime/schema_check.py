@@ -35,7 +35,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "scenario_node",
     "scenario_rule",
     "scenario_draft",
-    # 用户配置的节点实例：节点存在、顺序与依赖由用户配置，不由系统自动生成。
+    # 执行容器通过版本与任务关联真实执行记录。
     # 来源工作表清单与节点保存在草稿 JSON 中。
     "audit_plan",
     # 方案自己的配置（场景版本的可编辑副本）：形状与 scenario_draft_* 对应。
@@ -104,7 +104,6 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "status",
         "workbook_ir_json",
         "proposals_json",
-        "decisions_json",
         "manifest_draft_json",
         "coverage_json",
         "draft_revision",
@@ -153,7 +152,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     # 导入只记录实际工作表身份与选择状态，业务含义由模型解析到场景 JSON。
     "import_sheet": ("import_job_id", "sheet_key", "sheet_name", "status", "snapshot_json"),
     # 币种与产物来源是金额口径与主体核对的配置事实：缺列会让页面保存一次就丢掉它们。
-    # 节点版报告的分组属性：缺列时草稿保存会把分组报告退回旧的附加展示章节。
+    # 报告分组属性：持久化必须保留规则库声明的真实报告要求。
     "audit_plan": (
         "config_json",
         "plan_code",

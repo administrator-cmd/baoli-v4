@@ -9,13 +9,11 @@ import {
   getImportJob,
   listImportJobs,
   listTemplates,
-  saveImportDecisions,
   type TemplateOption,
   startImportConversion,
   updateSheetBindings,
 } from "@/api/imports";
 import type {
-  CandidateDecisionState,
   ImportJob,
   ImportJobSummary,
   ImportSheet,
@@ -25,8 +23,7 @@ import type {
   ProposalSheet,
   UploadPolicy,
 } from "@/api/contracts";
-import type { ConfigOrigin, DraftNodeItem } from "@/api/contracts/scenes";
-import CandidateCorrectionDialog from "@/components/import/CandidateCorrectionDialog.vue";
+import type { ConfigOrigin } from "@/api/contracts/scenes";
 import CandidateTable, { type CandidateColumn, type CandidateRow } from "@/components/import/CandidateTable.vue";
 import FileUploadCard from "@/components/import/FileUploadCard.vue";
 import ImportJobPicker from "@/components/import/ImportJobPicker.vue";
@@ -46,7 +43,6 @@ import {
   applicabilityLabel,
   failureNextStep,
   formatBusinessValue,
-  riskSourceNodeColumnLabel,
   riskSourceRuleColumnLabel,
   valueTypeLabel,
 } from "@/constants/labels";
@@ -82,12 +78,6 @@ const loadingJobs = ref(false);
 const selectedFileSize = ref<number | null>(null);
 /** 尚未确认受理的幂等标识：同一次业务动作再次提交时复用它，不会产生第二次执行。 */
 let conversionAttemptKey: string | null = null;
-/** 候选原地修正弹窗状态。 */
-const correctionTarget = ref<{ targetType: "MATERIAL" | "FIELD" | "RULE"; targetRef: string; candidate: Record<string, JsonValue> } | null>(
-  null,
-);
-const correctionPending = ref(false);
-
 const candidateTabModel = computed<CandidateTab>({
   get: () => candidateTab.value,
   set: (value) => {
@@ -95,34 +85,8 @@ const candidateTabModel = computed<CandidateTab>({
   },
 });
 
-/**
- * 本场景的实际节点供解析和候选展示使用。工作表只选择是否参与解析，不按表绑定节点；
- * 同一工作表的字段和规则可归到不同节点。节点及依赖由管理员在场景流程中配置，LLM 不创建节点。
- */
-const scenarioNodes = ref<DraftNodeItem[]>([]);
-const nodeLoadError = ref<string | null>(null);
-let nodeRequest = 0;
 let jobReception = 0;
 let jobLoadRequest = 0;
-
-async function loadScenarioNodes(scenarioCode: string | null | undefined): Promise<void> {
-  const request = ++nodeRequest;
-  if (!scenarioCode) {
-    scenarioNodes.value = [];
-    nodeLoadError.value = "当前作业没有所属场景，无法读取节点";
-    return;
-  }
-  nodeLoadError.value = null;
-  try {
-    const draft = await getSceneDraft(scenarioCode);
-    if (request !== nodeRequest) return;
-    scenarioNodes.value = draft.nodes ?? [];
-  } catch (error) {
-    if (request !== nodeRequest) return;
-    scenarioNodes.value = [];
-    nodeLoadError.value = error instanceof Error ? error.message : "读取场景节点失败";
-  }
-}
 
 const proposalSheets = computed<ProposalSheet[]>(() => job.value?.proposals?.sheets ?? []);
 const proposalCalculations = computed<ProposalCalculation[]>(() => job.value?.proposals?.calculations ?? []);
@@ -134,91 +98,25 @@ const hasProposals = computed(() => proposalSheets.value.length > 0 || proposalC
 const blockingIssueCount = computed(() => importBlockingIssues(job.value));
 
 /**
- * 候选原地修正需要的引用选项与原始对象索引。
- * 全部来自当前作业的转换结果，不做额外推断。
- */
-const materialRefOptions = computed(() =>
-  proposalSheets.value.flatMap((sheet) => sheet.materials.map((material) => ({
-    ref: material.candidate_ref,
-    name: `${material.name}（${material.source_sheet} 第 ${material.source_row} 行）`,
-  }))),
-);
-const ruleRefOptions = computed(() =>
-  proposalSheets.value.filter((sheet) => !sheet.excluded).flatMap((sheet) => sheet.rules.filter(
-    (rule) => rule.operator !== "RISK_TRIGGER" && rule.decision_state !== "EXCLUDED",
-  ).map((rule) => {
-    const materials = rule.comparison.scope_material_names.filter((name): name is string => Boolean(name)).join("、");
-    return {
-      ref: rule.candidate_ref,
-      name: `${rule.name}（${materials ? `${materials} · ` : ""}${rule.source_sheet} 第 ${rule.source_row} 行）`,
-    };
-  })),
-);
-const candidateIndex = computed(() => {
-  const index = new Map<string, { targetType: "MATERIAL" | "FIELD" | "RULE"; candidate: Record<string, JsonValue> }>();
-  for (const sheet of proposalSheets.value) {
-    for (const material of sheet.materials) {
-      index.set(material.candidate_ref, { targetType: "MATERIAL", candidate: material as unknown as Record<string, JsonValue> });
-    }
-    for (const field of sheet.fields) {
-      index.set(field.candidate_ref, {
-        targetType: "FIELD",
-        candidate: field as unknown as Record<string, JsonValue>,
-      });
-    }
-    for (const rule of sheet.rules) {
-      index.set(rule.candidate_ref, {
-        targetType: "RULE",
-        candidate: {
-          ...rule,
-          // parameters 在 comparison 里；修正弹窗需要按顶层的值做改动比对。
-          parameters: rule.comparison.parameters ?? {},
-          material_refs: rule.comparison.scope_material_refs,
-          source_node: rule.comparison.source_node ?? null,
-          source_rule_refs: rule.comparison.source_rule_refs,
-        } as unknown as Record<string, JsonValue>,
-      });
-    }
-  }
-  return index;
-});
-
-/**
  * 可选择参与解析的工作表；服务端仅将空表标记为 fixed_excluded。
  * 说明页是否参与由实际选择决定，表内说明行由模型声明处置。
  */
 const bindingSheets = computed<ImportSheet[]>(() => (job.value?.sheets ?? []).filter((sheet) => !isSystemExcludedSheet(sheet)));
-/** 已排除的候选不参与有效统计：它们是明确不发布的项。 */
+/** 统计本次解析接收的候选。 */
 const proposalTotals = computed(() =>
   proposalSheets.value.reduce(
     (totals, sheet) => ({
-      materials: totals.materials + sheet.materials.filter((item) => item.decision_state !== "EXCLUDED").length,
-      fields: totals.fields + sheet.fields.filter((item) => item.decision_state !== "EXCLUDED").length,
-      rules: totals.rules + sheet.rules.filter((item) => item.decision_state !== "EXCLUDED").length,
+      materials: totals.materials + sheet.materials.length,
+      fields: totals.fields + sheet.fields.length,
+      rules: totals.rules + sheet.rules.length,
       reportSections: totals.reportSections + sheet.report_sections.length,
     }),
     { materials: 0, fields: 0, rules: 0, reportSections: 0 },
   ),
 );
-const includedCalculations = computed(() =>
-  proposalCalculations.value.filter((item) => item.decision_state !== "EXCLUDED"),
-);
-
-const decisionCounts = computed(() => {
-  const counts: Record<CandidateDecisionState, number> = { AUTO: 0, PENDING: 0, MANUAL: 0, EXCLUDED: 0 };
-  for (const sheet of proposalSheets.value) {
-    for (const state of ["AUTO", "PENDING", "MANUAL", "EXCLUDED"] as CandidateDecisionState[]) {
-      counts[state] += countState(sheet, state);
-    }
-  }
-  for (const item of proposalCalculations.value) {
-    counts[item.decision_state] += 1;
-  }
-  return counts;
-});
-
-/** 明确候选：已自动识别或已人工处理，不需要逐项确认。 */
-const confirmedCandidateCount = computed(() => decisionCounts.value.AUTO + decisionCounts.value.MANUAL);
+const includedCalculations = computed(() => proposalCalculations.value);
+const confirmedCandidateCount = computed(() => proposalTotals.value.materials + proposalTotals.value.fields
+  + proposalTotals.value.rules + proposalCalculations.value.length);
 const excludedSheetNames = computed(() =>
   (job.value?.sheets ?? [])
     .filter((sheet) => isSystemExcludedSheet(sheet) || bindingFor(sheet).excluded)
@@ -243,8 +141,6 @@ const parsing = computed(() => watching.value && isOperationActive(operation.val
 /** 已经形成转换结果或已发布的作业，服务端不再接受改动绑定与重复解析。 */
 const importMutable = computed(() => Boolean(job.value?.proposals) === false && !sealed.value);
 
-/** 尚未写入草稿、也未产生历史版本时，可以原地修正候选。 */
-const candidateEditingEnabled = computed(() => Boolean(job.value) && hasProposals.value && !sealed.value);
 
 /** 解析失败或成功后都允许再次提交；提交期间和查询期间不允许重复提交。 */
 const canSubmitConversion = computed(() => importMutable.value && !pending.value && !operationRunning.value);
@@ -299,11 +195,9 @@ const steps = computed(() =>
   }),
 );
 
-const decisionStats = computed<StatItem[]>(() => [
+const parsingStats = computed<StatItem[]>(() => [
   { label: "未导入项目", value: rejectedCandidates.value.length, tone: rejectedCandidates.value.length ? "warning" : "success" },
-  { label: "已自动识别", value: decisionCounts.value.AUTO },
-  { label: "已人工处理", value: decisionCounts.value.MANUAL },
-  { label: "已排除候选", value: decisionCounts.value.EXCLUDED },
+  { label: "已接收候选", value: confirmedCandidateCount.value },
 ]);
 
 // 候选清单
@@ -331,10 +225,8 @@ const hasRiskRules = computed(() => proposalSheets.value.some((sheet) => sheet.r
 const ruleColumns = computed<CandidateColumn[]>(() => {
   const columns: CandidateColumn[] = [
     { key: "name", label: "规则名称", primary: true, minWidth: 200 },
-    { key: "node", label: "所属节点", width: 130 },
   ];
   if (hasRiskRules.value) {
-    columns.push({ key: "source_node", label: riskSourceNodeColumnLabel, width: 140 });
     columns.push({ key: "source_rule", label: riskSourceRuleColumnLabel, minWidth: 180 });
   }
   columns.push({ key: "method", label: "判断方式", minWidth: 220 });
@@ -344,10 +236,9 @@ const ruleColumns = computed<CandidateColumn[]>(() => {
 
 const calculationColumns: CandidateColumn[] = [
   { key: "name", label: "计算规则", primary: true, minWidth: 190 },
-  { key: "execution_mode", label: "计算用途", minWidth: 150 },
   { key: "formula", label: "计算方法", minWidth: 220 },
   { key: "parameters", label: "参数来源", minWidth: 260 },
-  { key: "bands", label: "判断标准", minWidth: 220 },
+  { key: "requirement", label: "业务要求", minWidth: 220 },
   { key: "status", label: "配置状态", width: 110 },
 ];
 
@@ -401,7 +292,6 @@ const fieldRows = computed<CandidateRow[]>(() =>
         field.material_name ?? "未关联材料",
         field.instruction || "未填写抽取要求",
       ],
-      state: field.decision_state,
       source: sourceText(field),
       details: [
         { label: "候选标识", value: field.candidate_ref },
@@ -419,7 +309,6 @@ const materialRows = computed<CandidateRow[]>(() =>
       ref: material.candidate_ref,
       name: material.name,
       values: [material.name, material.required ? "必传" : "按需上传", material.description || "未填写材料说明"],
-      state: material.decision_state,
       source: sourceText(material),
       details: [
         { label: "候选标识", value: material.candidate_ref },
@@ -435,22 +324,20 @@ const ruleRows = computed<CandidateRow[]>(() =>
       const risk = isRiskRule(rule);
       const values = [
         `${rule.name}${rule.config_status === "DISABLED" ? "（停用）" : ""}`,
-        rule.node_name ?? "未找到所属节点",
       ];
       if (hasRiskRules.value) {
-        // 风险疑点必须写明来源：只有风险规则有来源节点与来源审核规则，其它规则这两列为空。
-        values.push(risk ? riskSourceNodeText(rule) : "", risk ? riskSourceRuleText(rule) : "");
+        // 风险规则展示其真实依赖的来源规则。
+        values.push(risk ? riskSourceRuleText(rule) : "");
       }
       values.push(ruleComparisonText(rule), rule.comparison.requirement || "未填写审核要求");
       return {
         ref: rule.candidate_ref,
         name: rule.name,
         values,
-        state: rule.decision_state,
         source: sourceText(rule),
         details: [
           { label: "候选标识", value: rule.candidate_ref },
-          { label: "规则编码", value: `${rule.node} · ${rule.operator}` },
+          { label: "业务动作", value: rule.operator },
           { label: "配置状态", value: rule.config_status ? calculationStatusLabel(rule.config_status) : "未记录" },
           { label: "适用条件", value: ruleApplicability(rule) },
           { label: "原始识别内容", value: originalSummary(rule.original) },
@@ -466,41 +353,25 @@ const calculationRows = computed<CandidateRow[]>(() =>
     name: item.rule_name,
     values: [
       item.rule_name,
-      item.execution_mode === "VALUE_ONLY" ? "仅计算中间值" : "计算并判定",
       item.formula,
       item.parameters.map(calculationParameterText).join("；") || "无参数声明",
-      item.execution_mode === "VALUE_ONLY" ? "不作判定" : item.judgement_instruction || `${item.bands.length} 个区间`,
+      item.requirement,
       calculationStatusLabel(item.status),
     ],
-    state: item.decision_state,
     source: sourceText(item),
     details: [
       { label: "规则编号", value: item.rule_code },
       { label: "结果编号 / 类型", value: `${item.result_code} / ${item.result_type}` },
-      { label: "所属节点", value: item.node_name ?? "未找到所属节点" },
-      { label: "计算方式", value: item.execution_engine === "LLM" ? "AI 辅助计算与判断" : "旧程序计算，需重新解析规则库" },
-      { label: "判断标准", value: item.judgement_instruction || "见判定区间" },
-      { label: "判定区间原文", value: item.bands_text || "未记录" },
-      { label: "未声明参数", value: item.unresolved_identifiers.join("、") || "无" },
+      { label: "业务补充", value: JSON.stringify(item.business_context) },
       { label: "计算定义原表", value: calculationOriginText(item.origin) },
       ...item.parameter_sources.map((parameter) => ({
         label: `参数 ${parameter.code || "未填写编号"} 原表`, value: calculationOriginText(parameter.origin),
-      })),
-      ...item.band_sources.map((band) => ({
-        label: `判定 ${band.code || "未填写编号"} 原表`, value: calculationOriginText(band.origin),
       })),
     ],
   })),
 );
 
-/** 来源节点：只用服务端给出的中文文案；服务端没有给出时不显示，不在这里猜测。 */
-function riskSourceNodeText(rule: ProposalRule): string {
-  const labels = [
-    ...(rule.comparison.source_node_label ? [rule.comparison.source_node_label] : []),
-    ...rule.comparison.calculation_sources.map((source) => source.node_name ?? "未找到计算来源节点"),
-  ];
-  return Array.from(new Set(labels)).join("、");
-}
+
 
 /** 风险的全部来源审核规则，顺序与服务端候选引用一致。 */
 function riskSourceRuleText(rule: ProposalRule): string {
@@ -513,6 +384,9 @@ function riskSourceRuleText(rule: ProposalRule): string {
 /** 规则的比较对象用业务语言描述。 */
 function ruleComparisonText(rule: ProposalRule): string {
   const comparison = rule.comparison;
+  if (!comparison.left && !comparison.right && !isRiskRule(rule)) {
+    return comparison.operator_label || rule.operator;
+  }
   if (isRiskRule(rule)) {
     return `${riskSourceRuleText(rule) || "未声明来源审核规则"}：${comparison.risk_condition_label ?? "未声明触发条件"}`;
   }
@@ -534,14 +408,6 @@ function describeTarget(target: { material_name: string | null; field_name: stri
   return [target.material_name, target.field_name].filter(Boolean).join(" · ");
 }
 
-
-function countState(sheet: ProposalSheet, state: CandidateDecisionState): number {
-  return (
-    sheet.materials.filter((item) => item.decision_state === state).length +
-    sheet.fields.filter((item) => item.decision_state === state).length +
-    sheet.rules.filter((item) => item.decision_state === state).length
-  );
-}
 
 /**
  * 系统固定排除的工作表。
@@ -600,13 +466,11 @@ function inferStep(importJob: ImportJob): number {
 /**
  * 接收一份作业视图并落到真实可操作的步骤上。
  *
- * 读取作业所属场景的实际节点，用于候选归属展示；随后恢复工作表选择和问题答案。
+ * 恢复当前工作表选择并展示本次解析结果。
  */
 async function receiveJob(importJob: ImportJob, keepStep = false): Promise<void> {
   const reception = ++jobReception;
   job.value = importJob;
-  // 候选归属名称来自作业所属场景的实际节点。
-  await loadScenarioNodes(importJob.profile?.scenario_code);
   if (reception !== jobReception || job.value?.job_no !== importJob.job_no) return;
   initialiseBindings(importJob);
   if (!keepStep) {
@@ -682,21 +546,20 @@ async function startNewImport(): Promise<void> {
   await router.replace({ name: "scene-imports", query: scenarioCode ? { scenario: scenarioCode } : {} });
 }
 
-function openSceneFlow(): void {
+function openSceneConfiguration(): void {
   const scenarioCode = job.value?.profile?.scenario_code;
   const jobNo = job.value?.job_no;
   if (!scenarioCode || !jobNo) return;
   void router.push({
     name: "scene-detail",
     params: { scenarioCode },
-    query: { tab: "flow", importJob: jobNo },
+    query: { tab: "source", importJob: jobNo },
   });
 }
 
 function resetImportWorkspace(): void {
   ++jobLoadRequest;
   ++jobReception;
-  ++nodeRequest;
   loadingJob.value = false;
   // 完整重置操作查询：切作业后不再残留上一个作业的操作面板与轮询编号。
   resetTracking();
@@ -705,9 +568,7 @@ function resetImportWorkspace(): void {
   bindings.value = {};
   activeStep.value = 0;
   candidateTab.value = "material";
-  nodeLoadError.value = null;
   selectedFileSize.value = null;
-  correctionTarget.value = null;
   conversionAttemptKey = null;
 }
 
@@ -870,69 +731,6 @@ async function submitConversion(saveBindings: boolean): Promise<void> {
   });
 }
 
-/**
- * 候选原地修正 / 排除 / 恢复：走同一裁决接口，带上页面看到的草稿修订号。
- * 修订过期（IMPORT_DRAFT_REVISION_CONFLICT）由 FailureNotice 显示，提示刷新后重试。
- */
-async function applyCandidateDecision(
-  targetType: "MATERIAL" | "FIELD" | "RULE",
-  targetRef: string,
-  action: "RESOLVE" | "EXCLUDE" | "ACCEPT",
-  value: Record<string, JsonValue> = {},
-): Promise<void> {
-  if (!job.value) {
-    return;
-  }
-  const jobNo = job.value.job_no;
-  await run(async () => {
-    const revision = job.value?.draft_revision ?? 0;
-    const updated = await saveImportDecisions(jobNo, [{ target_type: targetType, target_ref: targetRef, action, value }], revision);
-    await receiveJob(updated, true);
-  });
-}
-
-function openCandidateEdit(targetType: "MATERIAL" | "FIELD" | "RULE", row: CandidateRow): void {
-  const entry = candidateIndex.value.get(row.ref);
-  if (!entry) {
-    formMessage.value = "找不到该候选对象，请刷新页面后重试。";
-    return;
-  }
-  correctionTarget.value = {
-    targetType: entry.targetType,
-    targetRef: row.ref,
-    candidate: entry.candidate,
-  };
-}
-
-async function submitCandidateEdit(value: Record<string, JsonValue>): Promise<void> {
-  const target = correctionTarget.value;
-  if (!target) {
-    return;
-  }
-  if (!Object.keys(value).length) {
-    ElMessage.info("没有检测到属性改动。");
-    return;
-  }
-  correctionPending.value = true;
-  try {
-    await applyCandidateDecision(target.targetType, target.targetRef, "RESOLVE", value);
-    correctionTarget.value = null;
-  } finally {
-    correctionPending.value = false;
-  }
-}
-
-function excludeCandidate(targetType: "MATERIAL" | "FIELD" | "RULE", row: CandidateRow): void {
-  if (!window.confirm(`确认排除「${row.name}」？排除后该候选不写入场景配置，可随时恢复。`)) {
-    return;
-  }
-  void applyCandidateDecision(targetType, row.ref, "EXCLUDE");
-}
-
-function restoreCandidate(targetType: "MATERIAL" | "FIELD" | "RULE", row: CandidateRow): void {
-  void applyCandidateDecision(targetType, row.ref, "ACCEPT");
-}
-
 /** 用导入结果替换 Excel 管理的草稿内容；流程节点保留，场景不会自动发布。 */
 async function applyToSceneDraft(): Promise<void> {
   if (!job.value || sealed.value) {
@@ -973,7 +771,7 @@ async function applyToSceneDraft(): Promise<void> {
                 `当前草稿已有 ${draft.materials.length} 个材料位、${draft.fields.length} 个字段、${draft.rules.filter((rule) => !rule.system).length} 条业务规则、${draft.calculations.length} 条计算规则；其中的人工修改将被覆盖。`)]
             : []),
           h("p", { style: { marginBottom: "12px" } },
-            "材料、字段、业务规则、计算配置、报告章节和来源工作表清单将被整份替换；流程节点、节点顺序和依赖关系继续保留。"),
+            "材料、字段、业务规则、计算配置、报告章节和来源工作表清单将被整份替换。执行按生效规则及其实际数据引用进行。"),
           h("p", "本次操作只生成草稿，不会发布场景，也不会影响当前已发布版本、已有方案和审核任务。"),
         ]),
         hasExistingBusinessDraft ? "覆盖现有草稿" : "生成场景草稿",
@@ -1129,8 +927,6 @@ watch(
       <el-card v-else-if="activeStep === 1" shadow="never" class="block-gap">
         <template #header>第二步 · 选择参与解析的工作表</template>
 
-        <el-alert v-if="nodeLoadError" class="block-gap-sm" type="error" show-icon :closable="false" :title="nodeLoadError" />
-
         <SheetBindingTable
           class="block-gap"
           :sheets="bindingSheets"
@@ -1151,7 +947,7 @@ watch(
           <div class="sticky-actions__bar binding-actions">
             <div class="card-actions">
               <el-button @click="activeStep = 0">上一步</el-button>
-              <el-button :disabled="!job.profile?.scenario_code" @click="openSceneFlow">配置场景流程</el-button>
+              <el-button :disabled="!job.profile?.scenario_code" @click="openSceneConfiguration">查看场景配置</el-button>
               <el-button :loading="loadingJob" @click="reloadSavedBindings">重新加载已保存选择</el-button>
               <el-button
                 type="primary"
@@ -1181,7 +977,7 @@ watch(
           无法解析或执行的项目逐条记录原因，不影响其他规则。
         </p>
 
-        <StatGrid class="block-gap" :items="decisionStats" />
+        <StatGrid class="block-gap" :items="parsingStats" />
 
         <el-card v-if="rejectedCandidates.length" shadow="never" class="block-gap">
           <template #header>未导入项目（{{ rejectedCandidates.length }} 项）</template>
@@ -1221,12 +1017,8 @@ watch(
                 <CandidateTable
                   :columns="materialColumns"
                   :rows="materialRows"
-                  :can-edit="candidateEditingEnabled"
                   empty-title="转换结果中没有材料候选"
                   empty-description="当前工作表没有定义材料位。可查看原文与解析结果核对是否包含材料定义。"
-                  @edit="openCandidateEdit('MATERIAL', $event)"
-                  @exclude="excludeCandidate('MATERIAL', $event)"
-                  @restore="restoreCandidate('MATERIAL', $event)"
                 />
               </el-tab-pane>
               <el-tab-pane name="field">
@@ -1234,12 +1026,8 @@ watch(
                 <CandidateTable
                   :columns="fieldColumns"
                   :rows="fieldRows"
-                  :can-edit="candidateEditingEnabled"
                   empty-title="转换结果中没有字段候选"
                   empty-description="当前工作表的转换结果只有材料或规则，没有可纳入的字段。可查看原文核对是否包含字段抽取要求。"
-                  @edit="openCandidateEdit('FIELD', $event)"
-                  @exclude="excludeCandidate('FIELD', $event)"
-                  @restore="restoreCandidate('FIELD', $event)"
                 />
               </el-tab-pane>
               <el-tab-pane name="rule">
@@ -1247,12 +1035,8 @@ watch(
                 <CandidateTable
                   :columns="ruleColumns"
                   :rows="ruleRows"
-                  :can-edit="candidateEditingEnabled"
                   empty-title="转换结果中没有规则候选"
                   empty-description="当前工作表没有可执行的检查规则。只写入材料清单和字段也可以，但审核任务不会有自动判断结果。"
-                  @edit="openCandidateEdit('RULE', $event)"
-                  @exclude="excludeCandidate('RULE', $event)"
-                  @restore="restoreCandidate('RULE', $event)"
                 />
               </el-tab-pane>
               <el-tab-pane v-if="proposalCalculations.length" name="calculation">
@@ -1369,17 +1153,6 @@ watch(
       </el-card>
     </template>
 
-    <CandidateCorrectionDialog
-      :open="Boolean(correctionTarget)"
-      :target-type="correctionTarget?.targetType ?? 'MATERIAL'"
-      :candidate="correctionTarget?.candidate ?? null"
-      :materials="materialRefOptions"
-      :rules="ruleRefOptions"
-      :nodes="scenarioNodes"
-      :pending="correctionPending"
-      @close="correctionTarget = null"
-      @submit="submitCandidateEdit"
-    />
   </div>
 </template>
 

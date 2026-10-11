@@ -22,8 +22,7 @@ from .scenarios import (
     ScenarioVersionResponse,
 )
 from .system import (
-    CapabilityCatalogResponse,
-    CapabilityItem,
+    ToolCatalogResponse,
     ExternalServiceConfiguration,
     MaterialTypeCatalogResponse,
     MaterialTypeItem,
@@ -75,8 +74,7 @@ __all__ = [
     "ScenarioDraftViewResponse",
     "ScenarioPublishResponse",
     "ScenarioVersionResponse",
-    "CapabilityCatalogResponse",
-    "CapabilityItem",
+    "ToolCatalogResponse",
     "ExternalServiceConfiguration",
     "MaterialTypeCatalogResponse",
     "MaterialTypeItem",

@@ -16,18 +16,6 @@ export interface TaskScope {
   unenabled_rules: RuleSnapshotEntry[];
   enabled_rule_keys?: string[];
   unenabled_rule_keys?: string[];
-  /** 未配置的检查类别（能力类型汇总）：用于「这类检查有没有配」。 */
-  unconfigured_node_types: string[];
-  /** 这些类别下真实存在的节点实例码：用于「当前这个节点是不是未配置的类别」。 */
-  unconfigured_node_codes: string[];
-  capability_gaps?: Array<{
-    rule_key?: string;
-    rule_name: string;
-    node?: string;
-    operator?: string;
-    gap: string;
-    message: string;
-  }>;
 }
 export interface DocumentUploadResponse extends ApiResponse {
   document_no: string;
@@ -107,7 +95,7 @@ export interface DraftMaterialItem {
 export interface DraftFieldItem {
   field_key: string;
   material_key: string;
-  /** 字段自身声明的抽取节点；已有显式抽取规则时由规则确定实际归属。 */
+  /** 内部技术容器身份，不是可编辑的业务阶段。 */
   node_code?: string | null;
   material_name: string | null;
   name: string;
@@ -166,12 +154,10 @@ export interface DraftRuleItem {
   parameters: Record<string, JsonValue>;
   requirement: string;
   applicability: { kind: string; material_keys?: string[] };
-  source_node: string | null;
   source_rule_key: string | null;
   source_rule_name: string | null;
   risk_level: string | null;
   risk_action: string | null;
-  requires_manual_review: boolean;
   source_ref?: string | null;
   origin?: ConfigOrigin | null;
   /** 业务配置事实：检查等级、合格要求原文、风险等级原文、成立条件、多来源与配置状态。 */
@@ -193,7 +179,7 @@ export interface DraftSectionItem {
   field_keys: string[];
   field_names: string[];
   sort_no?: number;
-  /** 节点版报告的分组属性：报告编号、名称、材料范围、输出格式、章节顺序、内容类型、结果排序与配置状态。 */
+  /** 报告的分组属性：报告编号、名称、材料范围、输出格式、章节顺序、内容类型、结果排序与配置状态。 */
   report_code?: string | null;
   report_name?: string | null;
   material_keys?: string[];
@@ -211,8 +197,7 @@ export interface DraftSectionItem {
 /**
  * 场景配置里的一个节点实例。
  *
- * 节点由用户配置：`node_code` 是实例码（同一场景可以有两个同类节点），
- * `node_type` 才是能力类型。顺序与依赖决定执行顺序，不由系统按规则内容生成。
+ * 节点是执行记录的技术容器。业务执行顺序由生效规则的显式字段、规则和计算引用决定。
  */
 export interface DraftNodeItem {
   node_code: string;
@@ -243,22 +228,18 @@ export interface DraftSheetItem {
 
 /** 草稿中的计算配置核对行。来自 calculation_json，不是运行结果。 */
 export interface DraftCalculationItem {
-  // PROGRAM 仅用于展示旧配置，已不支持发布或执行。
-  execution_engine: "PROGRAM" | "LLM";
-  judgement_instruction: string;
-  execution_mode: "CHECK" | "VALUE_ONLY";
   rule_code: string | null;
   name: string | null;
   node_code: string | null;
   formula: string | null;
+  requirement: string;
+  business_context: Record<string, JsonValue>;
   result_code: string | null;
   unit: string | null;
   currency: string | null;
   status: string | null;
-  frozen: boolean;
   origin?: ConfigOrigin | null;
   parameter_sources: Array<{ code: string | null; origin: ConfigOrigin | null }>;
-  band_sources: Array<{ code: string | null; origin: ConfigOrigin | null }>;
 }
 
 export interface DraftDisabledSourceRow {
@@ -283,7 +264,7 @@ export interface DraftSourceActivationPreviewData {
     source_id: string | null;
   }>;
   items: Array<{ kind: string; name: string; description: string }>;
-  questions: string[];
+  notices: string[];
 }
 
 export interface DraftSourceActivationPreview extends DraftSourceActivationPreviewData, ApiResponse {}
@@ -299,7 +280,7 @@ export interface ScenarioDraftView extends ApiResponse {
   /** 当前配置是否已生效：null 表示已生效；非空时页面显示“尚未生效 + 原因”。 */
   sync_error?: ConfigSyncError | null;
   updated_at: string;
-  /** 用户配置的实际节点实例，字段、规则和计算分别引用它们。 */
+  /** 执行记录技术容器，不供用户编排业务流程。 */
   nodes: DraftNodeItem[];
   /** 导入来源工作表清单；动态来源无表级节点，历史来源可保留旧绑定。 */
   sheets: DraftSheetItem[];

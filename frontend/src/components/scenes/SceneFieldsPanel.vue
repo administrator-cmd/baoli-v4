@@ -48,34 +48,9 @@ const loadError = ref<string | null>(null);
 const saving = ref(false);
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
-const extractionNodes = computed(() =>
-  (draft.value?.nodes ?? []).filter((node) => node.node_type === "FIELD_EXTRACTION"),
-);
-
-function fieldNodeCodes(item: DraftFieldItem): string[] {
-  const extractionRules = (draft.value?.rules ?? []).filter((rule) =>
-    rule.operator === "LLM_EXTRACT"
-    && rule.outputs.some((output) => output.field_key === item.field_key),
-  );
-  const activeRules = extractionRules.filter((rule) => rule.enabled);
-  const owners = (activeRules.length ? activeRules : extractionRules)
-    .map((rule) => rule.node).filter((code): code is string => Boolean(code));
-  return [...new Set(owners.length ? owners : item.node_code ? [item.node_code] : [])];
-}
-
-function fieldNodeLabel(item: DraftFieldItem): string {
-  const codes = fieldNodeCodes(item);
-  if (!codes.length) return "未指定抽取节点";
-  const labels = codes.map((code) => {
-    const node = draft.value?.nodes.find((candidate) => candidate.node_code === code);
-    return node ? `${node.name}${node.enabled ? "" : "（已停用）"}` : "未找到所属节点";
-  }).join("、");
-  const extractionRules = (draft.value?.rules ?? []).filter((rule) =>
-    rule.operator === "LLM_EXTRACT"
-    && rule.outputs.some((output) => output.field_key === item.field_key),
-  );
-  return extractionRules.length && extractionRules.every((rule) => !rule.enabled)
-    ? `${labels}（自动抽取已停用）` : labels;
+function fieldExecutionLabel(item: DraftFieldItem): string {
+  const producers = (draft.value?.rules ?? []).filter(rule => rule.outputs.some(output => output.field_key === item.field_key));
+  return producers.some(rule => rule.enabled) ? "已启用" : "已停用";
 }
 
 const query = reactive({ material_key: "", name: "" });
@@ -111,7 +86,6 @@ const dialogVisible = ref(false);
 const editingItem = ref<DraftFieldItem | null>(null);
 const form = reactive({
   material_key: "",
-  node_code: "",
   name: "",
   value_type: "STRING",
   extraction_strategy: "RAW_TEXT" as "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED",
@@ -159,7 +133,6 @@ watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immed
 function openCreate(): void {
   editingItem.value = null;
   form.material_key = materials.value[0]?.material_key ?? "";
-  form.node_code = "";
   form.name = "";
   form.value_type = "STRING";
   form.extraction_strategy = "RAW_TEXT";
@@ -178,8 +151,6 @@ function openCreate(): void {
 function openEdit(item: DraftFieldItem): void {
   editingItem.value = item;
   form.material_key = item.material_key;
-  const owners = fieldNodeCodes(item);
-  form.node_code = owners.length === 1 ? owners[0]! : item.node_code ?? "";
   form.name = item.name;
   form.value_type = item.value_type;
   form.extraction_strategy = item.extraction_strategy ?? defaultExtractionStrategy(item.value_type);
@@ -243,7 +214,6 @@ async function submitForm(): Promise<void> {
   try {
     const payload = {
       material_key: form.material_key,
-      node_code: form.node_code || null,
       name: form.name.trim(),
       value_type: form.value_type,
       extraction_strategy: form.extraction_strategy,
@@ -347,8 +317,8 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
 
       <el-table v-else :data="filteredFields" border stripe v-loading="loading" empty-text="暂无字段配置">
         <el-table-column type="index" label="序号" width="60" />
-        <el-table-column label="抽取节点" min-width="150" show-overflow-tooltip>
-          <template #default="{ row }">{{ fieldNodeLabel(row) }}</template>
+        <el-table-column label="自动取数" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">{{ fieldExecutionLabel(row) }}</template>
         </el-table-column>
         <el-table-column prop="source_ref" label="字段编号" width="120">
           <template #default="{ row }">
@@ -408,20 +378,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
               <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
             </el-select>
           </el-form-item>
-          <el-form-item label="抽取节点">
-            <el-select v-model="form.node_code" style="width: 100%" placeholder="请选择抽取节点">
-              <el-option value="" label="未指定（发布时核对唯一归属）" />
-              <el-option
-                v-if="form.node_code && !extractionNodes.some((node) => node.node_code === form.node_code)"
-                :value="form.node_code" label="原归属节点不可用" disabled
-              />
-              <el-option
-                v-for="node in extractionNodes" :key="node.node_code" :value="node.node_code"
-                :label="`${node.name}${node.enabled ? '' : '（已停用）'}`" :disabled="!node.enabled"
-              />
-            </el-select>
-            <div class="text-hint">同类节点有多个时须明确归属；已有独立抽取规则时，节点归属须与该规则一致。</div>
-          </el-form-item>
           <el-form-item label="字段编号">
             <el-input v-model="form.source_ref" maxlength="80" placeholder="例如：FD-001；导出规则库时写回「字段编号」列" />
             <div class="text-hint">保留规则库已有的业务编号；没有编号时可留空，系统用内部身份关联字段。</div>
@@ -444,7 +400,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
                 :disabled="!extractionStrategySupports(item.value, form.value_type)"
               />
             </el-select>
-            <div class="text-hint">文本和条款保留原文；数值、金额、日期和是否值由系统确定性转换；一个字段包含多个业务属性时使用结构化抽取。</div>
+            <div class="text-hint">模型按字段要求直接抽取；一个字段包含多个属性时可声明结构化产出。</div>
           </el-form-item>
           <el-form-item v-if="form.extraction_strategy === 'STRUCTURED'" label="结构定义" required>
             <el-input
@@ -462,12 +418,12 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <el-input v-model="form.currency" maxlength="40" placeholder="金额类字段建议填写（如：人民币）；不填写表示未声明，系统不默认币种" />
           </el-form-item>
           <el-form-item label="取数期间">
-            <el-select v-model="form.period_scope" clearable style="width: 100%" placeholder="不涉及时留空">
+            <el-select v-model="form.period_scope" filterable allow-create clearable style="width: 100%" placeholder="不涉及时留空">
               <el-option v-for="item in periodScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
           </el-form-item>
           <el-form-item label="报表口径">
-            <el-select v-model="form.statement_scope" clearable style="width: 100%" placeholder="不涉及时留空">
+            <el-select v-model="form.statement_scope" filterable allow-create clearable style="width: 100%" placeholder="不涉及时留空">
               <el-option v-for="item in statementScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
             <div class="text-hint">

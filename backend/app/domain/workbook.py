@@ -42,7 +42,7 @@ class WorkbookIR(BaseModel):
     source_filename: str
     source_size: int
     source_sha256: str
-    # 内部节点能力版本身份，不约束上传 Excel 的布局。
+    # 内部执行契约版本身份，不约束上传 Excel 的布局。
     profile_version: str
     # 上传入口的场景身份（用户先建场景、再在该场景下上传）。它不由表头推断：
     # 字段及规则使用该场景的实际节点；历史作业没有这一项时按未记录场景处理。

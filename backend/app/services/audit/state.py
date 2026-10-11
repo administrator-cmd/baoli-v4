@@ -3,7 +3,7 @@
 三个「当前」口径在这里定义，其他地方不得自行重算：当前上传版本是
 `TaskDocument.current_upload_id` 指向的那一份（历史上传保留为历史，不进入当前结果）；
 当前有效执行批次是每个节点最新且未被 INVALIDATED 的执行（报告、风险与规则输入都从这里取结果，
-节点执行先后由 DAG 的 `depends_on` 决定，不能用只用于展示排序的 `sequence_no` 截断）；当前事实版本
+执行项顺序由实际字段与上游结果引用决定）；当前事实版本
 是字段事实按 (任务, 字段, 材料位) 唯一的那条 `is_current`。
 
 检查点写在这里是为了让「业务事务」与「图等待点」的提交顺序只有一处实现：
@@ -12,9 +12,7 @@
 
 from .. import task_csv_service
 
-from ...domain.audit_vocab import is_type_unavailable, read_material_type_status
-from ...domain.manifest import rule_node_type_of
-from ...domain.node_registry import legacy_node_type_of
+from ...domain.audit_vocab import is_type_unavailable
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, DocumentUpload, NodeExecution, ScenarioVersion, TaskDocument, TaskFieldValue, WorkflowCheckpoint
 from .shared import _current_uploads, _scenario, _task_manifest
@@ -70,12 +68,11 @@ def _material_states(db: Session, task: AuditTask) -> dict[str, str | None]:
 
     这两种状态传给算子的后果不同：TYPE_REJECTED 是人工确定结论，依赖它的检查缺少有效依据；
     TYPE_REVIEW 不是对材料内容的否定（识别结论来自已下线为仅供参考的自动识别），依赖它的检查
-    照常按材料中的真实原文判定，类型本身另行作为待确认事项暴露。历史记录里由旧自动识别写下的
-    `TYPE_MISMATCH` 按待复核读取（见 `domain.audit_vocab.read_material_type_status`）。
+    照常按材料中的真实原文判定，类型本身另行作为待确认事项暴露。
     """
     states: dict[str, str | None] = {}
     for document, upload in _current_uploads(db, task):
-        status = read_material_type_status(document.status)
+        status = document.status
         if is_type_unavailable(status):
             states[document.material_key] = status
         elif upload is None:
@@ -182,62 +179,13 @@ def _risk_rule_refs(manifest: dict[str, Any]) -> set[tuple[str, str]]:
     return {
         (item["node"], item["rule_key"])
         for item in manifest.get("rules", [])
-        if rule_node_type_of(item) == "RISK_RATING"
+        if item.get("operator") == "RISK_TRIGGER" or item.get("risk_condition")
     }
 
-def _node_codes_of_type(manifest: dict[str, Any], node_type: str) -> list[str]:
-    """任务场景里某一能力类型的全部节点实例码。
-
-    节点实例码由用户配置，同一类型可以有多个实例（两张报表各一个字段抽取节点）。
-    按能力类型查询执行记录、产物或结果时必须先解析成实例码集合，不能写死一个
-    能力类型当实例码——那样在用户改了实例码之后一条也查不到，而页面只会显示
-    「尚未执行」。旧 manifest 的节点没有 `node_type`：那时实例码本身就是能力类型，
-    只有实例码是已知能力类型时迁移才确定；迁移不出来（自定义实例码）的节点
-    不参与匹配，也不会被当成任意一个能力类型。
-    """
-    return sorted(
-        str(item["node_code"])
-        for item in manifest.get("nodes", [])
-        if (item.get("node_type") or legacy_node_type_of(str(item["node_code"]))) == node_type
-    )
 
 
-def _is_node_of_type(manifest: dict[str, Any], node_code: str | None, node_type: str) -> bool:
-    """`node_code` 是不是该能力类型的节点。
-
-    用 `_node_codes_of_type` 做成员判断，不用 `_single_node_code_of_type`：
-    一个场景可以完全没有配置某一类节点（「当前场景未配置此类检查」是配置事实），
-    此时「当前节点是这类节点吗」的答案是否，而不是「配置缺失」。
-    拿 `_single_node_code_of_type` 做判断会让这类场景在每一个节点上都执行失败，
-    报出「没有配置人工复核节点」——与当前真正要做的事毫无关系。
-    """
-    if not node_code:
-        return False
-    return node_code in set(_node_codes_of_type(manifest, node_type))
 
 
-def _single_node_code_of_type(manifest: dict[str, Any], node_type: str, *, purpose: str) -> str:
-    """某一能力类型唯一的节点实例码；没有配置或配置了多个时明确报错。
-
-    用于系统需要定位到一个具体节点的场合（人工复核等待点、退回重判的落点）。
-    多个实例时无法确定该用哪一个，静默取第一个会让行为取决于用户配置顺序。
-    """
-    codes = _node_codes_of_type(manifest, node_type)
-    if not codes:
-        raise BusinessError(
-            "AUDIT_NODE_UNKNOWN",
-            f"本任务绑定的场景没有配置「{node_type}」节点，{purpose}无法进行",
-            status_code=500,
-            details={"node_type": node_type, "purpose": purpose},
-        )
-    if len(codes) > 1:
-        raise BusinessError(
-            "AUDIT_NODE_AMBIGUOUS",
-            f"本任务绑定的场景配置了多个「{node_type}」节点，无法确定{purpose}应落在哪一个上",
-            status_code=500,
-            details={"node_type": node_type, "purpose": purpose, "node_codes": codes},
-        )
-    return codes[0]
 
 def _scenario_nodes(db: Session, task: AuditTask) -> tuple[ScenarioVersion, list[dict[str, Any]], int]:
     scenario = _scenario(db, task)

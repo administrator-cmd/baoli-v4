@@ -233,19 +233,6 @@ const businessSectionCount = computed(() => props.report?.business_section_count
           </div>
         </el-alert>
 
-        <el-alert
-          v-if="conclusion?.capability_gaps?.length"
-          class="block-gap-sm"
-          type="warning"
-          show-icon
-          :closable="false"
-          title="有已启用的检查因能力未实现而没有结论"
-        >
-          <div v-for="(gap, index) in conclusion?.capability_gaps" :key="`${gap.rule_name}-${index}`">
-            {{ gap.rule_name }}（{{ gap.capability_id || gap.gap }}）：{{ gap.message }}
-          </div>
-          <div class="text-hint">这些检查不是「证据不足」，也不是通过；它们在发布时已由使用者逐条确认。</div>
-        </el-alert>
 
         <el-alert
           v-if="!businessSectionCount"

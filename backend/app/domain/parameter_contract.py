@@ -1,11 +1,5 @@
-"""规则参数契约常量：算子参数的取值集合与口径，叶子模块。
+"""工具参数与报告展示的取值常量，不约束规则业务合理性。"""
 
-单独成文件的原因：工具目录与 manifest 编译器共用这些常量，保证模型参数 Schema 与
-编译期校验一致；但 `manifest.py` 导入了 `capabilities`，而 `capabilities` 会导出
-工具目录，若 `tool_catalog` 反过来导入 `manifest` 就形成
-`manifest → capabilities → tool_catalog → manifest` 的模块级环。
-因此这些常量必须住在一个谁都不依赖的叶子模块里。
-"""
 
 from __future__ import annotations
 

@@ -11,7 +11,7 @@ from .. import task_csv_service
 
 import json
 import re
-from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW, read_material_type_status
+from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
 from ...domain import currency, field_strategy, quality_judgement
 from ...domain.manifest import EVIDENCE_SEAL_SUBJECT, applicability_view
 from ...common.exceptions import BusinessError
@@ -615,7 +615,7 @@ def _subject_type_review_notice(
         for document, upload in _current_uploads(db, task)
         if upload is not None
         and document.material_key in scope
-        and read_material_type_status(document.status) == MATERIAL_TYPE_REVIEW
+        and document.status == MATERIAL_TYPE_REVIEW
     )
     if not pending:
         return None

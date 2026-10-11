@@ -300,18 +300,11 @@ export interface AuditTask extends ApiResponse {
   fields: AuditField[];
   rules: AuditRule[];
   pending_reviews: PendingReview[];
-  /**
-   * 未配置的检查类别：`..._types` 是能力类型汇总（「这类检查有没有配」），
-   * `..._codes` 是这些类型下的节点实例码（「当前这个节点是不是未配置的类别」）。
-   * 两个口径不同，不得交叉比较。旧任务可能没有这两个字段。
-   */
-  unconfigured_check_node_types?: string[];
-  unconfigured_check_node_codes?: string[];
   /** 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。 */
   input_revision: number;
   /** 当前失败节点是否具备可核对的等待点恢复条件。 */
   can_recover_failed_node: boolean;
-  /** 任务冻结的普通规则、计算规则与未配置检查范围。 */
+  /** 任务冻结的生效规则范围。 */
   scope?: TaskScope | null;
   latest_operation: OperationAccepted | null;
   /** 任务备注（可编辑基本资料）。 */

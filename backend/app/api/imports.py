@@ -14,15 +14,11 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..schema.dto import (
     ApplyImportDraftRequest,
-    DecisionDraftRequest,
-    ImportDecisionsRequest,
     OperationRequest,
-    PublishRequest,
     SheetBindingsRequest,
 )
 from ..schema.query import validate_page_params
 from ..schema.vo import OperationAcceptedResponse
-from ..schema.vo.scenarios import ScenarioVersionResponse
 from ..services import admin_query_service, import_service
 from ..services.background_service import operation_view
 from ..services.import_service import (
@@ -31,8 +27,6 @@ from ..services.import_service import (
     import_job_summaries,
     import_job_view,
     apply_import_to_draft,
-    publish_import,
-    save_decisions,
     update_sheet_bindings,
 )
 from ..services.operation_gateway import submit_conversion
@@ -185,24 +179,8 @@ def retry_job(
     )
 
 
-@router.put("/{job_no}/decisions", response_model=ImportJobResponse)
-def put_decisions(job_no: str, payload: ImportDecisionsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
-    """提交裁决：必须一次处理全部待裁决问题，并带页面看到的草稿修订号，过期即 409。"""
-    job = save_decisions(db, job_no, payload)
-    return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
-@router.put("/{job_no}/decision-draft", response_model=ImportJobResponse)
-def put_decision_draft(
-    job_no: str,
-    payload: DecisionDraftRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> ImportJobResponse:
-    """保存集中裁决草稿：只落库当前作答，不触发图恢复，可反复保存。"""
-    # 先锁再查由服务函数负责；该入口与后台转换同样互斥。
-    job = import_service.save_decision_draft(db, job_no, payload.answers)
-    return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
 @router.post("/{job_no}/apply-draft", response_model=ImportJobResponse)
@@ -216,18 +194,3 @@ def apply_draft(
         expected_scene_revision=payload.expected_scene_revision,
     )
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
-
-
-@router.post("/{job_no}/publish", response_model=ScenarioVersionResponse, status_code=201)
-def publish(job_no: str, payload: PublishRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioVersionResponse:
-    """历史作业若已有场景版本则返回该版本。新的导入不能从这里发布场景。"""
-    version = publish_import(db, job_no, payload)
-    return ScenarioVersionResponse(
-        request_id=request.state.request_id,
-        scenario_code=version.scenario_code,
-        scenario_name=version.scenario_name,
-        version_no=version.version_no,
-        status=version.status,
-        manifest=version.manifest_json,
-        published_at=version.published_at,
-    )

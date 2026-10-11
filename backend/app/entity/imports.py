@@ -43,7 +43,6 @@ class ImportJob(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     workbook_ir_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     proposals_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    decisions_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     manifest_draft_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     coverage_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     draft_revision: Mapped[int] = mapped_column(

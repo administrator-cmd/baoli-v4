@@ -44,42 +44,9 @@ class MaterialTypeCatalogResponse(ApiResponse):
 
     items: list[MaterialTypeItem]
 
-class CapabilityItem(BaseModel):
-    """能力目录中的一项能力。
-
-    页面据此渲染检查方式下拉、规则输入形态与参数提示，不再本地维护一份名单——
-    本地名单与后端漂移过一次（后端 12 个算子，页面只有 7 个），
-    结果是页面上打开一条已导入的规则，下拉里找不到它当前的检查方式。
-    """
-
-    capability_id: str
-    label: str
-    kind: str
-    parent: str | None = None
-    nodes: list[str] = Field(default_factory=list)
-    new_rule_nodes: list[str]
-    input_kind: str
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    output_keys: list[str] = Field(default_factory=list)
-    statuses: list[str] = Field(default_factory=list)
-    supports_evidence: bool = False
-    supports_comparison: bool = False
-    implemented: bool = False
-    unimplemented_reason: str | None = None
-    execution: str = ""
-    evidence: str | None = None
-    judge: str | None = None
-    extension_namespace: str | None = None
-    version: str = ""
-    note: str | None = None
 
 class ToolCatalogItem(BaseModel):
-    """工具目录中的一项工具。
-
-    与 `CapabilityItem` 的分工：能力项回答「这条规则由哪项能力判定」，
-    工具项回答「模型可以调用什么、参数长什么样、当前能不能真跑」。
-    两者都由 `domain/tool_catalog.py` 从能力目录派生，不各自维护一份名单。
-    """
+    """工具的实际实现、参数和返回结果说明。"""
 
     tool_id: str
     version: str
@@ -88,7 +55,6 @@ class ToolCatalogItem(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
     handler_ref: dict[str, str] | None = None
-    allowed_nodes: list[str] = Field(default_factory=list)
     allowed_scenes: list[str] | None = None
     required_evidence: list[str] = Field(default_factory=list)
     side_effect: bool = False
@@ -99,28 +65,17 @@ class ToolCatalogItem(BaseModel):
     registered: bool = True
     implemented: bool = False
     agent_selectable: bool = False
-    node_level_only: bool = False
     agent_unselectable_reason: str | None = None
     error_codes: list[str] = Field(default_factory=list)
     unimplemented_reason: str | None = None
     input_count: str | None = None
     runtime_keys: list[str] = Field(default_factory=list)
 
-class CapabilityCatalogResponse(ApiResponse):
-    """审核能力目录。
+class ToolCatalogResponse(ApiResponse):
+    """模型可调用工具的唯一目录，不声明业务节点或发布能力缺口。"""
 
-    后端能力的单一事实来源：前端从这里取算子选项、节点约束与参数口径。implemented=false
-    的能力可以配置，但发布前必须逐条确认，运行时明确返回不可判定。`tools` 是同一份目录的
-    工具视图，只有 `implemented=true` 的工具才会进模型请求的 `tools`，不可调用的工具仍如实
-    列出并写明原因。
-    """
-
-    capability_version: str
-    rule_statuses: list[str] = Field(default_factory=list)
-    items: list[CapabilityItem] = Field(default_factory=list)
-    tool_catalog_version: str = ""
-    # 工具目录的内容指纹：随已发布配置冻结，用于对账「模型当时看到的是哪一版工具」。
-    tool_catalog_fingerprint: str = ""
+    tool_catalog_version: str
+    tool_catalog_fingerprint: str
     tools: list[ToolCatalogItem] = Field(default_factory=list)
 
 class RuleCapabilityStatusResponse(BaseModel):
@@ -163,9 +118,8 @@ __all__ = [
     "UploadPolicyResponse",
     "MaterialTypeItem",
     "MaterialTypeCatalogResponse",
-    "CapabilityItem",
     "ToolCatalogItem",
-    "CapabilityCatalogResponse",
+    "ToolCatalogResponse",
     "RuleCapabilityStatusResponse",
     "RuleStatusCatalogResponse",
     "SystemServiceItem",
