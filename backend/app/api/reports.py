@@ -7,12 +7,12 @@
 """
 
 from datetime import datetime
-from io import BytesIO
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+
+from .downloads import report_download_response
 
 from ..database import get_db
 from ..common.exceptions import BusinessError
@@ -20,7 +20,6 @@ from ..schema.dto import ReportRemarkRequest
 from ..schema.query import validate_page_params
 from ..services import admin_query_service
 from ..schema.vo import PagedResponse, RiskResultPageResponse
-from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/reports", tags=["审核报告"])
 risks_router = APIRouter(prefix="/risk-results", tags=["风险结果"])
@@ -55,50 +54,6 @@ def list_reports(
         page_size=page_size,
     )
     return PagedResponse.model_validate({**result, "request_id": request.state.request_id})
-
-
-@router.get("/export")
-def export_reports(
-    name: str | None = None,
-    task_no: str | None = None,
-    scenario_code: str | None = None,
-    plan_code: str | None = None,
-    archived: bool | None = None,
-    generated_from: datetime | None = None,
-    generated_to: datetime | None = None,
-    db: Session = Depends(get_db),
-):
-    """按当前筛选导出报告列表 CSV。"""
-    result = admin_query_service.list_reports_page(
-        db,
-        name=name,
-        task_no=task_no,
-        scenario_code=scenario_code,
-        plan_code=plan_code,
-        archived=archived,
-        generated_from=generated_from,
-        generated_to=generated_to,
-        page=1,
-        page_size=EXPORT_PAGE_SIZE,
-    )
-    rows = [
-        [
-            item["report_name"],
-            item["task_name"],
-            item["plan_name"] if not item["is_legacy_config"] else "历史任务配置",
-            item["generated_at"],
-            item["scope_execution_complete"],
-            item["risk_conclusion_available"],
-            item["status"],
-            item["stale"],
-        ]
-        for item in result["items"]
-    ]
-    return csv_response(
-        "审核报告列表.csv",
-        ["报告名称", "任务", "方案", "生成时间", "范围完整性", "风险可判定性", "归档状态", "已失效"],
-        rows,
-    )
 
 
 @router.get("/{report_no}")
@@ -136,17 +91,11 @@ def download_report(report_no: str, db: Session = Depends(get_db)) -> StreamingR
     if not isinstance(content, str) or not content:
         raise BusinessError(
             "REPORT_CONTENT_MISSING",
-            "该报告快照没有可下载的正文（历史回填缺失或生成时未写入）",
+            "该报告快照没有已保存的可下载正文",
             status_code=409,
             details={"report_no": report_no},
         )
-    extension = {"text/markdown": "md", "text/plain": "txt", "text/html": "html"}[report.content_type]
-    filename = f"{report.report_name}.{extension}"
-    return StreamingResponse(
-        BytesIO(content.encode("utf-8")),
-        media_type=report.content_type + "; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-    )
+    return report_download_response(content, report.content_type, report.report_name)
 
 
 @risks_router.get("", response_model=RiskResultPageResponse)
@@ -174,42 +123,3 @@ def list_risk_results(
         page_size=page_size,
     )
     return RiskResultPageResponse.model_validate({**result, "request_id": request.state.request_id})
-
-
-@risks_router.get("/export")
-def export_risk_results(
-    task_no: str | None = None,
-    scenario_code: str | None = None,
-    plan_code: str | None = None,
-    risk_level: str | None = None,
-    status: str | None = None,
-    db: Session = Depends(get_db),
-):
-    """按当前筛选导出风险结果列表 CSV。"""
-    result = admin_query_service.list_risk_results_page(
-        db,
-        task_no=task_no,
-        scenario_code=scenario_code,
-        plan_code=plan_code,
-        risk_level=risk_level,
-        status=status,
-        page=1,
-        page_size=EXPORT_PAGE_SIZE,
-    )
-    rows = [
-        [
-            item["task_name"],
-            item["name"],
-            item["source_rule_name"],
-            item["risk_level"],
-            item["status"],
-            item["suggestion"],
-            item["message"],
-        ]
-        for item in result["items"]
-    ]
-    return csv_response(
-        "风险结果列表.csv",
-        ["任务", "风险名称", "来源规则", "风险等级", "当前状态", "处理建议", "说明"],
-        rows,
-    )

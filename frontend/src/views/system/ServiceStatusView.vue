@@ -56,7 +56,6 @@ onMounted(() => {
     <PageHeader
       eyebrow="系统管理"
       title="服务状态"
-      subtitle="数据库与外部服务的配置、连接状态分开呈现；未验证的服务不会显示为已连接。"
       :show-refresh="false"
     />
     <div class="app-toolbar">
@@ -111,8 +110,5 @@ onMounted(() => {
       </el-table-column>
     </el-table>
 
-    <p class="text-hint block-gap-sm">
-      外部服务未配置时，依赖它的操作会返回明确的未配置错误；可以先查看任务与系统状态，不影响已有数据。
-    </p>
   </div>
 </template>

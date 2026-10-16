@@ -36,20 +36,19 @@ export interface ToolCatalogItem {
   registered: boolean;
   /** 当前能被真实执行（节点级实现或 Agent 工具都可以为 true）。 */
   implemented: boolean;
+  /** 质量判断是否已有实际判定依据；null 表示不是质量判断工具。 */
+  judgement_supported: boolean | null;
+  judgement_unsupported_reason: string | null;
   /** 模型在规则评估循环里能选它。与 implemented 是两件事。 */
   agent_selectable: boolean;
   /** agent_selectable=false 的真实原因。 */
   agent_unselectable_reason: string | null;
-  error_codes: string[];
   unimplemented_reason: string | null;
   input_count: string | null;
   runtime_keys: string[];
 }
 
 export interface ToolCatalog extends ApiResponse {
-  tool_catalog_version: string;
-  /** 工具目录内容指纹：能发现「版本号没改但内容变了」。 */
-  tool_catalog_fingerprint: string;
   tools: ToolCatalogItem[];
 }
 

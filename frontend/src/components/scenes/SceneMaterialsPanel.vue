@@ -2,12 +2,12 @@
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { DraftMaterialItem, ScenarioDraftView } from "@/api/contracts";
+import type { DraftMaterialItem } from "@/api/contracts";
 import { ApiError } from "@/api/http";
 import {
   createDraftMaterial,
   deleteDraftMaterial,
-  getSceneDraft,
+  getSceneConfiguration,
   updateDraftMaterial,
 } from "@/api/scenes";
 
@@ -27,10 +27,10 @@ const emit = defineEmits<{
 }>();
 
 const materials = ref<DraftMaterialItem[]>([]);
-const draft = ref<ScenarioDraftView | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
+let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
@@ -50,23 +50,23 @@ const form = reactive({
 const dependencyIssue = ref<{ title: string; entries: string[] } | null>(null);
 
 async function load(): Promise<void> {
+  const sequence = ++loadSequence;
   if (!props.scenarioCode) {
     materials.value = [];
-    draft.value = null;
     return;
   }
   loading.value = true;
   loadError.value = null;
   try {
-    const payload = await getSceneDraft(props.scenarioCode);
-    draft.value = payload;
+    const payload = await getSceneConfiguration(props.scenarioCode);
+    if (sequence !== loadSequence) return;
     materials.value = payload.materials;
   } catch (error) {
+    if (sequence !== loadSequence) return;
     materials.value = [];
-    draft.value = null;
     loadError.value = error instanceof Error ? error.message : "材料配置读取失败";
   } finally {
-    loading.value = false;
+    if (sequence === loadSequence) loading.value = false;
   }
 }
 
@@ -187,9 +187,6 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增材料</el-button>
-          <span v-if="draft" class="text-muted">
-            {{ draft.source_label }}
-          </span>
         </div>
         <div class="app-toolbar__right">
           <el-button :loading="loading" @click="load">刷新</el-button>
@@ -235,20 +232,14 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
           </template>
         </el-table-column>
       </el-table>
-      <p class="text-hint">
-        材料编码由系统生成，用于稳定引用；材料位只定义「需要哪些材料」，
-        材料类型在上传文件时由用户从 8018 支持目录中选择，不在这里配置。
-      </p>
 
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑材料' : '新增材料'" width="600px" :close-on-click-modal="false">
         <el-form label-width="100px">
           <el-form-item label="材料编号">
-            <el-input v-model="form.source_ref" maxlength="80" placeholder="例如：MAT-001；导出规则库时写回「材料编号」列" />
-            <div class="text-hint">从 Excel 导入的材料会带回原编号；页面新建的请补一个，否则导出会因缺少必填编号被拒绝。</div>
+            <el-input v-model="form.source_ref" maxlength="80" placeholder="例如：MAT-001" />
           </el-form-item>
           <el-form-item label="材料名称" required>
             <el-input v-model="form.name" maxlength="255" placeholder="例如：主合同" />
-            <div class="text-hint">材料名称是业务叫法，只表达这个材料位需要什么文件。</div>
           </el-form-item>
           <el-form-item label="是否必传">
             <el-radio-group v-model="form.required">
@@ -277,9 +268,6 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         </template>
       </el-dialog>
 
-      <div class="text-hint block-gap-sm">
-        已保存到草稿，发布后才供新方案使用。已建方案与任务使用它们创建时的快照。
-      </div>
     </template>
   </div>
 </template>

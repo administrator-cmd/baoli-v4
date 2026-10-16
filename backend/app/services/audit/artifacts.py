@@ -4,8 +4,9 @@
 占位在联系供应商之前提交，唯一键 (上传, 产物类型, 上传哈希) 保证同一份上传同一类产物只调用一次。
 
 失败语义：只有在能确认供应商未受理（调用前的本地错误，见 `PRE_CONTACT_ERROR_CODES`）时才删除
-占位，其余失败一律保留占位并报「结果未知」——自动重发会制造重复外部作业。OCR 是异步作业：
+占位，其余提交失败保留占位并报「结果未知」——自动重发会制造重复外部作业。OCR 是异步作业：
 本地等待预算耗尽只代表本次操作失败，不证明供应商作业已失效，因此不自动重新提交，交人工对账。
+供应商明确返回 failed 时保存 FAILED 终态与原因，用户可通过重新提交入口创建新作业。
 
 本模块不判断业务结论，只回答「产物是否存在、是否可读、内容哈希是什么」。"""
 
@@ -45,7 +46,7 @@ def _artifact_for_upload(db: Session, upload: DocumentUpload, service_code: str)
 
 def _artifact_payload(artifact: StoredArtifact) -> ExternalArtifact:
     try:
-        payload = ready_artifact_payload(artifact.metadata_json)
+        payload = ready_artifact_payload(artifact.metadata_json, artifact_type=artifact.artifact_type)
     except ValidationError as exc:
         raise BusinessError(
             "ARTIFACT_METADATA_INVALID",
@@ -154,6 +155,15 @@ def _ensure_external_artifact(
 def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed_artifact: StoredArtifact) -> StoredArtifact:
     existing = _artifact_for_upload(db, upload, "OCR")
     if existing:
+        if existing.status == "FAILED":
+            metadata = existing.metadata_json or {}
+            raise BusinessError(
+                "OCR_JOB_FAILED",
+                "当前 OCR 作业已失败，请在材料处理状态中重新提交 OCR 后再执行审核",
+                status_code=409,
+                details={"artifact_no": existing.artifact_no, "job_id": metadata.get("job_id"),
+                         "failure_message": metadata.get("failure_message")},
+            )
         if existing.status == "SUBMITTING":
             raise BusinessError(
                 "OCR_SUBMISSION_STATE_UNKNOWN",
@@ -187,7 +197,9 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
     # 先占位再联系供应商：提交中断是显式状态，绝不能自动重试——供应商可能已经受理。
     db.commit()
     try:
-        submission = document_service().submit_processed_document(file_path=processed_path, filename=processed_filename)
+        submission = document_service().submit_processed_document(
+            file_path=processed_path, filename=processed_filename,
+        )
     except BusinessError as exc:
         if exc.code in {"EXTERNAL_CONFIG_MISSING", "PROCESSED_ARTIFACT_MISSING", "OCR_MULTIPART_INVALID"}:
             db.delete(record)
@@ -241,7 +253,7 @@ def _submit_authorized_ocr_retry(
         raise
     try:
         submission = document_service().submit_processed_document(
-            file_path=processed_path, filename=processed_filename
+            file_path=processed_path, filename=processed_filename,
         )
     except BusinessError as exc:
         attempt = {**attempt, "failure_code": exc.code, "failure_message": exc.message}
@@ -306,7 +318,32 @@ def _complete_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, arti
     if artifact.status == "READY":
         return artifact
     job_id, deadline_at = _ocr_job_metadata(artifact)
-    result = document_service().poll_ocr_job(job_id=job_id, deadline_at=deadline_at)
+
+    def save_progress(progress: dict[str, Any]) -> None:
+        artifact.metadata_json = {
+            **(artifact.metadata_json or {}), **progress,
+            "progress_updated_at": datetime.now(UTC).isoformat(),
+        }
+        db.commit()
+
+    try:
+        result = document_service().poll_ocr_job(job_id=job_id, deadline_at=deadline_at, on_progress=save_progress)
+    except BusinessError as exc:
+        if exc.code == "OCR_JOB_FAILED":
+            # 供应商明确的失败终态必须保存；网络错误或本地超时仍保留可续查作业。
+            artifact.status = "FAILED"
+            artifact.metadata_json = {
+                **(artifact.metadata_json or {}),
+                "provider_state": "failed",
+                "failure_code": exc.code,
+                "failure_message": exc.message,
+                "provider_code": exc.details.get("provider_code"),
+                "provider_error": exc.details.get("provider_error"),
+                "provider_trace_id": exc.details.get("provider_trace_id"),
+                "failed_at": datetime.now(UTC).isoformat(),
+            }
+            db.commit()
+        raise
     relative, payload = _persist_external_artifact(task, upload, "OCR", result)
     artifact.relative_path = relative
     artifact.status = "READY"
@@ -316,6 +353,9 @@ def _complete_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, arti
         job_id=job_id,
         deadline_at=deadline_at,
         submit_attempts=list(current_metadata.get("submit_attempts") or []),
+        provider_state=current_metadata.get("provider_state"),
+        extract_progress=current_metadata.get("extract_progress"),
+        progress_updated_at=current_metadata.get("progress_updated_at"),
     ).model_dump(mode="json")
     artifact.content_sha256 = _artifact_content_digest(payload.model_dump(mode="json"), result.binary_content)
     db.flush()

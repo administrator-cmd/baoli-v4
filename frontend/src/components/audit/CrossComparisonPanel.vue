@@ -169,9 +169,6 @@ function rawDiffers(side: SideValue): boolean {
       :title="`「${ruleName}」有 ${missingFields.length} 项对比事实没有从服务端返回`"
     >
       <div>缺失项：{{ missingFields.join("、") }}。</div>
-      <div class="text-hint">
-        页面不会用字段名或材料名推断这些取值，也不会重新计算差额；需要后端在规则结果里补齐这些字段。
-      </div>
     </el-alert>
 
     <slot name="conclusion" />

@@ -6,12 +6,12 @@ import type {
   DraftFieldItem,
   DraftMaterialItem,
   DraftSectionItem,
-  ScenarioDraftView,
+  ScenarioConfigurationView,
 } from "@/api/contracts";
 import {
   createDraftSection,
   deleteDraftSection,
-  getSceneDraft,
+  getSceneConfiguration,
   updateDraftSection,
 } from "@/api/scenes";
 import { reportContentTypeOptions, reportFormatOptions, reportResultSortOptions } from "@/constants/labels";
@@ -30,10 +30,11 @@ const emit = defineEmits<{
 const sections = ref<DraftSectionItem[]>([]);
 const fields = ref<DraftFieldItem[]>([]);
 const materials = ref<DraftMaterialItem[]>([]);
-const draft = ref<ScenarioDraftView | null>(null);
+const draft = ref<ScenarioConfigurationView | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
+let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
@@ -42,7 +43,7 @@ const editingItem = ref<DraftSectionItem | null>(null);
 const form = reactive({
   title: "",
   content_instruction: "",
-  field_keys: [] as string[],
+  data_refs: [] as string[],
   // 报告分组属性；未声明编号时由规则库内部身份组织章节。
   report_code: "",
   report_name: "",
@@ -52,23 +53,32 @@ const form = reactive({
   content_type: "",
   result_sort: "",
   risk_level_order_text: "",
-  // 是否生效：与 Excel 的「是否生效」同一口径。业务只表达「这一行参不参与输出」，
-  // 不表达「系统配没配好」——后者是系统内部状态。
-  enabled: true,
+  config_status: "CLEAR",
 });
 
-const fieldOptions = computed(() =>
-  fields.value.map((item) => ({
-    value: item.field_key,
-    label: `${item.material_name ?? "未知材料"}·${item.name}`,
-  })),
-);
+const dataOptions = computed(() => {
+  const options = [
+    ...fields.value.map((item) => ({ value: item.field_key, label: `字段：${item.material_name ?? "未知材料"}·${item.name}` })),
+    ...(draft.value?.calculations ?? []).filter((item) => item.result_code).map((item) => ({
+      value: item.result_code!, label: `计算结果：${item.name ?? item.result_code}`,
+    })),
+    ...(draft.value?.rules ?? []).filter((item) => !item.system).map((item) => ({
+      value: item.rule_key, label: `规则结论：${item.name}`,
+    })),
+  ];
+  const known = new Set(options.map((item) => item.value));
+  for (const ref of form.data_refs) {
+    if (!known.has(ref)) options.push({ value: ref, label: `未明确的引用：${ref}` });
+  }
+  return options;
+});
 
 const materialOptions = computed(() =>
   materials.value.map((item) => ({ value: item.material_key, label: item.name })),
 );
 
 async function load(): Promise<void> {
+  const sequence = ++loadSequence;
   if (!props.scenarioCode) {
     sections.value = [];
     fields.value = [];
@@ -77,16 +87,18 @@ async function load(): Promise<void> {
   loading.value = true;
   loadError.value = null;
   try {
-    const payload = await getSceneDraft(props.scenarioCode);
+    const payload = await getSceneConfiguration(props.scenarioCode);
+    if (sequence !== loadSequence) return;
     draft.value = payload;
     sections.value = payload.sections;
     fields.value = payload.fields;
     materials.value = payload.materials;
   } catch (error) {
+    if (sequence !== loadSequence) return;
     sections.value = [];
     loadError.value = error instanceof Error ? error.message : "报告配置读取失败";
   } finally {
-    loading.value = false;
+    if (sequence === loadSequence) loading.value = false;
   }
 }
 
@@ -96,7 +108,7 @@ function openCreate(): void {
   editingItem.value = null;
   form.title = "";
   form.content_instruction = "";
-  form.field_keys = [];
+  form.data_refs = [];
   form.report_code = "";
   form.report_name = "";
   form.material_keys = [];
@@ -105,7 +117,7 @@ function openCreate(): void {
   form.content_type = "";
   form.result_sort = "";
   form.risk_level_order_text = "";
-  form.enabled = true;
+  form.config_status = "CLEAR";
   dialogVisible.value = true;
 }
 
@@ -113,7 +125,7 @@ function openEdit(item: DraftSectionItem): void {
   editingItem.value = item;
   form.title = item.title;
   form.content_instruction = item.content_instruction;
-  form.field_keys = [...item.field_keys];
+  form.data_refs = [...item.data_refs];
   form.report_code = item.report_code ?? "";
   form.report_name = item.report_name ?? "";
   form.material_keys = [...(item.material_keys ?? [])];
@@ -122,7 +134,7 @@ function openEdit(item: DraftSectionItem): void {
   form.content_type = item.content_type ?? "";
   form.result_sort = item.result_sort ?? "";
   form.risk_level_order_text = (item.risk_level_order ?? []).join("\n");
-  form.enabled = item.config_status !== "DISABLED";
+  form.config_status = item.config_status ?? "CLEAR";
   dialogVisible.value = true;
 }
 
@@ -136,8 +148,8 @@ async function submitForm(): Promise<void> {
     const payload = {
       title: form.title.trim(),
       content_instruction: form.content_instruction,
-      field_keys: form.field_keys,
-      // 报告编号留空即视为旧格式的报告章节：这部分键如实提交为空，
+      data_refs: form.data_refs,
+      // 未声明的报告属性如实提交为空，
       // 不替业务补一个编号，也不沿用上一份报告的分组属性。
       report_code: form.report_code.trim() || null,
       report_name: form.report_name.trim() || null,
@@ -147,8 +159,7 @@ async function submitForm(): Promise<void> {
       content_type: form.content_type || null,
       result_sort: form.result_sort || null,
       risk_level_order: form.risk_level_order_text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-      // 内部配置状态由「是否生效」映射：不生效 → DISABLED，生效 → CLEAR。
-      config_status: form.enabled ? "CLEAR" : "DISABLED",
+      config_status: form.config_status,
     };
     if (editingItem.value) {
       await updateDraftSection(props.scenarioCode, editingItem.value.section_key, payload);
@@ -202,7 +213,6 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增章节</el-button>
-          <span class="text-hint">系统执行摘要由系统始终生成；这里配置的是报告章节。</span>
         </div>
         <div class="app-toolbar__right">
           <el-button :loading="loading" @click="load">刷新</el-button>
@@ -227,14 +237,21 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
             <span v-else class="text-hint">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="绑定字段" min-width="260">
+        <el-table-column label="业务数据引用" min-width="260">
           <template #default="{ row }">
-            <span v-if="row.field_names.length">{{ row.field_names.join("、") }}</span>
-            <span v-else class="text-hint">未绑定字段（按章节类型使用审核结果）</span>
+            <span v-if="row.data_names.length">{{ row.data_names.join("、") }}</span>
+            <span v-else class="text-hint">按章节要求选择业务数据</span>
           </template>
         </el-table-column>
         <el-table-column prop="content_instruction" label="内容要求" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">{{ row.content_instruction || "—" }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="95">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'">
+              {{ row.config_status === 'PENDING' ? '待确认' : row.config_status === 'DISABLED' ? '暂停' : '启用' }}
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column v-if="canEdit" label="操作" width="140" fixed="right">
           <template #default="{ row }">
@@ -249,9 +266,9 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
           <el-form-item label="章节名称" required>
             <el-input v-model="form.title" maxlength="255" placeholder="例如：审核概况" />
           </el-form-item>
-          <el-form-item label="绑定字段">
-            <el-select v-model="form.field_keys" multiple filterable placeholder="选择要展示的字段（可留空）" style="width: 100%">
-              <el-option v-for="item in fieldOptions" :key="item.value" :value="item.value" :label="item.label" />
+          <el-form-item label="业务数据">
+            <el-select v-model="form.data_refs" multiple filterable allow-create placeholder="选择字段、计算结果或规则结论，也可填写引用" style="width: 100%">
+              <el-option v-for="item in dataOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
           </el-form-item>
           <el-form-item label="内容要求">
@@ -260,14 +277,13 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
               type="textarea"
               :rows="3"
               maxlength="4000"
-              placeholder="展示说明（报告只做字段的确定性展示，不代表会生成自由正文）"
+              placeholder="填写本章使用哪些业务数据，以及需要生成的内容"
             />
           </el-form-item>
 
           <h4 class="app-section-title">报告分组</h4>
           <el-form-item label="报告编号">
             <el-input v-model="form.report_code" maxlength="80" style="width: 220px" placeholder="例如：RPT-001" />
-            <span class="text-hint" style="margin-left: 8px">同一编号的章节组成一份报告</span>
           </el-form-item>
           <el-form-item label="报告名称">
             <el-input v-model="form.report_name" maxlength="255" placeholder="例如：合同审核报告" />
@@ -284,7 +300,6 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
           </el-form-item>
           <el-form-item label="章节顺序">
             <el-input-number v-model="form.section_order" :min="1" :step="1" style="width: 160px" />
-            <span class="text-hint" style="margin-left: 8px">同一报告内唯一的正整数</span>
           </el-form-item>
           <el-form-item label="内容类型">
             <el-select v-model="form.content_type" clearable style="width: 220px" placeholder="留空表示未声明">
@@ -299,9 +314,12 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
           <el-form-item label="风险等级顺序">
             <el-input v-model="form.risk_level_order_text" type="textarea" :rows="3" placeholder="按风险从高到低，每行填写一个场景等级；不排序时可留空" />
           </el-form-item>
-          <el-form-item label="是否生效">
-            <el-switch v-model="form.enabled" active-text="生效" inactive-text="不生效" />
-            <span class="text-hint" style="margin-left: 8px">不生效的章节仍然保留，只是不进入报告输出</span>
+          <el-form-item label="状态">
+            <el-select v-model="form.config_status">
+              <el-option value="CLEAR" label="启用" />
+              <el-option value="PENDING" label="待确认（不生成）" />
+              <el-option value="DISABLED" label="暂停" />
+            </el-select>
           </el-form-item>
         </el-form>
         <template #footer>

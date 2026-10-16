@@ -6,11 +6,11 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import get_db
 from ..domain import audit_vocab, tool_catalog
-from ..common.exceptions import BusinessError
+from ..schema.query import validate_page_params
 from ..schema.vo import (
-    ToolCatalogResponse,
     MaterialTypeCatalogResponse,
     MaterialTypeItem,
+    OperationLogPageResponse,
     RuleCapabilityStatusResponse,
     RuleStatusCatalogResponse,
     SystemServiceItem,
@@ -19,12 +19,11 @@ from ..schema.vo import (
     ToolCatalogItem,
     UploadKindPolicy,
     UploadPolicyResponse,
+    ToolCatalogResponse,
 )
 from ..integrations.http_services import list_material_types
 from ..services import operation_log_service, system_status_service
-from ..services.embedding_service import embedding_status
 from ..services.storage_service import DOCUMENT_EXTENSIONS, RULEBOOK_EXTENSIONS
-from ..schema.vo import OperationLogPageResponse
 
 
 router = APIRouter(prefix="/system", tags=["系统"])
@@ -90,8 +89,6 @@ def material_types(request: Request) -> MaterialTypeCatalogResponse:
 def tools_catalog(request: Request) -> ToolCatalogResponse:
     """供模型按需选择的真实工具、参数和实现信息；不决定规则执行路径。"""
     return ToolCatalogResponse(
-        tool_catalog_version=tool_catalog.TOOL_CATALOG_VERSION,
-        tool_catalog_fingerprint=tool_catalog.catalog_fingerprint(),
         tools=[ToolCatalogItem.model_validate(item) for item in tool_catalog.catalog_payload()],
         request_id=request.state.request_id,
     )
@@ -101,7 +98,7 @@ def tools_catalog(request: Request) -> ToolCatalogResponse:
 def rule_status_catalog(request: Request) -> RuleStatusCatalogResponse:
     """审核结论状态目录：每个状态码的标准中文含义与分档。
 
-    页面用它区分「已判定 / 仅计算完成 / 尚未判定 / 不适用」，未知码单独显示。
+    页面用它区分「已判定 / 已完成产出 / 尚未判定 / 不适用」，未知码单独显示。
     分档之外的状态不进入任何分档：页面必须把原始码单独计数并显示出来，
     不能静默消失，也不能按兜底文案显示成正常状态。
     """
@@ -163,24 +160,6 @@ def system_services(request: Request) -> SystemServicesResponse:
     status = system_status_service.status_view()
     database_status = status["database"]
     services = _service_rows(status["external_services"])
-    # 本地嵌入模型是审核任务检索取证的基础。它只报告配置状态与“未验证”，
-    # 不在状态接口里加载模型或做推理；缺模型时相关规则会明确报错而不是静默降级。
-    embedding = embedding_status()
-    services.append(
-        SystemServiceItem(
-            name="本地嵌入模型",
-            capability="审核任务材料证据索引与检索取证",
-            configuration_status=embedding["configuration_status"],
-            connection_status="UNVERIFIED" if embedding["configuration_status"] == "CONFIGURED_UNVERIFIED" else "NOT_CONFIGURED",
-            last_checked_at=None,
-            missing=list(embedding.get("missing") or []),
-            note=(
-                "模型文件已就位，未在本接口加载或推理；缺依赖或权重不完整时索引与检索会返回明确错误"
-                if embedding["configuration_status"] == "CONFIGURED_UNVERIFIED"
-                else "缺少本地模型配置或文件，需要检索取证的规则会明确报错，系统不会自动下载模型或改用远程模型"
-            ),
-        )
-    )
     services.insert(
         0,
         SystemServiceItem(
@@ -218,8 +197,7 @@ def list_operations(
     - 业务操作日志只记录已成功提交的写操作；失败尝试不写入，不把“尝试”显示成“已发生”。
     - 后台命令的 PENDING/RUNNING 显示为“执行中”，不等同成功也不等同失败。
     """
-    if page < 1 or page_size < 1 or page_size > 200:
-        raise BusinessError("PAGE_INVALID", "分页参数不合法：page 从 1 开始，每页 1 到 200 条", status_code=400)
+    page, page_size = validate_page_params(page, page_size)
     payload = operation_log_service.list_operations_page(
         db,
         object_type=object_type,

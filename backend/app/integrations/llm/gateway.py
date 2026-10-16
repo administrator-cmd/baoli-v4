@@ -396,7 +396,7 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
 
 def call_json(
     payload: dict[str, Any], system_prompt: str,
-    *, on_content: Callable[[str], None] | None = None,
+    *, on_content: Callable[[str], None] | None = None, reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """单轮请求 JSON 对象，完整接收流式文本后解析；不带工具或工具循环。"""
     _, _, model = _require_settings()
@@ -409,6 +409,8 @@ def call_json(
         ],
         "response_format": {"type": "json_object"},
     }
+    if reasoning_effort is not None:
+        request_body["reasoning_effort"] = reasoning_effort
     envelope = _post(request_body)
     try:
         content = envelope["choices"][0]["message"]["content"]

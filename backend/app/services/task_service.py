@@ -1,4 +1,3 @@
-from . import task_csv_service
 import logging
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -12,23 +11,14 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..common.exceptions import BusinessError
-from .audit.interrupt import start_audit_interrupt
-from .audit.recovery import can_recover_failed_node
-from .audit.facts import _current_field_fact_pairs
-from .audit.evidence import result_content_view, review_content_view
-# 复核批次的划分与哈希口径只有一份（`services.audit.reviews`）：
-# 任务视图给出的本批、提交校验用的本批、检查点里的哈希必须是同一个集合，
-# 在这里另算一套会让页面提交的集合与后端要求的集合永远对不上。
-from .audit.reviews import _current_review_batch, _review_hash
-from .audit.artifacts import _material_classify_content
 from ..entity import (
     AuditPlan,
     AuditTask,
     BackgroundOperation,
     DocumentUpload,
-    Evidence,
     ManualReview,
     NodeExecution,
+    OperationLog,
     RuleResult,
     ScenarioTemplate,
     ScenarioVersion,
@@ -36,19 +26,15 @@ from ..entity import (
     TaskDocument,
     TaskFact,
     TaskFieldValue,
-    WorkflowCheckpoint,
 )
-from . import rag_service
-from .background_service import assert_no_active_operation, latest_operation, operation_view
+from .background_service import assert_no_active_operation
 from ..domain.identity import public_no
-from ..domain.manifest import build_task_schema, enabled_extraction_field_keys
-from ..domain import fact_snapshot
 from ..domain.rule_library import execution_container_of
 from ..integrations.http_services import list_material_types
 from .operation_types import OBJECT_AUDIT_TASK
 from .operation_log_service import record_operation
 from .task_lookup import task_or_404
-from .storage_service import DOCUMENT_EXTENSIONS, save_upload
+from .storage_service import DOCUMENT_EXTENSIONS, save_upload_sync
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +104,20 @@ def task_of_command(db: Session, command: BackgroundOperation) -> AuditTask:
     task_no = detail.get("task_no")
     task = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no)) if task_no else None
     if task is None:
+        # 创建/复制命令保留幂等历史，重发旧命令不能重新创建已经被用户删除的任务。
+        deletion = db.scalar(select(OperationLog.id).where(
+            OperationLog.object_type == OBJECT_AUDIT_TASK,
+            OperationLog.object_no == task_no,
+            OperationLog.operation_type == "DELETE",
+            OperationLog.detail_json["permanent"].as_boolean().is_(True),
+        ).limit(1)) if task_no else None
+        if deletion is not None:
+            raise BusinessError(
+                "AUDIT_TASK_DELETED",
+                "该创建或复制命令对应的审核任务已永久删除，无法复用",
+                status_code=410,
+                details={"operation_no": command.operation_no, "task_no": task_no},
+            )
         raise BusinessError(
             "TASK_COMMAND_TASK_MISSING",
             "任务命令已提交，但关联任务不存在，命令与任务记录不一致",
@@ -332,15 +332,6 @@ def create_task_from_plan(
             status_code=409,
             details={"plan_code": plan.plan_code},
         )
-    if plan.scope_hash is None:
-        raise BusinessError(
-            "PLAN_SCOPE_HASH_MISSING",
-            "方案范围没有指纹，无法确认任务冻结的是哪一版范围；请在方案页重新保存后再创建任务",
-            status_code=409,
-            details={"plan_code": plan.plan_code},
-        )
-    # 任务快照同时冻结方案身份、方案范围、节点计划和 Sheet 范围。
-    # 执行范围与配置都取自方案自身；场景版本只保留来源身份。
     schema = dict(scope)
     manifest = plan.manifest_json
     if not isinstance(manifest, dict):
@@ -350,10 +341,9 @@ def create_task_from_plan(
             status_code=409,
             details={"plan_code": plan.plan_code},
         )
-    # 旧方案的范围可能早于节点停用规则保存：只校验既有选择仍可执行，
-    # 不重新计算或改写用户已确认的方案范围。
-    build_task_schema(manifest, scope["enabled_rule_keys"], allow_empty=True)
+    # 使用用户已确认的生效范围创建任务，不改写方案。
     schema["scenario_code"] = scenario.scenario_code
+    schema["scenario_name"] = scenario.scenario_name
     schema["scenario_version_no"] = scenario.version_no
     # 方案身份与范围指纹随任务冻结：任务详情与幂等重放都读它，
     # 不读方案后来改过的名称或重算过的范围。
@@ -361,7 +351,6 @@ def create_task_from_plan(
     schema["plan_name"] = plan.plan_name
     schema["plan_scope_hash"] = plan.scope_hash
     schema["node_plan"] = [dict(item) for item in manifest.get("nodes") or []]
-    schema["selected_sheets"] = [dict(item) for item in manifest.get("selected_sheets") or []]
     first_node = execution_container_of(manifest)
     first_node_index = 0
     task = AuditTask(
@@ -372,7 +361,6 @@ def create_task_from_plan(
         remark=remark,
         status="READY",
         current_node=first_node["node_code"],
-        thread_id=public_no("thread"),
         manifest_json=deepcopy(manifest),
         task_schema_json=schema,
         checkpoint_json={
@@ -404,7 +392,6 @@ def copy_task(
     *,
     task_name: str,
     new_task_no: str | None = None,
-    creation_operation_id: int | None = None,
 ) -> AuditTask:
     """按源任务所属方案的当前范围重新创建任务。
 
@@ -436,8 +423,7 @@ def copy_task(
             details={"plan_code": plan.plan_code},
         )
     created = create_task_from_plan(db, plan, task_name=task_name, remark=source.remark, task_no=new_task_no)
-    # 与新建任务同一口径：任务与等待点都成功后，才记一条成功操作日志。
-    start_audit_interrupt(db, created, creation_operation_id=creation_operation_id)
+    db.commit()
     db.refresh(created)
     return created
 
@@ -500,24 +486,12 @@ def _invalidate_for_input_change(
         )
         .values(status="INVALIDATED")
     )
-    # 替换/补传材料后，旧上传版本的证据索引必须退出当前检索；旧分块与旧检索记录保留为历史。
-    if previous_upload_id is not None:
-        rag_service.invalidate_upload_indexes(
-            db,
-            task_id=task.id,
-            upload_id=previous_upload_id,
-            reason=f"{action_label}材料「{document.material_name}」的当前文件，旧索引不再适用于当前上传版本",
-        )
     invalidated_reviews = db.execute(
         update(ManualReview)
         .where(ManualReview.audit_task_id == task.id, ManualReview.status == "PENDING")
         .values(status="INVALIDATED")
     ).rowcount
-    db.execute(
-        update(WorkflowCheckpoint)
-        .where(WorkflowCheckpoint.audit_task_id == task.id, WorkflowCheckpoint.status == "WAITING")
-        .values(status="INVALIDATED")
-    )
+
     db.execute(
         update(NodeExecution)
         .where(NodeExecution.audit_task_id == task.id)
@@ -544,7 +518,6 @@ def _invalidate_for_input_change(
     first_node_index = 0
     task.current_node = first_node_code
     task.status = "READY"
-    task.pending_review_hash = None
     task.checkpoint_json = {
         "node_index": first_node_index,
         "current_node": first_node_code,
@@ -583,7 +556,7 @@ def _invalidate_for_input_change(
     }
 
 
-async def upload_document(
+def upload_document(
     db: Session,
     task_no: str,
     document_no: str,
@@ -591,7 +564,7 @@ async def upload_document(
     *,
     material_type: str,
     replace: bool = False,
-) -> DocumentUpload:
+) -> tuple[DocumentUpload, dict[str, Any] | None, BackgroundOperation]:
     """上传或替换材料文件：落库、失效下游结果，并返回本次输入修订的真实影响范围。
 
     `material_type` 是用户本次上传时从 8018 支持目录中选择的材料类型。它随本次上传
@@ -600,13 +573,6 @@ async def upload_document(
     """
     settings = get_settings()
     task = task_or_404(db, task_no, lock=True)
-    if task.deleted_at is not None:
-        raise BusinessError(
-            "AUDIT_TASK_DELETED",
-            "任务已被删除，请先恢复后再上传材料",
-            status_code=409,
-            details={"task_no": task_no},
-        )
     # 与后台执行互斥必须在锁定对象行之后：先取锁再查活跃操作，消除检查与修改之间的 TOCTOU。
     assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
     document = db.scalar(
@@ -646,7 +612,7 @@ async def upload_document(
     upload_no = public_no("UPL")
     suffix = Path(upload.filename or "").suffix.lower()
     relative_path = f"tasks/{task.task_no}/{document.document_no}/{upload_no}{suffix}"
-    size, sha256 = await save_upload(
+    size, sha256 = save_upload_sync(
         upload,
         relative_path=relative_path,
         allowed_extensions=DOCUMENT_EXTENSIONS,
@@ -685,12 +651,25 @@ async def upload_document(
         )
     document.current_upload_id = record.id
     document.status = "UPLOADED"
-    if input_changed:
-        start_audit_interrupt(db, task)
-    else:
-        db.commit()
-    db.refresh(record)
-    return record, impact
+
+    # 文件保存、输入失效和分类命令一起提交；活跃命令占位消除提交后的替换/执行竞态。
+    from .operation_gateway import submit_document_classification
+    try:
+        operation, _ = submit_document_classification(db, task, record)
+    except BusinessError as exc:
+        if exc.code != "OPERATION_DISPATCH_FAILED":
+            raise
+        # 调度失败时文件已提交：响应明确携带 FAILED 分类状态，不能把整个上传报成失败。
+        operation = db.scalar(select(BackgroundOperation).where(
+            BackgroundOperation.object_type == OBJECT_AUDIT_TASK,
+            BackgroundOperation.object_no == task.task_no,
+            BackgroundOperation.operation_type == "DOCUMENT_CLASSIFY",
+            BackgroundOperation.idempotency_key == record.upload_no,
+        ))
+        if operation is None or operation.status != "FAILED":
+            raise
+        logger.error("文件已保存但分类调度失败 upload_no=%s operation_no=%s", record.upload_no, operation.operation_no)
+    return record, impact, operation
 
 
 def remove_current_document_file(
@@ -702,16 +681,9 @@ def remove_current_document_file(
 
     - 与后台执行互斥；任务已结束或正在执行时拒绝。
     - 没有当前文件时明确报错，不产生任何副作用。
-    - 历史上传版本保留为历史，不删除文件；任务回到材料检查等待重新上传。
+    - 历史上传版本保留为历史，不删除文件；任务回到规则执行等待重新上传。
     """
     task = task_or_404(db, task_no, lock=True)
-    if task.deleted_at is not None:
-        raise BusinessError(
-            "AUDIT_TASK_DELETED",
-            "任务已被删除，请先恢复后再移除材料文件",
-            status_code=409,
-            details={"task_no": task_no},
-        )
     assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
     document = db.scalar(
         select(TaskDocument).where(
@@ -742,665 +714,6 @@ def remove_current_document_file(
         previous_upload_id,
         action_label="已移除",
     )
-    start_audit_interrupt(db, task)
+    db.commit()
     db.refresh(document)
     return document, impact
-
-
-def external_artifact_status_view(
-    db: Session, task_no: str, document_no: str, artifact_type: str
-) -> dict[str, Any]:
-    """查询当前上传版本的 8018/8010 产物状态，不触发外部请求。"""
-    if artifact_type not in {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE"}:
-        raise BusinessError("ARTIFACT_TYPE_INVALID", "仅支持查询 8018 或 8010 文件处理产物", status_code=400)
-    task = task_or_404(db, task_no)
-    document = db.scalar(
-        select(TaskDocument).where(
-            TaskDocument.audit_task_id == task.id,
-            TaskDocument.document_no == document_no,
-        )
-    )
-    if document is None:
-        raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
-    base = {
-        "document_no": document_no,
-        "artifact_type": artifact_type,
-        "artifact_no": None,
-    }
-    if document.current_upload_id is None:
-        return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件"}
-    upload = db.get(DocumentUpload, document.current_upload_id)
-    if upload is None:
-        raise BusinessError("TASK_DOCUMENT_UPLOAD_MISSING", "当前上传文件不存在", status_code=500)
-    artifact = db.scalar(
-        select(StoredArtifact).where(
-            StoredArtifact.document_upload_id == upload.id,
-            StoredArtifact.artifact_type == artifact_type,
-            StoredArtifact.upload_sha256 == upload.sha256,
-        )
-    )
-    if artifact is None:
-        return {**base, "status": "NOT_SUBMITTED", "message": "当前上传文件尚无该处理产物"}
-    return {
-        **base,
-        "artifact_no": artifact.artifact_no,
-        "status": artifact.status,
-        "message": (
-            "处理结果未知，需人工核对"
-            if artifact.status == "PROCESSING"
-            else "处理产物已就绪" if artifact.status == "READY" else f"处理产物状态：{artifact.status}"
-        ),
-    }
-
-
-def ocr_status_view(db: Session, task_no: str, document_no: str) -> dict[str, Any]:
-    """当前上传文件对应的 OCR 产物只读状态。
-
-    只返回真实记录的产物状态；没有产物时明确说明“尚未提交”，不编造作业号或截止时间。
-    job_id / deadline_at 直接取自产物元数据，submit_attempts 缺失时保持 None。
-    """
-    task = task_or_404(db, task_no)
-    document = db.scalar(
-        select(TaskDocument).where(
-            TaskDocument.audit_task_id == task.id,
-            TaskDocument.document_no == document_no,
-        )
-    )
-    if not document:
-        raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
-    base = {
-        "document_no": document.document_no,
-        "artifact_no": None,
-        "job_id": None,
-        "deadline_at": None,
-        "submit_attempts": None,
-    }
-    if document.current_upload_id is None:
-        return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件，没有 OCR 产物"}
-    artifact = db.scalar(
-        select(StoredArtifact)
-        .where(
-            StoredArtifact.document_upload_id == document.current_upload_id,
-            StoredArtifact.artifact_type == "OCR",
-        )
-        .order_by(StoredArtifact.id.desc())
-    )
-    if artifact is None:
-        return {**base, "status": "NOT_SUBMITTED", "message": "当前上传文件尚未提交 OCR 作业"}
-    metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-    job_id = metadata.get("job_id")
-    deadline_raw = metadata.get("deadline_at")
-    try:
-        deadline_at = datetime.fromisoformat(deadline_raw) if isinstance(deadline_raw, str) else None
-    except ValueError as exc:
-        raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 截止时间无效", status_code=500) from exc
-    attempts = metadata.get("submit_attempts")
-    message = {
-        "SUBMITTING": "OCR 作业提交结果未知，系统不会自动重复提交，请人工对账",
-        "PENDING": "OCR 作业已提交，等待供应商完成",
-        "READY": "OCR 产物已就绪",
-        "FAILED": "OCR 作业失败",
-        "INVALIDATED": "OCR 产物已随材料替换失效",
-    }.get(artifact.status, f"OCR 产物状态：{artifact.status}")
-    return {
-        "document_no": document.document_no,
-        "artifact_no": artifact.artifact_no,
-        "status": artifact.status,
-        "job_id": job_id if isinstance(job_id, str) else None,
-        "deadline_at": deadline_at,
-        "submit_attempts": len(attempts) if isinstance(attempts, list) else attempts if isinstance(attempts, int) else None,
-        "message": message,
-    }
-
-
-def _task_display_structure(
-    task: AuditTask,
-    manifest: dict[str, Any],
-    nodes: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """当前任务的展示结构：只包含本场景真实选中的节点、Sheet 与字段。
-
-    前端提供通用组件（文本、金额、日期、表格、审核结果），具体展示什么由后端按当前场景配置
-    返回，页面不得按场景名或固定条件分支写死内容。因此这里返回的是数据而不是文案：`nodes` 是
-    本任务真实配置的节点实例（实例码 + 能力类型 + 顺序 + 依赖），前端据此渲染流程条与工作区；
-    `sheets` 是本场景选用的 Sheet 及各自归属的节点；`fields` 是本任务执行范围内的字段定义
-    （名称、类型、单位、币种、所属材料），前端据此决定用哪种通用组件渲染，不靠字段名猜类型。
-
-    任务创建时写入的 task_schema_json 优先：有 node_plan / selected_sheets 键就用它们。
-    历史任务没有这些键时，才读该任务所钉版本的 manifest，不读场景草稿。
-    """
-    schema = task.task_schema_json if isinstance(task.task_schema_json, dict) else {}
-    node_source = schema["node_plan"] if isinstance(schema.get("node_plan"), list) else nodes
-    if "selected_sheets" in schema and isinstance(schema.get("selected_sheets"), list):
-        sheet_source = schema["selected_sheets"]
-    else:
-        sheet_source = manifest.get("selected_sheets") or []
-    return {
-        "task_no": task.task_no,
-        "nodes": [
-            {
-                "node_code": str(node["node_code"]),
-                # 能力类型：缺 `node_type` 的旧节点只有在其实例码本身就是已知能力类型时
-                # 才能确定性迁移；无法确定时如实返回 null，页面按「未识别」处理，
-                # 不拿实例码冒充能力类型去匹配工作区。
-                "node_type": node.get("node_type"),
-                "name": str(node.get("name") or node["node_code"]),
-                "sequence_no": int(node.get("sequence_no") or 0),
-                "depends_on": [str(code) for code in (node.get("depends_on") or [])],
-                "enabled": bool(node.get("enabled", True)),
-            }
-            for node in node_source
-        ],
-        "sheets": [
-            {
-                "sheet_role": str(item.get("sheet_role")),
-                "node_code": item.get("node_code"),
-            }
-            for item in sheet_source
-            if isinstance(item, dict) and item.get("sheet_role")
-        ],
-        "fields": [
-            {
-                "field_key": str(field["field_key"]),
-                "name": str(field["name"]),
-                "value_type": str(field["value_type"]),
-                "unit": field.get("unit"),
-                "currency": field.get("currency"),
-                "material_key": str(field["material_key"]),
-            }
-            for field in task.task_schema_json["fields"]
-        ],
-    }
-
-
-def _execution_skip_reason(execution: NodeExecution | None) -> str | None:
-    """节点被显式跳过时给出原因（例如“当前场景未配置此类检查”）。"""
-    if execution is None or not isinstance(execution.result_json, dict):
-        return None
-    reason = execution.result_json.get("skip_reason")
-    return reason if isinstance(reason, str) and reason else None
-
-
-def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
-    """任务详情视图：节点、材料位、字段、规则、执行范围与最近一次后台操作。"""
-    scenario = db.get(ScenarioVersion, task.scenario_version_id)
-    if not scenario:
-        raise BusinessError("SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500)
-    manifest = task.manifest_json
-    schema = task.task_schema_json if isinstance(task.task_schema_json, dict) else {}
-    if isinstance(schema.get("node_plan"), list):
-        nodes = sorted(schema["node_plan"], key=lambda item: item.get("sequence_no") or 0)
-    else:
-        nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
-    frozen_version_no = (
-        schema["scenario_version_no"]
-        if isinstance(schema.get("scenario_version_no"), int)
-        else scenario.version_no
-    )
-    executions = {
-        item.node_code: item
-        for item in db.scalars(
-            select(NodeExecution)
-            .where(NodeExecution.audit_task_id == task.id, NodeExecution.status != "INVALIDATED")
-            .order_by(NodeExecution.id)
-        ).all()
-    }
-    documents = db.scalars(select(TaskDocument).where(TaskDocument.audit_task_id == task.id).order_by(TaskDocument.id)).all()
-    uploads = {
-        item.id: item
-        for item in db.scalars(
-            # document_upload 与 task_document 之间有两条外键，必须显式给出连接条件。
-            select(DocumentUpload)
-            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-            .where(TaskDocument.audit_task_id == task.id, DocumentUpload.is_current.is_(True))
-        ).all()
-    }
-    # 材料识别来自该材料当前上传的真实产物，不依赖文件处理业务阶段。
-    material_classify = {
-        item.material_key: _material_classify_content(db, uploads[item.current_upload_id])
-        for item in documents if item.current_upload_id in uploads
-    }
-    evidence_rows = db.scalars(
-        select(Evidence).where(Evidence.audit_task_id == task.id).order_by(Evidence.id)
-    ).all()
-    evidence_by_id = {item.id: item for item in evidence_rows}
-    field_evidence_by_fact: dict[int, list[Evidence]] = {}
-    for evidence_row in evidence_rows:
-        if evidence_row.field_value_id is not None and evidence_row.rule_result_id is None:
-            field_evidence_by_fact.setdefault(evidence_row.field_value_id, []).append(evidence_row)
-    field_facts = db.scalars(
-        select(TaskFieldValue)
-        .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
-        .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-        .where(
-            TaskFieldValue.audit_task_id == task.id,
-            TaskFieldValue.scenario_version_id == task.scenario_version_id,
-            TaskDocument.audit_task_id == task.id,
-            # 只看当前上传版本的事实版本；是否当前修订由 is_current 判定（同字段可能有多版历史）。
-            DocumentUpload.is_current.is_(True),
-            TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
-        )
-        .order_by(TaskFieldValue.id)
-    ).all()
-    field_facts = task_csv_service.from_index(db, task, TaskFieldValue, field_facts)
-    # 规则结果只取当前有效执行批次：非 INVALIDATED 口径之上，再按节点取最新批次。
-    # 人工复核节点允许形成多批成功执行记录；任务当前页展示最新批是明确的页面口径，
-    # 历史批次仍保留在执行记录中追溯。
-    current_execution_ids = {item.id for item in executions.values()}
-    rule_results = (
-        db.scalars(
-            select(RuleResult)
-            .join(NodeExecution, NodeExecution.id == RuleResult.node_execution_id)
-            .where(
-                RuleResult.audit_task_id == task.id,
-                NodeExecution.status != "INVALIDATED",
-                RuleResult.node_execution_id.in_(current_execution_ids),
-            )
-            .order_by(RuleResult.id)
-        ).all()
-        if current_execution_ids
-        else []
-    )
-    rule_results = task_csv_service.from_index(db, task, RuleResult, rule_results)
-    # 待办分两层，页面必须按本批提交：
-    # `reviews` 是当前复核批次（唯一允许提交的集合），`all_pending` 是全部待办。
-    # 复核是分批判决的：存在字段确认待办时本批只含字段事实，规则结论待办留到下一批。
-    # 页面把全部待办一次提交时，集合恒不等于本批，服务端只会 409。
-    all_pending = db.scalars(
-        select(ManualReview)
-        .where(ManualReview.audit_task_id == task.id, ManualReview.status == "PENDING")
-        .order_by(ManualReview.id)
-    ).all()
-    reviews = _current_review_batch(db, task)
-    batch_hash = _review_hash(reviews) if reviews else None
-    current_node_definition = next((item for item in nodes if item["node_code"] == task.current_node), None)
-    if not current_node_definition:
-        raise BusinessError("AUDIT_NODE_NOT_IN_SCENARIO", "任务当前节点不属于场景版本", status_code=500)
-    # 冻结的规则快照：范围取自创建时写入的 task_schema_json，名称取自任务绑定的
-    # 场景版本 manifest（不可变）。这里不读场景最新版本，避免让人以为任务会跟随升级。
-    rule_name_by_key = {
-        rule["rule_key"]: rule.get("name", rule["rule_key"]) for rule in manifest.get("rules", [])
-    }
-    scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
-    scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
-    current_execution = executions.get(current_node_definition["node_code"])
-    current_node = {
-        **current_node_definition,
-        "status": current_execution.status if current_execution else "CURRENT",
-        "failure_message": current_execution.failure_message if current_execution else None,
-    }
-    # 当前事实按字段+材料取 is_current 版本；fields_by_id 保留该上传下的全部修订，
-    # 使仍挂在历史修订上的待复核项不会因为查不到事实而报错。
-    current_field_pairs = _current_field_fact_pairs(db, task)
-    current_field_facts = {key: pair[0] for key, pair in current_field_pairs.items()}
-    current_task_facts = {key: pair[1] for key, pair in current_field_pairs.items()}
-    current_fact_status_by_field = {key: pair[1].status for key, pair in current_field_pairs.items()}
-    fields_by_id = {item.id: item for item in field_facts}
-    rules_by_id = {item.id: item for item in rule_results}
-    documents_by_id = {item.id: item for item in documents}
-    documents_by_material_key = {item.material_key: item for item in documents}
-    field_definitions = {item["field_key"]: item for item in task.task_schema_json["fields"]}
-    # 展示规则当时保存的原文，不拿字段的最新取值替换历史判断依据。
-    rule_evidence: dict[int, list[dict[str, Any]]] = {}
-    evidence_upload_ids = {
-        item.document_upload_id for item in evidence_rows if item.rule_result_id in rules_by_id
-    }
-    evidence_uploads = {
-        item.id: item
-        for item in db.scalars(
-            select(DocumentUpload).where(
-                DocumentUpload.audit_task_id == task.id,
-                DocumentUpload.id.in_(evidence_upload_ids),
-            )
-        ).all()
-    } if evidence_upload_ids else {}
-    for evidence in evidence_rows:
-        if evidence.rule_result_id not in rules_by_id:
-            continue
-        upload = evidence_uploads.get(evidence.document_upload_id)
-        document = documents_by_id.get(upload.task_document_id) if upload else None
-        rule_evidence.setdefault(evidence.rule_result_id, []).append({
-            "evidence_no": evidence.evidence_no,
-            "material_name": document.material_name if document else None,
-            "filename": upload.original_filename if upload else None,
-            "quote_text": evidence.quote_text,
-        })
-    rule_definitions = {(item["node"], item["rule_key"]): item for item in manifest["rules"]}
-    execution_node_by_id = {item.id: item.node_code for item in executions.values()}
-    node_type_by_code = {
-        str(item["node_code"]): str(item.get("node_type") or item["node_code"])
-        for item in nodes
-    }
-    extraction_codes = [execution_container_of(manifest)["node_code"]]
-    extraction_finished = any(
-        executions[code].status == "SUCCEEDED" for code in extraction_codes if code in executions
-    )
-    # manifest 把每个字段的抽取归属冻结在节点契约里。字段状态必须看自己的
-    # 归属节点；只要任意一个抽取节点完成就把所有尚未抽取字段标成 NOT_EXECUTED，
-    # 会把后续节点尚未开始的字段提前显示成已执行失败。
-    extraction_owner_by_field: dict[str, str] = {}
-    for node in manifest.get("nodes") or []:
-        if str(node.get("node_type") or node.get("node_code")) != "RULE_EXECUTION":
-            continue
-        contract = node.get("execution_contract")
-        if not isinstance(contract, dict) or not isinstance(contract.get("field_keys"), list):
-            continue
-        for field_key in contract["field_keys"]:
-            extraction_owner_by_field[str(field_key)] = str(node["node_code"])
-    extraction_field_keys = enabled_extraction_field_keys(
-        manifest, task.task_schema_json["enabled_rule_keys"],
-    )
-    field_view = []
-    field_correction_candidates = []
-    for field in task.task_schema_json["fields"]:
-        field_identity = (field["field_key"], field["material_key"])
-        fact = current_field_facts.get(field_identity)
-        task_fact = current_task_facts.get(field_identity)
-        fact_is_current = fact is not None and fact.status != "NOT_EXECUTED"
-        document = documents_by_material_key[field["material_key"]]
-        evidence = evidence_by_id.get(fact.evidence_id) if fact_is_current and fact.evidence_id in evidence_by_id else None
-        field_evidences = field_evidence_by_fact.get(fact.id, []) if fact_is_current and fact else []
-        owner_code = extraction_owner_by_field.get(field["field_key"])
-        owner_execution = executions.get(owner_code) if owner_code else None
-        owner_finished = (
-            owner_execution is not None and owner_execution.status == "SUCCEEDED"
-            if owner_code
-            else extraction_finished
-        )
-        extraction_enabled = field["field_key"] in extraction_field_keys
-        status = task_fact.status if task_fact else (
-            "NOT_EXECUTED" if owner_finished or not extraction_enabled else "PENDING"
-        )
-        # 当前事实行会保留待复核候选，供人工查看；任务字段结果里的“标准化结果”
-        # 只展示可执行事实，避免把 EVIDENCE_UNCLEAR / NORMALIZATION_FAILED 的
-        # 候选误显示成已经生效的值。
-        normalized_value = (
-            fact_snapshot.task_fact_value(task_fact, field_definition=field)
-            if fact_is_current and task_fact is not None and task_fact.status in {"PRESENT", "REVIEWED"}
-            else None
-        )
-        field_view.append(
-            {
-                # 字段键与材料键是主动纠错的定位依据；页面据此对某个字段事实发起纠错。
-                "field_key": field["field_key"],
-                "material_key": field["material_key"],
-                "name": field["name"],
-                "material_name": document.material_name,
-                "status": status,
-                "extraction_enabled": extraction_enabled,
-                "raw_value": fact.raw_value if fact_is_current else None,
-                "normalized_value": normalized_value,
-                "evidence_no": evidence.evidence_no if evidence else None,
-                "evidences": [
-                    {
-                        "evidence_no": item.evidence_no,
-                        "field_path": item.field_path,
-                    }
-                    for item in field_evidences
-                ],
-                # 材料未上传时字段属于“缺输入”；不适用与否由规则自己的适用条件决定。
-                "material_uploaded": document.current_upload_id is not None,
-                "material_required": document.required,
-                "fact_revision_no": fact.revision_no if fact_is_current else None,
-                "origin": fact.origin if fact_is_current else None,
-            }
-        )
-        if fact_is_current:
-            field_correction_candidates.append(
-                {
-                    "field_key": field["field_key"],
-                    "material_key": field["material_key"],
-                    "field_name": field["name"],
-                    "material_name": document.material_name,
-                    "status": status,
-                    "raw_value": fact.raw_value,
-                    "normalized_value": normalized_value,
-                }
-            )
-    return {
-        "task_no": task.task_no,
-        "intermediate_csv_available": task.intermediate_csv_json is not None,
-        "task_name": task.task_name,
-        # 任务备注是可编辑的基本资料；执行快照不随重命名或备注修改变化。
-        "remark": task.remark,
-        "created_at": task.created_at,
-        "updated_at": task.updated_at,
-        # 方案绑定：旧任务没有方案关联时显式为 None，页面显示「历史任务配置」，
-        # 不伪造关联、不改写历史结果。
-        "plan": (
-            {
-                "plan_code": schema["plan_code"],
-                "plan_name": schema["plan_name"],
-                "scenario_version_no": frozen_version_no,
-            }
-            if task.plan_id is not None
-            else None
-        ),
-        "is_legacy_config": task.plan_id is None,
-        "scenario_code": scenario.scenario_code,
-        "scenario_name": scenario.scenario_name,
-        "version_no": frozen_version_no,
-        "status": task.status,
-        "deleted": task.deleted_at is not None,
-        "current_node": current_node,
-        # 任务输入修订号：携带旧修订的命令会被后端明确拒绝，页面必须据此刷新。
-        "input_revision": task.input_revision,
-        # 本任务实际执行范围：未配置 / 未启用 的区分依据。
-        # 没有「自动补入」这一类：范围就是创建任务时勾选的那些规则。
-        "scope": {
-            "enabled_rule_keys": scope_enabled_keys,
-            "unenabled_rule_keys": scope_unenabled_keys,
-            "enabled_rules": [
-                {"rule_key": key, "name": rule_name_by_key.get(key, key)} for key in scope_enabled_keys
-            ],
-            "unenabled_rules": [
-                {"rule_key": key, "name": rule_name_by_key.get(key, key)} for key in scope_unenabled_keys
-            ],
-            "enabled_calculation_rules": [
-                {"rule_key": item["rule_code"], "name": item.get("rule_name") or item["rule_code"]}
-                for item in manifest.get("calculations", [])
-                if item.get("status") != "DISABLED"
-            ],
-        },
-        "nodes": [
-            {
-                **node,
-                "status": executions[node["node_code"]].status if node["node_code"] in executions else ("CURRENT" if node["node_code"] == task.current_node else "PENDING"),
-                "failure_code": executions[node["node_code"]].failure_code if node["node_code"] in executions else None,
-                "failure_message": executions[node["node_code"]].failure_message if node["node_code"] in executions else None,
-                "skip_reason": _execution_skip_reason(executions.get(node["node_code"])),
-                # 真实子步骤（8010/OCR 处理数量、印章是否按需启用、未配置的文件质量规则）保存在节点结果里。
-                "result_summary": executions[node["node_code"]].result_json if node["node_code"] in executions else None,
-            }
-            for node in nodes
-        ],
-        # 当前场景没有配置这类检查；页面和执行都必须明确说明，不能显示成通过。
-        # 两个口径分开：类型级说明「哪一类检查没配」，实例级让页面判断
-        # 展示结构由当前任务的场景配置动态决定，前端按它通用渲染。
-        # 页面不按场景名称或固定条件分支写死展示内容；这里给出本任务真实使用的
-        # 节点、Sheet、字段及其数据，统一协议里未被本场景选中的内容不出现。
-        "display": _task_display_structure(task, manifest, nodes),
-        "documents": [
-            {
-                "document_no": item.document_no,
-                # 材料键是检索取证的定位依据：页面据此限定检索范围，不用中文名去匹配。
-                "material_key": item.material_key,
-                "material_name": item.material_name,
-                "required": item.required,
-                "status": item.status,
-                "filename": uploads[item.current_upload_id].original_filename if item.current_upload_id in uploads else None,
-                # 当前文件的上传编号：页面下载/预览与历史版本入口用它定位真实文件。
-                "upload_no": uploads[item.current_upload_id].upload_no if item.current_upload_id in uploads else None,
-                # 该材料位的 8018 识别结论（含置信度）：只作展示，不影响材料状态与后续执行。
-                "material_classify": material_classify.get(item.material_key),
-            }
-            for item in documents
-        ],
-        "fields": field_view,
-        # 可主动纠错的字段事实清单（供页面提供纠错入口）。
-        "field_correction_candidates": field_correction_candidates,
-        "rules": [
-            {
-                "rule_key": item.rule_key,
-                "name": item.rule_name,
-                "status": item.status,
-                "message": item.message,
-                "result": {
-                    **result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
-                    # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
-                    # node_code 保留用户配置的实例码，两个字段都不由规则名称推断。
-                    "node": node_type_by_code.get(execution_node_by_id[item.node_execution_id]),
-                    "node_type": node_type_by_code.get(execution_node_by_id[item.node_execution_id]),
-                    "node_code": execution_node_by_id[item.node_execution_id],
-                },
-                "evidence": rule_evidence.get(item.id, []),
-                # 旧结果没有 standard 快照时，单独返回任务绑定配置的要求，不改写执行结果。
-                "configured_requirement": rule_definitions.get(
-                    (execution_node_by_id[item.node_execution_id], item.rule_key), {},
-                ).get("requirement"),
-            }
-            for item in rule_results
-        ],
-        "pending_reviews": [
-            _pending_review_view(
-                review=item,
-                documents_by_id=documents_by_id,
-                documents_by_material_key=documents_by_material_key,
-                uploads_by_id=uploads,
-                fields_by_id=fields_by_id,
-                field_definitions=field_definitions,
-                rules_by_id=rules_by_id,
-                evidence_rows=evidence_rows,
-                evidence_by_id=evidence_by_id,
-                current_fact_status_by_field=current_fact_status_by_field,
-            )
-            for item in reviews
-        ],
-        # 全部待办（含不属于本批的批次）：仅供页面展示「还有多少项在排队」。
-        # 提交必须用 `pending_reviews` / `pending_review_batch` 给出的本批集合。
-        "all_pending_reviews": [
-            _pending_review_view(
-                review=item,
-                documents_by_id=documents_by_id,
-                documents_by_material_key=documents_by_material_key,
-                uploads_by_id=uploads,
-                fields_by_id=fields_by_id,
-                field_definitions=field_definitions,
-                rules_by_id=rules_by_id,
-                evidence_rows=evidence_rows,
-                evidence_by_id=evidence_by_id,
-                current_fact_status_by_field=current_fact_status_by_field,
-            )
-            for item in all_pending
-        ],
-        # 当前复核批次的身份：**提交校验、检查点校验、Agent 复核准备与前端提交
-        # 用的是同一个集合**（`reviews._current_review_batch`）。
-        # `stale=True` 说明本批哈希与进入等待时落库的哈希不一致（待办集合在等待期间
-        # 被改动过），页面必须刷新后再提交，不能拿旧批次继续。
-        "pending_review_batch": {
-            "review_nos": [item.review_no for item in reviews],
-            "count": len(reviews),
-            "hash": batch_hash,
-            "stale": bool(reviews) and batch_hash != task.pending_review_hash,
-            "review_types": sorted({item.review_type for item in reviews}),
-            "all_pending_count": len(all_pending),
-        },
-        "pending_review_hash": batch_hash,
-        "pending_review_count": len(reviews),
-        "can_recover_failed_node": can_recover_failed_node(db, task),
-        "latest_operation": operation_view(latest) if (latest := latest_operation(db, OBJECT_AUDIT_TASK, task.task_no)) else None,
-    }
-
-
-def _pending_review_view(
-    *,
-    review: ManualReview,
-    documents_by_id: dict[int, TaskDocument],
-    documents_by_material_key: dict[str, TaskDocument],
-    uploads_by_id: dict[int, DocumentUpload],
-    fields_by_id: dict[int, TaskFieldValue],
-    field_definitions: dict[str, dict[str, Any]],
-    rules_by_id: dict[int, RuleResult],
-    evidence_rows: list[Evidence],
-    evidence_by_id: dict[int, Evidence],
-    current_fact_status_by_field: dict[tuple[str, str], str],
-) -> dict[str, Any]:
-    """复核表单只暴露业务上下文，不返回内部标识符。"""
-    material_name: str | None = None
-    field_name: str | None = None
-    rule_name: str | None = None
-    evidence_quote: str | None = None
-    evidence_no: str | None = None
-    effective_status: str | None = None
-
-    if review.document_upload_id is not None:
-        upload = uploads_by_id.get(review.document_upload_id)
-        if upload is None:
-            raise BusinessError("REVIEW_DOCUMENT_MISSING", "复核关联材料不存在", status_code=500)
-        document = documents_by_id.get(upload.task_document_id)
-        if document is None:
-            raise BusinessError("REVIEW_DOCUMENT_MISSING", "复核关联材料不存在", status_code=500)
-        material_name = document.material_name
-        effective_status = document.status
-    elif review.field_value_id is not None:
-        fact = fields_by_id.get(review.field_value_id)
-        if fact is None:
-            raise BusinessError("REVIEW_FIELD_MISSING", "复核关联字段不存在", status_code=500)
-        field = field_definitions.get(fact.field_key)
-        document = documents_by_material_key.get(fact.material_key)
-        if field is None or document is None:
-            raise BusinessError("REVIEW_FIELD_SCHEMA_MISSING", "复核字段不在任务字段清单中", status_code=500)
-        field_name = field["name"]
-        material_name = document.material_name
-        effective_status = current_fact_status_by_field.get((fact.field_key, fact.material_key))
-        evidence = evidence_by_id.get(fact.evidence_id) if fact.evidence_id is not None else None
-        evidence_quote = evidence.quote_text if evidence else None
-        evidence_no = evidence.evidence_no if evidence else None
-    elif review.rule_result_id is not None:
-        result = rules_by_id.get(review.rule_result_id)
-        if result is None:
-            raise BusinessError("REVIEW_RULE_MISSING", "复核关联规则不存在", status_code=500)
-        rule_name = result.rule_name
-        effective_status = result.status
-        evidence = next((item for item in evidence_rows if item.rule_result_id == result.id), None)
-        evidence_quote = evidence.quote_text if evidence else None
-        evidence_no = evidence.evidence_no if evidence else None
-    else:
-        raise BusinessError("REVIEW_TARGET_INVALID", "人工复核缺少关联业务对象", status_code=500)
-
-    # 系统原判断是不可变快照：状态、消息、原值、标准化值与证据整体返回，不能只取 message。
-    judgment = review_content_view(review.system_judgment_json if isinstance(review.system_judgment_json, dict) else {})
-    system_judgment = {
-        "status": judgment.get("status"),
-        "message": judgment.get("message"),
-        "raw_value": judgment.get("raw_value"),
-        "normalized_value": judgment.get("normalized_value"),
-        "evidence": judgment.get("evidence"),
-        "evidences": judgment.get("evidences", [])
-        if isinstance(judgment.get("evidences"), list) else [],
-        # 人工复核必须看到系统当时使用的完整业务依据。它们已经冻结在
-        # system_judgment_json 中，这里只做投影，不重新检索或重算。
-        "retrieval": judgment.get("retrieval"),
-        "seal_records": judgment.get("seal_records") if isinstance(judgment.get("seal_records"), list) else [],
-        "subject_query": judgment.get("subject_query"),
-        "service_code": judgment.get("service_code"),
-        "service_result": judgment.get("service_result"),
-    }
-    return {
-        "review_no": review.review_no,
-        "review_type": review.review_type,
-        "status": review.status,
-        "business_note": review.business_note,
-        "proposed_value": review.proposed_value,
-        "material_name": material_name,
-        "field_name": field_name,
-        "rule_name": rule_name,
-        "system_judgment": system_judgment,
-        "manual_conclusion": review.decision,
-        "effective_status": effective_status,
-        "basis_type": review.basis_type,
-        "before_value": review.before_value,
-        "after_value": review.after_value,
-        "evidence_quote": evidence_quote,
-        "evidence_no": evidence_no,
-    }

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
 from ..domain.configuration import empty_config, config_property
-from .base import TimestampMixin
+from .base import ConfigurationShape, TimestampMixin
 
 
 class ScenarioDraft(Base, TimestampMixin):
@@ -47,19 +47,18 @@ class ScenarioDraft(Base, TimestampMixin):
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="FORM", server_default=text("'FORM'"))
     base_version_no: Mapped[int | None] = mapped_column(Integer)
-    # 来源配置的能力版本身份：导入、继承或复制时保留，不能覆盖已有历史身份。
+    # 来源配置的执行契约版本身份，随导入、继承或复制保存。
     profile_version: Mapped[str | None] = mapped_column(String(40))
     # 最近一次保存时草稿还不能发布的原因。NULL 表示当前草稿可以通过发布检查，
     # 不是「已经发布」：已发布版本只在显式发布时产生。
     sync_error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    # 计算规则候选，或历史版本留下的 {"frozen": [已编译计算规则]}。
+    # 原始计算定义列表。
     # NULL 与空数组都表示没有计算配置。
     calculation_json = config_property("calculation_json")
     # 停用行允许保留未填写的业务列，不能强行塞进完整业务对象表。
-    disabled_source_rows = config_property("disabled_source_rows")
 
 
-class ScenarioDraftNode(Base, TimestampMixin):
+class ScenarioDraftNode(ConfigurationShape, TimestampMixin):
     """config_json 中的执行记录技术容器投影，不提供业务节点编排。"""
 
     __tablename__ = "scenario_draft_node"
@@ -85,29 +84,7 @@ class ScenarioDraftNode(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class ScenarioDraftSheet(Base, TimestampMixin):
-    """草稿来源工作表的内部投影；实际清单保存在 config_json。
-
-    新来源保存上传文件的真实 sheet_key/sheet_name，业务配置各自引用节点，
-    不按表名、表头或固定角色限制场景；node_code 只保留已有历史绑定数据。
-    """
-
-    __tablename__ = "scenario_draft_sheet"
-    __table_args__ = (
-        UniqueConstraint("draft_id", "sheet_role"),
-        Index("idx_scenario_draft_sheet_draft", "draft_id"),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    draft_id: Mapped[int] = mapped_column(ForeignKey("scenario_draft.id"), nullable=False)
-    # 来源表标识：动态来源用 RULE_LIBRARY:<sheet_key>，历史记录保留已存标识。
-    sheet_role: Mapped[str] = mapped_column(String(80), nullable=False)
-    # 该 Sheet 归属的节点实例码。为空表示本场景选用这张表但尚未指定节点。
-    node_code: Mapped[str | None] = mapped_column(String(80))
-    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-
-
-class ScenarioDraftMaterial(Base, TimestampMixin):
+class ScenarioDraftMaterial(ConfigurationShape, TimestampMixin):
     __tablename__ = "scenario_draft_material"
     __table_args__ = (
         UniqueConstraint("draft_id", "material_key"),
@@ -127,7 +104,7 @@ class ScenarioDraftMaterial(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class ScenarioDraftField(Base, TimestampMixin):
+class ScenarioDraftField(ConfigurationShape, TimestampMixin):
     __tablename__ = "scenario_draft_field"
     __table_args__ = (
         UniqueConstraint("draft_id", "field_key"),
@@ -170,7 +147,7 @@ class ScenarioDraftField(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class ScenarioDraftRule(Base, TimestampMixin):
+class ScenarioDraftRule(ConfigurationShape, TimestampMixin):
     __tablename__ = "scenario_draft_rule"
     __table_args__ = (
         UniqueConstraint("draft_id", "rule_key"),
@@ -194,13 +171,12 @@ class ScenarioDraftRule(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class ScenarioDraftSection(Base, TimestampMixin):
+class ScenarioDraftSection(ConfigurationShape, TimestampMixin):
     """报告配置草稿：一个报告章节。
 
     场景报告配置按章节保存，并可声明报告编号、报告名称、
     材料范围、输出格式、结果排序与内容类型；这些都是业务维护的配置事实，必须随草稿
-    一起保存，否则页面保存一次就会把按编号分组的报告退回成旧的附加展示章节。
-    旧格式没有这些列，它们保持 NULL，渲染与导出继续按旧的附加章节语义处理。
+    一起保存，未声明的属性保持为空。
     """
 
     __tablename__ = "scenario_draft_section"
@@ -216,6 +192,8 @@ class ScenarioDraftSection(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     content_instruction: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
     field_keys: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # JSON 配置属性；字段绑定供执行器定位，业务引用还可指向计算与规则结果。
+    data_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     # 规则库报告分组属性。
     report_code: Mapped[str | None] = mapped_column(String(80))

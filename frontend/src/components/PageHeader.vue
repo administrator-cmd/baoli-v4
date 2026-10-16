@@ -6,8 +6,6 @@ defineProps<{
   title: string;
   /** 页面上方的小字，标明所属模块。 */
   eyebrow?: string;
-  /** 一行业务说明：当前在做哪件事。 */
-  subtitle?: string;
   /** 当前作业/任务的中文名称。 */
   objectName?: string | null;
   /** 次级说明：版本、发布时间等。 */
@@ -51,8 +49,7 @@ defineEmits<{
       </template>
     </el-page-header>
 
-    <div v-if="subtitle || $slots.status" class="page-header__sub">
-      <span v-if="subtitle" class="text-muted">{{ subtitle }}</span>
+    <div v-if="$slots.status" class="page-header__sub">
       <slot name="status" />
     </div>
 

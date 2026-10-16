@@ -1,25 +1,20 @@
 """审核场景管理 API：场景列表、页面配置草稿与发布。
 
-- 列表使用真实后端筛选、排序与分页；导出与当前筛选使用同一作用域。
+- 列表使用真实后端筛选、排序与分页。
 - 草稿的每次写入都会递增修订号；发布必须携带页面看到的修订号。
-- 已发布版本是不可变的执行快照；后续修改当前草稿并发布新快照。
+- 发布成功后删除草稿；只读展示发布配置，后续编辑创建新草稿。
 - 页面创建的场景没有 Excel 作业与工作表行号：发布时不伪造导入来源。
 """
 
 from datetime import datetime
-from io import BytesIO
-from urllib.parse import quote
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..domain.manifest import build_task_schema
 from ..schema.dto.scenarios import (
-    DraftDisabledSourceRowUpdateRequest,
-    DraftSourceActivationPreviewRequest,
-    DraftSourceActivationConfirmRequest,
     DraftFieldRequest,
     DraftFieldUpdateRequest,
     DraftMaterialRequest,
@@ -36,12 +31,17 @@ from ..schema.dto.scenarios import (
 from ..schema.dto import TaskSchemaPreviewRequest
 from ..schema.vo.scenarios import (
     ScenarioDetailResponse,
+    ScenarioConfigurationViewResponse,
     ScenarioDraftViewResponse,
     ScenarioPublishResponse,
 )
 from ..schema.vo import TaskSchemaPreviewResponse
-from ..schema.vo import OperationAcceptedResponse
 from ..schema.query import validate_page_params
+from ..services.scenario_query_service import (
+    list_scenarios_page,
+    list_admin_scenario_options,
+    list_scenario_options,
+)
 from ..services import scenario_admin_service
 from ..services.scenario_admin_service import (
     create_draft_field,
@@ -49,15 +49,12 @@ from ..services.scenario_admin_service import (
     create_draft_rule,
     create_draft_section,
     create_scenario,
-    list_admin_scenario_options,
     delete_draft_field,
     delete_draft_material,
     delete_draft_rule,
     delete_draft_section,
     delete_scenario,
     draft_config_view,
-    list_scenario_options,
-    list_scenarios_page,
     publish_draft,
     scenario_detail,
     set_draft_rule_enabled,
@@ -69,19 +66,10 @@ from ..services.scenario_admin_service import (
     update_draft_section,
     update_scenario,
 )
-from ..services.background_service import operation_view
-from ..services.operation_gateway import submit_source_activation_preview
 from ..services.task_lookup import scenario_or_404
-from ..services.template_export_service import build_scenario_version_export
 from ..schema.vo import PagedResponse
-from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
-
-
-def _export_manifest(manifest: dict) -> bytes:
-    """将场景完整业务 JSON 导出为 Excel。"""
-    return build_scenario_version_export(manifest)
 
 
 def _draft_response(request: Request, payload: dict) -> ScenarioDraftViewResponse:
@@ -138,46 +126,6 @@ def admin_scenario_options(request: Request, db: Session = Depends(get_db)) -> d
     return {"request_id": request.state.request_id, "items": list_admin_scenario_options(db)}
 
 
-@router.get("/export")
-def export_scenarios(
-    name: str | None = None,
-    category: str | None = None,
-    enabled: bool | None = None,
-    published_from: datetime | None = None,
-    published_to: datetime | None = None,
-    db: Session = Depends(get_db),
-):
-    """按当前筛选导出场景列表 CSV。"""
-    result = list_scenarios_page(
-        db,
-        name=name,
-        category=category,
-        enabled=enabled,
-        published_from=published_from,
-        published_to=published_to,
-        page=1,
-        page_size=EXPORT_PAGE_SIZE,
-    )
-    rows = [
-        [
-            item["scenario_name"],
-            item["category"],
-            item["published_version_no"],
-            item["material_count"],
-            item["field_count"],
-            item["rule_count"],
-            item["enabled"],
-            item["updated_at"],
-        ]
-        for item in result["items"]
-    ]
-    return csv_response(
-        "审核场景列表.csv",
-        ["场景名称", "业务类型", "当前发布版本", "材料数", "字段数", "业务规则数", "启用状态", "更新时间"],
-        rows,
-    )
-
-
 @router.post("", response_model=ScenarioDetailResponse, status_code=201)
 def create_scenario_endpoint(payload: ScenarioCreateRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDetailResponse:
     """新建场景（页面配置）：没有 Excel 作业与工作表行号，不伪造导入来源。"""
@@ -219,7 +167,17 @@ def delete_scenario_endpoint(scenario_code: str, db: Session = Depends(get_db)) 
 # 配置草稿：材料 / 字段 / 规则 / 报告章节
 #
 # 写入统一收口：记录操作、递增草稿修订号，并刷新发布就绪状态。
-# 编译不通过时草稿照常保存、已发布版本保持不变，原因在 draft_config_view.sync_error 里如实返回。
+# 保存只更新草稿；发布接口编译当前配置并明确返回结构错误，不再维护发布预审状态。
+
+
+@router.get("/{scenario_code}/configuration", response_model=ScenarioConfigurationViewResponse)
+def get_scenario_configuration(
+    scenario_code: str, request: Request, view: Literal["DRAFT", "PUBLISHED"] | None = None,
+    db: Session = Depends(get_db),
+) -> ScenarioConfigurationViewResponse:
+    """只读当前配置：有草稿就展示草稿，否则展示发布内容。"""
+    payload = scenario_admin_service.configuration_view(db, template_or_404(db, scenario_code), view)
+    return ScenarioConfigurationViewResponse.model_validate({**payload, "request_id": request.state.request_id})
 
 
 @router.get("/{scenario_code}/draft", response_model=ScenarioDraftViewResponse)
@@ -229,54 +187,11 @@ def get_scenario_draft(scenario_code: str, request: Request, db: Session = Depen
     return _draft_response(request, draft_config_view(db, template))
 
 
-@router.put("/{scenario_code}/draft/disabled-source-rows/{row_key}", response_model=ScenarioDraftViewResponse)
-def update_disabled_source_row(
-    scenario_code: str,
-    row_key: str,
-    payload: DraftDisabledSourceRowUpdateRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> ScenarioDraftViewResponse:
-    draft = scenario_admin_service.update_draft_disabled_source_row(
-        db, scenario_code, row_key, payload.model_dump()
-    )
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
-
-
-
-
-@router.post("/{scenario_code}/draft/source-activations/preview", response_model=OperationAcceptedResponse, status_code=202)
-def preview_source_activation(
-    scenario_code: str, payload: DraftSourceActivationPreviewRequest,
-    request: Request, db: Session = Depends(get_db),
-) -> OperationAcceptedResponse:
-    operation, reused = submit_source_activation_preview(
-        db,
-        scenario_code,
-        row_keys=payload.row_keys,
-        expected_revision=payload.expected_revision,
-        idempotency_key=payload.idempotency_key,
-    )
-    return OperationAcceptedResponse.model_validate(
-        {**operation_view(operation, reused=reused), "request_id": request.state.request_id}
-    )
-
-
-@router.post("/{scenario_code}/draft/source-activations/confirm", response_model=ScenarioDraftViewResponse)
-def confirm_source_activation(
-    scenario_code: str, payload: DraftSourceActivationConfirmRequest,
-    request: Request, db: Session = Depends(get_db),
-) -> ScenarioDraftViewResponse:
-    from ..services import source_activation_service
-    draft = source_activation_service.activate(db, scenario_code, payload.preview_id, payload.expected_revision)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
-
-
 @router.post("/{scenario_code}/draft/materials", response_model=ScenarioDraftViewResponse, status_code=201)
 def create_material(scenario_code: str, payload: DraftMaterialRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """在草稿中新增材料位，返回最新草稿视图。"""
     draft = create_draft_material(db, scenario_code, payload.model_dump())
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.put("/{scenario_code}/draft/materials/{material_key}", response_model=ScenarioDraftViewResponse)
@@ -285,21 +200,21 @@ def update_material(
 ) -> ScenarioDraftViewResponse:
     """修改草稿中的材料位（只覆盖请求里出现的字段）。"""
     draft = update_draft_material(db, scenario_code, material_key, payload.model_dump(exclude_unset=True))
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.delete("/{scenario_code}/draft/materials/{material_key}", response_model=ScenarioDraftViewResponse)
 def delete_material(scenario_code: str, material_key: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """删除草稿中的材料位；仍被字段或规则引用时明确 409，不级联删除。"""
     draft = delete_draft_material(db, scenario_code, material_key)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.post("/{scenario_code}/draft/fields", response_model=ScenarioDraftViewResponse, status_code=201)
 def create_field(scenario_code: str, payload: DraftFieldRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """在草稿中新增字段，返回最新草稿视图。"""
     draft = create_draft_field(db, scenario_code, payload.model_dump())
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.put("/{scenario_code}/draft/fields/{field_key}", response_model=ScenarioDraftViewResponse)
@@ -308,21 +223,21 @@ def update_field(
 ) -> ScenarioDraftViewResponse:
     """修改草稿中的字段（只覆盖请求里出现的字段）。"""
     draft = update_draft_field(db, scenario_code, field_key, payload.model_dump(exclude_unset=True))
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.delete("/{scenario_code}/draft/fields/{field_key}", response_model=ScenarioDraftViewResponse)
 def delete_field(scenario_code: str, field_key: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """删除草稿中的字段；仍被规则或报告章节引用时明确 409，不级联删除。"""
     draft = delete_draft_field(db, scenario_code, field_key)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.post("/{scenario_code}/draft/rules", response_model=ScenarioDraftViewResponse, status_code=201)
 def create_rule(scenario_code: str, payload: DraftRuleRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """在草稿中新增规则，返回最新草稿视图。"""
     draft = create_draft_rule(db, scenario_code, payload.model_dump())
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.put("/{scenario_code}/draft/rules/{rule_key}", response_model=ScenarioDraftViewResponse)
@@ -331,7 +246,7 @@ def update_rule(
 ) -> ScenarioDraftViewResponse:
     """整体替换草稿中这条规则的定义；引用了它的下游规则名记录在操作明细里。"""
     draft = update_draft_rule(db, scenario_code, rule_key, payload.model_dump(exclude_unset=True))
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.put("/{scenario_code}/draft/rules/{rule_key}/enabled", response_model=ScenarioDraftViewResponse)
@@ -340,21 +255,21 @@ def set_rule_enabled(
 ) -> ScenarioDraftViewResponse:
     """启用 / 停用草稿中的规则；停用规则不进入发布后的执行范围。"""
     draft = set_draft_rule_enabled(db, scenario_code, rule_key, payload.enabled)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.delete("/{scenario_code}/draft/rules/{rule_key}", response_model=ScenarioDraftViewResponse)
 def delete_rule(scenario_code: str, rule_key: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """删除草稿中的规则。"""
     draft = delete_draft_rule(db, scenario_code, rule_key)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.post("/{scenario_code}/draft/sections", response_model=ScenarioDraftViewResponse, status_code=201)
 def create_section(scenario_code: str, payload: DraftSectionRequest, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """在草稿中新增报告章节。"""
     draft = create_draft_section(db, scenario_code, payload.model_dump())
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.put("/{scenario_code}/draft/sections/{section_key}", response_model=ScenarioDraftViewResponse)
@@ -363,14 +278,14 @@ def update_section(
 ) -> ScenarioDraftViewResponse:
     """修改草稿中的报告章节。"""
     draft = update_draft_section(db, scenario_code, section_key, payload.model_dump(exclude_unset=True))
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.delete("/{scenario_code}/draft/sections/{section_key}", response_model=ScenarioDraftViewResponse)
 def delete_section(scenario_code: str, section_key: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """删除草稿中的报告章节。"""
     draft = delete_draft_section(db, scenario_code, section_key)
-    return _draft_response(request, scenario_admin_service._draft_config_payload(db, draft))
+    return _draft_response(request, scenario_admin_service.draft_config_payload(db, draft))
 
 
 @router.post("/{scenario_code}/draft/publish", response_model=ScenarioPublishResponse, status_code=201)
@@ -382,9 +297,7 @@ def publish_scenario_draft(
     这是管理员确认配置的动作，与「保存草稿」严格分开：保存只写草稿，
     只有本接口会产生业务用户可用的 `scenario_version`。
 
-    发布前的检查全部在编译期完成，任一项不通过即 409/400 并附具体原因，
-    不产生可用版本：节点依赖与顺序、来源工作表、材料/字段/规则引用、
-    计算配置、能力缺口、报告章节，以及「至少选用一张 Sheet」。
+    发布时编译当前草稿，结构错误明确返回；发布快照与草稿删除同一次提交。
 
     修订号必须与草稿当前一致；内容与最新已发布版本完全一致时返回原版本，
     不制造重复版本。已发布版本不可修改——发布只新增版本。
@@ -399,32 +312,11 @@ def publish_scenario_draft(
         status=version.status,
         source=version.source,
         change_summary=version.change_summary,
-        manifest_hash=version.manifest_hash,
         material_count=len(manifest.get("materials", [])),
         field_count=len(manifest.get("fields", [])),
         rule_count=len(manifest.get("rules", [])),
         published_at=version.published_at,
         reused=reused,
-    )
-
-
-@router.get("/{scenario_code}/draft/export")
-def export_scenario_draft(scenario_code: str, db: Session = Depends(get_db)) -> StreamingResponse:
-    """导出当前草稿的有效配置（与发布使用同一编译结果）。
-
-    导出保留完整业务 JSON，不依赖固定模板列。
-    """
-    from ..services.scenario_admin_service import compile_draft_manifest, ensure_draft
-
-    template = template_or_404(db, scenario_code)
-    draft = ensure_draft(db, template)
-    manifest = compile_draft_manifest(db, template, draft)
-    content = _export_manifest(manifest)
-    filename = f"{template.scenario_name}-配置草稿-有效配置.xlsx"
-    return StreamingResponse(
-        BytesIO(content),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
 
 

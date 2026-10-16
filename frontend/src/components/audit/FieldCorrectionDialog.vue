@@ -97,7 +97,6 @@ function submit(): void {
             <el-option label="文档证据" value="DOCUMENT_EVIDENCE" />
             <el-option label="上传记录" value="UPLOAD_RECORD" />
           </el-select>
-          <div class="text-hint">人工提供的值以人工依据生效，不会把旧原文证据当成新值的证明。</div>
         </el-form-item>
 
         <el-form-item label="业务说明" required>

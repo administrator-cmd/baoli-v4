@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { Download, Eye, Upload } from "lucide-vue-next";
-
+import { Upload } from "lucide-vue-next";
 import type { AuditDocument } from "@/api/contracts";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -14,7 +13,6 @@ const props = defineProps<{
   catalog: MaterialTypeCatalog;
   busy: boolean;
   disabled: boolean;
-  needsAttention?: boolean;
   replacementImpact?: {
     stale_field_values: number;
     invalidated_rule_results: number;
@@ -26,8 +24,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   pick: [file: File, materialType: string];
-  download: [document: AuditDocument];
-  preview: [document: AuditDocument];
   remove: [document: AuditDocument];
   inspectProcessing: [document: AuditDocument];
 }>();
@@ -39,6 +35,10 @@ const materialClassify = computed(() => props.document.material_classify ?? null
 const matchedKeywords = computed(() => {
   const raw = materialClassify.value?.matched_keywords;
   return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+});
+const confidenceLabel = computed(() => {
+  const confidence = materialClassify.value?.confidence;
+  return typeof confidence === "number" ? `${(confidence * 100).toFixed(1)}%` : "—";
 });
 
 function materialStatusTone(status: string | null | undefined): StatusTone {
@@ -82,7 +82,7 @@ function onFileChange(file: { raw?: File }): void {
 </script>
 
 <template>
-  <tr class="material-row" :class="{ 'material-row--attention': needsAttention && missingRequired }">
+  <tr class="material-row" :class="{ 'material-row--attention': missingRequired }">
     <td>
       <div class="material-row__name">
         <strong>{{ document.material_name }}</strong>
@@ -95,13 +95,14 @@ function onFileChange(file: { raw?: File }): void {
     <td>
       <div class="material-row__status">
         <StatusBadge :status="document.status" :label="statusLabelOverride" :tone="materialStatusTone(document.status)" />
+        <span v-if="materialClassify" class="material-row__confidence">置信度 {{ confidenceLabel }}</span>
         <el-popover v-if="materialClassify" trigger="click" width="340">
           <template #reference><el-button link type="primary" size="small">识别详情</el-button></template>
           <div class="material-row__classification">
             <strong>自动识别（仅供参考）</strong>
             <div>判定类型：{{ materialClassify.detected_material_type || "未识别" }}</div>
             <div v-if="materialClassify.declared_material_type">上传声明：{{ materialClassify.declared_material_type }}</div>
-            <div>置信度：{{ materialClassify.confidence ?? "—" }}</div>
+            <div>置信度：{{ confidenceLabel }}</div>
             <div>命中关键词：{{ matchedKeywords.length ? matchedKeywords.join("、") : "无" }}</div>
           </div>
         </el-popover>
@@ -114,7 +115,7 @@ function onFileChange(file: { raw?: File }): void {
     <td><MaterialTypeSelect v-model="selectedType" :catalog="catalog" :show-error="false" :disabled="disabled || busy" /></td>
     <td>
       <div class="material-row__actions">
-        <el-upload ref="uploadRef" :auto-upload="false" :show-file-list="false" :disabled="disabled || busy" :on-change="onFileChange">
+        <el-upload ref="uploadRef" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff" :auto-upload="false" :show-file-list="false" :disabled="disabled || busy" :on-change="onFileChange">
           <el-button size="small" type="primary" :loading="busy" :disabled="disabled || busy">
             <template #icon><Upload :size="14" /></template>
             {{ document.filename ? "替换" : "上传" }}
@@ -122,12 +123,6 @@ function onFileChange(file: { raw?: File }): void {
         </el-upload>
         <template v-if="document.filename">
           <el-button link type="primary" size="small" :disabled="disabled || busy" @click="emit('inspectProcessing', document)">处理状态</el-button>
-          <el-button link type="primary" size="small" :disabled="disabled || busy" @click="emit('preview', document)">
-            <template #icon><Eye :size="14" /></template>预览
-          </el-button>
-          <el-button link type="primary" size="small" :disabled="disabled || busy" @click="emit('download', document)">
-            <template #icon><Download :size="14" /></template>下载
-          </el-button>
           <el-button link type="danger" size="small" :disabled="disabled || busy" @click="emit('remove', document)">移除</el-button>
         </template>
       </div>
@@ -149,4 +144,5 @@ function onFileChange(file: { raw?: File }): void {
 .material-row__note { margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
 .material-row__actions { gap: 4px 8px; }
 .material-row__classification { line-height: 1.7; overflow-wrap: anywhere; }
+.material-row__confidence { color: var(--el-text-color-secondary); font-size: 12px; }
 </style>

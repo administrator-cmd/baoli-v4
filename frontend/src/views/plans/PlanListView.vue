@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type { PlanListItem, PlanSelection } from "@/api/contracts";
 import {
   copyPlan,
+  deletePlan,
   getPlan,
   listPlans,
   restorePlan,
@@ -43,6 +44,8 @@ const sceneOptions = ref<ScenarioOption[]>([]);
 const sceneOptionsError = ref<string | null>(null);
 const selectedRows = ref<PlanListItem[]>([]);
 const editSelectedDisabled = computed(() => selectedRows.value.length !== 1);
+const deleteSelectedDisabled = computed(() => selectedRows.value.length === 0);
+const deleteSaving = ref(false);
 
 function goNew(): void {
   void router.push({ name: "plan-new" });
@@ -85,6 +88,40 @@ async function copyRow(row: PlanListItem): Promise<void> {
     await list.load();
   } catch (failure) {
     ElMessage.error(failure instanceof Error ? failure.message : "复制失败");
+  }
+}
+
+async function removePlans(targets: PlanListItem[]): Promise<void> {
+  if (!targets.length) return;
+  try {
+    await ElMessageBox.confirm(
+      targets.length === 1
+        ? `确认删除方案「${targets[0].plan_name}」？删除后可在“已删除”列表恢复，已创建的审核任务不受影响。`
+        : `确认删除选中的 ${targets.length} 个方案？删除后可在“已删除”列表恢复，已创建的审核任务不受影响。`,
+      "删除方案",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  deleteSaving.value = true;
+  try {
+    const failures: string[] = [];
+    let deletedCount = 0;
+    for (const row of targets) {
+      try {
+        await deletePlan(row.plan_code);
+        deletedCount += 1;
+      } catch (failure) {
+        failures.push(`${row.plan_name}：${failure instanceof Error ? failure.message : "删除失败"}`);
+      }
+    }
+    if (deletedCount) ElMessage.success(`已删除 ${deletedCount} 个方案`);
+    if (failures.length) ElMessage.error(failures.join("；"));
+    selectedRows.value = [];
+    await list.load();
+  } finally {
+    deleteSaving.value = false;
   }
 }
 
@@ -155,7 +192,6 @@ async function loadSceneOptions(): Promise<void> {
     <PageHeader
       eyebrow="方案管理"
       title="方案列表"
-      subtitle="基于已发布场景版本创建方案；启用且范围已生效的方案可用于创建审核任务。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -190,6 +226,7 @@ async function loadSceneOptions(): Promise<void> {
         <template v-if="!filters.deleted">
           <el-button type="primary" @click="goNew">新增</el-button>
           <el-button type="success" plain :disabled="editSelectedDisabled" @click="selectedRows[0] && goEdit(selectedRows[0])">编辑</el-button>
+          <el-button type="danger" plain :disabled="deleteSelectedDisabled" :loading="deleteSaving" @click="removePlans([...selectedRows])">删除</el-button>
         </template>
       </div>
       <div class="app-toolbar__right">
@@ -246,13 +283,14 @@ async function loadSceneOptions(): Promise<void> {
       <el-table-column label="更新时间" width="170">
         <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="280" fixed="right">
+      <el-table-column label="操作" width="330" fixed="right">
         <template #default="{ row }">
           <template v-if="!filters.deleted">
             <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
             <el-button link type="primary" size="small" @click="goEdit(row)">编辑</el-button>
             <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
             <el-button link type="primary" size="small" @click="openCreateTask(row)">创建任务</el-button>
+            <el-button link type="danger" size="small" :disabled="deleteSaving" @click="removePlans([row])">删除</el-button>
             <el-dropdown trigger="click">
               <el-button link type="primary" size="small">更多</el-button>
               <template #dropdown>

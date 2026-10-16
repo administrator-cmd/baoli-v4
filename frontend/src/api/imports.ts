@@ -1,6 +1,8 @@
 import type {
   ImportJob,
   ImportJobSummary,
+  ImportProposalChanges,
+  ImportProposalGroup,
   OperationAccepted,
   Paged,
 } from "./contracts";
@@ -22,7 +24,6 @@ export interface ImportJobRow {
   scenario_code: string | null;
   scenario_name: string | null;
   draft_revision: number;
-  pending_issue_count: number;
   /**
    * 该作业未结束（待执行 / 执行中）的后台操作数。
    * 转换期间作业状态不变，所以「是否执行中」只能看这个字段，不能看 status。
@@ -86,8 +87,7 @@ export function listTemplates(): Promise<TemplateOption[]> {
  * 在指定场景下上传规则库 Excel，读取为工作簿 IR；此时还没有规则候选。
  *
  * `scenarioCode` 必填：上传流程以场景为起点（用户先建场景、再在该场景下上传），
- * 场景不由 Excel 表头推断。管理员选择参与解析的工作表，模型生成的字段、规则
- * 和计算各自引用场景实际节点，不按工作表绑定一个节点。
+ * 场景不由 Excel 表头推断。系统解析全部非空工作表，生成业务配置。
  */
 export function createImportJob(file: File, scenarioCode: string): Promise<ImportJob> {
   const formData = new FormData();
@@ -96,26 +96,20 @@ export function createImportJob(file: File, scenarioCode: string): Promise<Impor
   return request<ImportJob>("/import-jobs", { method: "POST", body: formData });
 }
 
-/** 导入作业详情：工作表、问题、候选与草稿修订号。 */
+/** 导入作业详情：解析配置与修订号。 */
 export function getImportJob(jobNo: string): Promise<ImportJob> {
   return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}`);
 }
 
-/**
- * 保存参与解析的工作表。
- * 表内业务分别引用实际节点，已排除的工作表不进入转换范围。
- */
-export function updateSheetBindings(
-  jobNo: string,
-  bindings: Array<{
-    sheet_key: string;
-    excluded: boolean;
-  }>,
+/** 保存一项解析配置；返回最新结果和修订号。 */
+export function updateImportProposal(
+  jobNo: string, group: ImportProposalGroup, candidateRef: string,
+  expectedJobRevision: number, changes: ImportProposalChanges,
 ): Promise<ImportJob> {
-  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/sheet-bindings`, {
-    method: "PUT",
+  return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/proposals/${group}/${encodeURIComponent(candidateRef)}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bindings }),
+    body: JSON.stringify({ expected_job_revision: expectedJobRevision, changes }),
   });
 }
 
@@ -136,7 +130,7 @@ export function startImportConversion(jobNo: string, idempotencyKey: string): Pr
  * 不发布场景版本。管理员之后在场景页核对并显式发布。
  */
 export function applyImportToDraft(
-  jobNo: string, expectedJobRevision: number, expectedSceneRevision: number,
+  jobNo: string, expectedJobRevision: number, expectedSceneRevision: number | null,
 ): Promise<ImportJob> {
   return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/apply-draft`, {
     method: "POST",

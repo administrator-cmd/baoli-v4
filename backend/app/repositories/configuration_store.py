@@ -13,7 +13,6 @@ from ..domain.configuration import empty_config
 
 SECTIONS = {
     "ScenarioDraftNode": "nodes",
-    "ScenarioDraftSheet": "sheets",
     "ScenarioDraftMaterial": "materials",
     "ScenarioDraftField": "fields",
     "ScenarioDraftRule": "rules",
@@ -69,7 +68,7 @@ def find(db: Session, model: type, owner_id: int, **criteria: Any) -> ConfigItem
 
 
 def add(db: Session, item: Any) -> ConfigItem:
-    """将现有编辑器构造的配置对象写进 JSON，ORM 对象不会加入数据库会话。"""
+    """将编辑器配置对象写进 JSON；属性形状不属于数据库元数据或会话。"""
     model = type(item)
     owner_key = "draft_id" if model.__name__.startswith("ScenarioDraft") else "plan_id"
     owner = _owner(db, model, getattr(item, owner_key))

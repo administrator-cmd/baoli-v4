@@ -4,7 +4,7 @@
 供 domain、services 与 operators 共同引用。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from ..common.exceptions import BusinessError
 
@@ -63,6 +63,41 @@ RULE_STATUSES: tuple[str, ...] = (
     "RUNNING",
 )
 
+# 执行器、能力目录和结果视图使用的状态集合。状态码本身只在这里声明，
+# 调用方按业务语境选择集合，避免每个模块重新拼接字符串集合。
+ResultStatus = Literal[
+    "COMPUTED",
+    "PASSED",
+    "ABNORMAL",
+    "EVIDENCE_INSUFFICIENT",
+    "NOT_APPLICABLE",
+    "NOT_EXECUTED",
+    "PENDING_REVIEW",
+    "REVIEWED",
+    "SKIPPED",
+    "RUNNING",
+]
+RiskStatus = Literal[
+    "PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT", "PENDING_REVIEW", "NOT_APPLICABLE",
+]
+
+# 单条规则执行循环状态，与最终业务结论状态分开。
+LOOP_RUNNING = "RUNNING"
+LOOP_NEEDS_HUMAN = "NEEDS_HUMAN"
+LOOP_DONE = "DONE"
+LOOP_BLOCKED = "BLOCKED"
+
+MODEL_VERDICT_STATUSES = frozenset({
+    "PASSED", "ABNORMAL", "COMPUTED", "NOT_APPLICABLE", "EVIDENCE_INSUFFICIENT",
+})
+PRODUCED_RESULT_STATUSES = frozenset({"PASSED", "ABNORMAL", "COMPUTED"})
+COMPLETED_RESULT_STATUSES = frozenset({"PASSED", "ABNORMAL", "COMPUTED", "NOT_APPLICABLE"})
+CONCLUSIVE_RESULT_STATUSES = frozenset({"PASSED", "ABNORMAL", "NOT_APPLICABLE"})
+OPERATOR_RESULT_STATUSES = frozenset({"PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT"})
+UNRESOLVED_RESULT_STATUSES = frozenset({
+    "EVIDENCE_INSUFFICIENT", "PENDING_REVIEW", "NOT_EXECUTED", "RUNNING", "SKIPPED",
+})
+
 # 状态分类：页面分档与统计共用同一口径。
 #   已判定：系统或人工已经给出可用的业务结论（含人工改判后的「已复核」）。
 #   未判定：应当判定但还没有形成可用结论（证据不足、待复核、未执行、执行中、已跳过）。
@@ -91,20 +126,20 @@ STATUS_CATEGORIES: dict[str, str] = {
 # 状态的标准中文含义。它是系统对状态码的解释，与业务话术无关；
 # 页面显示状态时用这一份，未知状态码明确标为未识别，不用兜底文案冒充正常。
 RULE_STATUS_LABELS: dict[str, str] = {
-    "COMPUTED": "已计算（不作合格/异常判定）",
+    "COMPUTED": "已完成产出（不作合格/异常判定）",
     "PASSED": "合格",
     "ABNORMAL": "不合格",
     "EVIDENCE_INSUFFICIENT": "无法判断（证据或能力不足）",
     "NOT_APPLICABLE": "不适用",
     "NOT_EXECUTED": "未执行",
-    "PENDING_REVIEW": "待人工复核",
+    "PENDING_REVIEW": "未确认",
     "REVIEWED": "已人工复核",
     "SKIPPED": "已跳过",
     "RUNNING": "执行中",
 }
 
 STATUS_CATEGORY_LABELS: dict[str, str] = {
-    STATUS_CATEGORY_COMPUTED: "仅计算完成",
+    STATUS_CATEGORY_COMPUTED: "已完成产出",
     STATUS_CATEGORY_DECIDED: "已判定",
     STATUS_CATEGORY_UNDECIDED: "尚未判定",
     STATUS_CATEGORY_NOT_APPLICABLE: "不适用",
@@ -115,7 +150,7 @@ STATUS_CATEGORY_LABELS: dict[str, str] = {
 STATUS_NOTES: dict[str, str] = {
     "COMPUTED": "已产生可供下游使用的中间值，本条没有合格或异常结论。",
     "EVIDENCE_INSUFFICIENT": "尚未形成可用结论，具体缺什么见该条结果的原因；它既不是合格，也不是不合格。",
-    "PENDING_REVIEW": "系统已给出待确认的判断，等待人工确认后才是最终结论。",
+    "PENDING_REVIEW": "业务尚未确认；人工审核暂不启用，保留原因并继续执行其他规则，不代表通过。",
     "NOT_EXECUTED": "该检查本次没有执行，不能据此认为检查通过。",
     "SKIPPED": "该规则本次已跳过，具体原因见执行结果；跳过不等于通过。",
     "RUNNING": "该检查正在执行，尚未形成结果。",

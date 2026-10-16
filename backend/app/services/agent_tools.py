@@ -1,19 +1,14 @@
 """工具 adapter：把共享领域服务接到 Agent 工具接口上。
 
-工具与节点必须共用同一份判定实现（`domain/quality_judgement.py`），但输入来源不同：
-节点从 ORM 与已发布 manifest 取数，工具只拿到 `ToolExecutionContext` 与模型给的业务参数。
-adapter 的职责就是把后者的形状转成前者的输入，再调同一个共享服务——它不含任何判定逻辑，
-一旦出现 `if check_item == ...` 就说明判定被复制了。
+adapter 把 `ToolExecutionContext` 中的真实任务数据与模型给出的工具参数交给实际工具实现。
+材料与文件质量工具的判定实现统一在 `domain/quality_judgement.py`，不按业务节点分发。
 
-模型能填的只有业务口径（要检查的材料角色、检查项目、标准值/单位）；任务 ID、事实快照、
-策略版本、会话全部由运行时经 `ToolExecutionContext` 注入，模型看不到也填不了
+模型能填的只有业务口径（要检查的材料角色、检查项目、标准值/单位）；任务 ID、任务配置、
+会话全部由运行时经 `ToolExecutionContext` 注入，模型看不到也填不了
 （schema 里没有这些键，`additionalProperties: false` 会拒绝）。
 
-需要读材料记录的工具先读冻结快照，再用它核对真实记录：快照里的材料位身份是权威版本，
-真实记录必须逐项与冻结身份一致（上传引用、内容哈希、材料状态任一项不同即
-`TOOL_SNAPSHOT_MISMATCH`，本次不执行），判定取用的取值也取自冻结身份。
-只存哈希、执行时仍读「当前数据」的写法会让同一次评估的两次工具调用落到不同的材料版本上，
-而指纹对得上只是巧合——所以快照存的是内容，不是只有指纹。
+需要读材料记录的工具先按任务配置确定材料范围，再读取当前任务上传内容；材料缺失、
+越权或产物未准备好时明确报错，不把缺失内容当成成功结果。
 """
 
 from __future__ import annotations
@@ -23,9 +18,10 @@ from typing import Annotated, Any
 
 from langchain_core.tools import InjectedToolArg, tool
 
-from ..domain import quality_judgement
+from ..domain import file_quality, quality_judgement
+from ..domain.rule_library import active
 from ..common.exceptions import BusinessError
-from ..entity import DocumentUpload, EvaluationSnapshot, TaskDocument
+from ..entity import DocumentUpload, TaskDocument
 from sqlalchemy import select
 
 
@@ -39,7 +35,7 @@ def query_rule_library_tool(
     """查询本次审核任务冻结的生效规则库。
 
     查询只读任务创建时固化的 manifest：不会读取场景草稿、当前数据库规则或模型自行提供的规则。
-    规则由审核图按任务范围与事实快照执行；该工具只负责在需要时返回规则原文和依赖配置。
+    规则由审核图按任务范围与任务配置执行；该工具只负责在需要时返回规则原文和依赖配置。
     """
     if context is None or context.database_session is None or context.task_id is None:
         raise BusinessError("TOOL_CONTEXT_MISSING", "规则库查询需要审核任务上下文", status_code=500)
@@ -72,7 +68,7 @@ def query_rule_library_tool(
     }
 
     def matches(item: dict[str, Any]) -> bool:
-        if item["rule_key"] not in enabled_keys or not item.get("enabled", True):
+        if item["rule_key"] not in enabled_keys or not active(item):
             return False
         calculation = item.get("kind") == "CALCULATION"
         if (kind == "RULE" and calculation) or (kind == "CALCULATION" and not calculation):
@@ -93,49 +89,9 @@ def query_rule_library_tool(
         "source": "TASK_FROZEN_MANIFEST",
         "scenario_version_no": schema.get("scenario_version_no"),
         "plan_scope_hash": schema.get("plan_scope_hash"),
-        "manifest_hash": manifest.get("manifest_hash"),
     }
 
 
-def _snapshot_record(context: Any) -> EvaluationSnapshot:
-    """本次调用依据的冻结快照。缺失即显式失败——不能退回读当前数据。"""
-    if context is None or context.database_session is None:
-        raise BusinessError(
-            "TOOL_CONTEXT_MISSING",
-            "工具调用需要任务上下文与数据库会话，本次调用未提供",
-            status_code=500,
-        )
-    if not context.fact_snapshot_ref:
-        raise BusinessError(
-            "TOOL_SNAPSHOT_MISSING",
-            "工具调用缺少冻结事实快照身份，本次调用未执行",
-            status_code=500,
-            details={"tool_context": "fact_snapshot_ref"},
-        )
-    record = context.database_session.scalar(
-        select(EvaluationSnapshot).where(
-            EvaluationSnapshot.snapshot_ref == context.fact_snapshot_ref,
-            EvaluationSnapshot.audit_task_id == context.task_id,
-        )
-    )
-    if record is None:
-        raise BusinessError(
-            "TOOL_SNAPSHOT_MISSING",
-            "工具调用依据的冻结事实快照不存在，本次调用未执行",
-            status_code=409,
-            details={"snapshot_ref": context.fact_snapshot_ref},
-        )
-    if record.fact_snapshot_hash != context.fact_snapshot_hash:
-        raise BusinessError(
-            "TOOL_SNAPSHOT_MISMATCH",
-            "工具调用声明的快照指纹与冻结记录不一致，本次调用未执行",
-            details={
-                "snapshot_ref": record.snapshot_ref,
-                "frozen": record.fact_snapshot_hash,
-                "declared": context.fact_snapshot_hash,
-            },
-        )
-    return record
 
 
 def _requested_uploads(context: Any, material_keys: list[str]):
@@ -144,7 +100,7 @@ def _requested_uploads(context: Any, material_keys: list[str]):
     if task is None:
         raise BusinessError("TOOL_TASK_MISSING", "工具关联的任务不存在")
     material_scope(context, material_keys=_scope_materials(context, material_keys))
-    frozen = {m["material_key"]: m for m in _frozen_materials(context)}
+    frozen = {m["material_key"]: m for m in _current_materials(context)}
     for key in material_keys:
         identity = frozen[key]
         upload = context.database_session.get(DocumentUpload, identity.get("upload_id")) if identity.get("upload_id") else None
@@ -155,47 +111,24 @@ def _requested_uploads(context: Any, material_keys: list[str]):
 
 @tool("TASK_DATA_READ")
 def read_task_data_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]], *, context: Annotated[Any, InjectedToolArg]) -> dict[str, Any]:
-    """读取冻结上传的完整原文或已生成的真实产物。"""
-    from pathlib import Path
-    import hashlib
-    from openpyxl import load_workbook
-    from .storage_service import resolve_storage_path
+    """读取前置处理产物：OCR 正文 Markdown 或原文件印章信息。"""
     from .audit.artifacts import _artifact_for_upload, _artifact_payload
     items = []
-    kind = parameters.get("artifact_type") or "ORIGINAL"
+    kind = parameters.get("artifact_type") or "OCR"
     for task, key, upload in _requested_uploads(context, parameters["material_keys"]):
-        if kind != "ORIGINAL":
-            artifact = _artifact_for_upload(context.database_session, upload, kind)
-            if artifact is None or artifact.status != "READY":
-                raise BusinessError("TOOL_ARTIFACT_NOT_READY", "请求的材料产物尚未生成", details={"material_key": key, "artifact_type": kind})
-            content = _artifact_payload(artifact).content
-            items.append({"material_key": key, "upload_id": upload.id, "artifact_id": artifact.id, "artifact_type": kind, "content": content})
-            continue
-        path = resolve_storage_path(upload.relative_path)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != upload.sha256:
-            raise BusinessError("TOOL_DOCUMENT_CONTENT_CHANGED", "实际文件内容与冻结上传不一致")
-        suffix = Path(upload.original_filename).suffix.lower()
-        if suffix in {".xlsx", ".xlsm"}:
-            workbook = load_workbook(path, data_only=False, read_only=True)
-            cached = load_workbook(path, data_only=True, read_only=True)
-            try:
-                content = [{"sheet": sheet.title, "cells": [{"cell": cell.coordinate, "value": str(cell.value),
-                            "cached_value": str(cached[sheet.title][cell.coordinate].value) if cell.data_type == "f" else None}
-                            for row in sheet for cell in row if cell.value is not None]} for sheet in workbook]
-            finally:
-                workbook.close()
-                cached.close()
-        elif suffix in {".txt", ".csv", ".json", ".md", ".html", ".xml"}:
-            content = path.read_text(encoding="utf-8-sig")
-        else:
-            raise BusinessError("TOOL_ORIGINAL_FORMAT_UNSUPPORTED", "当前原始文件读取工具无法读取该格式；可显式调用DOCUMENT_PROCESS生成OCR后读取", details={"format": suffix, "material_key": key})
-        items.append({"material_key": key, "upload_id": upload.id, "sha256": upload.sha256, "filename": upload.original_filename, "content": content})
+        artifact = _artifact_for_upload(context.database_session, upload, kind)
+        if artifact is None or artifact.status != "READY":
+            raise BusinessError("TOOL_ARTIFACT_NOT_READY", "请求的材料产物尚未生成", details={"material_key": key, "artifact_type": kind})
+        content = _artifact_payload(artifact).content
+        if kind == "OCR":
+            content = {**content, "markdown": "\n\n".join(page["text"] for page in content["pages"]), "content_type": "text/markdown"}
+        items.append({"material_key": key, "upload_id": upload.id, "artifact_id": artifact.id, "artifact_type": kind, "content": content})
     return {"status": "SUCCEEDED", "message": "已读取实际材料内容", "items": items}
 
 
 @tool("DOCUMENT_PROCESS")
 def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]], *, context: Annotated[Any, InjectedToolArg]) -> dict[str, Any]:
-    """按模型明确选择的服务处理材料，不执行固定处理阶段。"""
+    """指定服务的实际调用入口；业务模型不再选择此工具，前置流程直接调用服务。"""
     from .storage_service import resolve_storage_path
     from .audit.document_ports import document_service
     from .audit.artifacts import _ensure_external_artifact, _artifact_for_upload, _artifact_payload, _submit_ocr_job, _complete_ocr_job
@@ -218,122 +151,41 @@ def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, An
     return {"status": "SUCCEEDED", "message": "指定服务已返回实际产物", "items": items}
 
 
-def _frozen_materials(context: Any) -> list[dict[str, Any]]:
-    record = _snapshot_record(context)
-    payload = record.facts_json if isinstance(record.facts_json, dict) else {}
-    materials = payload.get("materials")
-    if not isinstance(materials, list):
-        raise BusinessError(
-            "TOOL_SNAPSHOT_INVALID",
-            "冻结事实快照里没有材料位身份，无法核对材料，本次调用未执行",
-            status_code=500,
-            details={"snapshot_ref": record.snapshot_ref},
-        )
-    return [item for item in materials if isinstance(item, dict) and item.get("material_key")]
+def _current_materials(context: Any) -> list[dict[str, Any]]:
+    from ..entity import AuditTask
+    from .audit.agent import _task_materials
+    if context is None or context.database_session is None or context.task_id is None:
+        raise BusinessError("TOOL_CONTEXT_MISSING", "工具调用需要任务与数据库会话")
+    task = context.database_session.get(AuditTask, context.task_id)
+    if task is None:
+        raise BusinessError("TOOL_TASK_MISSING", "工具关联的任务不存在")
+    return _task_materials(context.database_session, task)
 
 
 def _material_names_of(context: Any) -> dict[str, str]:
-    """材料位的中文名。取自冻结快照，不由工具编造、也不取当前记录。"""
+    """材料位的中文名。取自任务配置，不由工具编造。"""
     return {
         str(item["material_key"]): item.get("material_name") or item["material_key"]
-        for item in _frozen_materials(context)
+        for item in _current_materials(context)
     }
 
 
 def material_scope(context: Any, *, material_keys: list[str], include_peers: bool = False) -> dict[str, Any]:
-    """本次判定需要的材料位：冻结身份 + 已核对的真实记录。
-
-    核对逐项做，任一项不同即报 `TOOL_SNAPSHOT_MISMATCH`：
-    当前上传引用、内容哈希、材料状态。判定取值一律取自冻结身份。
-
-    `include_peers` 为真时同时核对全部有上传的材料位（去重比对的对照集），
-    因为对照集的内容哈希参与判定，用当前值会让结论无法复现。
-    """
+    """读取任务当前材料；不存在的材料明确报错。"""
     session = context.database_session
-    frozen = _frozen_materials(context)
-    by_key = {str(item["material_key"]): item for item in frozen}
-    wanted = [str(key) for key in material_keys]
+    identities = {m["material_key"]: m for m in _current_materials(context)}
+    wanted = list(dict.fromkeys(material_keys))
     if include_peers:
-        wanted = sorted({*wanted, *(key for key, item in by_key.items() if item.get("upload_id"))})
-    documents = {
-        item.material_key: item
-        for item in session.scalars(
-            select(TaskDocument).where(TaskDocument.audit_task_id == context.task_id)
-        ).all()
-    }
-    uploads: dict[str, DocumentUpload | None] = {}
-    for material_key in wanted:
-        identity = by_key.get(material_key)
-        if identity is None:
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"材料位“{material_key}”不在本次评估冻结的事实快照里，本次调用未执行",
-                details={"material_key": material_key, "snapshot_ref": context.fact_snapshot_ref},
-            )
-        document = documents.get(material_key)
-        if document is None:
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"材料位“{material_key}”在任务里已不存在，本次调用未执行",
-                details={"material_key": material_key},
-            )
-        upload_id = identity.get("upload_id")
-        upload = session.get(DocumentUpload, upload_id) if upload_id else None
-        if upload_id and upload is None:
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"冻结快照引用的上传记录（{upload_id}）已不存在，本次调用未执行",
-                details={"material_key": material_key, "upload_id": upload_id},
-            )
-        if (document.current_upload_id or None) != (upload_id or None):
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"材料位“{material_key}”的当前上传已变化，本次调用未执行；"
-                "评估期间的输入变化必须重新冻结快照后重跑",
-                details={
-                    "material_key": material_key,
-                    "frozen_upload_id": upload_id,
-                    "current_upload_id": document.current_upload_id,
-                },
-            )
-        if upload is not None and upload.sha256 != identity.get("upload_sha256"):
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"材料位“{material_key}”的上传内容哈希与冻结快照不一致，本次调用未执行",
-                details={
-                    "material_key": material_key,
-                    "upload_id": upload.id,
-                    "frozen_sha256": identity.get("upload_sha256"),
-                    "current_sha256": upload.sha256,
-                },
-            )
-        if upload is not None and upload.upload_no != identity.get("upload_revision"):
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"材料位“{material_key}”的上传修订号与冻结快照不一致，本次调用未执行",
-                details={
-                    "material_key": material_key,
-                    "frozen_revision": identity.get("upload_revision"),
-                    "current_revision": upload.upload_no,
-                },
-            )
-        if document.status != identity.get("document_status"):
-            raise BusinessError(
-                "TOOL_SNAPSHOT_MISMATCH",
-                f"材料位“{material_key}”的材料状态与冻结快照不一致，本次调用未执行",
-                details={
-                    "material_key": material_key,
-                    "frozen_status": identity.get("document_status"),
-                    "current_status": document.status,
-                },
-            )
-        uploads[material_key] = upload
-    return {
-        "identity": {key: by_key[key] for key in wanted},
-        "uploads": uploads,
-        "documents": {key: documents[key] for key in wanted},
-        "material_names": _material_names_of(context),
-    }
+        wanted = sorted({*wanted, *(k for k, m in identities.items() if m.get("upload_id"))})
+    documents = {d.material_key: d for d in session.scalars(
+        select(TaskDocument).where(TaskDocument.audit_task_id == context.task_id)).all()}
+    missing = [k for k in wanted if k not in documents]
+    if missing:
+        raise BusinessError("TOOL_MATERIAL_MISSING", "请求的材料不属于当前任务", details={"materials": missing})
+    uploads = {k: session.get(DocumentUpload, documents[k].current_upload_id)
+               if documents[k].current_upload_id else None for k in wanted}
+    return {"identity": {k: identities[k] for k in wanted}, "uploads": uploads,
+            "documents": {k: documents[k] for k in wanted}, "material_names": _material_names_of(context)}
 
 
 def _scope_materials(context: Any, requested: list[str]) -> list[str]:
@@ -363,10 +215,10 @@ def check_materials_tool(
 ) -> dict[str, Any]:
     """材料存在性工具：声明的材料位是否都已上传。
 
-    判定与结果结构调 `quality_judgement.material_exists_result`，与材料检查节点同一实现，
+    判定与结果结构调 `quality_judgement.material_exists_result`，由材料存在性工具使用，
     因此工具目录声明的 `applicability` / `standard` / `comparison` / `missing_material_keys` /
-    `missing_material_names` 在 Agent 路径上真实存在。已上传判定取冻结快照的上传引用：
-    快照里没有上传引用的材料位就是「未上传」。
+    `missing_material_names` 在 Agent 路径上真实存在。已上传判定取当前任务材料记录：
+    没有当前上传引用的材料位就是「未上传」。
 
     `applicability` / `requirement` / `check_level` 由调用方经 runtime 注入，它们是已发布
     配置事实——模型自己写一个适用条件等于它自己决定这条规则适不适用。
@@ -426,7 +278,7 @@ def check_file_quality_tool(
     """文件质量工具：对授权范围内的材料逐份判定一个检查项目。
 
     判定调 `quality_judgement.judge_quality_item` 与
-    `quality_judgement.summarize_per_material`——与文件处理节点同一实现。
+    `quality_judgement.summarize_per_material`，不复制判定逻辑。
     """
     check_item = parameters.get("check_item")
     if not isinstance(check_item, str) or not check_item:
@@ -443,7 +295,7 @@ def check_file_quality_tool(
             details={"parameter": "material_refs"},
         )
     requested = _scope_materials(context, [str(item) for item in material_refs])
-    # 去重比对要用全部有上传的材料位作为对照集，因此这里连同它们一起核对快照身份。
+    # 去重比对要用全部有上传的材料位作为对照集，因此这里连同它们一起读取。
     scope = material_scope(context, material_keys=requested, include_peers=True)
     uploads_by_key = scope["uploads"]
     material_names = scope["material_names"]
@@ -506,6 +358,7 @@ def check_file_quality_tool(
     return {
         **summary,
         "check_item": check_item,
+        "judgement_supported": file_quality.is_implemented(check_item),
         "per_material": per_material,
         "status_counts": {value: statuses.count(value) for value in sorted(set(statuses))},
     }

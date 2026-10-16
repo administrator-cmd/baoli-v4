@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from ...common.api import ApiResponse
 
@@ -13,4 +14,7 @@ class OcrArtifactStatusResponse(ApiResponse):
     deadline_at: datetime | None = None
     message: str
     submit_attempts: int | None = None
+    provider_state: str | None = None
+    extract_progress: dict[str, Any] | None = None
+    progress_updated_at: datetime | None = None
 

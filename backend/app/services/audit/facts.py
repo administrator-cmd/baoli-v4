@@ -7,16 +7,13 @@
 规则模型产出由 rule_execution 保存；本模块负责实际事实读取、人工纠错与版本失效。
 人工确认值不被模型产出覆盖。"""
 
-from .. import task_csv_service
-import json
-from ...domain import fact_snapshot, field_strategy
+from ...domain import fact_projection, field_strategy
 from ...domain.identity import public_no
-from ...domain.manifest import required_field_scope
+from ...domain.manifest import normalize_field_scope
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, DocumentUpload, Evidence, ManualReview, TaskDocument, TaskFact, TaskFieldValue
+from .. import task_value_service
 from .shared import _task_field_definitions
-from datetime import date
-from decimal import Decimal, InvalidOperation
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from typing import Any
@@ -76,7 +73,6 @@ def _current_field_fact_pairs(
             .order_by(TaskFieldValue.id)
         ).all()
     )
-    candidate_rows = task_csv_service.from_index(db, task, TaskFieldValue, candidate_rows)
     candidates: dict[tuple[str, str], TaskFieldValue] = {}
     for row in candidate_rows:
         key = (row.field_key, row.material_key)
@@ -99,7 +95,6 @@ def _current_field_fact_pairs(
             )
         ).all()
     )
-    task_fact_rows = task_csv_service.from_index(db, task, TaskFact, task_fact_rows)
     task_facts: dict[tuple[str, str, str, str, str], TaskFact] = {}
     for row in task_fact_rows:
         identity = (
@@ -132,11 +127,11 @@ def _current_field_fact_pairs(
         identity = (
             str(field.get("source_ref") or field_key),
             material_key,
-            required_field_scope(
-                field, "period_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
+            normalize_field_scope(
+                field, "period_scope", status_code=500
             ),
-            required_field_scope(
-                field, "statement_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
+            normalize_field_scope(
+                field, "statement_scope", status_code=500
             ),
             str(field.get("entity_scope") or "SELF"),
         )
@@ -157,75 +152,8 @@ def _current_field_fact_pairs(
                     "task_fact_exists": canonical is not None,
                 },
             )
-        if candidate.status != canonical.status:
-            raise BusinessError(
-                "TASK_FACT_FIELD_STATUS_MISMATCH",
-                "当前字段版本与统一事实的状态不一致，不能展示或生成报告",
-                status_code=500,
-                details={
-                    "field_key": field_key,
-                    "material_key": material_key,
-                    "field_status": candidate.status,
-                    "fact_status": canonical.status,
-                },
-            )
-        expected_contract = {
-            "value_type": field.get("value_type"),
-            "unit": field.get("unit"),
-            "currency": field.get("currency"),
-        }
-        actual_contract = {
-            "value_type": canonical.value_type,
-            "unit": canonical.unit,
-            "currency": canonical.currency,
-        }
-        if actual_contract != expected_contract:
-            raise BusinessError(
-                "TASK_FACT_FIELD_CONTRACT_MISMATCH",
-                "统一事实的类型、单位或币种与任务字段契约不一致",
-                status_code=500,
-                details={
-                    "field_key": field_key,
-                    "material_key": material_key,
-                    "expected": expected_contract,
-                    "actual": actual_contract,
-                },
-            )
-        if canonical.status in {"PRESENT", "REVIEWED"}:
-            canonical_value = fact_snapshot.task_fact_value(canonical, field_definition=field)
-            if canonical_value is None:
-                raise BusinessError(
-                    "TASK_FACT_VALUE_MISSING",
-                    "统一事实已标记为有效，但没有可展示或执行的值",
-                    status_code=500,
-                    details={"field_key": field_key, "material_key": material_key},
-                )
-            candidate_value = fact_snapshot.canonical_field_value(candidate.normalized_value_json, field)
-            if candidate_value != fact_snapshot.canonical_field_value(canonical_value, field):
-                raise BusinessError(
-                    "TASK_FACT_FIELD_VALUE_MISMATCH",
-                    "当前字段候选值与统一事实的有效值不一致，不能继续展示或生成报告",
-                    status_code=500,
-                    details={"field_key": field_key, "material_key": material_key},
-                )
         pairs[key] = (candidate, canonical)
 
-    unexpected_candidates = sorted(set(candidates) - set((key, str(item["material_key"])) for key, item in definitions.items()))
-    if unexpected_candidates:
-        raise BusinessError(
-            "TASK_FIELD_OUT_OF_SCOPE",
-            "当前字段版本不在任务冻结的字段范围内",
-            status_code=500,
-            details={"field_keys": [key for key, _ in unexpected_candidates]},
-        )
-    unexpected_facts = sorted(set(task_facts) - expected_identities)
-    if unexpected_facts:
-        raise BusinessError(
-            "TASK_FACT_OUT_OF_SCOPE",
-            "当前统一事实不在任务冻结的字段范围内",
-            status_code=500,
-            details={"fact_codes": [identity[0] for identity in unexpected_facts]},
-        )
     return pairs
 
 
@@ -289,14 +217,24 @@ def _write_human_field_fact(
         revision_no=_next_field_revision(facts, document_upload_id),
         is_current=True,
         status=status,
-        raw_value=raw_value,
-        normalized_value_json=normalized_value,
         evidence_id=None,
         extraction_execution_id=None,
         origin="HUMAN_CORRECTION",
     )
     db.add(fact)
     db.flush()
+    field = _task_field_definitions(task).get(field_key)
+    if field is None or field["material_key"] != material_key:
+        raise BusinessError(
+            "TASK_FIELD_DEFINITION_MISSING", "人工纠错的字段不在任务冻结的字段定义中",
+            status_code=500, details={"field_key": field_key, "material_key": material_key},
+        )
+    # 候选与有效事实都明确保存声明的单位、币种。
+    task_value_service.append_values(
+        db, task, [(task_value_service.RECORD_TASK_FIELD_VALUE, fact.id,
+                    {"raw_value": raw_value, "normalized_value_json": normalized_value,
+                     "unit": field.get("unit"), "currency": field.get("currency")})]
+    )
     if inherit_evidence_from_id is not None:
         inherited_evidence_id: int | None = None
         first_inherited_evidence_id: int | None = None
@@ -330,14 +268,6 @@ def _write_human_field_fact(
             if source.id == source_primary_evidence_id:
                 inherited_evidence_id = inherited.id
         fact.evidence_id = inherited_evidence_id or first_inherited_evidence_id
-    field = _task_field_definitions(task).get(field_key)
-    if field is None or field["material_key"] != material_key:
-        raise BusinessError(
-            "TASK_FIELD_DEFINITION_MISSING",
-            "人工纠错的字段不在任务冻结的字段定义中",
-            status_code=500,
-            details={"field_key": field_key, "material_key": material_key},
-        )
     _write_field_task_fact(
         db,
         task,
@@ -365,76 +295,24 @@ def _write_field_task_fact(
     期间与报表口径取自当前场景的字段配置；不涉及这些口径时配置显式声明「不适用」，
     本函数不代填任何具体口径。
 
-    有效状态必须同时写入与字段类型匹配的唯一取值列。类型不匹配时在这里明确
-    失败，不产生「状态有效、值为空」或把错误金额塞入文本列的统一事实。
+    有效值按声明的类型写入 CSV 业务列，无法转换时明确失败。
     """
-    # 取数期间与报表口径来自字段自己的声明：计算参数按这两项定位事实，
-    # 缺了就无法建立定位键。这里不代填默认值——默认成「本期 / 合并」会让一个
-    # 声明了上期的计算参数静默取到本期的数，而结果看起来完全正常。
-    period_scope = required_field_scope(
-        field, "period_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
+    # 按字段实际声明的期间与报表口径区分事实；未声明时表示不适用，
+    # 不推断本期、上期、合并或母公司。
+    period_scope = normalize_field_scope(
+        field, "period_scope", status_code=500
     )
-    statement_scope = required_field_scope(
-        field, "statement_scope", code="TASK_SCHEMA_FIELD_SCOPE_MISSING", status_code=500
+    statement_scope = normalize_field_scope(
+        field, "statement_scope", status_code=500
     )
     entity_scope = str(field.get("entity_scope") or "SELF")
     value_type = str(field.get("value_type") or "DECIMAL")
     # task_field_value 保存抽取候选，供人工复核；task_fact 是计算与 Agent 使用的
     # 统一事实。证据或标准化尚未通过的候选不能在统一事实中携带可执行值。
     executable_value = normalized_value if status in {"PRESENT", "REVIEWED"} else None
-    decimal_value = None
-    text_value = None
-    date_value = None
-    boolean_value = None
+    executable_fact_value = None
     if executable_value is not None:
-        strategy = field_strategy.strategy_of(field)
-        try:
-            if strategy == field_strategy.STRUCTURED:
-                schema = field.get("structure_schema")
-                if not isinstance(schema, dict):
-                    raise ValueError("结构化字段缺少结构 Schema")
-                structured = field_strategy.normalize_structured_value(executable_value, schema)
-                text_value = json.dumps(
-                    structured,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            elif value_type in {"DECIMAL", "AMOUNT"}:
-                if isinstance(executable_value, bool):
-                    raise ValueError("数值不能是布尔值")
-                decimal_value = Decimal(str(executable_value).strip())
-                if not decimal_value.is_finite():
-                    raise ValueError("数值必须是有限数值")
-            elif value_type == "DATE":
-                date_value = (
-                    executable_value
-                    if type(executable_value) is date
-                    else date.fromisoformat(str(executable_value).strip())
-                )
-            elif value_type == "BOOLEAN":
-                if not isinstance(executable_value, bool):
-                    raise ValueError("布尔字段的规范值必须是布尔值")
-                boolean_value = executable_value
-            elif value_type in {"STRING", "CLAUSE", "DECIMAL_CN"}:
-                if not isinstance(executable_value, str) or not executable_value.strip():
-                    raise ValueError("文本字段的规范值必须是非空文本")
-                text_value = executable_value.strip()
-            else:
-                raise ValueError(f"字段类型不受支持：{value_type}")
-        except (InvalidOperation, ValueError) as exc:
-            raise BusinessError(
-                "TASK_FACT_VALUE_INVALID",
-                "字段规范值无法按字段契约写入统一事实",
-                status_code=500,
-                details={
-                    "field_key": field.get("field_key"),
-                    "material_key": material_key,
-                    "value_type": value_type,
-                    "status": status,
-                    "reason": str(exc),
-                },
-            ) from exc
+        executable_fact_value = fact_projection.canonical_fact_value(executable_value, field)
     elif status in {"PRESENT", "REVIEWED"}:
         raise BusinessError(
             "TASK_FACT_VALUE_MISSING",
@@ -444,7 +322,6 @@ def _write_field_task_fact(
         )
 
     # 同一 (字段, 材料位, 期间, 口径) 已有当前事实时，把它置为非当前再插入新版本。
-    # 事实不可变：绝不原地改写（改写会被数据库触发器拒绝）。
     previous = db.scalars(
         select(TaskFact).where(
             TaskFact.audit_task_id == task.id,
@@ -464,29 +341,27 @@ def _write_field_task_fact(
             .values(is_current=False)
         )
         db.flush()
-    db.add(
-        TaskFact(
-            audit_task_id=task.id,
-            scenario_version_id=task.scenario_version_id,
-            # 事实编号用业务字段编号（FEX-xxx）：计算参数按它引用，
-            # 与字段身份（field_key）是两回事，转换在编译期完成。
-            fact_code=str(field.get("source_ref") or field["field_key"]),
-            fact_kind="EXTRACTED",
-            material_key=material_key,
-            entity_scope=entity_scope,
-            period_scope=period_scope,
-            statement_scope=statement_scope,
-            value_type=value_type,
-            decimal_value=decimal_value,
-            text_value=text_value,
-            date_value=date_value,
-            boolean_value=boolean_value,
-            unit=field.get("unit"),
-            currency=field.get("currency"),
-            source_execution_id=source_execution_id,
-            revision_no=revision_no,
-            is_current=True,
-            status=status,
-        )
+    task_fact = TaskFact(
+        audit_task_id=task.id,
+        scenario_version_id=task.scenario_version_id,
+        # 事实编号用业务字段编号（FEX-xxx）：计算参数按它引用，
+        # 与字段身份（field_key）是两回事，转换在编译期完成。
+        fact_code=str(field.get("source_ref") or field["field_key"]),
+        fact_kind="EXTRACTED",
+        material_key=material_key,
+        entity_scope=entity_scope,
+        period_scope=period_scope,
+        statement_scope=statement_scope,
+        value_type=value_type,
+        source_execution_id=source_execution_id,
+        revision_no=revision_no,
+        is_current=True,
+        status=status,
     )
+    db.add(task_fact)
     db.flush()
+    # 取值（含单位与币种）写进任务 CSV；表里只留身份、口径与当前位。
+    task_value_service.append_values(
+        db, task, [(task_value_service.RECORD_TASK_FACT, task_fact.id,
+                    {"value": executable_fact_value, "unit": field.get("unit"), "currency": field.get("currency")})]
+    )

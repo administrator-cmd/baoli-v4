@@ -4,8 +4,11 @@ import type { ApiResponse, JsonValue } from "./common";
 
 export interface Report extends ApiResponse {
   task_no: string;
+  report_no: string | null;
+  report_name: string | null;
+  reports: Array<{ report_no: string; report_name: string; current: boolean }>;
   status: "COMPLETE" | "INCOMPLETE" | "NOT_GENERATED";
-  content_type: "text/markdown";
+  content_type: "text/markdown" | "text/plain" | "text/html";
   content: string | null;
   reasons: string[];
   /** 报告是否已生成。 */
@@ -67,7 +70,6 @@ export interface ReportRow {
   scenario_name: string;
   scenario_version_no: number | null;
   plan_name: string | null;
-  is_legacy_config: boolean;
   generated_at: string;
   report_generated: boolean;
   scope_execution_complete: boolean;
@@ -76,7 +78,6 @@ export interface ReportRow {
   archived_at: string | null;
   current: boolean;
   stale: boolean;
-  origin: "NODE" | "LEGACY_BACKFILL";
   input_revision: number | null;
   task_input_revision: number;
   remark: string | null;
@@ -101,7 +102,6 @@ export interface ReportDetail extends ApiResponse {
   status: string;
   archived_at: string | null;
   remark: string | null;
-  origin: string;
   stale: boolean;
   input_revision: number | null;
   task_input_revision: number | null;
@@ -113,7 +113,6 @@ export interface RiskResultRow {
   scenario_name: string;
   scenario_version_no: number | null;
   plan_name: string | null;
-  is_legacy_config: boolean;
   rule_key: string;
   name: string;
   risk_level: string | null;

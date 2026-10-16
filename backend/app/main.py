@@ -9,7 +9,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .api import audits, imports, materials, operations, plans, reports, reviews, scenarios, system
 from .config import PROJECT_DIR, get_settings
-from .domain import node_profile
 from .integrations import http_services
 from .services.audit import document_ports
 from .database import SessionLocal, check_database_connection
@@ -20,9 +19,8 @@ from .common.exceptions import (
     request_validation_error_handler,
     unhandled_error_handler,
 )
-from .runtime.checkpoint import check_checkpoint_tables
 from .runtime.schema_check import verify_schema
-from .middleware.request_context import attach_request_id
+from .middleware.request_context import RequestContextMiddleware
 from .services.audit import recover_interrupted_executions
 from .services.background_service import recover_interrupted_operations
 
@@ -65,7 +63,6 @@ def _configure_logging(level_name: str) -> None:
 
 settings = get_settings()
 # 执行契约目录路径从配置注入，domain 不直接读取全局配置。
-node_profile.configure_node_profile(settings.resolved_node_profile_path)
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
 document_ports.register_document_service(http_services)
 _configure_logging(settings.log_level)
@@ -86,18 +83,6 @@ async def lifespan(_: FastAPI):
     except RuntimeError as exc:
         logger.error("数据库结构校验失败：%s", exc)
         raise
-    # 只检查 checkpoint 表是否存在，不执行任何 DDL。缺表时把库名与缺失表名一并打出来，
-    # 便于判断是没执行建表脚本，还是脚本执行到了另一个库。
-    try:
-        check_checkpoint_tables()
-    except BusinessError as exc:
-        logger.error(
-            "checkpoint 表结构检查失败 code=%s message=%s details=%r",
-            exc.code,
-            exc.message,
-            exc.details,
-        )
-        raise
     # 上次进程被杀时可能有节点停在 RUNNING、或后台操作停在活跃状态；
     # 这里显式标记中断原因，不自动重放外部调用。等待中的任务不受影响。
     with SessionLocal() as session:
@@ -108,23 +93,11 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="4.0.0-verification", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-app.middleware("http")(attach_request_id)
-
-
-app.add_exception_handler(BusinessError, business_error_handler)
-app.add_exception_handler(RequestValidationError, request_validation_error_handler)
-app.add_exception_handler(StarletteHTTPException, http_error_handler)
-app.add_exception_handler(Exception, unhandled_error_handler)
+api_app = FastAPI(title=settings.app_name, version="4.0.0-verification", lifespan=lifespan)
+api_app.add_exception_handler(BusinessError, business_error_handler)
+api_app.add_exception_handler(RequestValidationError, request_validation_error_handler)
+api_app.add_exception_handler(StarletteHTTPException, http_error_handler)
+api_app.add_exception_handler(Exception, unhandled_error_handler)
 
 for router in (
     system.router,
@@ -132,7 +105,6 @@ for router in (
     scenarios.router,
     plans.router,
     audits.router,
-    reviews.router,
     reviews.executions_router,
     materials.router,
     materials.evidence_router,
@@ -140,4 +112,15 @@ for router in (
     reports.risks_router,
     operations.router,
 ):
-    app.include_router(router, prefix=settings.api_prefix)
+    api_app.include_router(router, prefix=settings.api_prefix)
+
+# 请求上下文和 CORS 包在 FastAPI 的 ServerErrorMiddleware 外层，覆盖未处理异常的 500。
+# 异常仍由框架向服务端抛出，响应开始后不尝试替换已发送内容。
+app = RequestContextMiddleware(CORSMiddleware(
+    api_app,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+))

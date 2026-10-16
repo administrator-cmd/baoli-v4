@@ -12,7 +12,7 @@ import logging
 from ...config import get_settings
 from ...domain.identity import public_no
 from ...common.exceptions import BusinessError, exception_summary
-from ...graphs.audit_graph import CHECKPOINT_STORAGE_UNAVAILABLE, resume_audit_confirmation, resume_audit_manual_review
+from ...graphs.audit_graph import STORAGE_UNAVAILABLE, run_audit_node
 from . import flow as audit_flow
 from ...entity import (
     AuditTask,
@@ -21,23 +21,23 @@ from ...entity import (
     NodeExecution,
     StoredArtifact,
     TaskDocument,
-    WorkflowCheckpoint,
 )
-from ...schema.dto import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest, RecoverFailedNodeRequest
+from ...schema.dto import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest
 from ..task_lookup import task_or_404
-from .artifacts import _artifact_for_upload, _ocr_job_metadata, _submit_authorized_ocr_retry
+from .. import task_value_service
+from .artifacts import (
+    _artifact_for_upload, _artifact_payload, _complete_ocr_job, _ocr_job_metadata,
+    _submit_authorized_ocr_retry, _submit_ocr_job,
+)
 from .evidence import _evidence_snapshot, _evidence_snapshots
 from .facts import _current_field_fact_pairs, _write_human_field_fact
-from .flow import _fail_running_execution, _raise_graph_error
-from .graph_runtime import _ensure_audit_interrupt, _mark_graph_runtime_failed
-from .interrupt import start_audit_interrupt
-from .recovery import failed_node_recovery
+from .flow import _fail_running_execution, _mark_graph_runtime_failed, _raise_graph_error
 from ..background_service import assert_no_active_operation
 from ..operation_log_service import find_by_idempotency, record_operation, require_idempotent_replay
 from ..operation_types import OBJECT_AUDIT_TASK
-from .reviews import _current_review_batch, _decision_command_no, _invalidate_retry_results, _invalidate_validation_results, _next_node_for_recalculation, _review_hash, _validate_review_payloads
+from .reviews import _decision_command_no, _invalidate_retry_results, _invalidate_validation_results, _next_node_for_recalculation
 from .shared import _normalize_field_value, _task_field_definitions, _task_manifest
-from .state import _save_flow_checkpoint, _scenario_nodes, _set_task_checkpoint
+from .state import _scenario_nodes, _set_task_checkpoint
 from datetime import UTC, datetime, timedelta
 from decimal import InvalidOperation
 from sqlalchemy import select, update
@@ -55,7 +55,10 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
     自动重放会制造重复作业，因此既不自动重发，也不把中断伪装成恢复成功。
     仅适用于单进程部署（当前设计即单 FastAPI 进程）。
     """
-    interrupted = db.scalars(select(NodeExecution).where(NodeExecution.status == "RUNNING")).all()
+    interrupted = db.scalars(
+        select(NodeExecution).join(AuditTask, AuditTask.id == NodeExecution.audit_task_id)
+        .where(NodeExecution.status == "RUNNING", AuditTask.status != "WAITING_REVIEW")
+    ).all()
     for execution in interrupted:
         execution.status = "FAILED"
         execution.finished_at = datetime.now(UTC)
@@ -88,11 +91,14 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
     }
 
 def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest) -> dict[str, Any]:
-    """节点执行命令入口：先做并发与状态校验（任务已结束 / 正在执行 / 节点不一致都明确拒绝），再恢复图执行。"""
+    """节点执行命令入口：先做并发与状态校验，再一次性跑完当前节点的全部规则。
+
+    执行不再有等待点，也没有「恢复」这一段：一次后台操作就是一次完整执行。
+    """
     task = task_or_404(db, task_no, lock=True)
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
-    # 必须在进入流程图之前就拦住并发，否则第二个请求会直接 resume 正在执行的图。
+    # 必须在进入图之前就拦住并发，否则第二个请求会与正在执行的图互相覆盖。
     if task.status == "RUNNING":
         raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能并发执行或重跑", status_code=409)
     if request.node_code != task.current_node:
@@ -106,60 +112,29 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
     if running_execution:
         raise BusinessError("AUDIT_NODE_RUNNING", "当前任务已有执行中的节点，不能并发执行或重跑", status_code=409)
     if task.status == "BLOCKED":
-        # 失败或阻断的图已离开确认 interrupt。重新执行当前节点必须建立新的图等待点；
-        # 旧执行记录由 _begin_node_execution 在真正开始时失效，保留原失败供审计。
-        latest_execution = db.scalar(
-            select(NodeExecution)
-            .where(
-                NodeExecution.audit_task_id == task.id,
-                NodeExecution.node_code == task.current_node,
-                NodeExecution.status.in_(["FAILED", "BLOCKED"]),
-            )
-            .order_by(NodeExecution.id.desc())
-        )
-        if latest_execution is None:
-            raise BusinessError(
-                "AUDIT_EXECUTION_NOT_RECOVERABLE",
-                "当前节点没有可重新执行的失败记录",
-                status_code=409,
-            )
+        # 失败或阻断的任务需要重跑当前节点：旧执行记录由 _begin_node_execution 在真正
+        # 开始时失效，原失败保留供审计。
         _, nodes, current_index = _scenario_nodes(db, task)
-        db.execute(
-            update(WorkflowCheckpoint)
-            .where(WorkflowCheckpoint.audit_task_id == task.id, WorkflowCheckpoint.status == "WAITING")
-            .values(status="INVALIDATED")
-        )
-        task.thread_id = public_no("thread")
         task.checkpoint_json = {
-            "node_index": current_index,
-            "current_node": nodes[current_index]["node_code"],
+            "node_index": current_index, "current_node": nodes[current_index]["node_code"],
             "phase": "AWAITING_CONFIRMATION",
         }
         db.flush()
-        start_audit_interrupt(db, task)
-    graph_namespace = _ensure_audit_interrupt(db, task, "AWAITING_CONFIRMATION")
     try:
-        state = resume_audit_confirmation(task.thread_id, graph_namespace, request.node_code, db, audit_flow)
+        state = run_audit_node(task.task_no, db, audit_flow)
     except BusinessError as exc:
         if exc.code == "AUDIT_GRAPH_EXECUTION_FAILED":
-            _mark_graph_runtime_failed(
-                db, task_no, failure_code=exc.code,
-                failure_message=str(exc.details.get("reason") or exc.message),
-            )
-        elif exc.code in {CHECKPOINT_STORAGE_UNAVAILABLE, "CHECKPOINT_CONNECT_FAILED"}:
-            _fail_running_execution(
-                db, task_no, graph_namespace, code=exc.code,
-                message=str(exc.details.get("reason") or exc.message),
-            )
+            _mark_graph_runtime_failed(db, task_no, failure_code=exc.code,
+                                       failure_message=str(exc.details.get("reason") or exc.message))
+        elif exc.code == STORAGE_UNAVAILABLE:
+            _fail_running_execution(db, task_no, code=exc.code,
+                                    message=str(exc.details.get("reason") or exc.message))
         raise
     except Exception as exc:
-        logger.exception("审核流程恢复发生未处理异常", extra={"task_no": task_no, "node_code": request.node_code})
+        logger.exception("审核流程执行发生未处理异常", extra={"task_no": task_no, "node_code": request.node_code})
         _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError(
-            "AUDIT_GRAPH_RUNTIME_FAILED",
-            f"审核流程恢复失败，任务已标记为失败（{exception_summary(exc)}）",
-            status_code=500,
-        ) from exc
+        raise BusinessError("AUDIT_GRAPH_RUNTIME_FAILED",
+                            f"审核流程执行失败，任务已标记为失败（{exception_summary(exc)}）", status_code=500) from exc
     try:
         _raise_graph_error(state)
     except BusinessError as exc:
@@ -169,135 +144,15 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
     except Exception as exc:
         logger.exception("审核流程返回状态无效", extra={"task_no": task_no, "node_code": request.node_code})
         _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError(
-            "AUDIT_GRAPH_RUNTIME_FAILED",
-            f"审核流程返回状态无效，任务已标记为失败（{exception_summary(exc)}）",
-            status_code=500,
-        ) from exc
+        raise BusinessError("AUDIT_GRAPH_RUNTIME_FAILED",
+                            f"审核流程返回状态无效，任务已标记为失败（{exception_summary(exc)}）", status_code=500) from exc
     result = state.get("last_execution")
     if not isinstance(result, dict):
         _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError("AUDIT_GRAPH_RESULT_MISSING", "审核流程未返回当前节点执行结果", status_code=500)
+        raise BusinessError("AUDIT_GRAPH_RESULT_MISSING", "审核流程未返回当前节点执行结果", status_code=500,
+                            details={"phase": state.get("phase"), "execution_id": state.get("execution_id")})
     return result
 
-
-def recover_failed_checkpoint_node(
-    db: Session,
-    task_no: str,
-    request: RecoverFailedNodeRequest,
-) -> AuditTask:
-    """恢复检查点丢失或图等待点初始化失败的当前节点。
-
-    这不是通用的 FAILED 重试，也不把数据库里的旧检查点改回 WAITING：旧检查点
-    必须明确标记初始化失败，或最近一次节点命令确为检查点丢失；当前节点不能
-    留有有效的执行结果。
-    旧执行、旧检查点和材料全部保留，
-    只让当前节点及其后继结果失效，然后用新的 thread/namespace 产生真实 interrupt。
-    """
-    task = task_or_404(db, task_no, lock=True)
-    recovery = failed_node_recovery(db, task)
-    if request.input_revision != task.input_revision:
-        raise BusinessError(
-            "AUDIT_INPUT_REVISION_STALE",
-            "任务输入已变化，请刷新任务后再恢复",
-            status_code=409,
-        )
-    if request.node_code != task.current_node:
-        raise BusinessError("AUDIT_NODE_MISMATCH", "恢复节点与任务当前节点不一致", status_code=409)
-
-    # 只失效当前节点及其后继，不动已经完成的上游节点；历史记录仍可审计。
-    _invalidate_retry_results(db, task, recovery.nodes, recovery.current_index)
-    task.status = "READY"
-    task.pending_review_hash = None
-    task.checkpoint_json = {
-        "node_index": recovery.current_index,
-        "current_node": task.current_node,
-        "phase": "AWAITING_CONFIRMATION",
-    }
-    # 图恢复身份只由 thread_id 决定。新线程与新业务 namespace 使旧的丢失等待点
-    # 永远不会被误当成新的等待点；旧 WorkflowCheckpoint 保持 FAILED 不被改写。
-    old_thread_id = task.thread_id
-    task.thread_id = public_no("thread")
-    db.flush()
-    start_audit_interrupt(db, task)
-
-    record_operation(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        object_no=task.task_no,
-        object_name=task.task_name,
-        operation_type="NODE_RECOVER",
-        detail={
-            "node_code": task.current_node,
-            "failed_execution_id": recovery.latest_execution.id if recovery.latest_execution is not None else None,
-            "old_thread_id": old_thread_id,
-            "new_thread_id": task.thread_id,
-            "old_checkpoint_id": recovery.old_checkpoint.id,
-            "source_operation_no": recovery.source_operation_no,
-            "init_failure_code": recovery.init_failure_code,
-        },
-        result="SUCCEEDED",
-    )
-    db.commit()
-    db.refresh(task)
-    return task
-
-def submit_manual_reviews(db: Session, task_no: str, request: ManualReviewRequest) -> dict[str, Any]:
-    """人工复核提交命令入口：校验等待状态与待复核集合身份后交回图执行；幂等复用由 operation_gateway 先行处理。"""
-    task = task_or_404(db, task_no, lock=True)
-    if task.status != "WAITING_REVIEW":
-        raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
-    reviews = _current_review_batch(db, task)
-    current_hash = _review_hash(reviews)
-    if current_hash != task.pending_review_hash:
-        raise BusinessError("MANUAL_REVIEW_SET_CHANGED", "待复核集合已变化，请刷新后重新提交", status_code=409)
-    requested = {item.review_no: item for item in request.reviews}
-    if len(requested) != len(request.reviews) or set(requested) != {item.review_no for item in reviews}:
-        raise BusinessError("MANUAL_REVIEW_INCOMPLETE", "必须处理当前全部待复核项")
-    _validate_review_payloads(db, task, reviews, requested)
-    graph_namespace = _ensure_audit_interrupt(db, task, "WAITING_REVIEW")
-    decisions = [item.model_dump(mode="json") for item in request.reviews]
-    try:
-        state = resume_audit_manual_review(task.thread_id, graph_namespace, decisions, db, audit_flow)
-    except BusinessError as exc:
-        if exc.code == "AUDIT_GRAPH_EXECUTION_FAILED":
-            _mark_graph_runtime_failed(
-                db, task_no, failure_code=exc.code,
-                failure_message=str(exc.details.get("reason") or exc.message),
-            )
-        elif exc.code in {CHECKPOINT_STORAGE_UNAVAILABLE, "CHECKPOINT_CONNECT_FAILED"}:
-            _fail_running_execution(
-                db, task_no, graph_namespace, code=exc.code,
-                message=str(exc.details.get("reason") or exc.message),
-            )
-        raise
-    except Exception as exc:
-        logger.exception("人工复核流程恢复发生未处理异常", extra={"task_no": task_no})
-        _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError(
-            "AUDIT_GRAPH_RUNTIME_FAILED",
-            f"人工复核流程恢复失败，任务已标记为失败（{exception_summary(exc)}）",
-            status_code=500,
-        ) from exc
-    try:
-        _raise_graph_error(state)
-    except BusinessError as exc:
-        if exc.code == "AUDIT_GRAPH_RESULT_INVALID":
-            _mark_graph_runtime_failed(db, task_no)
-        raise
-    except Exception as exc:
-        logger.exception("人工复核流程返回状态无效", extra={"task_no": task_no})
-        _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError(
-            "AUDIT_GRAPH_RUNTIME_FAILED",
-            f"人工复核流程返回状态无效，任务已标记为失败（{exception_summary(exc)}）",
-            status_code=500,
-        ) from exc
-    result = state.get("manual_review_result")
-    if not isinstance(result, dict):
-        _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError("MANUAL_REVIEW_RESULT_MISSING", "人工复核流程未返回处理结果", status_code=500)
-    return result
 
 def correct_field_value(db: Session, task_no: str, request: FieldCorrectionRequest) -> dict[str, Any]:
     """主动字段纠错入口：对 PRESENT 错值与 NOT_PRESENT 漏值统一处理。
@@ -308,13 +163,6 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     """
     task = task_or_404(db, task_no, lock=True)
     assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
-    if task.deleted_at is not None:
-        raise BusinessError(
-            "AUDIT_TASK_DELETED",
-            "任务已被删除，请先恢复后再发起字段纠错",
-            status_code=409,
-            details={"task_no": task_no},
-        )
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能发起字段纠错", status_code=409)
     if task.status == "RUNNING":
@@ -357,12 +205,14 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
             details={"field_key": request.field_key},
         )
     fact, _ = current_pair
+    # 取值在任务 CSV；表里只留版本与当前位。
+    fact_value = task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FIELD_VALUE, fact.id)
     normalized_value: Any = None
     if request.decision == "MODIFY_FIELD":
         if request.field_value is None or not request.field_value.strip():
             raise BusinessError("FIELD_CORRECTION_VALUE_REQUIRED", "修改字段必须填写纠错后的字段值")
         try:
-            # 与人工复核完全同一套类型校验（含金额的单位与币种口径）；不合法就明确报错，不落库。
+            # 只转换用户填写的接口类型，不从金额文本推断单位或币种。
             normalized_value = _normalize_field_value(
                 field["value_type"],
                 request.field_value,
@@ -389,8 +239,8 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         new_status, new_raw = "NOT_PRESENT", None
     system_judgment = {
         "status": fact.status,
-        "raw_value": fact.raw_value,
-        "normalized_value": fact.normalized_value_json,
+        "raw_value": fact_value.get("raw_value"),
+        "normalized_value": fact_value.get("normalized_value_json"),
         "evidence": _evidence_snapshot(db, fact.evidence_id),
         "evidences": _evidence_snapshots(db, fact.id),
     }
@@ -414,7 +264,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         decision=request.decision,
         business_note=request.business_note,
         proposed_value=new_raw,
-        before_value=fact.raw_value,
+        before_value=fact_value.get("raw_value"),
         after_value=new_raw,
         basis_type=request.basis_type,
         decision_command_no=_decision_command_no(db, task),
@@ -431,10 +281,9 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     if next_node is None:
         # 没有规则、计算或报告消费该字段，且 DAG 已全部完成：字段事实仍应保存，
         # 不能把“无需重算”当成纠错失败。
-        task.pending_review_hash = None
         task.status = "COMPLETED"
         _set_task_checkpoint(task, node_index=current_index, phase="COMPLETED")
-        _save_flow_checkpoint(db, task)
+        db.flush()
         db.commit()
         return {
             "task_no": task.task_no,
@@ -443,7 +292,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
             "review_no": review.review_no,
             "fact_revision_no": new_fact.revision_no,
             "previous_revision_no": previous_revision_no,
-            "before_value": fact.raw_value,
+            "before_value": fact_value.get("raw_value"),
             "after_value": new_raw,
             "normalized_value": normalized_value,
             "status": new_status,
@@ -453,12 +302,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
             "next_node_code": None,
         }
     rewind_index = next(index for index, item in enumerate(nodes) if item["node_code"] == next_node["node_code"])
-    db.execute(
-        update(WorkflowCheckpoint)
-        .where(WorkflowCheckpoint.audit_task_id == task.id, WorkflowCheckpoint.status == "WAITING")
-        .values(status="INVALIDATED")
-    )
-    task.pending_review_hash = None
+
     task.status = "READY"
     task.current_node = next_node["node_code"]
     task.checkpoint_json = {
@@ -466,12 +310,8 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         "current_node": task.current_node,
         "phase": "AWAITING_CONFIRMATION",
     }
-    # 图恢复身份只由 thread_id 决定：退回节点必须换一个新的图实例。沿用旧 thread 会复用
-    # 已经废弃的等待点（例如停在旧的人工复核等待点），新的等待点无法建立、任务会被误判为失败。
-    task.thread_id = public_no("thread")
     db.flush()
-    # 业务提交与图等待点分开提交：先落业务事实与下游重算，再单独建立新的图等待点。
-    start_audit_interrupt(db, task)
+    db.commit()
     return {
         "task_no": task.task_no,
         "field_key": request.field_key,
@@ -479,7 +319,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         "review_no": review.review_no,
         "fact_revision_no": new_fact.revision_no,
         "previous_revision_no": previous_revision_no,
-        "before_value": fact.raw_value,
+        "before_value": fact_value.get("raw_value"),
         "after_value": new_raw,
         "normalized_value": normalized_value,
         "status": new_status,
@@ -497,8 +337,8 @@ def reconcile_external_artifact(
     request: ExternalArtifactReconcileRequest,
 ) -> dict[str, Any]:
     """人工确认同步外部调用状态未知，解除占位以允许重新执行当前节点。"""
-    if artifact_type not in {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE"}:
-        raise BusinessError("ARTIFACT_TYPE_INVALID", "仅支持对账 8018 或 8010 文件处理产物", status_code=400)
+    if artifact_type not in {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "SEAL"}:
+        raise BusinessError("ARTIFACT_TYPE_INVALID", "仅支持对账材料校验、去章或印章识别产物", status_code=400)
     task = task_or_404(db, task_no, lock=True)
     operation_request = {
         "task_no": task_no,
@@ -559,11 +399,91 @@ def reconcile_external_artifact(
     return result
 
 
+def _document_ocr_retry_target(
+    db: Session, task: AuditTask, document_no: str, artifact_no: str | None,
+) -> tuple[TaskDocument, DocumentUpload, StoredArtifact, StoredArtifact | None]:
+    """续查只定位当前材料；未知提交仍由现有人工对账入口处理。"""
+    if task.status in {"RUNNING", "COMPLETED", "FAILED"}:
+        raise BusinessError("TASK_DOCUMENT_LOCKED", "任务正在执行或已结束，不能重试材料识别", status_code=409)
+    document = db.scalar(select(TaskDocument).where(
+        TaskDocument.audit_task_id == task.id, TaskDocument.document_no == document_no,
+    ))
+    if document is None:
+        raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
+    upload = db.get(DocumentUpload, document.current_upload_id) if document.current_upload_id else None
+    if upload is None:
+        raise BusinessError("OCR_UPLOAD_MISSING", "该材料位没有当前上传文件", status_code=409)
+    artifact = _artifact_for_upload(db, upload, "OCR")
+    if (artifact.artifact_no if artifact else None) != artifact_no:
+        raise BusinessError("OCR_ARTIFACT_STALE", "OCR 作业记录已变化，请刷新后重试", status_code=409)
+    if artifact is not None and artifact.status not in {"PENDING", "FAILED"}:
+        raise BusinessError(
+            "OCR_SUBMISSION_STATE_UNKNOWN", "OCR 提交结果未知，请在处理状态中核对原作业后再操作", status_code=409,
+        )
+    parsed = _artifact_for_upload(db, upload, "DOCUMENT_PARSE")
+    if parsed is None or parsed.status != "READY":
+        raise BusinessError("PROCESSED_ARTIFACT_MISSING", "该材料尚无已完成的去章产物，请先执行材料前置处理", status_code=409)
+    return document, upload, parsed, artifact
+
+
+def retry_document_ocr(
+    db: Session, task: AuditTask, document_no: str, artifact_no: str | None, *, operation_no: str,
+) -> dict[str, Any]:
+    """只处理一份材料：续查原作业，或对明确失败的作业提交一次新识别。"""
+    document, upload, parsed, artifact = _document_ocr_retry_target(db, task, document_no, artifact_no)
+    if artifact is None:
+        artifact = _submit_ocr_job(db, task, upload, parsed)
+    elif artifact.status == "FAILED":
+        metadata = dict(artifact.metadata_json or {})
+        attempts = list(metadata.pop("submit_attempts", []) or [])
+        attempt = {
+            "at": datetime.now(UTC).isoformat(), "reason": "用户重试当前材料的 OCR 识别",
+            "idempotency_key": operation_no, "state": "SUBMITTING",
+            "previous_status": artifact.status, "previous_relative_path": artifact.relative_path,
+            "previous_metadata": metadata,
+        }
+        artifact.status = "SUBMITTING"
+        artifact.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting"
+        artifact.metadata_json = {**metadata, "submit_attempts": [*attempts, attempt]}
+        db.commit()  # 新提交意图和旧作业记录先保存，重复点击不会再提交。
+        try:
+            artifact = _submit_authorized_ocr_retry(
+                db, task, upload, parsed, artifact, idempotency_key=operation_no,
+            )
+        except Exception:
+            db.commit()  # 保留真实的提交失败或结果未知状态，后台异常继续上抛。
+            raise
+    elif artifact.status == "PENDING":
+        job_id, old_deadline = _ocr_job_metadata(artifact)
+        resumed_at = datetime.now(UTC)
+        artifact.metadata_json = {
+            **artifact.metadata_json,
+            "job_id": job_id,
+            "deadline_at": (resumed_at + timedelta(seconds=get_settings().ocr_max_wait_seconds)).isoformat(),
+            "previous_deadline_at": old_deadline.isoformat(),
+            "resumed_at": resumed_at.isoformat(), "resume_operation_no": operation_no,
+        }
+        db.commit()  # 只延长这次用户主动续查的等待时间，不创建远端作业。
+    artifact = _complete_ocr_job(db, task, upload, artifact)
+    _artifact_payload(artifact)
+    stages = [_artifact_for_upload(db, upload, stage) for stage in ("MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "SEAL", "OCR")]
+    if all(item is not None and item.status == "READY" for item in stages):
+        for item in stages:
+            _artifact_payload(item)
+        document.status = "PREPARED"
+    db.commit()
+    return {
+        "document_no": document.document_no, "artifact_no": artifact.artifact_no,
+        "status": artifact.status, "document_status": document.status,
+        "message": "当前材料的正文识别结果已保存，其他材料的处理结果已保留",
+    }
+
+
 def reconcile_ocr(db: Session, task_no: str, document_no: str, request: OcrReconcileRequest) -> dict[str, Any]:
-    """OCR 提交结果未知时的人工对账出口。
+    """OCR 提交结果未知、等待超时或供应商明确失败后的人工处理出口。
 
     系统没有真实的供应商幂等/查询能力时既不自动重发也不标成功：
-    ADOPT_JOB 按人工确认的作业号接管并续查；RETRY_SUBMIT 由人工明确放弃未知状态并重新提交。
+    ADOPT_JOB 按人工确认的作业号接管并续查；RETRY_SUBMIT 由人工明确重提未知、超时或失败的作业。
     本地等待超时只让本次操作失败，不改变产物状态机。
     """
     task = task_or_404(db, task_no, lock=True)
@@ -722,7 +642,7 @@ def reconcile_ocr(db: Session, task_no: str, document_no: str, request: OcrRecon
         )
         db.commit()
         return result
-    if artifact.status not in {"SUBMITTING", "PROCESSING"} and not expired_pending:
+    if artifact.status not in {"SUBMITTING", "PROCESSING", "FAILED"} and not expired_pending:
         raise BusinessError(
             "OCR_RECONCILE_STATUS_INVALID",
             "当前 OCR 作业状态明确，不能重新提交（会重复产生外部作业）",

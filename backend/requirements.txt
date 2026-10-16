@@ -14,18 +14,7 @@ requests==2.34.2
 langgraph==1.2.12
 # 标准 @tool、工具对象调用与模型工具定义转换；版本取自本机 dd 环境元数据。
 langchain-core==1.6.5
-# 图直接使用 langgraph.checkpoint 的 saver 接口，显式固定该传递依赖以保证安装可复现。
-# 1.x 的 langgraph 依赖 checkpoint 4.x，两个版本必须同步升级。
-langgraph-checkpoint==4.2.0
-# 持久化 checkpoint：社区 MySQL saver，把 checkpoint 保存在同一个 baoli_v4 库。
-# 本包自身声明 langgraph-checkpoint>=2.1.2；与上面的 4.2.0 是否兼容**尚未实跑验证**，
-# 建表 SQL 见 backend/database/schema.sql 第 8 节。
-langgraph-checkpoint-mysql[pymysql]==3.0.0
 
-# --- 审核任务检索取证（本地 Embedding）-----------------------------------------
-# 只使用本机已存在的本地模型（BAOLI_EMBEDDING_MODEL_PATH），不自动下载权重、不调用云 Embedding。
-# 这两个包声明的是兼容区间而不是固定补丁号：sentence-transformers 2.x/3.x 与 torch 2.x 都可运行，
-# 部署时请按部署机的 CUDA/CPU 环境选择具体版本并记录到部署说明。
-# 当前 conda `dd` 环境装的是 sentence-transformers 3.4.1 与 torch 2.14.0（未在本文件钉死）。
-sentence-transformers>=2.2,<4
-torch>=2.0
+
+# 标准 JSON Schema 参数验证，替换自维护的子集校验器。
+jsonschema==4.25.1

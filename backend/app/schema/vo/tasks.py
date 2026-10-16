@@ -16,7 +16,6 @@ class TaskSchemaPreviewResponse(ApiResponse):
     field_count: int = 0
 
 class AuditTaskResponse(ApiResponse):
-    intermediate_csv_available: bool = False
     task_no: str
     task_name: str
     # 任务备注是可编辑基本资料；执行快照不随重命名或备注修改变化。
@@ -24,32 +23,18 @@ class AuditTaskResponse(ApiResponse):
     # 基本资料的时间：创建=任务建立时刻，更新=名称/备注/流程推进等任何写入。
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    # 方案绑定：为 None 表示旧任务没有方案关联（页面显示“历史任务配置”），
-    # 不伪造关联、不改写历史结果。
+    # 任务创建时冻结的方案身份。
     plan: dict[str, Any] | None = None
-    is_legacy_config: bool = False
     scenario_code: str
     scenario_name: str
     version_no: int
     status: str
-    deleted: bool = False
     current_node: dict[str, Any]
     nodes: list[dict[str, Any]]
     documents: list[dict[str, Any]]
     fields: list[dict[str, Any]]
     field_correction_candidates: list[dict[str, Any]] = Field(default_factory=list)
     rules: list[dict[str, Any]]
-    # 当前复核批次：唯一允许提交的集合。复核分批判决（字段事实先于规则结论），
-    # 页面只能提交这一批；不属于本批的待办留在服务端，提交它们会被明确拒绝。
-    pending_reviews: list[dict[str, Any]]
-    # 全部待办（含不属于本批的批次）：仅用于展示「还有多少项在排队」。
-    all_pending_reviews: list[dict[str, Any]] = Field(default_factory=list)
-    # 本批的身份：`review_nos` 是本批全部待办编号，`hash` 与服务端提交校验、
-    # 检查点校验用的是同一个哈希；`stale=True` 表示待办集合在等待期间被改动过，
-    # 页面必须刷新后再提交。`all_pending_count` 是排队总数。
-    pending_review_batch: dict[str, Any] = Field(default_factory=dict)
-    pending_review_hash: str | None = None
-    pending_review_count: int = 0
     # 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。
     # 提交执行/复核命令时带上它，过期修订的命令会被明确拒绝。
     input_revision: int = 0
@@ -57,7 +42,6 @@ class AuditTaskResponse(ApiResponse):
     scope: dict[str, Any] = Field(default_factory=dict)
     # 该任务上最近一次后台操作的受理状态；有活跃操作时页面据此继续查询。
     latest_operation: dict[str, Any] | None = None
-    can_recover_failed_node: bool = False
 
 class ReplacementImpact(BaseModel):
     """替换上传文件的影响范围：历史事实仍可追溯，但不再进入当前报告。"""
@@ -76,6 +60,8 @@ class DocumentUploadResponse(ApiResponse):
     filename: str
     size_bytes: int
     status: str
+    material_classify: dict[str, Any] | None = None
+    classification_operation: dict[str, Any]
     impact: ReplacementImpact | None = None
 
 class ExecuteNodeResponse(ApiResponse):

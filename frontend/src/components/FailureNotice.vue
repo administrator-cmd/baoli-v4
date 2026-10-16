@@ -29,6 +29,16 @@ const detailEntries = computed(() => {
     .filter(([, value]) => typeof value === "string" || typeof value === "number")
     .map(([key, value]) => ({ key, value: String(value) }));
 });
+
+const fieldErrors = computed(() => {
+  const fields = props.error?.details.fields;
+  if (!Array.isArray(fields)) return [];
+  return fields.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    if (typeof entry.field !== "string" || typeof entry.message !== "string") return [];
+    return [{ field: entry.field, message: entry.message }];
+  });
+});
 </script>
 
 <template>
@@ -46,8 +56,12 @@ const detailEntries = computed(() => {
     <div class="failure-notice__body">
       <p>错误码：{{ error.code }}</p>
       <p>{{ nextStep }}</p>
+      <div v-for="(entry, index) in fieldErrors" :key="index">
+        {{ entry.field }}：{{ entry.message }}
+      </div>
       <el-collapse v-if="detailEntries.length || error.requestId" class="failure-notice__more">
         <el-collapse-item title="查看技术信息" name="tech">
+          <div v-if="error.statusCode !== null" class="mono">HTTP 状态：{{ error.statusCode }}</div>
           <div v-for="entry in detailEntries" :key="entry.key" class="mono">
             {{ entry.key }}：{{ entry.value }}
           </div>

@@ -12,18 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common.exceptions import BusinessError
-from ..entity import ImportJob, ImportSheet
+from ..entity import ImportJob
 from ..entity import AuditTask
-from ..schema.dto import ExecuteNodeRequest, ManualReviewRequest
+from ..schema.dto import ExecuteNodeRequest
 from . import background_service
 from .background_service import (
     PHASE_LLM_REQUEST,
     PHASE_GRAPH_ADVANCED,
     PHASE_INTERRUPT_WAITING,
-    PHASE_RESULT_READY,
-    normalized_request_hash,
 )
-from .operation_types import OBJECT_AUDIT_TASK, OBJECT_IMPORT_JOB, OBJECT_SCENARIO
+from .operation_types import OBJECT_AUDIT_TASK, OBJECT_IMPORT_JOB
 
 
 def _manifest_of_task(task: AuditTask) -> dict[str, Any]:
@@ -49,30 +47,11 @@ def _idempotency_key(provided: str | None) -> str:
     return (provided or "").strip() or public_no("IDEM")
 
 
-def _import_bindings_hash(db: Session, job: ImportJob) -> str:
-    """工作表选择的规范化摘要：选择被改动后旧命令必须被识别为过期。"""
-    sheets = db.scalars(
-        select(ImportSheet).where(ImportSheet.import_job_id == job.id).order_by(ImportSheet.sheet_key)
-    ).all()
-    return normalized_request_hash(
-        {
-            "sheets": [
-                {
-                    "sheet_key": item.sheet_key,
-                    "status": item.status,
-                }
-                for item in sheets
-            ]
-        }
-    )
-
-
 def _assert_import_command_current(db: Session, job: ImportJob, content: dict[str, Any]) -> None:
     """执行前核对命令内容仍是当前输入，过期命令不按新输入重算。"""
     if (
         job.source_sha256 != content.get("source_sha256")
         or job.draft_revision != content.get("draft_revision")
-        or _import_bindings_hash(db, job) != content.get("bindings_hash")
     ):
         raise BusinessError(
             "IMPORT_CONVERSION_INPUT_STALE",
@@ -108,17 +87,10 @@ def submit_conversion(
         "job_no": job.job_no,
         "source_sha256": job.source_sha256,
         "draft_revision": job.draft_revision,
-        "bindings_hash": _import_bindings_hash(db, job),
     }
 
     def validate() -> None:
         import_service._ensure_import_mutable(db, job)
-        if job.status in {"PUBLISHED", "APPLIED"}:
-            raise BusinessError(
-                "IMPORT_ALREADY_PUBLISHED" if job.status == "PUBLISHED" else "IMPORT_ALREADY_APPLIED",
-                "该导入作业已写入场景或已产生版本，不能重新转换",
-                status_code=409,
-            )
 
     def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
         from . import import_service
@@ -157,84 +129,6 @@ def submit_conversion(
     )
 
 
-def submit_source_activation_preview(
-    db: Session,
-    scenario_code: str,
-    *,
-    row_keys: list[str],
-    expected_revision: int,
-    idempotency_key: str | None,
-) -> tuple[Any, bool]:
-    """提交自由规则库来源的 LLM 增量解析。
-
-    模型调用必须在后台执行；命令中固化场景、草稿修订和来源行，runner 只使用
-    这份已持久化请求，不能在后台读取页面当前选择后重新拼请求。
-    """
-    from . import scenario_admin_service, source_activation_service
-
-    template = scenario_admin_service.template_or_404(db, scenario_code, lock=True)
-    draft = scenario_admin_service.ensure_draft(db, template)
-    source_rows = source_activation_service._source_rows(draft.config_json, row_keys)
-    request = {
-        "scenario_code": scenario_code,
-        "row_keys": list(row_keys),
-        "expected_revision": int(expected_revision),
-        "config_fingerprint": source_activation_service._fingerprint(
-            draft.config_json, draft.schema_json, draft.profile_version
-        ),
-    }
-
-    def validate() -> None:
-        if draft.revision_no != expected_revision:
-            raise BusinessError(
-                "SCENARIO_DRAFT_REVISION_CONFLICT",
-                "场景草稿已变化，请刷新最新配置后重新解析",
-                status_code=409,
-                details={"expected": expected_revision, "actual": draft.revision_no},
-            )
-        # 受理时就校验行身份和来源类型，避免把明显无效的长操作写入后台队列。
-        source_activation_service._source_rows(draft.config_json, row_keys)
-
-    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
-        content = command.request
-        result = source_activation_service.preview(
-            session,
-            content["scenario_code"],
-            list(content["row_keys"]),
-            int(content["expected_revision"]),
-            content["config_fingerprint"],
-            operation_no=command.operation_no,
-        )
-        command.phase(PHASE_RESULT_READY)
-        return result
-
-    # source_rows 的读取同时确保 selected rows 非空且不重复；变量保留在这里是为了
-    # 让受理阶段明确完成这项校验，不把它推迟到模型线程才暴露。
-    del source_rows
-    return background_service.submit_operation(
-        db,
-        object_type=OBJECT_SCENARIO,
-        object_no=scenario_code,
-        operation_type="SOURCE_ACTIVATION_PREVIEW",
-        idempotency_key=_idempotency_key(idempotency_key),
-        request=request,
-        runner=runner,
-        input_version=str(expected_revision),
-        validate=validate,
-    )
-
-
-def _reject_deleted_task(task: AuditTask) -> None:
-    """已删除（逻辑删除）的任务不能再接受任何写操作；恢复后才能继续。"""
-    if task.deleted_at is not None:
-        raise BusinessError(
-            "AUDIT_TASK_DELETED",
-            "任务已被删除，请先恢复后再继续操作",
-            status_code=409,
-            details={"task_no": task.task_no},
-        )
-
-
 def _reject_stale_input_revision(task: AuditTask, input_revision: int | None) -> None:
     """提交者声明的输入修订与任务当前修订不一致时明确拒绝。
 
@@ -252,71 +146,6 @@ def _reject_stale_input_revision(task: AuditTask, input_revision: int | None) ->
     )
 
 
-def submit_manual_reviews(
-    db: Session,
-    task: AuditTask,
-    *,
-    reviews: list[dict[str, Any]],
-    idempotency_key: str | None,
-    input_revision: int | None = None,
-) -> tuple[Any, bool]:
-    """提交人工复核恢复为后台操作。
-
-    复核恢复会重新进入审核图（写 checkpoint、推进等待点），因此与节点执行共用
-    同一套受理/互斥机制，不留下隐蔽的同步长请求。复核明细整体落库，重发时逐条比对。
-    """
-    from .audit import commands as audit_commands
-
-    normalized_reviews = [
-        {
-            "review_no": item["review_no"],
-            "decision": item["decision"],
-            "business_note": item["business_note"],
-            "field_value": item.get("field_value"),
-            "basis_type": item.get("basis_type", "HUMAN_STATEMENT"),
-        }
-        for item in reviews
-    ]
-    request = {
-        "task_no": task.task_no,
-        "input_revision": input_revision,
-        "reviews": normalized_reviews,
-    }
-
-    def validate() -> None:
-        _reject_deleted_task(task)
-        # 人工复核等待点按能力类型解析实例码：`task.current_node` 是实例码，
-        # 与能力类型比较在用户改了实例码之后恒为假，复核会被永远挡在门外。
-        review_node_code = task.current_node
-        if task.status != "WAITING_REVIEW" or task.current_node != review_node_code:
-            raise BusinessError("MANUAL_REVIEW_NOT_WAITING", "任务当前不在人工复核等待状态", status_code=409)
-        _reject_stale_input_revision(task, input_revision)
-
-    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
-        _reject_unsupported_resume(command)
-        content = command.request
-        submitted = ManualReviewRequest.model_validate(
-            {"reviews": content["reviews"], "input_revision": content.get("input_revision")}
-        )
-        result = audit_commands.submit_manual_reviews(session, content["task_no"], submitted)
-        # 复核恢复后图推进到下一个等待点（任务完成时不再有等待点）。
-        command.phase(PHASE_GRAPH_ADVANCED if result.get("status") == "COMPLETED" else PHASE_INTERRUPT_WAITING)
-        return result
-
-    return background_service.submit_operation(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        object_no=task.task_no,
-        operation_type="MANUAL_REVIEW_RESUME",
-        idempotency_key=_idempotency_key(idempotency_key),
-        request=request,
-        runner=runner,
-        # 目标节点记实例码：它是本次命令真实落在哪个节点上的执行事实，
-        # 能力类型在不同场景里对应不同的实例码。
-        target_node=task.current_node,
-        input_version=str(task.input_revision),
-        validate=validate,
-    )
 
 
 def submit_node_execution(
@@ -333,7 +162,6 @@ def submit_node_execution(
     request = {"task_no": task.task_no, "node_code": node_code, "input_revision": input_revision}
 
     def validate() -> None:
-        _reject_deleted_task(task)
         if task.status in {"COMPLETED", "FAILED"}:
             raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
         if node_code != task.current_node:
@@ -362,5 +190,90 @@ def submit_node_execution(
         runner=runner,
         target_node=node_code,
         input_version=str(task.input_revision),
+        validate=validate,
+    )
+
+
+def submit_document_classification(db: Session, task: AuditTask, upload) -> tuple[Any, bool]:
+    """上传保存与分类命令在同一事务认领，提交后由独立会话执行 8018。"""
+    request = {"task_no": task.task_no, "upload_id": upload.id, "input_revision": task.input_revision}
+
+    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
+        from ..entity import DocumentUpload, TaskDocument
+        from .audit.artifacts import _ensure_external_artifact
+        from .audit.document_ports import document_service
+        from .storage_service import resolve_storage_path
+
+        content = command.request
+        current = session.scalar(select(AuditTask).where(AuditTask.task_no == content["task_no"]))
+        record = session.get(DocumentUpload, content["upload_id"])
+        document = session.get(TaskDocument, record.task_document_id) if record is not None else None
+        if current is None or record is None or document is None or record.audit_task_id != current.id:
+            raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "上传分类命令对应的任务文件不存在", status_code=404)
+        if document.current_upload_id != record.id or not record.is_current or current.input_revision != content["input_revision"]:
+            raise BusinessError("DOCUMENT_CLASSIFICATION_INPUT_STALE", "分类命令对应的文件版本已失效", status_code=409)
+        artifact = _ensure_external_artifact(
+            session, current, record, "MATERIAL_CLASSIFY",
+            lambda: document_service().validate_material_type(
+                file_path=resolve_storage_path(record.relative_path), filename=record.original_filename,
+                content_type=record.content_type, material_type=record.declared_material_type,
+            ),
+        )
+        session.commit()
+        command.phase(background_service.PHASE_RESULT_READY)
+        return {"task_no": current.task_no, "document_no": document.document_no, "artifact_no": artifact.artifact_no}
+
+    return background_service.submit_operation(
+        db, object_type=OBJECT_AUDIT_TASK, object_no=task.task_no,
+        operation_type="DOCUMENT_CLASSIFY", idempotency_key=upload.upload_no,
+        request=request, runner=runner, input_version=str(task.input_revision),
+    )
+
+
+def submit_document_ocr_retry(
+    db: Session,
+    task: AuditTask,
+    *,
+    document_no: str,
+    artifact_no: str | None,
+    input_revision: int,
+    idempotency_key: str,
+) -> tuple[Any, bool]:
+    """为单份材料提交 OCR 续查/重试操作，不重新执行整个任务节点。"""
+    from .audit.commands import retry_document_ocr
+
+    request = {
+        "task_no": task.task_no,
+        "document_no": document_no,
+        "artifact_no": artifact_no,
+        "input_revision": input_revision,
+    }
+
+    def validate() -> None:
+        if task.status in {"RUNNING", "COMPLETED", "FAILED"}:
+            raise BusinessError("TASK_DOCUMENT_LOCKED", "任务正在执行或已结束，不能重试材料识别", status_code=409)
+        if int(task.input_revision) != int(input_revision):
+            raise BusinessError(
+                "INPUT_REVISION_CONFLICT", "任务输入已更新，请刷新任务后再重试材料识别", status_code=409,
+            )
+
+    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
+        current = session.scalar(select(AuditTask).where(AuditTask.task_no == command.request["task_no"]))
+        if current is None:
+            raise BusinessError("AUDIT_TASK_NOT_FOUND", "审核任务不存在", status_code=404)
+        return retry_document_ocr(
+            session, current, command.request["document_no"], command.request.get("artifact_no"),
+            operation_no=command.operation_no,
+        )
+
+    return background_service.submit_operation(
+        db,
+        object_type=OBJECT_AUDIT_TASK,
+        object_no=task.task_no,
+        operation_type="OCR_DOCUMENT_RETRY",
+        idempotency_key=idempotency_key,
+        request=request,
+        runner=runner,
+        input_version=str(input_revision),
         validate=validate,
     )

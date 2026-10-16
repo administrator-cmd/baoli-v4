@@ -3,10 +3,10 @@ import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import type { ExecutionRow } from "@/api/contracts";
-import { executionExportUrl, getExecution, listExecutions } from "@/api/reviews";
+import { getExecution, listExecutions } from "@/api/reviews";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
-import { nodeLabel, nodeOptions } from "@/constants/labels";
+import { formatDate, nodeLabel, nodeOptions } from "@/constants/labels";
 import StatusBadge from "@/components/StatusBadge.vue";
 
 /**
@@ -41,20 +41,14 @@ const statusOptions = [
   { value: "INVALIDATED", label: "已失效" },
 ];
 
-function exportUrl(): string {
-  return executionExportUrl({
-    task_no: filters.task_no || undefined,
-    node_code: filters.node_code || undefined,
-    status: filters.status || undefined,
-    started_from: filters.started_from || undefined,
-    started_to: filters.started_to || undefined,
-  });
-}
-
 function durationText(ms: number | null): string {
   if (ms === null) return "—";
   if (ms < 1000) return `${ms} 毫秒`;
   return `${(ms / 1000).toFixed(1)} 秒`;
+}
+
+function executionTime(value: string | null | undefined): string {
+  return value ? formatDate(value) : "—";
 }
 
 function openTask(row: ExecutionRow): void {
@@ -86,7 +80,6 @@ onMounted(() => {
     <PageHeader
       eyebrow="审核管理"
       title="执行记录"
-      subtitle="业务节点的真实执行批次；耗时与失败原因来自服务端，重试资格由任务当前状态决定。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -111,7 +104,6 @@ onMounted(() => {
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
         <el-button @click="list.reset()">重置</el-button>
-        <el-button tag="a" :href="exportUrl()">导出</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
@@ -137,10 +129,10 @@ onMounted(() => {
         <template #default="{ row }"><StatusBadge :status="row.status" /></template>
       </el-table-column>
       <el-table-column label="开始时间" width="170">
-        <template #default="{ row }">{{ row.started_at ? String(row.started_at).replace("T", " ").slice(0, 19) : "—" }}</template>
+        <template #default="{ row }">{{ executionTime(row.started_at) }}</template>
       </el-table-column>
       <el-table-column label="结束时间" width="170">
-        <template #default="{ row }">{{ row.finished_at ? String(row.finished_at).replace("T", " ").slice(0, 19) : "—" }}</template>
+        <template #default="{ row }">{{ executionTime(row.finished_at) }}</template>
       </el-table-column>
       <el-table-column label="耗时" width="100">
         <template #default="{ row }">{{ durationText(row.duration_ms) }}</template>
@@ -175,8 +167,8 @@ onMounted(() => {
         <el-descriptions-item label="任务">{{ detail.task_name }}（{{ detail.task_no }}）</el-descriptions-item>
         <el-descriptions-item label="执行节点">{{ detail.node_name }}（第 {{ detail.sequence_no }} 次执行）</el-descriptions-item>
         <el-descriptions-item label="执行状态"><StatusBadge :status="detail.status" /></el-descriptions-item>
-        <el-descriptions-item label="开始时间">{{ String(detail.started_at ?? "—").replace("T", " ").slice(0, 19) }}</el-descriptions-item>
-        <el-descriptions-item label="结束时间">{{ String(detail.finished_at ?? "—").replace("T", " ").slice(0, 19) }}</el-descriptions-item>
+        <el-descriptions-item label="开始时间">{{ executionTime(detail.started_at) }}</el-descriptions-item>
+        <el-descriptions-item label="结束时间">{{ executionTime(detail.finished_at) }}</el-descriptions-item>
         <el-descriptions-item label="任务输入修订">{{ detail.input_revision ?? "—" }}</el-descriptions-item>
         <el-descriptions-item label="关联操作编号">{{ detail.operation_no ?? "—" }}</el-descriptions-item>
         <el-descriptions-item label="失败码">{{ detail.failure_code ?? "—" }}</el-descriptions-item>
@@ -195,7 +187,6 @@ onMounted(() => {
           <el-button v-if="detail" type="primary" @click="openTask(detail)">进入任务执行</el-button>
         </div>
       </div>
-      <p class="text-hint">重试由任务页按服务端资格提供：仅当任务待执行且停在当前节点、无活跃操作时允许。</p>
     </el-drawer>
   </div>
 </template>

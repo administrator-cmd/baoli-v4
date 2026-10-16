@@ -1,17 +1,18 @@
 """共用风险判断：业务条件来自场景，来源结果由运行期提供。"""
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..common.exceptions import BusinessError
+from ..domain.audit_vocab import RiskStatus
 from ..integrations.llm.gateway import call_json
 
 
 class RiskResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    status: Literal["PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT", "PENDING_REVIEW", "NOT_APPLICABLE"]
+    status: RiskStatus
     message: str = Field(min_length=1)
     evidence_source_indices: list[int]
 

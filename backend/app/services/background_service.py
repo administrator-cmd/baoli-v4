@@ -8,8 +8,6 @@
 后台执行失败不会静默：状态写 FAILED 并保留错误码与中文原因。
 """
 
-import hashlib
-import json
 import logging
 import threading
 from dataclasses import dataclass
@@ -23,6 +21,7 @@ from ..database import SessionLocal
 from ..common.exceptions import BusinessError, exception_summary, safe_error_details
 from ..entity import BackgroundOperation
 from ..domain.identity import public_no
+from .operation_log_service import normalized_request_hash
 
 
 logger = logging.getLogger(__name__)
@@ -40,15 +39,6 @@ PHASE_INTERRUPT_WAITING = "INTERRUPT_WAITING"
 # 场景来源解析属于这一类：预览文件与 operation.result_json 都已保存后才算完成。
 PHASE_RESULT_READY = "RESULT_READY"
 
-
-def normalized_request_hash(payload: dict[str, Any]) -> str:
-    """命令请求的规范化摘要。
-
-    同一幂等标识下必须比较它才能判断是重发还是新请求；排序键 + 紧凑分隔符保证
-    等价请求得到同一个摘要，不受字段顺序或空白影响。
-    """
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _request_diff(existing: dict[str, Any], incoming: dict[str, Any]) -> list[str]:

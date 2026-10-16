@@ -1,7 +1,7 @@
 """可调用工具及其真实实现目录。
 
 模型直接执行规则，按需选择工具；目录描述参数、实际能力与权限，不约束业务阶段。
-工具定义与实现版本随任务冻结，工具错误如实回传，不提供模拟成功。
+执行时使用当前真实工具目录，工具错误如实回传，不提供模拟成功。
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from ..common.exceptions import BusinessError
+from .audit_vocab import OPERATOR_RESULT_STATUSES
 
 from . import file_quality
 from .parameter_contract import (
@@ -28,12 +29,9 @@ INPUT_FIELD_LIST = "FIELD_LIST"
 INPUT_FIELD_SET = "FIELD_SET"
 INPUT_OUTPUT_FIELDS = "OUTPUT_FIELDS"
 INPUT_MATERIAL_SCOPE = "MATERIAL_SCOPE"
-EVIDENCE_RETRIEVAL = "TASK_RETRIEVAL"
-EVIDENCE_SEAL_SUBJECT = "SEAL_SUBJECT_RETRIEVAL"
 JUDGE_PROGRAM = "PROGRAM"
 JUDGE_LLM = "LLM"
 JUDGE_HUMAN = "HUMAN_REVIEW"
-_DECIDED_STATUSES = frozenset({"PASSED", "ABNORMAL", "EVIDENCE_INSUFFICIENT"})
 
 
 @dataclass(frozen=True)
@@ -73,7 +71,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="字段是否一致",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_PAIR,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison",),
@@ -84,7 +82,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="字段应当不同",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_PAIR,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison",),
@@ -94,7 +92,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="日期先后比较",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_PAIR,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison",),
@@ -106,7 +104,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="数值比较",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_PAIR,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison",),
@@ -117,7 +115,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="数值加总比较",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_LIST,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison", "sum_value"),
@@ -144,7 +142,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="字段非空",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_ONE,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison",),
@@ -155,7 +153,7 @@ _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
         label="条款不应存在",
         kind=KIND_OPERATOR,
         input_kind=INPUT_FIELD_ONE,
-        statuses=_DECIDED_STATUSES,
+        statuses=OPERATOR_RESULT_STATUSES,
         implemented=True,
         judge=JUDGE_PROGRAM,
         output_keys=("comparison", "clause_exists"),
@@ -193,7 +191,7 @@ _QUALITY_METADATA: tuple[_ToolMetadata, ...] = tuple(
             )
         ),
         judge=JUDGE_PROGRAM,
-        output_keys=("per_material", "comparison")
+        output_keys=("per_material", "comparison", "judgement_supported")
         + (("actual_bytes", "limit_bytes") if check_item == "FILE_SIZE" else ())
         + (("duplicates",) if check_item == "FILE_DUPLICATE" else ())
         + (("declared_content_type",) if check_item == "FILE_FORMAT" else ()),
@@ -204,16 +202,6 @@ _QUALITY_METADATA: tuple[_ToolMetadata, ...] = tuple(
 _TOOL_METADATA = {item.tool_id: item for item in (*_OPERATOR_METADATA, *_QUALITY_METADATA)}
 OPERATOR_LABELS = {item.tool_id: item.label for item in _TOOL_METADATA.values()}
 
-
-# 工具目录版本：工具语义（参数、输出结构、权限范围）变化时递增。
-# 冻结版本用于执行前核对；当前没有旧 handler，版本不符时显式拒绝重新执行。
-# 版本 6：统一工具目录，移除业务节点授权与人工复核参数。
-TOOL_CATALOG_VERSION = "6"
-
-# 工具策略版本：本次发布允许 Agent 在什么范围内选工具。
-# 它与目录版本分开：目录可以升级（新增工具、调整 Schema）而任务仍按旧策略执行。
-# 策略变化（放开或收紧工具范围、改变越权判定口径）时递增。
-TOOL_POLICY_VERSION = "5"
 
 # handler 所在的模块与函数。解析在 services.tool_service 里完成：
 # domain 层不导入 operators 与 services，避免领域层依赖执行层。
@@ -248,39 +236,6 @@ _CONTEXT_TOOLS: dict[str, str] = {
     "FILE_QUALITY_CHECK": "check_file_quality_tool",
     "DECIMAL_CN_EQUAL": "decimal_cn_equal_tool",
 }
-
-# 可调用工具的真实错误码。取自 handler 实际抛出的 BusinessError（逐一核对源码），
-# 不是推断：operators/registry.py 的 _require_inputs / _threshold_of / 各算子。
-_OPERATOR_ERROR_CODES: dict[str, tuple[str, ...]] = {
-    "FIELD_EQUAL": ("RULE_INPUT_MISSING", "RULE_VALUE_INVALID"),
-    "FIELD_NOT_EQUAL": ("RULE_INPUT_MISSING", "RULE_VALUE_INVALID"),
-    "DATE_COMPARE": ("RULE_INPUT_MISSING", "RULE_VALUE_INVALID", "RULE_PARAMETER_INVALID"),
-    "DECIMAL_COMPARE": (
-        "RULE_INPUT_MISSING",
-        "RULE_VALUE_INVALID",
-        "RULE_PARAMETER_INVALID",
-        "RULE_PARAMETER_MISSING",
-    ),
-    "DECIMAL_SUM_COMPARE": (
-        "RULE_INPUT_MISSING",
-        "RULE_VALUE_INVALID",
-        "RULE_PARAMETER_INVALID",
-        "RULE_PARAMETER_MISSING",
-    ),
-    "FIELD_NOT_EMPTY": ("RULE_INPUT_MISSING",),
-    "CLAUSE_ABSENT": ("RULE_INPUT_MISSING", "RULE_VALUE_INVALID"),
-    "RISK_TRIGGER": (),
-}
-
-# 工具调用层的错误码：它们在执行前校验阶段抛出，与 handler 内部错误分开。
-# 每个工具都会出现这些，因此并入其 error_codes。
-_TOOL_LAYER_ERROR_CODES: tuple[str, ...] = (
-    "TOOL_NOT_REGISTERED",
-    "TOOL_VERSION_MISMATCH",
-    "TOOL_NOT_PUBLISHED",
-    "TOOL_SCENE_NOT_ALLOWED",
-    "TOOL_ARGUMENTS_INVALID",
-)
 
 # 工具输入只提交身份引用，真实取值由系统按身份读取。
 _INPUT_ITEM_SCHEMA: dict[str, Any] = {
@@ -499,7 +454,6 @@ class ToolSpec:
     implemented: bool
     # 模型是否可以选择该工具，由实际调用入口决定。
     agent_selectable: bool
-    error_codes: tuple[str, ...]
     unimplemented_reason: str = ""
     # `agent_selectable=False` 的真实原因。为空表示该工具就是 Agent 可选择的。
     # 页面据此区分「已注册但不能被模型调用」与「模型可以调用」，
@@ -509,17 +463,12 @@ class ToolSpec:
     input_count: str = ""
     # 需要调用方注入的运行期键 → 说明。模型不提供这些值（见 _RUNTIME_KEYS）。
     runtime_keys: tuple[str, ...] = ()
+    # 质量判断是否有真实实现；None 表示该工具不是质量判断项。
+    judgement_supported: bool | None = None
+    judgement_unsupported_reason: str = ""
 
     def to_definition(self) -> dict[str, Any]:
-        """发布期冻结的完整工具定义。
-
-        模型可见的函数定义、参数与输出契约、实现身份、权限范围与目录/策略版本
-        全部在这一份里，随已发布配置一起落库。恢复执行时只读它，
-        不再用当前目录现场重新生成——否则目录升级后旧任务看到的定义会与首次不同。
-
-        `catalog_version` / `catalog_hash` / `policy_version` 取当前目录与策略：
-        冻结发生在发布期，那一刻的当前值就是这份定义的版本身份。
-        """
+        """当前工具的调用定义与实际实现信息。"""
         return {
             "tool_id": self.tool_id,
             "tool_version": self.version,
@@ -528,17 +477,15 @@ class ToolSpec:
             "description": self.description,
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
-            # 实现身份：handler 引用 + 工具版本 + 目录内容指纹，
-            # 三者合起来才能回答「这次执行跑的是哪一版实现」。
+            # 保存实现引用与工具版本，便于执行时定位真实处理器。
             "handler_ref": dict(self.handler_ref) if self.handler_ref else None,
             # 工具的场景权限范围。
             "allowed_scenes": sorted(self.allowed_scenes) if self.allowed_scenes is not None else None,
             "required_evidence": list(self.required_evidence),
             "side_effect": self.side_effect,
             "idempotent": self.idempotent,
-            "catalog_version": TOOL_CATALOG_VERSION,
-            "catalog_hash": catalog_fingerprint(),
-            "policy_version": TOOL_POLICY_VERSION,
+            "judgement_supported": self.judgement_supported,
+            "judgement_unsupported_reason": self.judgement_unsupported_reason or None,
         }
 
     def to_payload(self) -> dict[str, Any]:
@@ -559,9 +506,10 @@ class ToolSpec:
             # Agent 可选择 / 已实现」，不再把它们混成一个「可调用」。
             "registered": True,
             "implemented": self.implemented,
+            "judgement_supported": self.judgement_supported,
+            "judgement_unsupported_reason": self.judgement_unsupported_reason or None,
             "agent_selectable": self.agent_selectable,
             "agent_unselectable_reason": self.agent_unselectable_reason or None,
-            "error_codes": list(self.error_codes),
             "unimplemented_reason": self.unimplemented_reason or None,
             "input_count": self.input_count or None,
             "runtime_keys": list(self.runtime_keys),
@@ -685,9 +633,6 @@ def _build_operator_tool(metadata: _ToolMetadata) -> ToolSpec:
         idempotent=True,
         supports_query=False,
         implemented=callable_now,
-        error_codes=tuple(
-            sorted({*_TOOL_LAYER_ERROR_CODES, *_OPERATOR_ERROR_CODES.get(metadata.tool_id, ())})
-        ),
         unimplemented_reason=reason,
         agent_selectable=selectable,
         agent_unselectable_reason="" if selectable else _agent_unselectable_reason(metadata),
@@ -708,10 +653,7 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
     check_item = metadata.tool_id
     artifact = file_quality.QUALITY_ITEM_ARTIFACT.get(check_item)
     implemented = file_quality.is_implemented(check_item)
-    # 未实现的检查项（图像清晰度、页码连续、有效签章、骑缝章）工具入口仍然存在：
-    # Agent 需要能调用它并拿到「缺少已确认判定依据、本项不可判定」这个真实结论。
-    # 「调不了」与「调了但判定不出来」是两件事，混在一起会让 Agent 无法区分
-    # 「系统不支持这个检查」与「这项检查没通过」。
+    # 没有实际判定实现的项目只在目录说明，不提供给模型调用。
     parameters = {
         "type": "object",
         "properties": {
@@ -730,7 +672,7 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
         description=(
             f"{metadata.label}（文件质量检查）。"
             f"依赖的处理产物：{artifact}；判定按材料位逐份完成。"
-            + ("" if implemented else "本项缺少已确认的判定依据，调用后会返回「不可判定」并说明缺什么。")
+            + ("" if implemented else "本项没有实际判定实现，不能作为工具调用。")
         ),
         input_schema={
             "type": "object",
@@ -754,13 +696,13 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
         side_effect=False,
         idempotent=True,
         supports_query=False,
-        implemented=True,
-        error_codes=tuple(sorted(_TOOL_LAYER_ERROR_CODES)),
-        unimplemented_reason="",
-        # 文件质量工具可由任何生效规则按需调用。
-        agent_selectable=True,
-        agent_unselectable_reason="",
+        implemented=implemented,
+        unimplemented_reason="" if implemented else "本项没有实际判定实现",
+        agent_selectable=implemented,
+        agent_unselectable_reason="" if implemented else "本项没有实际判定实现",
         input_count="按材料位逐份判定",
+        judgement_supported=implemented,
+        judgement_unsupported_reason="" if implemented else "本项没有实际判定实现",
     )
 
 
@@ -797,7 +739,6 @@ def _build_rule_library_query_tool() -> ToolSpec:
                 "source": {"type": "string"},
                 "scenario_version_no": {},
                 "plan_scope_hash": {},
-                "manifest_hash": {},
             },
             "required": ["status", "message", "items", "source"],
         },
@@ -808,7 +749,6 @@ def _build_rule_library_query_tool() -> ToolSpec:
         idempotent=True,
         supports_query=False,
         implemented=True,
-        error_codes=tuple(sorted({*_TOOL_LAYER_ERROR_CODES, "TOOL_CONTEXT_MISSING", "TOOL_TASK_MISSING", "TOOL_RULE_LIBRARY_MISSING", "TOOL_RULE_SCOPE_MISSING"})),
         agent_selectable=True,
         agent_unselectable_reason="",
         input_count="查询条件可选",
@@ -820,12 +760,12 @@ def _build_task_data_tool(process: bool = False) -> ToolSpec:
     if process:
         properties["service"] = {"type": "string", "enum": ["DOCUMENT_PARSE", "OCR", "SEAL", "MATERIAL_CLASSIFY"]}
     else:
-        properties["artifact_type"] = {"type": "string", "enum": ["ORIGINAL", "DOCUMENT_PARSE", "OCR", "SEAL", "MATERIAL_CLASSIFY"]}
+        properties["artifact_type"] = {"type": "string", "enum": ["OCR", "SEAL", "MATERIAL_CLASSIFY"]}
     return ToolSpec(
         tool_id="DOCUMENT_PROCESS" if process else "TASK_DATA_READ", version="1",
-        label="按需处理材料" if process else "读取材料内容",
-        description=("对选定材料调用指定的真实文件处理/OCR/印章/材料识别服务，不自动执行其他服务。"
-                     if process else "读取任务冻结上传的完整内容或指定已生成产物；原始Excel保留各sheet、单元格及公式。PDF/图片可通过DOCUMENT_PROCESS生成OCR后读取，不编造正文。"),
+        label="材料前置处理" if process else "读取材料内容",
+        description=("文件处理/OCR/印章/材料识别由程序在业务审核前执行，模型不负责触发。"
+                     if process else "读取已经完成前置处理的材料产物。正文使用artifact_type=OCR，返回去章文件的完整Markdown；印章检验使用SEAL，返回原文件的印章主体等信息；材料类型校验使用MATERIAL_CLASSIFY。未指定类型时读取OCR正文。"),
         input_schema={"type": "object", "properties": {"inputs": _inputs_schema(min_items=0, max_items=0),
                       "parameters": {"type": "object", "properties": properties,
                                      "required": ["material_keys", "service"] if process else ["material_keys"], "additionalProperties": False}},
@@ -833,8 +773,9 @@ def _build_task_data_tool(process: bool = False) -> ToolSpec:
         output_schema={"type": "object", "properties": {"status": {"type": "string"}, "message": {"type": "string"}, "items": {"type": "array"}}, "required": ["status", "message", "items"]},
         handler_ref={"module": _ADAPTER_MODULE, "function": "process_documents_tool" if process else "read_task_data_tool", "context": "true"},
         allowed_scenes=None, required_evidence=(), side_effect=process,
-        idempotent=True, supports_query=False, implemented=True, agent_selectable=True,
-        error_codes=tuple(sorted(_TOOL_LAYER_ERROR_CODES)), input_count="材料身份列表，inputs填空数组",
+        idempotent=True, supports_query=False, implemented=True, agent_selectable=not process,
+        agent_unselectable_reason="由程序在规则执行前统一完成，模型只读取处理产物" if process else "",
+        input_count="材料身份列表，inputs填空数组",
     )
 
 
@@ -863,46 +804,5 @@ def tool_spec(tool_id: str | None) -> ToolSpec | None:
 
 
 def catalog_payload() -> list[dict[str, Any]]:
-    """工具目录的对外结构：全部工具（含不可调用的与节点级实现的），按标识排序。"""
+    """实际工具目录的对外结构，按标识排序。"""
     return [spec.to_payload() for spec in TOOL_SPECS.values()]
-
-
-def allowed_tools_of(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """生效规则可选择所有实际可调用工具；定义和规则启用范围随任务冻结。"""
-    allowed: dict[tuple[str, str], dict[str, list[str]]] = {}
-    for rule in rules:
-        if not rule.get("enabled", True):
-            continue
-        node_code = rule.get("node")
-        rule_code = rule.get("rule_code") or rule.get("rule_key")
-        rule_key = rule.get("rule_key")
-        if not all(isinstance(value, str) and value for value in (node_code, rule_code, rule_key)):
-            continue
-        specs = [spec for spec in TOOL_SPECS.values() if spec.agent_selectable and spec.implemented]
-        for spec in specs:
-            scope = allowed.setdefault((spec.tool_id, node_code), {"rule_codes": [], "rule_keys": []})
-            scope["rule_codes"].append(rule_code)
-            scope["rule_keys"].append(rule_key)
-    return [
-        {
-            "tool_id": tool_id,
-            "node_code": node_code,
-            "rule_codes": sorted(set(scope["rule_codes"])),
-            "rule_keys": sorted(set(scope["rule_keys"])),
-            "definition": tool_spec(tool_id).to_definition(),
-        }
-        for (tool_id, node_code), scope in sorted(allowed.items())
-    ]
-
-
-def catalog_fingerprint() -> str:
-    """工具目录的内容指纹：随已发布配置冻结，用于对账「模型当时看到的是哪一版工具」。
-
-    目录内容变化（新增工具、参数 Schema 调整、实现状态变化）都会改变它，
-    因此它不能只写版本号——版本号由人维护，指纹由内容决定。
-    """
-    import hashlib
-    import json
-
-    canonical = json.dumps(catalog_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

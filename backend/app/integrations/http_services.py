@@ -9,7 +9,7 @@ import math
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -354,7 +354,7 @@ def detect_seals(
                 )
                 if normalized_subject:
                     evidence.append(
-                        ExternalEvidence(page_no=page_no, quote_text=normalized_subject, bbox=bbox)
+                        ExternalEvidence(quote_text=normalized_subject)
                     )
             pages.append({"page_no": page_no, "seals_count": seals_count, "seals": normalized_seals})
             total += seals_count
@@ -397,203 +397,157 @@ def detect_seals(
 
 
 def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmission:
-    """把当前的 8010 产物提交一次，返回可续查的 OCR 作业。"""
+    """按官方 requests 示例，用本地文件句柄提交 8010 产物。"""
 
     settings, submit_url, token, model = _ocr_configuration()
     deadline_at = datetime.now(UTC) + timedelta(seconds=settings.ocr_max_wait_seconds)
     deadline = time.monotonic() + settings.ocr_max_wait_seconds
-    optional_payload = json.dumps(
-        {
-            "useDocOrientationClassify": False,
-            "useDocUnwarping": False,
-            "useChartRecognition": False,
-        },
-        separators=(",", ":"),
-    )
+    optional_payload = {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useChartRecognition": False,
+    }
+    headers = {"Authorization": f"bearer {token}"}
+    data = {"model": model, "optionalPayload": json.dumps(optional_payload)}
     try:
-        with file_path.open("rb") as input_file:
-            prepared = requests.Request(
-                "POST",
-                submit_url,
-                data={"model": model, "optionalPayload": optional_payload},
-                files={"file": (filename, input_file)},
-            ).prepare()
+        input_file = file_path.open("rb")
     except OSError as exc:
         raise BusinessError(
             "PROCESSED_ARTIFACT_MISSING",
             "当前上传文件缺少可读取的 8010 处理产物，无法提交 OCR",
             status_code=409,
         ) from exc
-    body = prepared.body
-    content_type = prepared.headers.get("Content-Type")
-    if not isinstance(body, bytes) or not content_type:
-        raise BusinessError("OCR_MULTIPART_INVALID", "无法生成 PaddleOCR 所需的上传请求", status_code=500)
-    with _client(settings.request_timeout_seconds) as client:
-        submit = _request(
-            client,
-            "POST",
-            submit_url,
-            service_code="OCR",
-            operation="SUBMIT",
-            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "SUBMIT"),
-            headers={"Authorization": f"bearer {token}", "Content-Type": content_type},
-            content=body,
+    with input_file:
+        file_sha256 = hashlib.file_digest(input_file, "sha256").hexdigest()
+        file_size = input_file.tell()
+        input_file.seek(0)
+        logger.info(
+            "PaddleOCR 提交 filename=%s uploaded_filename=%s bytes=%s sha256=%s model=%s options=%s",
+            filename, file_path.name, file_size, file_sha256, model, data["optionalPayload"],
         )
-        submit_payload = _json_object(submit, "OCR", "SUBMIT")
         try:
-            submit_data = submit_payload["data"]
-            if not isinstance(submit_data, dict):
-                raise TypeError
-            job_id = _non_empty_string(submit_data["jobId"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise _contract_error("OCR", "SUBMIT") from exc
+            submit = requests.post(
+                submit_url, headers=headers, data=data, files={"file": input_file},
+                timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "SUBMIT"),
+            )
+            submit.raise_for_status()
+        except requests.RequestException as exc:
+            raise _ocr_request_error(exc, "SUBMIT") from exc
+    if submit.status_code != 200:
+        raise _contract_error("OCR", "SUBMIT")
+    submit_payload = _json_object(submit, "OCR", "SUBMIT")
+    try:
+        submit_data = submit_payload["data"]
+        if not isinstance(submit_data, dict):
+            raise TypeError
+        job_id = _non_empty_string(submit_data["jobId"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _contract_error("OCR", "SUBMIT") from exc
+    logger.info(
+        "PaddleOCR 已受理 job_id=%s filename=%s sha256=%s trace_id=%s",
+        job_id, filename, file_sha256, submit_payload.get("traceId"),
+    )
     return OcrJobSubmission(job_id=job_id, deadline_at=deadline_at)
 
 
-def poll_ocr_job(*, job_id: str, deadline_at: datetime) -> ExternalServiceResult:
-    """查询并下载一个此前已提交的 PaddleOCR 作业，不重新提交。
-
-    超时语义区分两类，绝不含糊：
-      - 单次 HTTP 请求超时：由 `_request` 抛出，消息为“……外部服务请求超时”，只说明这一次调用没等到响应；
-      - 本地等待预算耗尽（deadline_at 到期）：抛 EXTERNAL_SERVICE_TIMEOUT，消息明确说明没有证据表明
-        供应商作业已失效，系统不会自动重新提交，需要人工对账。本地停止等待不等于供应商作业失败。
-    """
-
+def poll_ocr_job(
+    *, job_id: str, deadline_at: datetime,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> ExternalServiceResult:
+    """按官方 requests 示例立即查询，未结束时等待后再次查询，完成后下载 JSONL。"""
     settings, submit_url, token, _ = _ocr_configuration()
     try:
         normalized_deadline = deadline_at.astimezone(UTC)
     except (AttributeError, ValueError) as exc:
         raise BusinessError("OCR_JOB_METADATA_INVALID", "已提交的 PaddleOCR 作业缺少有效截止时间", status_code=500) from exc
-    remaining = (normalized_deadline - datetime.now(UTC)).total_seconds()
-    if remaining <= 0:
+    if normalized_deadline <= datetime.now(UTC):
         raise _ocr_local_deadline_error("POLL")
-    deadline = time.monotonic() + remaining
+    deadline = time.monotonic() + (normalized_deadline - datetime.now(UTC)).total_seconds()
     normalized_job_id = _non_empty_string(job_id)
     headers = {"Authorization": f"bearer {token}"}
     poll_url = f"{submit_url.rstrip('/')}/{quote(normalized_job_id, safe='')}"
-    with _client(settings.request_timeout_seconds) as client:
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            time.sleep(min(settings.ocr_poll_interval_seconds, remaining))
-            if time.monotonic() >= deadline:
-                break
-            poll = _request(
-                client,
-                "GET",
-                poll_url,
-                service_code="OCR",
-                operation="POLL",
+    previous_progress = None
+    while True:
+        try:
+            poll_response = requests.get(
+                poll_url, headers=headers,
                 timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "POLL"),
-                headers=headers,
             )
-            poll_payload = _json_object(poll, "OCR", "POLL")
-            try:
-                poll_data = poll_payload["data"]
-                if not isinstance(poll_data, dict):
-                    raise TypeError
-                state = poll_data["state"]
-                if not isinstance(state, str):
-                    raise TypeError
-            except (KeyError, TypeError) as exc:
-                raise _contract_error("OCR", "POLL") from exc
-            if state == "failed":
-                provider_error = poll_data.get("error")
-                provider_code = poll_data.get("errorCode")
-                if isinstance(provider_error, dict):
-                    provider_code = provider_error.get("code") or provider_code
-                    provider_error = provider_error.get("message") or provider_error.get("msg")
-                if not isinstance(provider_error, str) or not provider_error.strip():
-                    provider_error = next(
-                        (
-                            value.strip()
-                            for key in ("errorMessage", "errorMsg", "message")
-                            if isinstance(value := poll_data.get(key), str) and value.strip()
-                        ),
-                        None,
-                    )
-                logger.warning(
-                    "PaddleOCR 作业失败 job_id=%s state=%s provider_code=%s provider_error=%s response_fields=%s",
-                    normalized_job_id,
-                    state,
-                    provider_code,
-                    provider_error,
-                    sorted(poll_data),
-                )
-                provider_reason = "；".join(
-                    str(item) for item in (provider_code, provider_error) if item is not None and str(item).strip()
-                )
-                raise BusinessError(
-                    "OCR_JOB_FAILED",
-                    f"PaddleOCR 作业 {normalized_job_id} 返回失败状态"
-                    + (f"：{provider_reason}" if provider_reason else "；当前响应未提供可识别的失败原因"),
-                    status_code=502,
-                    details={"service": "OCR", "operation": "POLL", "job_id": normalized_job_id},
-                )
-            if state == "done":
-                break
-            if state not in OCR_JOB_ACTIVE_STATES:
-                # 只接过真实契约里确认过的状态（pending/running/done/failed）。未知状态立即报契约错误，
-                # 带上状态值与供应商字段名，绝不把它当作"继续等待"最终变成超时。
-                raise BusinessError(
-                    "EXTERNAL_SERVICE_CONTRACT_INVALID",
-                    "PaddleOCR 轮询返回了未知的作业状态",
-                    status_code=502,
-                    details={
-                        "service": "OCR",
-                        "operation": "POLL",
-                        "field": "data.state",
-                        "state": state,
-                        "known_states": sorted(OCR_JOB_STATES),
-                    },
-                )
-            continue
-        else:
-            raise _ocr_local_deadline_error("POLL")
-        # 循环以 done 结束：这里下载结果。
-        try:
-            result_url = poll_data["resultUrl"]
-            if not isinstance(result_url, dict):
-                raise TypeError
-            json_url = _non_empty_string(result_url["jsonUrl"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise _contract_error("OCR", "POLL") from exc
-        downloaded = _request(
-            client,
-            "GET",
-            _validate_download_url(json_url, "OCR", "DOWNLOAD"),
-            service_code="OCR",
-            operation="DOWNLOAD",
-            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "DOWNLOAD"),
-            headers={"Accept-Encoding": "identity"},
-        )
-        try:
-            pages, average_confidence, page_no_semantics = _parse_ocr_ndjson(downloaded.text)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise _contract_error("OCR", "DOWNLOAD") from exc
-        if not pages:
+            poll_response.raise_for_status()
+        except requests.RequestException as exc:
+            raise _ocr_request_error(exc, "POLL") from exc
+        if poll_response.status_code != 200:
+            raise _contract_error("OCR", "POLL")
+        poll_payload = _json_object(poll_response, "OCR", "POLL")
+        if not isinstance(poll_payload.get("data"), dict):
+            raise _contract_error("OCR", "POLL")
+        poll_data = poll_payload["data"]
+        state = poll_data.get("state")
+        if not isinstance(state, str):
+            raise _contract_error("OCR", "POLL")
+        extract_progress = poll_data.get("extractProgress")
+        if extract_progress is not None and not isinstance(extract_progress, dict):
+            raise _contract_error("OCR", "POLL")
+        progress = {"provider_state": state, "extract_progress": extract_progress}
+        if progress != previous_progress:
+            logger.info("PaddleOCR 处理进度 job_id=%s state=%s progress=%s",
+                        normalized_job_id, state, extract_progress)
+            if on_progress is not None:
+                on_progress(progress)
+            previous_progress = progress
+        if state == "failed":
+            provider_error = poll_data["errorMsg"]
+            if not isinstance(provider_error, str):
+                raise _contract_error("OCR", "POLL")
+            logger.warning("PaddleOCR 作业失败 job_id=%s trace_id=%s errorMsg=%s",
+                           normalized_job_id, poll_payload.get("traceId"), provider_error)
             raise BusinessError(
-                "OCR_RESULT_EMPTY",
-                "PaddleOCR 返回结果中没有任何结果项（连空页也没有）",
+                "OCR_JOB_FAILED",
+                f"PaddleOCR 作业 {normalized_job_id} 返回失败状态：{provider_error}",
                 status_code=502,
-                details={"service": "OCR", "operation": "DOWNLOAD"},
+                details={"service": "OCR", "operation": "POLL", "job_id": normalized_job_id,
+                         "provider_state": state, "provider_code": poll_data.get("errorCode"),
+                         "provider_error": provider_error,
+                         "provider_trace_id": poll_payload.get("traceId")},
             )
-        return ExternalServiceResult(
-            artifact=ExternalArtifact(
-                status="SUCCESS",
-                content={
-                    "page_count": len(pages),
-                    "avg_confidence": average_confidence,
-                    "page_no_semantics": page_no_semantics,
-                    "page_no_note": (
-                        "页码为供应商结果项的合成顺序号（含空页），不是原始文件页号；"
-                        "无供应商页号字段时，页号只能用于定位产物位置，不能当作原始页码引用。"
-                        if page_no_semantics == "SYNTHETIC_SEQUENCE"
-                        else "页码来自供应商返回的页号字段。"
-                    ),
-                    "pages": pages,
-                },
-            )
+        if state == "done":
+            break
+        if state not in OCR_JOB_ACTIVE_STATES:
+            raise BusinessError("EXTERNAL_SERVICE_CONTRACT_INVALID", "PaddleOCR 轮询返回了未知的作业状态",
+                                status_code=502, details={"service": "OCR", "operation": "POLL",
+                                                          "state": state})
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _ocr_local_deadline_error("POLL")
+        time.sleep(min(settings.ocr_poll_interval_seconds, remaining))
+    result_url = poll_data.get("resultUrl")
+    if not isinstance(result_url, dict) or not isinstance(result_url.get("jsonUrl"), str):
+        raise _contract_error("OCR", "POLL")
+    try:
+        jsonl_response = requests.get(
+            result_url["jsonUrl"],
+            timeout=_remaining_timeout(settings.request_timeout_seconds, deadline, "DOWNLOAD"),
         )
+        jsonl_response.raise_for_status()
+    except requests.RequestException as exc:
+        raise _ocr_request_error(exc, "DOWNLOAD") from exc
+    try:
+        pages, average_confidence, page_no_semantics = _parse_ocr_ndjson(jsonl_response.text)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _contract_error("OCR", "DOWNLOAD") from exc
+    if not pages:
+        raise BusinessError("OCR_RESULT_EMPTY", "PaddleOCR 返回结果中没有任何结果项（连空页也没有）",
+                            status_code=502, details={"service": "OCR", "operation": "DOWNLOAD"})
+    return ExternalServiceResult(
+        artifact=ExternalArtifact(status="SUCCESS", content={
+            "page_count": len(pages), "avg_confidence": average_confidence,
+            "page_no_semantics": page_no_semantics,
+            "page_no_note": ("页码为供应商结果项的合成顺序号（含空页），不是原始文件页号；"
+                              "无供应商页号字段时，页码只能用于定位产物位置，不能当作原始页码引用。"
+                              if page_no_semantics == "SYNTHETIC_SEQUENCE" else "页码来自供应商返回的页号字段。"),
+            "pages": pages,
+        })
+    )
 
 
 def _ocr_configuration() -> tuple[Settings, str, str, str]:
@@ -677,7 +631,24 @@ def _request(
         ) from exc
 
 
-def _json_object(response: httpx.Response, service_code: str, operation: str) -> dict[str, Any]:
+def _ocr_request_error(exc: requests.RequestException, operation: str) -> BusinessError:
+    """把 requests 异常明确交给现有作业状态处理，不重试或吞掉失败。"""
+    timed_out = isinstance(exc, requests.Timeout)
+    details: dict[str, Any] = {
+        "service": "OCR", "operation": operation, "error_type": type(exc).__name__,
+    }
+    if exc.response is not None:
+        details["http_status"] = exc.response.status_code
+    logger.warning("PaddleOCR HTTP 请求失败 details=%s", details)
+    return BusinessError(
+        "EXTERNAL_SERVICE_TIMEOUT" if timed_out else "EXTERNAL_SERVICE_FAILED",
+        "PaddleOCR 请求超时" if timed_out else "PaddleOCR HTTP 请求失败",
+        status_code=504 if timed_out else 502,
+        details=details,
+    )
+
+
+def _json_object(response: httpx.Response | requests.Response, service_code: str, operation: str) -> dict[str, Any]:
     try:
         payload = response.json()
     except ValueError as exc:

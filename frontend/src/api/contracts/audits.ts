@@ -1,4 +1,4 @@
-/** 审核任务：任务详情、节点、字段与规则结果、复核待办、证据、纠错与检索。 */
+/** 审核任务：任务详情、节点、字段、规则结果、证据与字段纠错。 */
 
 import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 import type { TaskScope } from "./scenes";
@@ -16,21 +16,15 @@ export interface AuditNode {
   failure_message: string | null;
   skip_reason: string | null;
 }
-/** 任务冻结的来源工作表；新动态来源不绑定节点，node_code 仅保留历史数据。 */
-export interface TaskDisplaySheet {
-  sheet_role: string;
-  node_code: string | null;
-}
 /**
  * 任务的展示结构：由后端按当前任务的场景配置返回。
  *
- * 页面按它通用渲染：只展示当前场景实际使用的节点、Sheet 与字段，
+ * 页面按它通用渲染：只展示当前场景实际使用的节点与字段，
  * 展示范围来自任务冻结的配置，不按参考模板补充内容。
  */
 export interface TaskDisplay {
   task_no: string;
   nodes: AuditNode[];
-  sheets: TaskDisplaySheet[];
   fields: Array<{
     field_key: string;
     name: string;
@@ -43,14 +37,12 @@ export interface TaskDisplay {
 
 export interface AuditDocument {
   document_no: string;
-  /** 材料键：检索取证的定位依据，不用中文名匹配材料。 */
+  /** 材料键：材料位的稳定身份，不用中文名匹配材料。 */
   material_key?: string | null;
   material_name: string;
   required: boolean;
   status: string;
   filename: string | null;
-  /** 当前文件的上传编号：下载/预览与历史版本定位用；没有当前文件时为 null。 */
-  upload_no?: string | null;
   /**
    * 该材料位的 8018 识别结论；材料处理节点尚未执行时为 null。
    * 置信度与判定类型只作展示，不参与任何判定，也不影响材料状态。
@@ -142,6 +134,8 @@ export interface RuleStandard {
 export interface AuditRule {
   rule_key?: string;
   name: string;
+  kind?: string | null;
+  material_names?: string[];
   status: string;
   message: string;
   result: Record<string, JsonValue> | null;
@@ -154,136 +148,7 @@ export interface AuditRule {
   }>;
 }
 
-export interface RetrievalCandidateSnapshot {
-  index_no?: string | null;
-  chunk_no?: number | null;
-  chunk_id?: number | null;
-  source_entry_no?: number | null;
-  subject_name?: string | null;
-  artifact_type?: string | null;
-  text?: string | null;
-  material_key?: string | null;
-  material_name?: string | null;
-  filename?: string | null;
-  similarity?: string | null;
-}
-
-export interface RetrievalRecordSnapshot {
-  retrieval_no?: string | null;
-  status?: string | null;
-  message?: string | null;
-  candidate_count?: number;
-  candidates?: RetrievalCandidateSnapshot[];
-  adopted?: RetrievalCandidateSnapshot[];
-  uncovered_materials?: Array<{ material_key?: string; reason?: string }>;
-  excluded_indexes?: Array<{ index_no?: string; reason?: string }>;
-}
-
-export interface SealRecord {
-  material_key?: string | null;
-  material_name?: string | null;
-  filename?: string | null;
-  artifact_no?: string | null;
-  entry_no?: number | null;
-  subject_name?: string | null;
-  seal_type?: string | null;
-  confidence?: number | null;
-}
-
-export interface SubjectQuerySnapshot {
-  field_key?: string | null;
-  field_name?: string | null;
-  material_key?: string | null;
-  material_name?: string | null;
-  value?: string | null;
-  status?: string | null;
-}
-
-export interface PendingReview {
-  review_no: string;
-  review_type: string;
-  business_note: string | null;
-  proposed_value: string | null;
-  material_name?: string | null;
-  field_name?: string | null;
-  rule_name?: string | null;
-  /** 系统原判断的不可变快照：状态、消息、原值、依据引用。 */
-  system_judgment?: {
-    status: string | null;
-    message: string | null;
-    raw_value: string | null;
-    normalized_value?: JsonValue;
-    evidence?: {
-      evidence_no?: string | null;
-      field_path?: string | null;
-      quote_text?: string | null;
-      /** 内容依据结论：引文能否在所属材料里找到原文。 */
-      quote_check?: string | null;
-      quote_check_label?: string | null;
-    } | null;
-    evidences?: Array<{
-      evidence_no?: string | null;
-      field_path?: string | null;
-      quote_text?: string | null;
-      quote_check?: string | null;
-      quote_check_label?: string | null;
-    }>;
-    /**
-     * 主体/签章一致性核对的判据：
-     *   retrieval 是本次检索的真实范围、候选身份与双方原文；
-     *   seal_records 是规则材料范围内的全部印章识别条目；
-     *   subject_query 是本次实际使用的待核对主体原文。
-     * 人工要同时看到这三项才能判断是否一致，不能在响应投影里丢掉。
-     */
-    retrieval?: RetrievalRecordSnapshot | null;
-    seal_records?: SealRecord[] | null;
-    subject_query?: SubjectQuerySnapshot | null;
-    /**
-     * 材料类型待复核的原始识别结论：
-     *   service_code 是给出结论的外部服务（当前为 MATERIAL_CLASSIFY）；
-     *   service_result 是它的原样返回（declared/detected_material_type、confidence、
-     *   matched_keywords 等）。
-     * 置信度不参与任何判定，只是给人工判断"文件是否放错材料位"的依据，必须展示。
-     */
-    service_code?: string | null;
-    service_result?: Record<string, JsonValue> | null;
-  } | null;
-  /** 已完成裁决时的业务结论与复核后有效状态。 */
-  manual_conclusion?: string | null;
-  effective_status?: string | null;
-  basis_type?: string | null;
-  before_value?: string | null;
-  after_value?: string | null;
-  evidence_quote?: string | null;
-  evidence_no?: string | null;
-}
-
-export interface TaskReviewJudgment {
-  status: string | null;
-  message: string | null;
-  raw_value: string | null;
-  normalized_value?: JsonValue;
-  evidence?: {
-    evidence_no?: string | null;
-    field_path?: string | null;
-    quote_text?: string | null;
-    quote_check?: string | null;
-    quote_check_label?: string | null;
-  } | null;
-  evidences?: Array<{
-    evidence_no?: string | null;
-    field_path?: string | null;
-    quote_text?: string | null;
-    quote_check?: string | null;
-    quote_check_label?: string | null;
-  }>;
-  retrieval?: RetrievalRecordSnapshot | null;
-  seal_records?: SealRecord[] | null;
-  subject_query?: SubjectQuerySnapshot | null;
-}
-
 export interface AuditTask extends ApiResponse {
-  intermediate_csv_available?: boolean;
   task_no: string;
   task_name: string;
   scenario_name: string;
@@ -294,26 +159,22 @@ export interface AuditTask extends ApiResponse {
   updated_at?: string | null;
   current_node: AuditNode;
   nodes: AuditNode[];
-  /** 展示结构：本任务真实使用的节点、Sheet 与字段；旧任务可能没有该字段。 */
+  /** 任务冻结的技术容器、来源工作表与字段。 */
   display?: TaskDisplay | null;
   documents: AuditDocument[];
   fields: AuditField[];
   rules: AuditRule[];
-  pending_reviews: PendingReview[];
   /** 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。 */
   input_revision: number;
   /** 当前失败节点是否具备可核对的等待点恢复条件。 */
-  can_recover_failed_node: boolean;
   /** 任务冻结的生效规则范围。 */
   scope?: TaskScope | null;
   latest_operation: OperationAccepted | null;
   /** 任务备注（可编辑基本资料）。 */
   remark?: string | null;
   scenario_code?: string;
-  deleted?: boolean;
-  /** 方案绑定：为 null 表示旧任务没有方案关联（“历史任务配置”）。 */
+  /** 任务创建时冻结的方案身份。 */
   plan?: TaskPlanInfo | null;
-  is_legacy_config?: boolean;
 }
 
 export interface ExecuteNodeResponse extends ApiResponse {
@@ -340,6 +201,7 @@ export interface RiskList extends ApiResponse {
     message: string;
     risk_level?: string | null;
     details: Record<string, JsonValue> | null;
+    evidence: Array<{ evidence_no: string; material_name: string | null; quote_text: string }>;
   }>;
 }
 
@@ -351,7 +213,7 @@ export interface Evidence extends ApiResponse {
   field_path: string | null;
   quote_text: string;
   /** 内容依据的核对结论：引文或字段值能否在所属材料里找到原文。 */
-  quote_check?: "FOUND" | "VALUE_FOUND" | "NOT_FOUND" | "NOT_CHECKABLE" | "PENDING" | null;
+  quote_check?: "FOUND" | "NOT_FOUND" | "NOT_CHECKABLE" | "PENDING" | null;
   quote_check_label?: string | null;
   /** 该证据所属的上传版本与产物；旧上传的证据按历史身份查看。 */
   document_upload_no: string | null;
@@ -396,30 +258,6 @@ export interface OcrReconcileResponse extends ApiResponse {
   message: string;
 }
 
-export interface ReviewDraftRecord {
-  review_no: string;
-  decision: string | null;
-  business_note: string | null;
-  field_value: string | null;
-  basis_type: string | null;
-  updated_at?: string;
-}
-
-export interface ReviewDraftPayloadItem {
-  review_no: string;
-  decision: string | null;
-  business_note: string | null;
-  field_value: string | null;
-  basis_type: string | null;
-}
-
-export interface ReviewDraftResult extends ApiResponse {
-  task_no: string;
-  pending_hash: string | null;
-  saved_review_nos: string[];
-  drafts: Record<string, ReviewDraftRecord>;
-}
-
 export interface DocumentRemoveResult extends ApiResponse {
   document_no: string;
   material_name: string;
@@ -434,80 +272,4 @@ export interface DocumentRemoveResult extends ApiResponse {
     reset_to_node: string | null;
     description: string;
   } | null;
-}
-
-export interface RetrievalCandidate {
-  chunk_id: number;
-  chunk_no: number;
-  index_no: string | null;
-  /** 印章条目在原产物中的条目序号：候选身份的一部分，可以回到原始条目。 */
-  source_entry_no: number | null;
-  /** 印章识别出的主体名称。向量只由它生成，页码等定位信息不参与相似度。 */
-  subject_name: string;
-  material_key: string | null;
-  material_name: string | null;
-  filename: string | null;
-  upload_no: string | null;
-  /** 相似度只用于候选排序，不构成主体一致的结论。 */
-  similarity: string;
-}
-
-export interface RetrievalResult extends ApiResponse {
-  task_no: string;
-  retrieval_no: string;
-  status: string;
-  message: string;
-  model_id?: string | null;
-  model_revision?: string | null;
-  index_version?: string | null;
-  index_versions?: string[];
-  scope?: Record<string, JsonValue>;
-  candidates: RetrievalCandidate[];
-  /** 本次实际送入后续步骤的条目；它是上下文预算，不是人工结论。 */
-  adopted: RetrievalCandidate[];
-  /** 有上传但没有可用主体索引的材料及原因（未识别主体 / 未建索引 / 索引失效）。 */
-  uncovered_materials?: Array<{ material_key?: string; reason?: string }>;
-  excluded_indexes?: Array<{ index_no?: string; reason?: string }>;
-}
-
-export type RetrievalDecision = "CONSISTENT" | "INCONSISTENT" | "EVIDENCE_INSUFFICIENT";
-
-export interface RetrievalDecisionResult extends ApiResponse {
-  task_no: string;
-  retrieval_no: string;
-  decision: string;
-  note: string | null;
-  selected: Record<string, JsonValue> | null;
-  decided_at: string | null;
-  decision_input_revision: number | null;
-}
-
-export interface EvidenceIndexItem {
-  index_no: string;
-  artifact_type: string;
-  status: string;
-  /** 索引是否仍适用于当前产物内容：产物重新识别后旧索引只是历史记录。 */
-  current_for_artifact: boolean;
-  chunk_count: number;
-  model_id: string;
-  model_revision: string;
-  embedding_dim?: number | null;
-  chunk_version?: string | null;
-  index_version: string;
-  document_upload_no: string | null;
-  filename: string | null;
-  material_name: string | null;
-  built_at: string | null;
-  failure_code: string | null;
-  failure_message: string | null;
-}
-
-export interface TaskEvidenceIndex extends ApiResponse {
-  task_no: string;
-  index_version: string | null;
-  model_id: string | null;
-  model_revision: string | null;
-  chunk_version?: string | null;
-  indexed: boolean;
-  items: EvidenceIndexItem[];
 }

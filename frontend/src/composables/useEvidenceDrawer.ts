@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef, type ComputedRef, type Ref } from "vue";
 
-import type { AuditField, Evidence, PendingReview } from "@/api/contracts";
+import type { AuditField, Evidence } from "@/api/contracts";
 import { getTaskEvidence } from "@/api/audits";
 
 export interface EvidenceDrawerState {
@@ -13,8 +13,6 @@ export interface EvidenceDrawerState {
   loading: Ref<boolean>;
   /** 按字段打开证据；没有证据编号时明确提示，不打开空抽屉。 */
   openForField: (field: AuditField) => Promise<void>;
-  /** 按当前人工复核待办打开指定属性的证据；未指定时使用待办摘要证据。 */
-  openForReview: (review: PendingReview, evidenceNo?: string) => Promise<void>;
   close: () => void;
 }
 
@@ -61,23 +59,6 @@ export function useEvidenceDrawer(options: {
     await load(taskNo, target.evidence_no);
   }
 
-  async function openForReview(review: PendingReview, selectedEvidenceNo?: string): Promise<void> {
-    const taskNo = options.taskNo.value;
-    const evidenceNo = selectedEvidenceNo ?? review.evidence_no;
-    if (!evidenceNo) return;
-    // 显式标注类型：避免对含递归 JsonValue 的对象字面量做深层可赋值性推导（TS2589）。
-    const placeholder: AuditField = {
-      name: review.field_name ?? review.rule_name ?? "人工复核",
-      material_name: review.material_name ?? "",
-      status: "PENDING_REVIEW",
-      raw_value: null,
-      normalized_value: null,
-      evidence_no: evidenceNo,
-    };
-    field.value = placeholder;
-    evidence.value = null;
-    await load(taskNo, evidenceNo);
-  }
 
   function close(): void {
     field.value = null;
@@ -92,7 +73,6 @@ export function useEvidenceDrawer(options: {
     error,
     loading,
     openForField,
-    openForReview,
     close,
   };
 }

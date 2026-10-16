@@ -40,7 +40,6 @@ const menuGroups = [
     icon: ListChecks,
     items: [
       { path: "/audit-tasks", title: "审核任务" },
-      { path: "/reviews", title: "人工复核" },
       { path: "/executions", title: "执行记录" },
     ],
   },

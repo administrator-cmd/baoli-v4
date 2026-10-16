@@ -1,7 +1,7 @@
 """证据的内容依据核对、返回投影与复制。
 
-`quote_check` 表示引文或字段值能否在所属产物中找到原文依据
-（FOUND / VALUE_FOUND / NOT_FOUND / NOT_CHECKABLE），不依赖模型生成页码或坐标。
+`quote_check` 仅表示完整引文能否在所属产物中找到
+（FOUND / NOT_FOUND / NOT_CHECKABLE），不依赖模型生成页码或坐标。
 
 比对前消除 OCR 排版产物（行内公式包裹、Markdown 标记、HTML 标签、空白换行），但仍按规范化后
 的连续子串判定，不做相似度匹配；原始引文原样保存与展示。"""
@@ -9,16 +9,15 @@
 from ...domain.identity import public_no
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, Evidence, RuleResult, StoredArtifact, TaskFieldValue
-from .. import task_csv_service
-from .artifacts import _artifact_page_text, _artifact_payload
-from .shared import QUOTE_CHECK_LABELS, _evidence_supports_value, _locatable_text
+from .artifacts import _artifact_payload
+from .shared import QUOTE_CHECK_LABELS, _locatable_text
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
 
 
 def evidence_content_view(value: dict[str, Any] | None) -> dict[str, Any] | None:
-    """只投影证据原文和来源，历史快照中的定位字段不再返回。"""
+    """返回证据原文和来源，排除处理产物内部位置元数据。"""
     if value is None:
         return None
     return {
@@ -30,71 +29,91 @@ def evidence_content_view(value: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 
-def retrieval_content_view(value: dict[str, Any] | None) -> dict[str, Any] | None:
-    """仅投影检索候选和采用证据，保留真实身份及范围，不改写检索记录。"""
-    if value is None:
-        return None
-    result = dict(value)
-    for key in ("candidates", "adopted"):
-        if key in value:
-            result[key] = [evidence_content_view(item) for item in value[key]]
-    return result
 
 
 def result_content_view(value: dict[str, Any]) -> dict[str, Any]:
-    """结果及复核中的检索/印章投影，不触碰字段值和业务配置 JSON。"""
-    result = dict(value)
-    if "retrieval" in value:
-        result["retrieval"] = retrieval_content_view(value["retrieval"])
-    if "seal_records" in value and value["seal_records"] is not None:
-        result["seal_records"] = [evidence_content_view(item) for item in value["seal_records"]]
-    return result
+    """返回规则结果，不触碰字段值和业务配置 JSON。"""
+    return dict(value)
 
 
-def review_content_view(value: dict[str, Any]) -> dict[str, Any]:
-    """历史和新复核快照共用的证据视图，保留原记录不变。"""
-    result = result_content_view(value)
-    if "evidence" in value:
-        result["evidence"] = evidence_content_view(value["evidence"])
-    if "evidences" in value and value["evidences"] is not None:
-        result["evidences"] = [evidence_content_view(item) for item in value["evidences"]]
-    return result
-
-
-def _check_evidence_content(
-    texts: list[str], quote_text: str, *, raw_value: Any = None,
-    value_type: str | None = None, unit: str | None = None, currency: str | None = None,
-) -> str:
-    """核对所属产物中的引文和字段值，不依赖模型声明的位置。"""
+def _check_evidence_content(texts: list[str], quote_text: str) -> str:
+    """仅定位引文；不核对金额、日期、单位或抽取值。"""
     quoted = _locatable_text(quote_text)
-    quote_found = bool(quoted) and any(quoted in _locatable_text(text) for text in texts)
-    if raw_value is None:
-        return "FOUND" if quote_found else ("NOT_FOUND" if quoted else "NOT_CHECKABLE")
-    supported = _evidence_supports_value(
-        raw_value, quote_text, value_type=value_type, unit=unit, currency=currency,
-    )
-    if quote_found and supported:
-        return "FOUND"
-    if supported and any(
-        _evidence_supports_value(raw_value, text, value_type=value_type, unit=unit, currency=currency)
-        for text in texts
-    ):
-        return "VALUE_FOUND"
-    return "NOT_FOUND"
-
-
-def _verify_evidence_content(
-    artifact: StoredArtifact, evidence: Any, *, raw_value: Any = None,
-    value_type: str | None = None, unit: str | None = None, currency: str | None = None,
-) -> str:
-    """按所属处理产物的真实文本核对内容；没有可核对文本时如实标记。"""
-    pages = _artifact_page_text(artifact)
-    if pages is None:
+    if not quoted:
         return "NOT_CHECKABLE"
-    return _check_evidence_content(
-        list(pages.values()), evidence.quote_text, raw_value=raw_value,
-        value_type=value_type, unit=unit, currency=currency,
-    )
+    return "FOUND" if any(quoted in _locatable_text(text) for text in texts) else "NOT_FOUND"
+
+
+def artifact_content_texts(content: Any) -> list[str]:
+    """只收集实际文本，不把 JSON 转义字符当成原文。"""
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, dict):
+        return [text for value in content.values() for text in artifact_content_texts(value)]
+    if isinstance(content, list):
+        return [text for value in content for text in artifact_content_texts(value)]
+    return []
+
+
+def fact_evidence_ids(db: Session, task: AuditTask, fact: Any) -> list[int]:
+    """按事实的字段身份和来源执行批次读取证据，避免串用另一版字段。"""
+    if fact.fact_kind == "DERIVED":
+        return list(db.scalars(select(Evidence.id).join(RuleResult, Evidence.rule_result_id == RuleResult.id).where(
+            RuleResult.audit_task_id == task.id, RuleResult.node_execution_id == fact.source_execution_id,
+            RuleResult.rule_code == fact.calculation_rule_code)))
+    from ...domain.fact_projection import field_identity_index, fact_identity
+    index = field_identity_index({field["field_key"]: field for field in task.task_schema_json["fields"]})
+    key = index.get(fact_identity(fact))
+    if key is None:
+        raise BusinessError("TASK_FACT_FIELD_UNDECLARED", "事实证据无法关联冻结的完整字段身份", status_code=500,
+                            details={"fact_id": fact.id})
+    return list(db.scalars(select(Evidence.id).join(TaskFieldValue, Evidence.field_value_id == TaskFieldValue.id).where(
+        TaskFieldValue.audit_task_id == task.id, TaskFieldValue.field_key == key,
+        TaskFieldValue.material_key == fact.material_key, TaskFieldValue.is_current.is_(True),
+        TaskFieldValue.extraction_execution_id == fact.source_execution_id,
+        Evidence.rule_result_id.is_(None))))
+
+
+def save_artifact_references(db: Session, task: AuditTask, execution: Any, rule_result: RuleResult, rule: dict[str, Any],
+                             verdict: dict[str, Any] | None) -> list[int]:
+    """保存已核对的工具产物引用；字段引用绑定本次真实抽取记录。"""
+    definitions = {field["field_key"]: field for field in rule.get("output_definitions") or []}
+    evidence_ids = []
+    seen = set()
+    for reference in (verdict or {}).get("evidence") or []:
+        artifact_id = reference.get("artifact_id")
+        if artifact_id is None:
+            continue
+        artifact = db.get(StoredArtifact, artifact_id)
+        if artifact is None or artifact.audit_task_id != task.id or artifact.status != "READY":
+            raise BusinessError("RULE_EVIDENCE_ARTIFACT_INVALID", "证据引用的产物不属于当前任务的成功产物", status_code=500)
+        output_code = reference.get("output_code")
+        field_value = None
+        if output_code is not None:
+            definition = definitions[output_code]
+            if reference.get("material_key") != definition["material_key"]:
+                raise BusinessError("RULE_EVIDENCE_SOURCE_INVALID", "字段证据与声明材料不一致")
+            field_value = db.scalar(select(TaskFieldValue).where(
+                TaskFieldValue.audit_task_id == task.id, TaskFieldValue.field_key == output_code,
+                TaskFieldValue.document_upload_id == artifact.document_upload_id,
+                TaskFieldValue.extraction_execution_id == execution.id, TaskFieldValue.is_current.is_(True)))
+            # 没有本次抽取记录（例如沿用人工值）时，引用只作规则依据。
+        identity = (artifact.id, field_value.id if field_value else None, reference.get("quote_text"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        evidence = Evidence(evidence_no=public_no("EVD"), audit_task_id=task.id,
+                            document_upload_id=artifact.document_upload_id, artifact_id=artifact.id,
+                            field_value_id=field_value.id if field_value else None,
+                            rule_result_id=None if field_value else rule_result.id,
+                            quote_text=reference.get("quote_text") or "")
+        db.add(evidence)
+        db.flush()
+        if field_value:
+            if field_value.evidence_id is None:
+                field_value.evidence_id = evidence.id
+            evidence_ids.append(evidence.id)
+    return evidence_ids
 
 
 def _evidence_snapshot(db: Session, evidence_id: int | None) -> dict[str, Any] | None:
@@ -204,45 +223,18 @@ def _fact_evidence_suffix(evidence_by_id: dict[int, Evidence], fact: TaskFieldVa
 def _quote_check_of(db: Session, evidence: Evidence) -> str:
     """一条证据的内容依据结论：引文能否在它所属的处理产物里找到原文。
 
-    逐条按所属产物重新核对，不落库、不改写历史记录；与抽取时共用内容核对口径，
-    不借用其它产物中的引文或字段值。
+    逐条按所属产物定位引文，不落库，不比较字段值或业务口径。
     """
     if not evidence.artifact_id or not (evidence.quote_text or "").strip():
         return "NOT_CHECKABLE"
     artifact = db.get(StoredArtifact, evidence.artifact_id)
     if artifact is None:
         return "NOT_CHECKABLE"
-    pages = _artifact_page_text(artifact)
-    if pages is None:
+    payload = _artifact_payload(artifact)
+    texts = artifact_content_texts(payload.content)
+    if artifact.artifact_type == "OCR":
+        texts.append("\n\n".join(page["text"] for page in payload.content["pages"]))
+    texts.extend(item.quote_text for item in payload.evidence)
+    if not texts:
         return "NOT_CHECKABLE"
-    field_value = None
-    if evidence.field_value_id:
-        task = db.get(AuditTask, evidence.audit_task_id)
-        indexed = db.get(TaskFieldValue, evidence.field_value_id)
-        if indexed is not None and task is not None:
-            field_value = task_csv_service.from_index(db, task, TaskFieldValue, [indexed])[0]
-    evidence_value = field_value.raw_value if field_value else None
-    value_type = unit = currency = None
-    if field_value is not None:
-        task = db.get(AuditTask, evidence.audit_task_id)
-        field = next(
-            (
-                item
-                for item in ((task.task_schema_json or {}).get("fields") or [])
-                if item.get("field_key") == field_value.field_key
-                and item.get("material_key") == field_value.material_key
-            ),
-            {},
-        ) if task is not None else {}
-        value_type = field.get("value_type")
-        unit = field.get("unit")
-        currency = field.get("currency")
-    if field_value and evidence.field_path and isinstance(field_value.normalized_value_json, dict):
-        evidence_value = field_value.normalized_value_json.get(evidence.field_path)
-        property_schema = ((field.get("structure_schema") or {}).get("properties") or {}).get(evidence.field_path)
-        value_type = property_schema.get("type") if isinstance(property_schema, dict) else None
-        unit = currency = None
-    return _check_evidence_content(
-        list(pages.values()), evidence.quote_text, raw_value=evidence_value,
-        value_type=value_type, unit=unit, currency=currency,
-    )
+    return _check_evidence_content(texts, evidence.quote_text)

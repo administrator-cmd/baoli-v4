@@ -11,8 +11,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = BACKEND_DIR.parent
 
 # 业务库与开发验证库是两个明确的部署目标。这里集中声明允许的库名，
-# database.py、checkpoint 与维护脚本共用同一口径，避免只改一处导致应用和脚本
-# 实际连接到不同目标。其它库名一律拒绝，防止误把清库或 checkpoint 操作指向未知库。
+# database.py 与维护脚本共用同一口径，避免只改一处导致应用和脚本实际连接到不同目标。
+# 其它库名一律拒绝，防止误把清库操作指向未知库。
 ALLOWED_DATABASE_NAMES = frozenset({"baoli_v4", "baoli_v4_dev"})
 
 
@@ -50,8 +50,6 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str | None = None
     data_dir: Path = Path("data")
-    # 执行契约的版本与名称；业务规则来自 LLM 解析的 JSON。
-    node_profile_path: Path = Path("backend/config/node_profile.json")
     # 上传入口的体量上限。两者互相独立：规则库是配置表，业务材料是合同/协议扫描件，
     # 不是一回事，不能共用一个数值。
     # 只校验为正数，不设固定上界：真实运行环境里几十 MiB 的扫描件是正常的，
@@ -69,6 +67,9 @@ class Settings(BaseSettings):
     llm_baseurl: str | None = None
     llm_apikey: SecretStr | None = None
     llm_model_name: str | None = None
+    # 规则库解析的供应商推理强度；未配置时不传，由供应商决定。
+    # 与审核任务模型请求分开，避免复杂规则库整理耗尽长响应时间。
+    rulebook_llm_reasoning_effort: str | None = None
     # 工具调用循环的轮数上限。达到上限时审核流程显式失败（LLM_TOOL_LOOP_LIMIT），
     # 不把「跑到上限」当作结论，也不静默降级成普通文本解析。
     # 0 表示不设上限，由调用方自行控制终止——上限是安全阀，不是业务默认。
@@ -90,28 +91,12 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=900.0, gt=0)
     log_level: str = "INFO"
 
-    # 审核任务 RAG（本地 Embedding + 任务范围检索）
-    # 本地嵌入模型目录。必须指向本机已经存在的模型；系统不会自动下载权重，
-    # 也不会切换到远程模型或云 Embedding。留空表示未配置，需要检索的规则会明确报错。
-    embedding_model_path: Path | None = None
-    # 嵌入模型标识与修订号：它们与切分方式一起决定索引版本，模型变化必须新建索引版本。
-    embedding_model_id: str = "shibing624/text2vec-base-chinese"
-    embedding_model_revision: str = "183bb99aa7af74355fb58d16edf8c13ae7c5433e"
-    # 分块版本：切分规则或预处理变化时必须递增，否则旧索引会被当成当前索引。
-    embedding_chunk_version: str = "chunk-v1"
-    # 单次嵌入的批大小与检索候选上限。候选上限只是可说明的检索参数，
-    # 不构成风险阈值，也不允许静默截掉材料后宣称检查完整。
-    embedding_batch_size: int = Field(default=16, ge=1, le=256)
-    retrieval_top_k: int = Field(default=8, ge=1, le=64)
-    # 排序后返回正文的条数上限，避免把整份合同塞进一次判断的上下文。
-    retrieval_context_chunks: int = Field(default=5, ge=1, le=32)
-
     @field_validator(
         "database_url",
-        "embedding_model_path",
         "llm_baseurl",
         "llm_apikey",
         "llm_model_name",
+        "rulebook_llm_reasoning_effort",
         "service_8018_url",
         "service_8010_url",
         "ocr_service_url",
@@ -144,24 +129,6 @@ class Settings(BaseSettings):
         if not root.is_absolute():
             root = PROJECT_DIR / root
         return root.resolve()
-
-    @property
-    def resolved_node_profile_path(self) -> Path:
-        """执行契约目录的绝对路径。"""
-        path = self.node_profile_path
-        if not path.is_absolute():
-            path = PROJECT_DIR / path
-        return path.resolve()
-
-    @property
-    def resolved_embedding_model_path(self) -> Path | None:
-        """本地嵌入模型的绝对路径；未配置时返回 None（需要检索的规则会明确报错）。"""
-        path = self.embedding_model_path
-        if path is None:
-            return None
-        if not path.is_absolute():
-            path = PROJECT_DIR / path
-        return path.resolve()
 
     @staticmethod
     def _secret_value(value: SecretStr | None) -> str | None:

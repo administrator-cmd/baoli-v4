@@ -2,12 +2,12 @@
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { DraftFieldItem, DraftMaterialItem, ScenarioDraftView } from "@/api/contracts";
+import type { DraftFieldItem, DraftMaterialItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
 import {
   createDraftField,
   deleteDraftField,
-  getSceneDraft,
+  getSceneConfiguration,
   updateDraftField,
 } from "@/api/scenes";
 import {
@@ -42,10 +42,11 @@ const emit = defineEmits<{
 
 const fields = ref<DraftFieldItem[]>([]);
 const materials = ref<DraftMaterialItem[]>([]);
-const draft = ref<ScenarioDraftView | null>(null);
+const draft = ref<ScenarioConfigurationView | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
+let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 function fieldExecutionLabel(item: DraftFieldItem): string {
@@ -106,6 +107,7 @@ const form = reactive({
 const dependencyIssue = ref<{ title: string; entries: string[] } | null>(null);
 
 async function load(): Promise<void> {
+  const sequence = ++loadSequence;
   if (!props.scenarioCode) {
     fields.value = [];
     materials.value = [];
@@ -115,16 +117,18 @@ async function load(): Promise<void> {
   loading.value = true;
   loadError.value = null;
   try {
-    const payload = await getSceneDraft(props.scenarioCode);
+    const payload = await getSceneConfiguration(props.scenarioCode);
+    if (sequence !== loadSequence) return;
     draft.value = payload;
     fields.value = payload.fields;
     materials.value = payload.materials;
   } catch (error) {
+    if (sequence !== loadSequence) return;
     fields.value = [];
     materials.value = [];
     loadError.value = error instanceof Error ? error.message : "字段配置读取失败";
   } finally {
-    loading.value = false;
+    if (sequence === loadSequence) loading.value = false;
   }
 }
 
@@ -379,8 +383,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             </el-select>
           </el-form-item>
           <el-form-item label="字段编号">
-            <el-input v-model="form.source_ref" maxlength="80" placeholder="例如：FD-001；导出规则库时写回「字段编号」列" />
-            <div class="text-hint">保留规则库已有的业务编号；没有编号时可留空，系统用内部身份关联字段。</div>
+            <el-input v-model="form.source_ref" maxlength="80" placeholder="例如：FD-001" />
           </el-form-item>
           <el-form-item label="字段名称" required>
             <el-input v-model="form.name" maxlength="255" placeholder="例如：应收账款金额" />
@@ -400,7 +403,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
                 :disabled="!extractionStrategySupports(item.value, form.value_type)"
               />
             </el-select>
-            <div class="text-hint">模型按字段要求直接抽取；一个字段包含多个属性时可声明结构化产出。</div>
           </el-form-item>
           <el-form-item v-if="form.extraction_strategy === 'STRUCTURED'" label="结构定义" required>
             <el-input
@@ -409,7 +411,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
               :rows="10"
               placeholder='例如：{"type":"object","properties":{"付款期限":{"type":"string"}},"required":["付款期限"],"additionalProperties":false}'
             />
-            <div class="text-hint">填写 JSON Schema。系统按这个结构校验模型返回值，并要求每个有值属性分别提供原文证据。</div>
           </el-form-item>
           <el-form-item label="单位">
             <el-input v-model="form.unit" maxlength="40" placeholder="按规则库填写（如：件、%、元）；不填写表示未声明" />
@@ -426,9 +427,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <el-select v-model="form.statement_scope" filterable allow-create clearable style="width: 100%" placeholder="不涉及时留空">
               <el-option v-for="item in statementScopeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
-            <div class="text-hint">
-              不涉及期间或报表口径时可选「不适用」，计算按字段声明的实际口径定位事实。
-            </div>
           </el-form-item>
           <el-form-item label="产物来源">
             <el-select v-model="form.artifact_source" clearable style="width: 100%" placeholder="留空表示由常规字段抽取提供">
@@ -439,7 +437,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
                 :label="item.label"
               />
             </el-select>
-            <div class="text-hint">选择「印章识别」表示该字段取自印章识别产物；主体核对按这条声明确定待核对主体，不靠字段名猜。</div>
           </el-form-item>
           <el-form-item label="是否必需">
             <el-radio-group v-model="form.required">

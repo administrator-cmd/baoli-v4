@@ -1,6 +1,8 @@
 from collections.abc import Generator
 
+import pymysql
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError, DisconnectionError, InterfaceError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings, validated_database_url
@@ -22,6 +24,17 @@ def _validated_database_url():
 
 engine = create_engine(_validated_database_url(), pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def is_storage_unavailable(exc: Exception) -> bool:
+    """识别连接及数据库运行故障，不按异常模块把所有数据库错误都当成不可达。
+
+    调用方据此区分「稍后重试可能成功」和「这次执行本身有缺陷」，两者的处理方式不同。
+    """
+    return isinstance(
+        exc,
+        (pymysql.OperationalError, pymysql.InterfaceError, OperationalError, InterfaceError, DisconnectionError),
+    ) or (isinstance(exc, DBAPIError) and exc.connection_invalidated)
 
 
 def get_db() -> Generator[Session, None, None]:

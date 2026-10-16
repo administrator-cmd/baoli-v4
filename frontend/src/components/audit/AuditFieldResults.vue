@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import { FileSearch } from "lucide-vue-next";
 
 import type { AuditFieldView } from "@/api/audits";
+import DrawerPanel from "@/components/DrawerPanel.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import {
@@ -12,20 +13,7 @@ import {
   statusLabel,
 } from "@/constants/labels";
 
-/**
- * 字段抽取结果。
- *
- * 阅读顺序固定为：字段与来源材料 → 原文内容 → 标准化结果 → 当前状态 → 事实来源 → 操作。
- * 原文与标准化结果分列：原文是材料里真实写着的那几个字，标准化结果是系统为比较
- * 确定性算出来的值。两者不是一回事，合并成一格会让「系统算成了什么」和「材料里写了什么」
- * 无法对照，也无法发现标准化出错。
- *
- * 标准化结果不代表审核通过：它只说明系统按字段类型把原文算成了可比对的值。
- * 人工已确认的有效值（事实来源=人工纠错 / 状态=已复核）单独标注。
- *
- * 未取到值时区分原因：材料未上传、本次未执行抽取、抽取失败、未抽取到——它们是
- * 四种不同的缺什么，统一写成「字段为空」会让人不知道该去补哪一步。
- */
+/** 字段列表展示名称、抽取结果和状态；完整取值、来源和纠错入口在详情中。 */
 const props = defineProps<{
   fields: AuditFieldView[];
   /** 字段抽取节点是否已经执行过；未执行时说明原因，而不是显示成空值。 */
@@ -91,15 +79,6 @@ function normalizedText(field: AuditFieldView): string {
   return "没有可标准化的原文";
 }
 
-/** 原文与标准化结果是否不同：不同才需要并排提示，避免同值重复两次。 */
-function normalizedDiffers(field: AuditFieldView): boolean {
-  const normalized = field.normalized_value;
-  if (normalized === null || normalized === undefined) {
-    return false;
-  }
-  return String(field.raw_value ?? "") !== String(normalized);
-}
-
 /**
  * 人工已确认的有效值。
  *
@@ -117,6 +96,18 @@ function humanConfirmedText(field: AuditFieldView): string | null {
   return "人工已确认该字段在材料中不存在";
 }
 
+const detailField = shallowRef<AuditFieldView | null>(null);
+
+function extractedText(field: AuditFieldView): string {
+  const value = field.normalized_value;
+  if (value !== null && value !== undefined && value !== "") return formatBusinessValue(value);
+  if (field.status === "NOT_PRESENT") return "材料未载明";
+  if (field.status === "NOT_APPLICABLE") return "本次不适用";
+  if (field.extraction_enabled === false) return "未启用抽取";
+  if (field.material_uploaded === false) return "材料未上传";
+  return "未取到有效值";
+}
+
 const search = ref("");
 const statusFilter = ref("ALL");
 
@@ -130,8 +121,9 @@ const filters = [
   {
     value: "UNRESOLVED",
     label: "未取到值",
-    statuses: ["NOT_PRESENT", "EVIDENCE_UNCLEAR", "NORMALIZATION_FAILED", "EXTRACTION_FAILED"],
+    statuses: ["NOT_PRESENT", "EVIDENCE_UNCLEAR", "NORMALIZATION_FAILED", "EXTRACTION_FAILED", "EVIDENCE_INSUFFICIENT"],
   },
+  { value: "NOT_APPLICABLE", label: "不适用", statuses: ["NOT_APPLICABLE"] },
   { value: "NOT_EXECUTED", label: "未执行", statuses: ["NOT_EXECUTED", "PENDING"] },
 ];
 
@@ -178,11 +170,11 @@ const emptyDescription = computed(() => {
   <div v-else class="stack">
     <div class="field-toolbar">
       <el-input v-model="search" clearable placeholder="搜索字段、材料或原文" aria-label="搜索字段结果" class="field-search" />
-      <el-radio-group v-model="statusFilter" aria-label="按字段状态筛选">
-        <el-radio-button v-for="filter in filters" :key="filter.value" :value="filter.value">
-          {{ filter.label }}（{{ fields.filter((field) => matchesFilter(field, filter)).length }}）
-        </el-radio-button>
-      </el-radio-group>
+      <el-select v-model="statusFilter" aria-label="按字段状态筛选" class="field-status-filter">
+        <el-option v-for="filter in filters" :key="filter.value" :value="filter.value"
+          :label="`${filter.label}（${fields.filter((field) => matchesFilter(field, filter)).length}）`" />
+      </el-select>
+      <span class="text-hint field-count">显示 {{ rows.length }} / {{ fields.length }} 项</span>
     </div>
 
     <el-alert
@@ -197,118 +189,60 @@ const emptyDescription = computed(() => {
       <el-button @click="search = ''; statusFilter = 'ALL'">清除筛选</el-button>
     </el-empty>
 
-    <el-table v-else :data="rows" border stripe size="small">
-      <el-table-column label="字段名称" min-width="150" show-overflow-tooltip>
+    <el-table v-else :data="rows" class="field-table" @row-click="(field: AuditFieldView) => detailField = field">
+      <el-table-column label="字段" min-width="240">
         <template #default="{ row }">
           <span class="cell-strong">{{ row.name }}</span>
-          <div v-if="row.fact_revision_no" class="table-note">事实修订 {{ row.fact_revision_no }}</div>
+          <div class="table-note">{{ row.material_name }}</div>
         </template>
       </el-table-column>
-
-      <el-table-column label="来源材料" min-width="140" show-overflow-tooltip>
+      <el-table-column label="抽取结果" min-width="360">
         <template #default="{ row }">
-          <span>{{ row.material_name }}</span>
-          <div v-if="row.material_required" class="table-note">必传</div>
+          <div class="field-value">{{ extractedText(row) }}</div>
         </template>
       </el-table-column>
-
-      <!-- 原文内容：材料里真实写着的内容，不做任何改写 -->
-      <el-table-column label="原文内容" min-width="200">
-        <template #default="{ row }">
-          <div class="cell-quote">{{ rawText(row) }}</div>
-        </template>
-      </el-table-column>
-
-      <!-- 标准化结果：系统按字段类型确定性算出的可比对值；与原文不同才单独强调 -->
-      <el-table-column label="标准化结果" min-width="150">
-        <template #default="{ row }">
-          <span :class="{ 'cell-strong': normalizedDiffers(row) }">{{ normalizedText(row) }}</span>
-          <div v-if="normalizedDiffers(row)" class="table-note">由原文确定性算出，不代表审核通过</div>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="当前状态" width="130">
+      <el-table-column label="状态" width="132">
         <template #default="{ row }">
           <StatusBadge :status="row.status" :tone="fieldStatusTone(row.status)" />
-          <div v-if="humanConfirmedText(row)" class="table-note">已有人工确认值</div>
         </template>
       </el-table-column>
-
-      <el-table-column label="事实来源" width="120">
+      <el-table-column label="操作" width="100" fixed="right" align="center">
         <template #default="{ row }">
-          <StatusBadge
-            :status="row.origin === 'HUMAN_CORRECTION' ? 'MANUAL' : 'DOCUMENT_EXTRACTION'"
-            :label="factOriginLabel(row.origin)"
-            :tone="row.origin === 'HUMAN_CORRECTION' ? 'info' : 'neutral'"
-          />
-        </template>
-      </el-table-column>
-
-      <el-table-column label="人工确认值" min-width="160">
-        <template #default="{ row }">
-          <span v-if="humanConfirmedText(row)">{{ humanConfirmedText(row) }}</span>
-          <span v-else class="text-muted">服务端未返回人工确认值</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="原文依据" min-width="170">
-        <template #default="{ row }">
-          <div v-if="evidenceItems(row).length" class="table-note">已记录 {{ evidenceItems(row).length }} 条原文证据</div>
-          <div v-else-if="row.extraction_enabled === false" class="table-note">本方案未启用自动抽取</div>
-          <div v-else-if="row.material_uploaded === false" class="table-note">材料未上传，无法抽取</div>
-          <div v-else-if="row.status === 'PENDING' || row.status === 'NOT_EXECUTED'" class="table-note">
-            本次未执行抽取
-          </div>
-          <div v-else-if="row.status === 'EXTRACTION_FAILED'" class="table-note">抽取失败，没有证据</div>
-          <div v-else class="table-note">已抽取，未记录原文证据</div>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="操作" width="170" fixed="right" align="center">
-        <template #default="{ row }">
-          <el-button v-if="evidenceItems(row).length === 1" link type="primary" size="small" title="查看证据原文" @click="openEvidence(row, evidenceItems(row)[0].evidence_no)">
-            <template #icon><FileSearch :size="15" /></template>
-            原文证据
-          </el-button>
-          <el-dropdown
-            v-else-if="evidenceItems(row).length > 1"
-            trigger="click"
-            @command="(evidenceNo: unknown) => openEvidence(row, String(evidenceNo))"
-          >
-            <el-button link type="primary" size="small" title="选择字段属性的原文证据">
-              <template #icon><FileSearch :size="15" /></template>
-              原文证据（{{ evidenceItems(row).length }}）
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item
-                  v-for="item in evidenceItems(row)"
-                  :key="item.evidence_no"
-                  :command="item.evidence_no"
-                >
-                  {{ item.field_path || "字段原文" }}
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <el-button
-            v-if="correctionEnabled"
-            link
-            type="primary"
-            size="small"
-            title="发起字段纠错"
-            @click="$emit('correct', row)"
-          >
-            纠正
-          </el-button>
+          <el-button link type="primary" @click.stop="detailField = row">详情</el-button>
         </template>
       </el-table-column>
     </el-table>
-
-    <p class="text-hint">
-      标准化结果只表示系统把原文算成了可比对的值，不代表审核通过；是否通过要看使用该字段的规则结论。
-    </p>
   </div>
+  <DrawerPanel :open="Boolean(detailField)" :title="detailField?.name ?? '字段详情'" size="min(680px, 100%)" @close="detailField = null">
+    <template v-if="detailField">
+      <div class="field-detail-head">
+        <StatusBadge :status="detailField.status" :tone="fieldStatusTone(detailField.status)" />
+        <span class="text-muted">{{ detailField.material_name }}</span>
+      </div>
+      <h4 class="app-section-title">抽取原始值</h4>
+      <div class="detail-value">{{ rawText(detailField) }}</div>
+      <h4 class="app-section-title">标准化结果</h4>
+      <div class="detail-value">{{ normalizedText(detailField) }}</div>
+      <el-descriptions :column="1" class="block-gap">
+        <el-descriptions-item v-if="detailField.origin" label="事实来源">{{ factOriginLabel(detailField.origin) }}</el-descriptions-item>
+        <el-descriptions-item v-if="humanConfirmedText(detailField)" label="人工确认值">{{ humanConfirmedText(detailField) }}</el-descriptions-item>
+        <el-descriptions-item v-if="detailField.extraction_message && detailField.extraction_presentation_version === 2" label="抽取说明">{{ detailField.extraction_message }}</el-descriptions-item>
+      </el-descriptions>
+      <el-collapse v-if="detailField.extraction_message && detailField.extraction_presentation_version !== 2" class="block-gap">
+        <el-collapse-item title="原执行说明（该结果尚未保存结构化说明）" name="original">
+          <div class="detail-value">{{ detailField.extraction_message }}</div>
+        </el-collapse-item>
+      </el-collapse>
+      <div class="field-detail-actions">
+        <el-button v-for="(item, index) in evidenceItems(detailField)" :key="item.evidence_no" @click="openEvidence(detailField, item.evidence_no)">
+          <template #icon><FileSearch :size="15" /></template>
+          {{ item.field_path || (evidenceItems(detailField).length > 1 ? `原文证据 ${index + 1}` : "原文证据") }}
+        </el-button>
+        <span v-if="!evidenceItems(detailField).length" class="text-hint">未记录原文证据</span>
+        <el-button v-if="correctionEnabled" type="primary" plain @click="$emit('correct', detailField)">纠正字段</el-button>
+      </div>
+    </template>
+  </DrawerPanel>
 </template>
 
 <style scoped>
@@ -316,25 +250,62 @@ const emptyDescription = computed(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .field-search {
   width: min(100%, 320px);
 }
 
-.field-toolbar :deep(.el-radio-group) {
+.field-status-filter {
+  width: 180px;
+}
+
+.field-count {
+  margin-left: auto;
+}
+
+.field-table :deep(.el-table__cell) {
+  padding: 6px 0;
+  vertical-align: top;
+}
+
+.field-table :deep(.cell) {
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.field-table :deep(.el-table__row) {
+  cursor: pointer;
+}
+
+.field-value {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+
+.field-detail-head,
+.field-detail-actions {
+  display: flex;
   flex-wrap: wrap;
-  gap: 4px 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.field-detail-actions {
+  margin-top: 20px;
 }
 
 .cell-strong {
   font-weight: 600;
 }
 
-.cell-quote {
+.detail-value {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  line-height: 1.7;
+  line-height: 1.55;
 }
 </style>

@@ -85,6 +85,11 @@ export function setPlanEnabled(planCode: string, enabled: boolean): Promise<Plan
   });
 }
 
+/** 逻辑删除方案；已创建任务保留自己的冻结配置。 */
+export function deletePlan(planCode: string): Promise<PlanSelection> {
+  return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`, { method: "DELETE" });
+}
+
 /** 恢复已逻辑删除的方案。 */
 export function restorePlan(planCode: string): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/restore`, { method: "POST" });
@@ -99,7 +104,7 @@ export function copyPlan(planCode: string, planName: string | null): Promise<Pla
   });
 }
 
-/** 方案的可编辑配置：材料 / 字段 / 全部规则 / 报告章节（节点与 Sheet 只读返回）。 */
+/** 方案的可编辑配置：材料 / 字段 / 审核规则 / 完整计算定义 / 报告章节。 */
 export function getPlanConfig(planCode: string): Promise<PlanConfig> {
   return request<PlanConfig>(`/plans/${encodeURIComponent(planCode)}/config`);
 }

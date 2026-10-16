@@ -1,7 +1,6 @@
 /** 管理端列表：材料、上传、证据、执行记录、复核记录与操作日志。 */
 
 import type { ApiResponse, JsonValue } from "./common";
-import type { TaskReviewJudgment } from "./audits";
 
 export interface DocumentRow {
   document_no: string;
@@ -11,7 +10,6 @@ export interface DocumentRow {
   material_name: string;
   required: boolean;
   status: string;
-  upload_no: string | null;
   filename: string | null;
   size_bytes: number | null;
   uploaded_at: string | null;
@@ -83,43 +81,6 @@ export interface ExecutionDetail extends ExecutionRow {
   plan_bound: boolean | null;
   operation_no: string | null;
   created_at: string;
-}
-
-export interface ReviewRow {
-  review_no: string;
-  task_no: string;
-  task_name: string;
-  scenario_name: string;
-  review_type: string;
-  object_name: string;
-  status: string;
-  system_judgment_status: string | null;
-  system_judgment_message: string | null;
-  decision: string | null;
-  effective_status: string | null;
-  basis_type: string | null;
-  before_value: string | null;
-  after_value: string | null;
-  task_status: string | null;
-  task_current_node: string | null;
-  updated_at: string;
-}
-
-export interface TaskReviewRow {
-  review_no: string;
-  review_type: string;
-  object_name: string;
-  object_kind: "RULE" | "FIELD" | "MATERIAL" | "UNKNOWN";
-  status: string;
-  system_judgment: TaskReviewJudgment;
-  decision: string | null;
-  business_note: string | null;
-  before_value: string | null;
-  after_value: string | null;
-  basis_type: string | null;
-  decision_command_no: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface OperationLogRow {

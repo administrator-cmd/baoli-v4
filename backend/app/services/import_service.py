@@ -1,60 +1,38 @@
-import json
 from datetime import UTC, datetime
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from fastapi import UploadFile
-from sqlalchemy import delete, func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..repositories import configuration_store as config_store
-
+from ..repositories.scenario_repository import find_latest_published_version
 from ..config import get_settings
 from ..domain.manifest import (
     draft_config_of_import,
-    import_origin_of,
     rule_comparison_view,
 )
-from ..domain.proposals import ProposalBundle
-from ..domain.workbook import WorkbookIR
 from ..common.exceptions import BusinessError
-from ..graphs.import_graph import (
-    run_sheet_conversion,
-    run_workbook_read,
-)
-from ..entity import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from ..entity import ImportJob
 from ..entity import (
     BackgroundOperation,
-    ScenarioDraft,
     ScenarioTemplate,
     ScenarioVersion,
+    ScenarioDraft,
 )
-from ..schema.dto import SheetBindingsRequest
 from .background_service import ACTIVE_STATUSES, assert_no_active_operation, latest_operation, operation_view
 from ..domain.identity import public_no
 from .operation_types import OBJECT_IMPORT_JOB
 from .operation_log_service import record_operation
 from ..domain import scenario_schema, node_profile
-from .storage_service import RULEBOOK_EXTENSIONS, save_upload
+from .storage_service import RULEBOOK_EXTENSIONS, resolve_storage_path, save_upload
+from .llm_service import convert_workbook
+from .workbook_service import read_workbook_ir
 
 
 # 工作表不参与解析时的状态值，保存选择与转换共用。
 METADATA_SHEET_STATUS = "EXCLUDED"
-
-
-def _bundle_coverage(bundle: ProposalBundle) -> dict[str, Any] | None:
-    """转换结果的来源覆盖记录。
-
-    coverage 由转换侧提供，旧版本没有该字段时保持 None；不在这里编造覆盖统计。
-    """
-    coverage = getattr(bundle, "coverage", None)
-    if coverage is None:
-        return None
-    if isinstance(coverage, dict):
-        return coverage
-    if hasattr(coverage, "model_dump"):
-        return coverage.model_dump(mode="json")
-    return None
 
 
 def _job_or_404(db: Session, job_no: str, *, lock: bool = False) -> ImportJob:
@@ -99,19 +77,12 @@ def _ensure_import_mutable(db: Session, job: ImportJob) -> None:
             status_code=409,
             details={"job_no": job.job_no, "scenario_code": job.scenario_code},
         )
-    if job.status == "PUBLISHED" or published_version_id is not None:
+    if published_version_id is not None:
         raise BusinessError(
             "IMPORT_ALREADY_PUBLISHED",
             "该导入作业已产生场景版本，不能再修改或重新编译",
             status_code=409,
         )
-
-
-
-
-def _is_template_metadata_sheet(sheet: ImportSheet) -> bool:
-    """只有空表由系统排除；说明内容由模型按真实单元格识别。"""
-    return sheet.snapshot_json["state"] == "EMPTY"
 
 
 
@@ -159,17 +130,17 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
         max_bytes=settings.max_rulebook_bytes,
     )
     try:
-        graph_state = run_workbook_read(
-            job_no=job_no,
-            source_path=relative_path,
+        workbook_ir = read_workbook_ir(
+            resolve_storage_path(relative_path),
             workbook_id=public_no("wb"),
             source_filename=upload.filename or f"规则库{suffix}",
             source_size=size,
             source_sha256=sha256,
+            profile_version=schema["profile_version"],
             scenario_code=scenario_code,
-            schema_json=schema,
+            schema_key=schema["schema_key"],
+            schema_version=schema["schema_version"],
         )
-        workbook_ir = WorkbookIR.model_validate(graph_state["workbook_ir"])
         job = ImportJob(
             job_no=job_no,
             source_filename=upload.filename or f"规则库{suffix}",
@@ -185,23 +156,8 @@ async def create_import_job(db: Session, upload: UploadFile, *, scenario_code: s
             schema_json=schema,
             profile_display_version=node_profile.NODE_PROFILE_VERSION,
             status="PARSED",
-            workbook_ir_json=workbook_ir.model_dump(mode="json"),
         )
         db.add(job)
-        db.flush()
-        # 默认选择所有非空表；布局与业务语义交由 LLM 理解。
-        for sheet in workbook_ir.sheets:
-            status = "EXCLUDED" if sheet.state == "EMPTY" else "BOUND"
-            db.add(
-                ImportSheet(
-                    import_job_id=job.id,
-                    sheet_key=sheet.sheet_key,
-                    sheet_name=sheet.name,
-                    visible=sheet.visible,
-                    status=status,
-                    snapshot_json=sheet.model_dump(mode="json"),
-                )
-            )
         db.commit()
         db.refresh(job)
         return job
@@ -215,237 +171,84 @@ def get_import_job(db: Session, job_no: str) -> ImportJob:
     return _job_or_404(db, job_no)
 
 
-def _proposal_business_view(
-    job: ImportJob,
-    sheet_names: dict[str, str],
-) -> dict[str, Any] | None:
-    """直接展示本次模型解析候选与真实来源，不叠加业务裁决。"""
-    proposals = job.proposals_json
-    if not isinstance(proposals, dict):
-        return None
-    effective = proposals
-    material_names = {
-        material["candidate_ref"]: material["name"]
-        for sheet in effective.get("sheets", [])
-        for material in sheet.get("materials", [])
+def _saved_proposals(job: ImportJob) -> dict[str, Any]:
+    """最终模型结果入库前已解析，读取时只确认有 JSON 对象。"""
+    if not isinstance(job.proposals_json, dict):
+        raise BusinessError("IMPORT_PROPOSALS_INVALID", "导入作业没有已保存的配置 JSON", status_code=409,
+                            details={"job_no": job.job_no})
+    return job.proposals_json
+
+
+def update_import_proposal(
+    db: Session, job_no: str, *, group: str, candidate_ref: str,
+    expected_job_revision: int, changes: dict[str, Any],
+) -> ImportJob:
+    """修改一项已解析业务配置，保留其身份、依赖和未编辑属性。"""
+    editable_attributes = {
+        "materials": {"name", "description", "required"},
+        "fields": {"name", "instruction", "required", "config_status"},
+        "rules": {"name", "requirement", "rule_role", "config_status"},
+        "calculations": {"rule_name", "formula", "requirement", "status"},
+        "report_sections": {"section_name", "content_instruction", "config_status"},
     }
-    field_labels = {
-        field["candidate_ref"]: (
-            f"{material_names[field['material_ref']]} · {field['name']}"
-            if field.get("material_ref") in material_names
-            else field["name"]
+    job = _job_or_404(db, job_no, lock=True)
+    _ensure_import_mutable(db, job)
+    assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
+    if job.draft_revision != expected_job_revision:
+        raise BusinessError(
+            "IMPORT_DRAFT_REVISION_CONFLICT", "解析结果已修改，请刷新后再保存", status_code=409,
+            details={"expected": expected_job_revision, "actual": job.draft_revision},
         )
-        for sheet in effective.get("sheets", [])
-        for field in sheet.get("fields", [])
-    }
-    rule_names: dict[str, str] = {}
-    for sheet in effective.get("sheets", []):
-        for rule in sheet.get("rules", []):
-            material_scope = [material_names.get(ref) or ref for ref in rule.get("material_refs", [])]
-            rule_names[rule["candidate_ref"]] = (
-                f"{rule['name']}（{'、'.join(material_scope)}）" if material_scope else rule["name"]
-            )
-    # 有效字段的值类型、单位与币种：规则比较视图据此展示双方口径，不做任何换算猜测。
-    field_meta = {
-        field["candidate_ref"]: {
-            "value_type": field["value_type"],
-            "unit": field.get("unit"),
-            "currency": field.get("currency"),
-        }
-        for sheet in effective.get("sheets", [])
-        for field in sheet.get("fields", [])
-    }
-    calculation_meta = {
-        item["result_code"]: {
-            "rule_name": item["rule_name"],
-        }
-        for item in effective.get("calculations", [])
-    }
-    sheets: list[dict[str, Any]] = []
-    # 原始候选用于保留来源事实；两者按 candidate_ref 一一对应。
-    origins = {
-        sheet["sheet_key"]: sheet for sheet in proposals.get("sheets", [])
-    }
-    for sheet in effective.get("sheets", []):
-        sheet_key = sheet.get("sheet_key")
-        sheet_name = sheet_names.get(sheet_key)
-        if not sheet_name:
-            raise BusinessError("IMPORT_PROPOSAL_SHEET_MISSING", "规则转换结果引用了不存在的工作表", status_code=500)
-        origin = origins.get(sheet_key, {})
-        origin_materials = {item["candidate_ref"]: item for item in origin.get("materials", [])}
-        origin_fields = {item["candidate_ref"]: item for item in origin.get("fields", [])}
-        origin_rules = {item["candidate_ref"]: item for item in origin.get("rules", [])}
-        rule_views: list[dict[str, Any]] = []
-        for item in sheet.get("rules", []):
-            comparison = rule_comparison_view(
+    unsupported = changes.keys() - editable_attributes[group]
+    if unsupported:
+        raise BusinessError("IMPORT_PROPOSAL_ATTRIBUTE_INVALID", "提交的属性不属于这类解析配置",
+                            details={"group": group, "attributes": sorted(unsupported)})
+    proposals = deepcopy(_saved_proposals(job))
+    item = next((item for item in proposals[group] if item["candidate_ref"] == candidate_ref), None)
+    if item is None:
+        raise BusinessError("IMPORT_PROPOSAL_NOT_FOUND", "解析结果中不存在该项配置", status_code=404,
+                            details={"group": group, "candidate_ref": candidate_ref})
+    item.update(changes)
+    if group == "rules" and changes.get("rule_role") == "CHECK" and item.get("operator") == "RISK_TRIGGER":
+        # 管理员明确改为普通核查后，不能仍被旧风险动作识别为风险规则。
+        item["operator"] = "LLM_EXECUTE"
+    job.proposals_json = proposals
+    job.draft_revision += 1
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(job)
+    return job
+
+
+def _proposal_business_view(job: ImportJob) -> dict[str, Any] | None:
+    """直接展示模型的业务配置，不要求来源坐标。"""
+    if job.proposals_json is None:
+        return None
+    proposals = _saved_proposals(job)
+    material_names = {item["candidate_ref"]: item["name"] for item in proposals["materials"]}
+    field_labels = {item["candidate_ref"]: item["name"] for item in proposals["fields"]}
+    rule_names = {item["candidate_ref"]: item["name"] for item in proposals["rules"]}
+    field_meta = {item["candidate_ref"]: item for item in proposals["fields"]}
+    calculation_meta = {item["result_code"]: item for item in proposals["calculations"]}
+    return {
+        "materials": proposals["materials"],
+        "fields": [
+            {**item, "material_name": material_names.get(item["material_ref"])}
+            for item in proposals["fields"]
+        ],
+        "rules": [
+            {**item, "comparison": rule_comparison_view(
                 item, material_names, field_labels, rule_names, field_meta,
                 calculation_meta=calculation_meta,
-            )
-            rule_views.append(
-                {
-                    "candidate_ref": item["candidate_ref"],
-                    "name": item["name"],
-                    "operator": item["operator"],
-                    "config_status": item.get("config_status"),
-                    "original": _origin_view(origin_rules.get(item["candidate_ref"]), ("name", "operator")),
-                    "comparison": comparison,
-                    "source_sheet": sheet_name,
-                    "source_row": item["source"]["row_no"],
-                    "source_cells": item["source"]["cells"],
-                }
-            )
-        sheets.append(
-            {
-                "sheet_key": sheet_key,
-                "sheet_name": sheet_name,
-                "suggested_role": sheet.get("suggested_role"),
-                "materials": [
-                    {
-                        "candidate_ref": item["candidate_ref"],
-                        "name": item["name"],
-                        "required": item["required"],
-                        # 材料业务说明随候选一起展示和发布，不是无用备注。
-                        "description": item.get("description", ""),
-                        "original": _origin_view(
-                            origin_materials.get(item["candidate_ref"]),
-                            ("name", "required", "description"),
-                        ),
-                        "source_sheet": sheet_name,
-                        "source_row": item["source"]["row_no"],
-                        "source_cells": item["source"]["cells"],
-                    }
-                    for item in sheet.get("materials", [])
-                ],
-                "fields": [
-                    {
-                        "candidate_ref": item["candidate_ref"],
-                        "name": item["name"],
-                        "value_type": item["value_type"],
-                        "unit": item.get("unit"),
-                        "currency": item.get("currency"),
-                        "required": item["required"],
-                        "instruction": item["instruction"],
-                        "material_ref": item["material_ref"],
-                        "material_name": material_names.get(item["material_ref"]),
-                        "original": _origin_view(
-                            origin_fields.get(item["candidate_ref"]),
-                            ("name", "value_type", "unit", "currency", "required", "instruction"),
-                        ),
-                        "source_sheet": sheet_name,
-                        "source_row": item["source"]["row_no"],
-                        "source_cells": item["source"]["cells"],
-                    }
-                    for item in sheet.get("fields", [])
-                ],
-                "rules": rule_views,
-                "report_sections": [
-                    {"section_name": item["section_name"]} for item in sheet.get("report_sections", [])
-                ],
-            }
-        )
-    original_calculations = {
-        item["candidate_ref"]: item for item in proposals.get("calculations", [])
+            )}
+            for item in proposals["rules"]
+        ],
+        "calculations": proposals["calculations"],
+        "report_sections": proposals["report_sections"],
     }
-
-    def nested_calc_sources(
-        rows: list[dict[str, Any]], originals: list[dict[str, Any]], key: str
-    ) -> list[dict[str, Any]]:
-        original_by_code = {row[key]: row for row in originals}
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            code = row.get(key)
-            original_row = original_by_code.get(code) if isinstance(code, str) else None
-            result.append({
-                "code": code if isinstance(code, str) else None,
-                "origin": import_origin_of(
-                    original_row, sheet_names=sheet_names, import_job_no=job.job_no
-                ) if original_row and original_row.get("source") else None,
-            })
-        return result
-
-    calculations: list[dict[str, Any]] = []
-    for item in effective.get("calculations", []):
-        candidate_ref = item["candidate_ref"]
-        original = original_calculations.get(candidate_ref)
-        if original is None:
-            raise BusinessError(
-                "IMPORT_CALC_ORIGIN_MISSING",
-                "计算候选找不到原始定义，无法核对跨表来源",
-                status_code=500,
-                details={"candidate_ref": candidate_ref},
-            )
-        rule_code = item["rule_code"]
-        source = item["source"]
-        sheet_key = source["sheet_key"]
-        sheet_name = sheet_names.get(sheet_key)
-        if not sheet_name:
-            raise BusinessError("IMPORT_PROPOSAL_SHEET_MISSING", "计算候选引用了不存在的工作表", status_code=500)
-        calculations.append(
-            {
-                "candidate_ref": candidate_ref,
-                "rule_code": rule_code,
-                "rule_name": item["rule_name"],
-                "formula": item["formula"],
-                "requirement": item.get("requirement", ""),
-                "business_context": item.get("business_context", {}),
-                "result_code": item["result_code"],
-                "result_type": item["result_type"],
-                "status": item["status"],
-                "parameters": item["parameters"],
-                "source_sheet": sheet_name,
-                "source_row": source["row_no"],
-                "source_cells": source["cells"],
-                "origin": import_origin_of(original, sheet_names=sheet_names, import_job_no=job.job_no),
-                "parameter_sources": nested_calc_sources(
-                    item["parameters"], original.get("parameters") or [], "parameter_code"
-                ),
-            }
-        )
-    return {"sheets": sheets, "calculations": calculations}
-
-
-def _origin_view(origin: dict[str, Any] | None, properties: tuple[str, ...]) -> dict[str, Any] | None:
-    """保留原始候选值，供页面在人工改过之后仍能对照原始识别结果。"""
-    if not isinstance(origin, dict):
-        return None
-    return {name: origin.get(name) for name in properties}
-
-
-def _issue_business_source(issue: ImportIssue, sheet_names: dict[str, str]) -> dict[str, Any]:
-    """把问题来源投影为工作表名称、行号和单元格，避免暴露候选引用。"""
-    payload = issue.source_json if isinstance(issue.source_json, dict) else {}
-    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
-    sheet_key = source.get("sheet_key")
-    return {
-        "target_type": payload.get("target_type"),
-        "sheet_name": sheet_names.get(sheet_key, sheet_key),
-        "row_no": source.get("row_no"),
-        "cells": source.get("cells", []),
-    }
-
-
-def _manifest_business_view(job: ImportJob) -> dict[str, Any] | None:
-    """场景草稿只向前端暴露名称标识；字段键和规则键属于内部技术字段。"""
-    manifest = job.manifest_draft_json
-    if not isinstance(manifest, dict):
-        return None
-    return {
-        "scene_code": manifest.get("scene_code"),
-        "scene_name": manifest.get("scene_name"),
-    }
-
-
-def _unprocessed_note(snapshot: dict[str, Any]) -> str | None:
-    """超出读取范围时明确说明未处理范围，不能宣称整份 Excel 已完整转换。"""
-    settings = get_settings()
-    notes: list[str] = []
-    if snapshot.get("rows_truncated"):
-        notes.append(f"本表共 {snapshot['max_row']} 行，预览仅显示前 {settings.workbook_preview_rows} 行，解析读取完整内容")
-    if snapshot.get("columns_truncated"):
-        notes.append(f"本表共 {snapshot['max_column']} 列，预览仅显示前 {settings.workbook_preview_columns} 列，解析读取完整内容")
-    if snapshot.get("cells_truncated"):
-        notes.append(f"部分单元格内容超过 {settings.workbook_cell_chars} 字，超出部分仅在预览中省略，解析读取完整原文")
-    return "；".join(notes) if notes else None
 
 
 def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
@@ -464,33 +267,8 @@ def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
     }
 
 
-def _ordered_sheets_of(db: Session, job_id: int) -> list[ImportSheet]:
-    """按上传顺序（也就是 Excel 里的 Sheet 顺序）读取本作业的工作表。
-
-    先只排 id，再按 id 取行，不直接对带 `snapshot_json` 的行做排序：`import_sheet` 每行带着
-    这张表的整份读取快照（实测单表 261 KB），而 MySQL 的 filesort 要求整行放进
-    `sort_buffer_size`（本机 256 KB），行一旦大于缓冲，查询直接报 1038 Out of sort memory，
-    整个导入详情页 500。只排 id 时参与排序的是 8 字节整数，与行大小无关。
-
-    这不是「调大缓冲」能根治的：快照大小由上传文件决定，没有上界，换更大的缓冲只是把同一个
-    错误推到更大的文件上。
-    """
-    ordered_ids = db.scalars(
-        select(ImportSheet.id).where(ImportSheet.import_job_id == job_id).order_by(ImportSheet.id)
-    ).all()
-    if not ordered_ids:
-        return []
-    rows = {item.id: item for item in db.scalars(select(ImportSheet).where(ImportSheet.id.in_(ordered_ids))).all()}
-    return [rows[item_id] for item_id in ordered_ids]
-
-
 def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
-    """导入作业的业务视图：工作表、问题、候选、草稿修订号与最新后台操作。"""
-    sheets = _ordered_sheets_of(db, job.id)
-    issues = db.scalars(select(ImportIssue).where(
-        ImportIssue.import_job_id == job.id,
-    ).order_by(ImportIssue.id)).all()
-    sheet_names = {item.sheet_key: item.sheet_name for item in sheets}
+    """导入作业的业务视图：二轮整理结果、修订号与最新后台操作。"""
     return {
         "job_no": job.job_no,
         "source_filename": job.source_filename,
@@ -499,57 +277,10 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
         "schema_key": job.schema_key,
         "schema_version": job.schema_version,
         "schema_json": _job_schema(job),
-        # 作业所属场景及执行契约摘要；解析范围来自实际工作表选择。
+        # 作业所属场景及执行契约摘要。
         "profile": _job_profile_summary(db, job),
         "draft_revision": job.draft_revision,
-        "sheets": [
-            {
-                "sheet_key": item.sheet_key,
-                "name": item.sheet_name,
-                "visible": item.visible,
-                "status": item.status,
-                # 只有空表标为系统排除；说明页和隐藏表不因名称或展示属性被排除。
-                "fixed_excluded": _is_template_metadata_sheet(item),
-                "header_candidates": list(item.snapshot_json.get("header_candidates") or []),
-                "summary": {
-                    "max_row": item.snapshot_json["max_row"],
-                    "max_column": item.snapshot_json["max_column"],
-                    "non_empty_rows": item.snapshot_json["non_empty_rows"],
-                    "used_range": item.snapshot_json.get("used_range"),
-                    "merged_ranges": item.snapshot_json["merged_ranges"],
-                    "truncated": any(
-                        item.snapshot_json[key]
-                        for key in ("rows_truncated", "columns_truncated", "cells_truncated")
-                    ),
-                    "unprocessed_note": _unprocessed_note(item.snapshot_json),
-                },
-                # WorkbookIR 内部保留完整来源事实；工作台只拿到有上限的预览单元格，
-                # 不返回原始的 cell_details 载荷。
-                "rows": [
-                    {"row_no": row["row_no"], "cells": row["cells"]}
-                    for row in item.snapshot_json["preview_rows"]
-                ],
-            }
-            for item in sheets
-        ],
-        "issues": [
-            {
-                "issue_no": item.issue_no,
-                "category": item.category,
-                "severity": item.severity,
-                "status": item.status,
-                "title": item.title,
-                "description": item.description,
-                "source": _issue_business_source(item, sheet_names),
-            }
-            for item in issues
-        ],
-        "proposals": _proposal_business_view(
-            job, sheet_names,
-        ),
-        "manifest_draft": _manifest_business_view(job),
-        # 每条来源业务记录的处置（候选 / 明确排除 / 待处理问题）。
-        "coverage": job.coverage_json,
+        "proposals": _proposal_business_view(job),
         "failure": {"code": job.failure_code, "message": job.failure_message} if job.failure_code else None,
         "latest_operation": operation_view(latest) if (latest := latest_operation(db, OBJECT_IMPORT_JOB, job.job_no)) else None,
         "created_at": job.created_at,
@@ -624,34 +355,6 @@ def import_job_summaries(db: Session) -> list[dict[str, Any]]:
 
 
 
-def update_sheet_bindings(db: Session, job_no: str, request: SheetBindingsRequest) -> ImportJob:
-    """保存本次参与解析的工作表；用途、表头和业务引用由 LLM 理解。"""
-    job = _job_or_404(db, job_no, lock=True)
-    assert_no_active_operation(db, OBJECT_IMPORT_JOB, job_no)
-    _ensure_import_mutable(db, job)
-    sheets = {item.sheet_key: item for item in db.scalars(select(ImportSheet).where(ImportSheet.import_job_id == job.id))}
-    keys = [item.sheet_key for item in request.bindings]
-    if len(keys) != len(set(keys)) or set(keys) != set(sheets):
-        raise BusinessError("SHEET_BINDING_INCOMPLETE", "工作表选择必须包含全部实际工作表，且不能重复")
-    for binding in request.bindings:
-        sheet = sheets[binding.sheet_key]
-        sheet.status = "EXCLUDED" if binding.excluded else "BOUND"
-    db.execute(delete(FieldCandidate).where(FieldCandidate.import_job_id == job.id))
-    db.execute(delete(ImportIssue).where(ImportIssue.import_job_id == job.id))
-    job.proposals_json = None
-    job.manifest_draft_json = None
-    # 解析范围变化后，历史导入发布检查记录不再有效。
-    job.precheck_json = None
-    job.draft_revision = job.draft_revision + 1
-    job.status = "PARSED"
-    job.failure_code = None
-    job.failure_message = None
-    db.commit()
-    return job
-
-
-
-
 def _conversion_job_for_write(
     db: Session, job_no: str, operation_no: str, *, draft_revision: int | None = None,
 ) -> ImportJob:
@@ -682,65 +385,39 @@ def _conversion_job_for_write(
 
 def _reset_conversion_candidates(db: Session, job: ImportJob) -> None:
     """新结果与旧候选的替换在同一短事务中提交。"""
-    db.execute(delete(FieldCandidate).where(FieldCandidate.import_job_id == job.id))
-    db.execute(delete(ImportIssue).where(ImportIssue.import_job_id == job.id))
     job.proposals_json = None
-    job.manifest_draft_json = None
-    job.coverage_json = None
-    job.precheck_json = None
     job.draft_revision = job.draft_revision + 1
 
 
 def retry_conversion(db: Session, job_no: str, *, operation_no: str) -> ImportJob:
-    """读取输入后释放事务，模型返回时再锁定作业并提交结果。"""
+    """读取输入后释放事务，模型返回时再锁定作业并提交结果。
+
+    工作簿原文按 source_path 重新读取：命令执行前已经核对过 source_sha256，
+    同一份文件重读得到同一份 IR，因此不需要把整份原文也存进数据库。
+    """
     job = _conversion_job_for_write(db, job_no, operation_no)
-    sheets = _ordered_sheets_of(db, job.id)
-    bindings = {item.sheet_key: {"excluded": item.status == "EXCLUDED"} for item in sheets}
     draft_revision = job.draft_revision
-    workbook_ir = job.workbook_ir_json
     scenario_code = job.scenario_code
     schema_json = _job_schema(job)
-    # 此前只有读取：显式结束事务并释放行锁，后续不得访问已过期的 ORM 输入。
-    db.rollback()
     try:
-        checkpoint_ns = f"import:conversion:{public_no('CKPT')}"
-        graph_state = run_sheet_conversion(
-            job_no=job_no,
-            operation_no=operation_no,
-            checkpoint_ns=checkpoint_ns,
-            workbook_ir=workbook_ir,
-            bindings=bindings,
+        workbook_ir = read_workbook_ir(
+            resolve_storage_path(job.source_path),
+            workbook_id=public_no("wb"),
+            source_filename=job.source_filename,
+            source_size=job.source_size,
+            source_sha256=job.source_sha256,
+            profile_version=job.profile_version,
             scenario_code=scenario_code,
-            schema_json=schema_json,
+            schema_key=job.schema_key,
+            schema_version=job.schema_version,
         )
+        # 到此只有本地读取：显式结束事务并释放行锁，模型返回前不持有任何锁，
+        # 后续不得访问已过期的 ORM 输入。
+        db.rollback()
+        proposals = convert_workbook(workbook_ir, operation_no=operation_no)
         job = _conversion_job_for_write(db, job_no, operation_no, draft_revision=draft_revision)
         _reset_conversion_candidates(db, job)
-        bundle = ProposalBundle.model_validate(graph_state["proposals"])
-        proposal_json = bundle.model_dump(mode="json")
-        coverage_json = _bundle_coverage(bundle)
-        node_notes = [note for note in (graph_state.get("node_notes") or []) if isinstance(note, dict)]
-        # 导入不生成业务审批事项；技术说明仅随覆盖信息留存。
-        if coverage_json is not None:
-            coverage_json["notices"] = [
-                {"code": note["code"], "message": note["message"],
-                 "sheet_name": note["sheet_name"], "row_no": note["row_no"]}
-                for note in node_notes
-            ]
-        for sheet in bundle.sheets:
-            for candidate in sheet.fields:
-                db.add(
-                    FieldCandidate(
-                        import_job_id=job.id,
-                        candidate_ref=candidate.candidate_ref,
-                        name=candidate.name,
-                        value_type=candidate.value_type,
-                        material_ref=candidate.material_ref,
-                        proposal_json=candidate.model_dump(mode="json"),
-                        status="PROPOSED",
-                    )
-                )
-        job.proposals_json = proposal_json
-        job.coverage_json = coverage_json
+        job.proposals_json = proposals
         job.status = "PROPOSED"
         job.failure_code = None
         job.failure_message = None
@@ -758,8 +435,6 @@ def retry_conversion(db: Session, job_no: str, *, operation_no: str) -> ImportJo
             "LLM_NETWORK_FAILED",
             "LLM_EXTERNAL_FAILED",
         } else "CONTRACT_INVALID"
-        if exc.code == "LLM_SOURCE_REF_INVALID":
-            job.status = "SOURCE_REF_INVALID"
         job.failure_code = exc.code
         job.failure_message = exc.message
         db.commit()
@@ -778,35 +453,18 @@ def retry_conversion(db: Session, job_no: str, *, operation_no: str) -> ImportJo
 
 
 
-def _validated_bound_sheets(
-    db: Session, job: ImportJob, template: ScenarioTemplate, sheets: list[ImportSheet],
-) -> list[dict[str, Any]]:
-    """只核对本次选入的工作表与解析来源，执行不依赖旧节点配置。"""
-    selected = [{"sheet_key": item.sheet_key, "sheet_name": item.sheet_name,
-                 "sheet_role": "RULE_LIBRARY:" + item.sheet_key, "node_code": None}
-                for item in sheets if item.status == "BOUND"]
-    if {item["sheet_key"] for item in selected} != {item["sheet_key"] for item in job.proposals_json["sheets"]}:
-        raise BusinessError("IMPORT_SHEET_SELECTION_CHANGED", "参与的工作表已改变，请重新解析", status_code=409)
-    if not selected:
-        raise BusinessError("SCENARIO_SHEET_REQUIRED", "本次没有选择工作表", status_code=409)
-    return selected
-
-
-
-
 def apply_import_to_draft(
-    db: Session, job_no: str, *, expected_job_revision: int, expected_scene_revision: int
+    db: Session, job_no: str, *, expected_job_revision: int, expected_scene_revision: int | None
 ) -> ImportJob:
     """把解析结果写入场景草稿，不生成或发布场景版本。
 
     不创建场景：场景身份以上传时记录的 scenario_code 为准，不从文件名、Sheet 名或表头另找。
-    写入替换材料、字段、规则、报告、工作表与计算定义。
-    写入前核对工作表选择和草稿修订，执行时由 LLM 按生效规则处理。
+    写入替换材料、字段、规则、报告与计算定义。
+    写入前核对草稿修订，执行时由 LLM 按生效规则处理。
     """
     from .operation_types import OBJECT_SCENARIO
     from .scenario_admin_service import (
         _bump_draft,
-        _latest_published_version,
         _commit_config_change,
         ensure_draft,
         load_import_config_into_draft,
@@ -824,7 +482,7 @@ def apply_import_to_draft(
             details={"job_no": job_no, "expected": expected_job_revision, "actual": job.draft_revision},
         )
     existing_version_id = db.scalar(select(ScenarioVersion.id).where(ScenarioVersion.import_job_id == job.id).limit(1))
-    if job.status == "PUBLISHED" or existing_version_id is not None:
+    if existing_version_id is not None:
         raise BusinessError(
             "IMPORT_ALREADY_PUBLISHED",
             "该导入作业已经产生过场景版本，不能再改写场景草稿",
@@ -853,9 +511,16 @@ def apply_import_to_draft(
         raise BusinessError("IMPORT_STATUS_NOT_READY", "导入作业尚未成功完成规则转换", status_code=409)
     if not job.proposals_json:
         raise BusinessError("PROPOSALS_MISSING", "规则尚未转换", status_code=409)
-    sheets = _ordered_sheets_of(db, job.id)
-    selected_sheets = _validated_bound_sheets(db, job, template, list(sheets))
+    proposals = _saved_proposals(job)
     try:
+        draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == template.scenario_code))
+        actual_revision = draft.revision_no if draft is not None else None
+        if actual_revision != expected_scene_revision:
+            raise BusinessError(
+                "SCENARIO_DRAFT_REVISION_CONFLICT", "场景草稿在本次确认期间已修改，请重新核对后再写入",
+                status_code=409,
+                details={"scenario_code": template.scenario_code, "expected": expected_scene_revision, "actual": actual_revision},
+            )
         draft = ensure_draft(db, template)
         if (
             draft.schema_json != job_schema
@@ -868,33 +533,19 @@ def apply_import_to_draft(
                 status_code=409,
                 details={"job_no": job.job_no, "scenario_code": job.scenario_code},
             )
-        if draft.revision_no != expected_scene_revision:
-            raise BusinessError(
-                "SCENARIO_DRAFT_REVISION_CONFLICT",
-                "场景草稿在本次确认期间已修改，请重新核对后再写入",
-                status_code=409,
-                details={
-                    "scenario_code": template.scenario_code,
-                    "expected": expected_scene_revision,
-                    "actual": draft.revision_no,
-                },
-            )
         config = draft_config_of_import(
-            proposals=job.proposals_json or {},
+            proposals=proposals,
             namespace=template.scenario_code,
-            selected_sheets=selected_sheets,
-            import_job_no=job.job_no,
         )
         load_import_config_into_draft(db, draft, config, profile_version=job.profile_version)
         draft.config_json = {**draft.config_json, "import_proposals": job.proposals_json,
                              "import_job_no": job.job_no}
         draft.source = "EXCEL"
-        latest = _latest_published_version(db, template.scenario_code)
+        latest = find_latest_published_version(db, template.scenario_code)
         if latest is not None and draft.base_version_no is None:
             draft.base_version_no = latest.version_no
         _bump_draft(draft)
         job.status = "APPLIED"
-        job.manifest_draft_json = None
         record_operation(
             db,
             object_type=OBJECT_IMPORT_JOB,
@@ -909,7 +560,7 @@ def apply_import_to_draft(
             object_no=template.scenario_code,
             object_name=template.scenario_name,
             operation_type="IMPORT_APPLY",
-            detail={"job_no": job.job_no, "scenario_code": template.scenario_code, "sheet_count": len(config["sheets"])},
+            detail={"job_no": job.job_no, "scenario_code": template.scenario_code},
         )
         _commit_config_change(db, template, draft)
     except Exception:

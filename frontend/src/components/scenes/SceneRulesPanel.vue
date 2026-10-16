@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftRuleItem } from "@/api/contracts";
 import { ApiError } from "@/api/http";
-import { deleteDraftRule, getSceneDraft, setDraftRuleEnabled } from "@/api/scenes";
+import { deleteDraftRule, getSceneConfiguration, setDraftRuleEnabled } from "@/api/scenes";
 import { ruleOperatorOptions } from "@/constants/labels";
 
 /**
@@ -28,6 +28,7 @@ const rules = ref<DraftRuleItem[]>([]);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
+let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
@@ -63,6 +64,7 @@ function describeError(error: unknown): string {
 }
 
 async function load(): Promise<void> {
+  const sequence = ++loadSequence;
   if (!props.scenarioCode) {
     rules.value = [];
     return;
@@ -70,13 +72,15 @@ async function load(): Promise<void> {
   loading.value = true;
   loadError.value = null;
   try {
-    const payload = await getSceneDraft(props.scenarioCode);
+    const payload = await getSceneConfiguration(props.scenarioCode);
+    if (sequence !== loadSequence) return;
     rules.value = payload.rules;
   } catch (error) {
+    if (sequence !== loadSequence) return;
     rules.value = [];
     loadError.value = error instanceof Error ? error.message : "规则配置读取失败";
   } finally {
-    loading.value = false;
+    if (sequence === loadSequence) loading.value = false;
   }
 }
 
@@ -275,14 +279,6 @@ function scopeText(rule: DraftRuleItem): string {
             <el-descriptions-item v-if="detailRule.risk_action" label="处理建议">{{ detailRule.risk_action }}</el-descriptions-item>
             <el-descriptions-item label="启用状态">{{ detailRule.enabled ? "启用" : "停用" }}</el-descriptions-item>
           </el-descriptions>
-          <!--
-            只对系统派生的规则说明「为什么不能编辑」。业务规则弹窗里没有任何按钮缺失，
-            给所有规则统一贴一句「因此只读」会对业务规则说假话。
-          -->
-          <p v-if="detailRule.system" class="text-hint block-gap-sm">
-            这条规则由字段与固定报告自动派生，随配置变化重新生成，因此不能编辑；
-            停用或删除它会破坏执行依赖。
-          </p>
         </template>
       </el-drawer>
     </template>

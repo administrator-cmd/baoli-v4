@@ -45,7 +45,7 @@ onMounted(() => void load());
 
 <template>
   <div class="app-panel">
-    <PageHeader eyebrow="方案管理" title="方案编辑" subtitle="选择方案后调整材料、字段、规则和报告章节。" :show-refresh="false">
+    <PageHeader eyebrow="方案管理" title="方案编辑" :show-refresh="false">
       <template #actions>
         <BackButton label="返回方案列表" @click="router.push({ name: 'plans' })" />
       </template>

@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 
 import type { Evidence, EvidenceRow } from "@/api/contracts";
 import { getTaskEvidence } from "@/api/audits";
-import { evidenceExportUrl, listEvidence } from "@/api/materials";
+import { listEvidence } from "@/api/materials";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 import EvidenceDrawer from "@/components/EvidenceDrawer.vue";
@@ -45,14 +45,6 @@ const referenceTypeOptions = [
 
 function referenceTypeText(value: string): string {
   return value === "FIELD_FACT" ? "字段事实" : value === "RULE_RESULT" ? "规则判定" : "处理产物";
-}
-
-function exportUrl(): string {
-  return evidenceExportUrl({
-    task_no: filters.task_no || undefined,
-    reference_type: filters.reference_type || undefined,
-    keyword: filters.keyword || undefined,
-  });
 }
 
 function openTask(row: EvidenceRow): void {
@@ -98,7 +90,6 @@ onMounted(() => {
     <PageHeader
       eyebrow="资料管理"
       title="证据记录"
-      subtitle="字段、规则与处理产物引用的原文证据，点击行查看完整原文和来源。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -116,18 +107,10 @@ onMounted(() => {
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
         <el-button @click="list.reset()">重置</el-button>
-        <el-button tag="a" :href="exportUrl()">导出</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
 
-    <div class="app-toolbar">
-      <div class="app-toolbar__left">
-        <span class="text-hint">
-          点击行可查看完整证据，可按任务、依据类型与引用原文筛选。
-        </span>
-      </div>
-    </div>
 
     <el-alert v-if="error" type="error" show-icon :closable="false" :title="`读取失败：${error}`">
       <el-button size="small" @click="list.load()">重试</el-button>

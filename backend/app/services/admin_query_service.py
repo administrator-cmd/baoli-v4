@@ -10,17 +10,15 @@
 """
 
 import logging
-from .audit.evidence import result_content_view
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, delete as sa_delete, func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
-from fastapi.responses import FileResponse
-
+from ..common.pagination import PageResult, page_result
 from ..common.exceptions import BusinessError
-from ..entity import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from ..entity import ImportJob
 from ..entity import (
     AuditPlan,
     AuditReport,
@@ -28,7 +26,6 @@ from ..entity import (
     BackgroundOperation,
     DocumentUpload,
     Evidence,
-    ManualReview,
     NodeExecution,
     RuleResult,
     ScenarioNode,
@@ -37,9 +34,9 @@ from ..entity import (
     TaskDocument,
     TaskFieldValue,
 )
+from . import task_value_service
 from .operation_log_service import record_operation
 from .operation_types import OBJECT_REPORT
-from . import task_csv_service
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +53,11 @@ def list_documents_page(
     has_file: bool | None,
     page: int,
     page_size: int,
-) -> dict[str, Any]:
+) -> PageResult[dict[str, Any]]:
     """审核材料分页列表（跨任务）。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
-    else:
-        # 跨任务浏览默认隐藏已删除任务的记录；按任务编号查询（任务详情上下文）保持只读可见。
-        conditions.append(AuditTask.deleted_at.is_(None))
     if keyword:
         like = f"%{keyword.strip()}%"
         conditions.append(
@@ -126,7 +120,6 @@ def list_documents_page(
                 "material_name": document.material_name,
                 "required": document.required,
                 "status": document.status,
-                "upload_no": upload.upload_no if upload else None,
                 "filename": upload.original_filename if upload else None,
                 "size_bytes": upload.size_bytes if upload else None,
                 "uploaded_at": upload.created_at if upload else None,
@@ -134,7 +127,7 @@ def list_documents_page(
                 "version_count": upload_counts.get(upload.id, 0) if upload else None,
             }
         )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+    return page_result(items, total, page, page_size)
 
 
 def document_detail(db: Session, document_no: str) -> dict[str, Any]:
@@ -175,43 +168,6 @@ def document_detail(db: Session, document_no: str) -> dict[str, Any]:
     }
 
 
-def document_upload_by_no(db: Session, document_no: str, upload_no: str) -> tuple[TaskDocument, DocumentUpload]:
-    """按材料位与上传编号取上传记录；取不到即 404。"""
-    document = db.scalar(select(TaskDocument).where(TaskDocument.document_no == document_no))
-    if not document:
-        raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "材料位不存在", status_code=404, details={"document_no": document_no})
-    upload = db.scalar(
-        select(DocumentUpload).where(
-            DocumentUpload.task_document_id == document.id,
-            DocumentUpload.upload_no == upload_no,
-        )
-    )
-    if not upload:
-        raise BusinessError("DOCUMENT_UPLOAD_NOT_FOUND", "上传文件不存在", status_code=404, details={"upload_no": upload_no})
-    return document, upload
-
-
-def upload_file_response(db: Session, document_no: str, upload_no: str, *, preview: bool) -> FileResponse:
-    """下载/预览一个上传版本的文件；文件缺失时明确报错，不返回空的伪文件。"""
-    from .storage_service import resolve_storage_path
-
-    _, upload = document_upload_by_no(db, document_no, upload_no)
-    path = resolve_storage_path(upload.relative_path)
-    if not path.exists():
-        raise BusinessError(
-            "DOCUMENT_FILE_MISSING",
-            "该上传记录的文件在存储中不存在，请核对数据目录与备份是否对应同一时间点",
-            status_code=404,
-            details={"upload_no": upload_no, "filename": upload.original_filename},
-        )
-    return FileResponse(
-        path,
-        media_type=upload.content_type or "application/octet-stream",
-        filename=upload.original_filename,
-        content_disposition_type="inline" if preview else "attachment",
-    )
-
-
 # 证据记录（跨任务）
 
 
@@ -223,14 +179,11 @@ def list_evidence_page(
     keyword: str | None,
     page: int,
     page_size: int,
-) -> dict[str, Any]:
+) -> PageResult[dict[str, Any]]:
     """证据记录分页列表（跨任务）。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
-    else:
-        # 跨任务浏览默认隐藏已删除任务的记录；按任务编号查询（任务详情上下文）保持只读可见。
-        conditions.append(AuditTask.deleted_at.is_(None))
     # 分类口径与报告「证据引用」章节一致：带 rule_result_id 的证据属于规则判定证据。
     # 规则执行时会把字段证据复制给规则结果（两个外键同时存在），只按 field_value_id 判类会
     # 把它误显示成“字段事实”，并与筛选条件互相矛盾。
@@ -319,7 +272,7 @@ def list_evidence_page(
                 "created_at": evidence.created_at,
             }
         )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+    return page_result(items, total, page, page_size)
 
 
 # 执行记录（跨任务）
@@ -335,13 +288,11 @@ def list_executions_page(
     started_to: datetime | None,
     page: int,
     page_size: int,
-) -> dict[str, Any]:
+) -> PageResult[dict[str, Any]]:
     """节点执行记录分页列表（跨任务）。"""
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
-    else:
-        conditions.append(AuditTask.deleted_at.is_(None))
     if node_code:
         conditions.append(NodeExecution.node_code == node_code)
     if status:
@@ -415,7 +366,7 @@ def list_executions_page(
                 "result_summary": row.result_json if isinstance(row.result_json, dict) else None,
             }
         )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+    return page_result(items, total, page, page_size)
 
 
 def execution_detail(db: Session, execution_id: int) -> dict[str, Any]:
@@ -473,135 +424,6 @@ def execution_detail(db: Session, execution_id: int) -> dict[str, Any]:
     }
 
 
-# 人工复核（跨任务）
-
-
-def list_reviews_page(
-    db: Session,
-    *,
-    task_no: str | None,
-    review_type: str | None,
-    status: str | None,
-    updated_from: datetime | None,
-    updated_to: datetime | None,
-    page: int,
-    page_size: int,
-) -> dict[str, Any]:
-    """人工复核分页列表（跨任务）：含已复核与已失效记录。"""
-    conditions = []
-    if task_no:
-        conditions.append(AuditTask.task_no == task_no)
-    else:
-        conditions.append(AuditTask.deleted_at.is_(None))
-    if review_type:
-        conditions.append(ManualReview.review_type == review_type)
-    if status:
-        conditions.append(ManualReview.status == status)
-    if updated_from:
-        conditions.append(ManualReview.updated_at >= updated_from)
-    if updated_to:
-        conditions.append(ManualReview.updated_at <= updated_to)
-
-    total = db.scalar(
-        select(func.count())
-        .select_from(ManualReview)
-        .join(AuditTask, AuditTask.id == ManualReview.audit_task_id)
-        .where(*conditions)
-    ) or 0
-    # 只取列表真正用到的列：scenario_version 带 200KB+ 的 manifest_json，
-    # 整行 SELECT * 会让 ORDER BY 的 filesort 把整行塞进排序缓冲（MySQL 默认 256KB），
-    # 即使只有 1 行待复核也会报 1038 Out of sort memory；列表页不读 manifest_json。
-    # 注意 AuditTask 的 task_schema_json 不在这里取：字段中文名由下面的独立查询读取，
-    # 保留它会让 filesort 重新背上 36KB 的大列。
-    rows = db.execute(
-        select(
-            ManualReview.id,
-            ManualReview.review_no,
-            ManualReview.audit_task_id,
-            ManualReview.review_type,
-            ManualReview.status,
-            ManualReview.system_judgment_json,
-            ManualReview.business_note,
-            ManualReview.decision,
-            ManualReview.basis_type,
-            ManualReview.before_value,
-            ManualReview.after_value,
-            ManualReview.updated_at,
-            AuditTask.task_no,
-            AuditTask.task_name,
-            RuleResult.rule_name,
-            RuleResult.status.label("rule_status"),
-            TaskFieldValue.field_key,
-            TaskFieldValue.status.label("fact_status"),
-            DocumentUpload.id.label("upload_id"),
-            TaskDocument.material_name,
-            TaskDocument.status.label("document_status"),
-            ScenarioVersion.scenario_name,
-        )
-        .join(AuditTask, AuditTask.id == ManualReview.audit_task_id)
-        .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
-        .outerjoin(RuleResult, RuleResult.id == ManualReview.rule_result_id)
-        .outerjoin(TaskFieldValue, TaskFieldValue.id == ManualReview.field_value_id)
-        .outerjoin(DocumentUpload, DocumentUpload.id == ManualReview.document_upload_id)
-        .outerjoin(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-        .where(*conditions)
-        .order_by(ManualReview.updated_at.desc(), ManualReview.id.desc())
-        .limit(page_size)
-        .offset((page - 1) * page_size)
-    ).all()
-
-    task_ids = {row.audit_task_id for row in rows}
-    field_names: dict[tuple[int, str], str] = {}
-    task_status_by_id: dict[int, str] = {}
-    task_current_node: dict[int, str] = {}
-    if task_ids:
-        for task in db.scalars(select(AuditTask).where(AuditTask.id.in_(task_ids))).all():
-            task_status_by_id[task.id] = task.status
-            task_current_node[task.id] = task.current_node
-            for field in task.task_schema_json.get("fields", []):
-                field_names[(task.id, field["field_key"])] = field["name"]
-
-    items = []
-    for row in rows:
-        if row.rule_name is not None:
-            object_name = f"规则：{row.rule_name}"
-            effective_status = row.rule_status
-        elif row.field_key is not None:
-            object_name = f"字段：{field_names.get((row.audit_task_id, row.field_key), row.field_key)}"
-            effective_status = row.fact_status
-        elif row.upload_id is not None:
-            object_name = f"材料：{row.material_name}"
-            effective_status = row.document_status
-        else:
-            object_name = "未关联业务对象"
-            effective_status = None
-        judgment = result_content_view(row.system_judgment_json if isinstance(row.system_judgment_json, dict) else {})
-        items.append(
-            {
-                "review_no": row.review_no,
-                "task_no": row.task_no,
-                "task_name": row.task_name,
-                "scenario_name": row.scenario_name,
-                "review_type": row.review_type,
-                "object_name": object_name,
-                "status": row.status,
-                "system_judgment_status": judgment.get("status"),
-                "system_judgment_message": judgment.get("message") or row.business_note,
-                # 取证检索与印章记录是主体核对复核的判据，列表投影不能把它丢掉。
-                "system_judgment_retrieval": judgment.get("retrieval"),
-                "system_judgment_seal_records": judgment.get("seal_records"),
-                "decision": row.decision,
-                "effective_status": effective_status,
-                "basis_type": row.basis_type,
-                "before_value": row.before_value,
-                "after_value": row.after_value,
-                "task_status": task_status_by_id.get(row.audit_task_id),
-                "task_current_node": task_current_node.get(row.audit_task_id),
-                "updated_at": row.updated_at,
-            }
-        )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
-
 
 # 规则库导入作业（管理列表）
 
@@ -616,7 +438,7 @@ def list_import_jobs_page(
     page: int,
     page_size: int,
     scenario_code: str | None = None,
-) -> dict[str, Any]:
+) -> PageResult[dict[str, Any]]:
     """导入作业分页列表（管理端）。"""
     conditions = []
     if scenario_code:
@@ -631,9 +453,9 @@ def list_import_jobs_page(
         conditions.append(ImportJob.created_at <= created_to)
 
     count_statement = select(func.count()).select_from(ImportJob)
-    # 只取列表真正用到的列：import_job 带 workbook_ir_json / proposals_json / coverage_json
-    # 等大 JSON 列，整行 SELECT * 会让 ORDER BY 的 filesort 把整行塞进排序缓冲
-    # （默认 256KB），两三条作业就报 1038 Out of sort memory；列表页从不读这些列。
+    # 只取列表真正用到的列：import_job 带 proposals_json 等大 JSON 列，整行 SELECT * 会让
+    # ORDER BY 的 filesort 把整行塞进排序缓冲（默认 256KB），两三条作业就报 1038
+    # Out of sort memory；列表页从不读这些列。
     rows_statement = select(
         ImportJob.id,
         ImportJob.job_no,
@@ -656,7 +478,6 @@ def list_import_jobs_page(
         rows_statement.order_by(ImportJob.created_at.desc(), ImportJob.id.desc()).limit(page_size).offset((page - 1) * page_size)
     ).all()
 
-    job_ids = [row.id for row in rows]
     # 场景名一次查出，逐行查会让列表页变成 N+1 次查询。
     scenario_codes = sorted({row.scenario_code for row in rows if row.scenario_code})
     scenario_names = (
@@ -671,15 +492,6 @@ def list_import_jobs_page(
         if scenario_codes
         else {}
     )
-    issue_counts: dict[int, int] = {}
-    if job_ids:
-        for job_id, count in db.execute(
-            select(ImportIssue.import_job_id, func.count())
-            .where(ImportIssue.import_job_id.in_(job_ids), ImportIssue.status == "OPEN")
-            .group_by(ImportIssue.import_job_id)
-        ).all():
-            issue_counts[int(job_id)] = int(count)
-
     # 转换期间的作业状态不会变（retry_conversion 全程持有作业行锁、结束时才提交），
     # 所以「有没有未结束的后台操作」只能问 background_operation，不能靠作业状态猜。
     # 列表只用来决定「中止」按钮是否可用，因此只回活跃操作数，不回整个操作对象。
@@ -711,7 +523,6 @@ def list_import_jobs_page(
                 "scenario_code": job.scenario_code,
                 "scenario_name": scenario_names.get(job.scenario_code),
                 "draft_revision": job.draft_revision,
-                "pending_issue_count": issue_counts.get(job.id, 0),
                 "active_operation_count": active_operation_counts.get(job.job_no, 0),
                 "failure_code": job.failure_code,
                 "failure_message": job.failure_message,
@@ -719,69 +530,25 @@ def list_import_jobs_page(
                 "updated_at": job.updated_at,
             }
         )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+    return page_result(items, total, page, page_size)
 
 
 def delete_import_job(db: Session, job_no: str) -> None:
-    """删除导入作业（仅限未发布的草稿作业）。
-    已发布作业（或已经产生场景版本的作业）不删除：删除会破坏版本来源追溯。
-    有活跃后台转换时同样拒绝——先等待或按其真实状态处理。
-    """
-    # 先读取活跃操作，不要在转换线程持有作业锁时直接 FOR UPDATE 等待。
-    # 转换期间删除的语义是明确返回 409，不能让页面长时间表现为“没有反应”。
-    active = db.scalar(
-        select(BackgroundOperation.operation_no).where(
-            BackgroundOperation.object_type == "IMPORT_JOB",
-            BackgroundOperation.object_no == job_no,
-            BackgroundOperation.status.in_(("PENDING", "RUNNING")),
-        )
-    )
-    if active is not None:
-        raise BusinessError(
-            "OPERATION_ALREADY_ACTIVE",
-            "该导入作业正在转换，请先点击中止或等待转换完成后再删除",
-            status_code=409,
-            details={"job_no": job_no, "operation_no": active},
-        )
+    """直接删除验证项目中的导入作业。
 
+    验证项目不保留导入来源追溯，也不因作业状态、场景草稿、发布版本或后台操作
+    增加删除门禁。已发布版本解除对作业的来源引用后继续保留版本本身；来源字段允许置空，
+    其他发布版本内容仍由数据库触发器保护。
+    """
     job = db.scalar(select(ImportJob).where(ImportJob.job_no == job_no).with_for_update())
     if not job:
         raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": job_no})
-    if job.status in {"PUBLISHED", "APPLIED"}:
-        raise BusinessError(
-            "IMPORT_JOB_PUBLISHED",
-            "该作业已写入场景草稿或已产生场景版本，不能删除；配置来源需要保留追溯",
-            status_code=409,
-            details={"job_no": job_no, "status": job.status},
-        )
-    published = db.scalar(select(ScenarioVersion.id).where(ScenarioVersion.import_job_id == job.id).limit(1))
-    if published is not None:
-        raise BusinessError(
-            "IMPORT_JOB_PUBLISHED",
-            "该作业已产生场景版本，不能删除；已发布版本及其来源需要保留追溯",
-            status_code=409,
-            details={"job_no": job_no},
-        )
-    # 行锁建立后再次检查，避免“检查活跃操作”和“删除”之间恰好受理了新转换。
-    active = db.scalar(
-        select(BackgroundOperation.operation_no).where(
-            BackgroundOperation.object_type == "IMPORT_JOB",
-            BackgroundOperation.object_no == job_no,
-            BackgroundOperation.status.in_(("PENDING", "RUNNING")),
-        )
-    )
-    if active is not None:
-        raise BusinessError(
-            "OPERATION_ALREADY_ACTIVE",
-            "该导入作业正在转换，请先点击中止或等待转换完成后再删除",
-            status_code=409,
-            details={"job_no": job_no, "operation_no": active},
-        )
-    # 子表必须先于父表删除：三个模型与 ImportJob 之间只有外键列、没有 relationship()，
-    # unit-of-work 在同一次 flush 里不保证先发子表 DELETE，FK RESTRICT 会让父表删除报 500。
-    # 这里用 Core 批量删除立即执行，顺序确定。
-    for model in (FieldCandidate, ImportIssue, ImportSheet):
-        db.execute(sa_delete(model).where(model.import_job_id == job.id))
+    # scenario_version.import_job_id 允许为空；解除来源引用后即可物理删除作业。
+    for version in db.scalars(
+        select(ScenarioVersion).where(ScenarioVersion.import_job_id == job.id)
+    ).all():
+        version.import_job_id = None
+    db.flush()
     db.delete(job)
     record_operation(
         db,
@@ -820,15 +587,13 @@ def list_reports_page(
     generated_to: datetime | None,
     page: int,
     page_size: int,
-) -> dict[str, Any]:
+) -> PageResult[dict[str, Any]]:
     """审核报告分页列表（跨任务）。"""
     conditions = []
     if name:
         conditions.append(AuditReport.report_name.like(f"%{name.strip()}%"))
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
-    else:
-        conditions.append(AuditTask.deleted_at.is_(None))
     if scenario_code:
         conditions.append(ScenarioVersion.scenario_code == scenario_code)
     if plan_code:
@@ -865,7 +630,6 @@ def list_reports_page(
             AuditReport.risk_conclusion_available,
             AuditReport.status,
             AuditReport.archived_at,
-            AuditReport.origin,
             AuditReport.input_revision,
             AuditReport.remark,
             AuditTask.task_no,
@@ -902,7 +666,6 @@ def list_reports_page(
                 "scenario_name": row.scenario_name,
                 "scenario_version_no": row.version_no,
                 "plan_name": row.plan_name,
-                "is_legacy_config": row.plan_id is None,
                 "generated_at": row.generated_at,
                 "report_generated": row.report_generated,
                 "scope_execution_complete": row.scope_execution_complete,
@@ -911,13 +674,12 @@ def list_reports_page(
                 "archived_at": row.archived_at,
                 "current": current_map.get(row.audit_task_id) == row.id,
                 "stale": stale,
-                "origin": row.origin,
                 "input_revision": row.input_revision,
                 "task_input_revision": row.task_input_revision,
                 "remark": row.remark,
             }
         )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+    return page_result(items, total, page, page_size)
 
 
 def report_or_404(db: Session, report_no: str) -> AuditReport:
@@ -957,7 +719,6 @@ def report_detail(db: Session, report_no: str) -> dict[str, Any]:
         "status": report.status,
         "archived_at": report.archived_at,
         "remark": report.remark,
-        "origin": report.origin,
         "stale": stale,
         "input_revision": report.input_revision,
         "task_input_revision": task.input_revision if task else None,
@@ -1040,17 +801,14 @@ def list_risk_results_page(
         .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
         .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
         .where(
-            func.json_contains_path(RuleResult.result_json, "one", "$.risk_level") == 1,
+            RuleResult.risk_level.is_not(None),
             NodeExecution.id == latest_execution,
         )
     )
-    risk_level_expr = func.json_unquote(func.json_extract(RuleResult.result_json, "$.risk_level"))
+    risk_level_expr = RuleResult.risk_level
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
-    else:
-        # 跨任务浏览默认隐藏已删除任务的记录；按任务编号查询（任务详情上下文）保持只读可见。
-        conditions.append(AuditTask.deleted_at.is_(None))
     if scenario_code:
         conditions.append(ScenarioVersion.scenario_code == scenario_code)
     if plan_code:
@@ -1102,18 +860,23 @@ def list_risk_results_page(
         base_query.with_only_columns(func.count())
         .where(*conditions, RuleResult.status == "ABNORMAL")
     ) or 0
-    indexes_by_task: dict[int, list[Any]] = {}
-    for row in rows:
-        indexes_by_task.setdefault(row.audit_task_id, []).append(row)
-    csv_results = {}
-    for task_id, indexes in indexes_by_task.items():
-        task = db.get(AuditTask, task_id)
-        for result in task_csv_service.from_index(db, task, RuleResult, indexes):
-            csv_results[result.id] = result
+    results_by_id = {result.id: result for result in db.scalars(
+        select(RuleResult).where(RuleResult.id.in_([row.id for row in rows]))
+    )}
+    # 取值按任务分组的 CSV：一次读一份文件，不按行重复读。
+    task_owners: dict[int, AuditTask] = {}
+    for result in results_by_id.values():
+        if result.audit_task_id in task_owners:
+            continue
+        owner = db.get(AuditTask, result.audit_task_id)
+        if owner is None:
+            raise BusinessError("AUDIT_TASK_NOT_FOUND", "规则结果所属审核任务不存在", status_code=500)
+        task_owners[result.audit_task_id] = owner
     items = []
     for row in rows:
-        result = csv_results[row.id]
-        data = result.result_json if isinstance(result.result_json, dict) else {}
+        result = results_by_id[row.id]
+        # 风险等级是索引列，其余业务结论（处理建议、来源规则）在任务 CSV。
+        data = task_value_service.value_of(db, task_owners[result.audit_task_id], task_value_service.RECORD_RULE_RESULT, result.id)
         items.append(
             {
                 "task_no": row.task_no,
@@ -1121,10 +884,9 @@ def list_risk_results_page(
                 "scenario_name": row.scenario_name,
                 "scenario_version_no": row.version_no,
                 "plan_name": row.plan_name,
-                "is_legacy_config": row.plan_id is None,
                 "rule_key": result.rule_key,
                 "name": result.rule_name,
-                "risk_level": data.get("risk_level"),
+                "risk_level": result.risk_level,
                 "status": result.status,
                 "message": result.message,
                 "suggestion": data.get("action"),

@@ -2,7 +2,14 @@ from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class ConfigurationShape(DeclarativeBase):
+    """编辑器 JSON 属性形状；不属于数据库 Base，不创建或读写明细表。
+
+    configuration_store 只使用列名和默认值构造 JSON，实例不会加入 Session。
+    """
 
 
 class TimestampMixin:

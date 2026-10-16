@@ -3,20 +3,19 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { PlanAdjustments, PlanConfig, PlanFieldItem, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
+import type { PlanAdjustments, PlanConfig, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
 import { createPlan, getPlan, getPlanAdjustments, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import BackButton from "@/components/BackButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
-import CalculationSources from "@/components/CalculationSources.vue";
+import PlanBusinessEditor from "@/components/plans/PlanBusinessEditor.vue";
+import PlanExtractionEditor from "@/components/plans/PlanExtractionEditor.vue";
 import {
-  defaultExtractionStrategy,
-  extractionStrategyOptions,
-  extractionStrategySupports,
+  extractionStrategyLabel,
   reportContentTypeOptions,
   reportFormatOptions,
   reportResultSortOptions,
-  valueTypeOptions,
+  valueTypeLabel,
 } from "@/constants/labels";
 
 /**
@@ -50,8 +49,34 @@ const scenesError = ref<string | null>(null);
 const scenesLoading = ref(false);
 const plan = ref<PlanSelection | null>(null);
 const config = ref<PlanConfig | null>(null);
-function nodeName(code: string | null): string {
-  return config.value?.nodes.find((node) => node.node_code === code)?.name ?? "所属节点未记录";
+const businessEditorVisible = ref(false);
+const businessEditorKind = ref<"rule" | "calculation">("rule");
+const businessEditorKey = ref("");
+const extractionEditorVisible = ref(false);
+const extractionEditorKind = ref<"material" | "field">("material");
+const extractionEditorKey = ref("");
+
+function editBusiness(kind: "rule" | "calculation", key: string): void {
+  businessEditorKind.value = kind;
+  businessEditorKey.value = key;
+  businessEditorVisible.value = true;
+}
+function editExtraction(kind: "material" | "field", key: string): void {
+  extractionEditorKind.value = kind;
+  extractionEditorKey.value = key;
+  extractionEditorVisible.value = true;
+}
+
+function statusLabel(status: unknown, enabled?: boolean): string {
+  if (status === "PENDING") return "待确认";
+  if (status === "DISABLED" || enabled === false) return "暂停";
+  if (status === "CLEAR" || enabled === true) return "启用";
+  return typeof status === "string" && status ? status : "未声明";
+}
+
+function statusTone(status: unknown, enabled?: boolean): "success" | "warning" | "info" {
+  const label = statusLabel(status, enabled);
+  return label === "启用" ? "success" : label === "待确认" ? "warning" : "info";
 }
 const savedConfigJson = ref("");
 const loading = ref(false);
@@ -76,14 +101,11 @@ const canCreateTask = computed(() => Boolean(
   && !hasUnsavedBasic.value && !hasUnsavedConfig.value && !planStatusError.value && !saving.value,
 ));
 const sectionDialogVisible = ref(false);
-const fieldSchemaDialogVisible = ref(false);
-const editingFieldSchema = ref<PlanFieldItem | null>(null);
-const fieldSchemaText = ref("");
 const editingSectionKey = ref<string | null>(null);
 const sectionForm = reactive({
   title: "",
   content_instruction: "",
-  field_keys: [] as string[],
+  data_refs: [] as string[],
   report_code: "",
   report_name: "",
   material_keys: [] as string[],
@@ -94,63 +116,28 @@ const sectionForm = reactive({
   risk_level_order_text: "",
   config_status: null as string | null,
 });
-const fieldOptions = computed(() => (config.value?.fields ?? []).map((field) => ({
-  value: field.field_key,
-  label: `${config.value?.materials.find((material) => material.material_key === field.material_key)?.name ?? field.material_key} · ${field.name}`,
-})));
-
-function handlePlanFieldTypeChange(field: PlanFieldItem): void {
-  if (field.extraction_strategy !== "STRUCTURED") field.structure_schema = null;
-}
-
-function handlePlanFieldStrategyChange(field: PlanFieldItem): void {
-  if (field.extraction_strategy !== "STRUCTURED") {
-    field.structure_schema = null;
-  }
-}
-
-function openFieldSchemaEditor(field: PlanFieldItem): void {
-  editingFieldSchema.value = field;
-  fieldSchemaText.value = field.structure_schema ? JSON.stringify(field.structure_schema, null, 2) : "";
-  fieldSchemaDialogVisible.value = true;
-}
-
-function applyFieldSchema(): void {
-  const field = editingFieldSchema.value;
-  if (!field) return;
-  const text = fieldSchemaText.value.trim();
-  if (!text) {
-    ElMessage.warning("结构化抽取必须填写结构定义");
-    return;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    ElMessage.warning("结构定义不是有效的 JSON");
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    ElMessage.warning("结构定义的根节点必须是 JSON 对象");
-    return;
-  }
-  field.structure_schema = parsed as Record<string, unknown>;
-  fieldSchemaDialogVisible.value = false;
-}
-
-function validatePlanFieldStrategies(fields: PlanFieldItem[]): boolean {
-  for (const field of fields) {
-    if (field.extraction_strategy === "STRUCTURED" && !field.structure_schema) {
-      ElMessage.warning(`字段“${field.name}”使用结构化抽取，必须填写结构定义`);
-      return false;
-    }
-    if (field.extraction_strategy !== "STRUCTURED" && field.structure_schema) {
-      ElMessage.warning(`字段“${field.name}”不是结构化抽取，不能保留结构定义`);
-      return false;
+const dataOptions = computed(() => {
+  const options = [
+    ...(config.value?.fields ?? []).map((field) => ({
+      value: field.field_key, label: `字段：${config.value?.materials.find((material) => material.material_key === field.material_key)?.name ?? "未知材料"} · ${field.name}`,
+    })),
+    ...(config.value?.calculation_rules ?? []).map((item) => ({
+      value: item.result_code, label: `计算结果：${item.rule_name}`,
+    })),
+    ...(config.value?.rules ?? []).filter((item) => !item.is_system && !item.rule_json.calculation_ref).map((item) => ({
+      value: item.rule_key, label: `规则结论：${item.name}`,
+    })),
+  ];
+  const known = new Set(options.map((item) => item.value));
+  const refs = [...sectionForm.data_refs, ...(config.value?.sections ?? []).flatMap((item) => item.data_refs)];
+  for (const ref of refs) {
+    if (!known.has(ref)) {
+      options.push({ value: ref, label: `未明确的引用：${ref}` });
+      known.add(ref);
     }
   }
-  return true;
-}
+  return options;
+});
 
 const selectedScene = computed(() => scenes.value.find((item) => item.scenario_code === basicForm.scenario_code) ?? null);
 
@@ -344,17 +331,16 @@ async function saveConfig(): Promise<void> {
   if (!code || !currentConfig || saving.value) {
     return;
   }
-  if (!validatePlanFieldStrategies(currentConfig.fields)) return;
   const submittedConfigJson = JSON.stringify(currentConfig);
   saving.value = true;
   try {
-    // 整体提交配置及计算规则选择。
+    // 整体提交完整业务配置，计算定义与启停一起保存。
     const updated = await updatePlanConfig(code, {
       materials: currentConfig.materials,
       fields: currentConfig.fields,
       rules: currentConfig.rules,
       sections: currentConfig.sections,
-      calculation_rules: currentConfig.calculation_rules.map(({ rule_code, enabled }) => ({ rule_code, enabled })),
+      calculation_rules: currentConfig.calculation_rules,
     });
     if (request !== loadRequest || planCode.value !== code) return;
     const editedDuringSave = JSON.stringify(currentConfig) !== submittedConfigJson;
@@ -387,14 +373,16 @@ async function saveAll(): Promise<void> {
   }
 }
 
-const enabledRules = computed(() => (config.value?.rules ?? []).filter((item) => item.enabled));
-const disabledRules = computed(() => (config.value?.rules ?? []).filter((item) => !item.enabled));
+// 抽取、计算和报告在各自页签编辑业务定义，派生执行项不重复展示。
+const businessRules = computed(() => (config.value?.rules ?? []).filter((item) => !item.is_system && !item.rule_json.calculation_ref));
+const enabledRules = computed(() => businessRules.value.filter((item) => item.enabled));
+const disabledRules = computed(() => businessRules.value.filter((item) => !item.enabled));
 
 function openSectionEditor(item?: PlanSectionItem): void {
   editingSectionKey.value = item?.section_key ?? null;
   sectionForm.title = item?.title ?? "";
   sectionForm.content_instruction = item?.content_instruction ?? "";
-  sectionForm.field_keys = [...(item?.field_keys ?? [])];
+  sectionForm.data_refs = [...(item?.data_refs ?? [])];
   sectionForm.report_code = item?.report_code ?? "";
   sectionForm.report_name = item?.report_name ?? "";
   sectionForm.material_keys = [...(item?.material_keys ?? [])];
@@ -417,7 +405,8 @@ function applySection(): void {
     section_key: existing?.section_key ?? crypto.randomUUID(),
     title: sectionForm.title.trim(),
     content_instruction: sectionForm.content_instruction,
-    field_keys: [...sectionForm.field_keys],
+    field_keys: sectionForm.data_refs.filter((ref) => config.value!.fields.some((field) => field.field_key === ref)),
+    data_refs: [...sectionForm.data_refs],
     report_code: sectionForm.report_code.trim() || null,
     report_name: sectionForm.report_name.trim() || null,
     material_keys: [...sectionForm.material_keys],
@@ -437,8 +426,8 @@ function applySection(): void {
   sectionDialogVisible.value = false;
 }
 
-function fieldNames(keys: string[]): string {
-  return keys.map((key) => config.value?.fields.find((field) => field.field_key === key)?.name ?? key).join("、") || "未绑定";
+function dataNames(refs: string[]): string {
+  return refs.map((ref) => dataOptions.value.find((item) => item.value === ref)?.label ?? `未明确的引用：${ref}`).join("、") || "按章节要求选择业务数据";
 }
 
 function materialNames(keys: string[] | null | undefined): string {
@@ -472,11 +461,10 @@ function adjustmentValue(value: unknown): string {
 </script>
 
 <template>
-  <div class="app-panel">
+  <div class="app-panel" :class="{ 'plan-editor': !isCreate }">
     <PageHeader
       eyebrow="方案管理"
       :title="isCreate ? '新增方案' : `方案编辑：${basicForm.plan_name || planCode}`"
-      subtitle="基于已发布场景版本创建个性化方案。"
       :show-refresh="false"
     >
       <template #actions>
@@ -537,14 +525,6 @@ function adjustmentValue(value: unknown): string {
                 :label="`${item.scenario_name}（第 ${item.latest_version_no} 版）`"
               />
             </el-select>
-            <div class="text-hint">
-              <template v-if="isCreate">
-                基于所选版本创建；场景更新不会改动已有方案。
-              </template>
-              <template v-else>
-                本方案固定到创建时的场景版本。
-              </template>
-            </div>
           </el-form-item>
           <el-alert
             v-if="isCreate && previousCode && reference && !scenesLoading && (!selectedScene || selectedScene.available === false) && !scenesError"
@@ -626,117 +606,80 @@ function adjustmentValue(value: unknown): string {
             </el-tab-pane>
 
             <el-tab-pane :label="`材料（${config.materials.length}）`" name="materials">
-              <el-table :data="config.materials" border stripe size="small" max-height="420">
-                <el-table-column label="材料名称" min-width="240">
-                  <template #default="{ row }"><el-input v-model="row.name" maxlength="255" aria-label="材料名称" /></template>
-                </el-table-column>
-                <el-table-column label="是否必传" width="120">
-                  <template #default="{ row }"><el-switch v-model="row.required" aria-label="是否必传" /></template>
-                </el-table-column>
-              </el-table>
+              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ config.materials.length }} 项材料</span></div>
+              <div class="plan-table-wrap">
+                <el-table :data="config.materials" row-key="material_key" border stripe size="small" height="100%" empty-text="当前方案没有材料">
+                  <el-table-column type="index" label="序号" width="60" />
+                  <el-table-column prop="name" label="材料名称" min-width="200" show-overflow-tooltip />
+                  <el-table-column prop="description" label="业务说明" min-width="300" show-overflow-tooltip />
+                  <el-table-column label="必传" width="80"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('material', row.material_key)">编辑</el-button></template></el-table-column>
+                </el-table>
+              </div>
             </el-tab-pane>
 
             <el-tab-pane :label="`字段（${config.fields.length}）`" name="fields">
-              <el-table :data="config.fields" border stripe size="small" max-height="420">
-                <el-table-column label="字段名称" min-width="180">
-                  <template #default="{ row }"><el-input v-model="row.name" maxlength="255" aria-label="字段名称" /></template>
-                </el-table-column>
-                <el-table-column label="所属材料" min-width="170">
-                  <template #default="{ row }">
-                    <el-select v-model="row.material_key" aria-label="所属材料">
-                      <el-option v-for="material in config.materials" :key="material.material_key" :label="material.name" :value="material.material_key" />
-                    </el-select>
-                  </template>
-                </el-table-column>
-                <el-table-column label="数据类型" width="150">
-                  <template #default="{ row }">
-                    <el-select v-model="row.value_type" :aria-label="`${row.name}的数据类型`" @change="handlePlanFieldTypeChange(row)">
-                      <el-option v-for="item in valueTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
-                    </el-select>
-                  </template>
-                </el-table-column>
-                <el-table-column label="抽取策略" width="155">
-                  <template #default="{ row }">
-                    <el-select v-model="row.extraction_strategy" :aria-label="`${row.name}的抽取策略`" @change="handlePlanFieldStrategyChange(row)">
-                      <el-option
-                        v-for="item in extractionStrategyOptions"
-                        :key="item.value"
-                        :value="item.value"
-                        :label="item.label"
-                        :disabled="!extractionStrategySupports(item.value, row.value_type)"
-                      />
-                    </el-select>
-                  </template>
-                </el-table-column>
-                <el-table-column label="结构定义" width="110">
-                  <template #default="{ row }">
-                    <el-button
-                      v-if="row.extraction_strategy === 'STRUCTURED'"
-                      link
-                      type="primary"
-                      size="small"
-                      @click="openFieldSchemaEditor(row)"
-                    >
-                      {{ row.structure_schema ? "编辑" : "填写" }}
-                    </el-button>
-                    <span v-else class="text-muted">不适用</span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="必抽" width="75">
-                  <template #default="{ row }"><el-switch v-model="row.required" aria-label="是否必抽" /></template>
-                </el-table-column>
-                <el-table-column label="单位" width="110">
-                  <template #default="{ row }"><el-input v-model="row.unit" aria-label="单位" /></template>
-                </el-table-column>
-                <el-table-column label="币种" width="110">
-                  <template #default="{ row }"><el-input v-model="row.currency" aria-label="币种" /></template>
-                </el-table-column>
-                <el-table-column label="提取要求" min-width="260">
-                  <template #default="{ row }"><el-input v-model="row.instruction" aria-label="提取要求" /></template>
-                </el-table-column>
-              </el-table>
+              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ config.fields.length }} 个字段</span></div>
+              <div class="plan-table-wrap">
+                <el-table :data="config.fields" row-key="field_key" border stripe size="small" height="100%" empty-text="当前方案没有字段">
+                  <el-table-column type="index" label="序号" width="60" />
+                  <el-table-column prop="name" label="字段名称" min-width="180" show-overflow-tooltip />
+                  <el-table-column label="所属材料" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
+                  <el-table-column label="数据类型" width="100"><template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template></el-table-column>
+                  <el-table-column label="抽取策略" width="120"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
+                  <el-table-column label="必抽" width="70"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column prop="instruction" label="提取要求" min-width="240" show-overflow-tooltip />
+                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('field', row.field_key)">编辑</el-button></template></el-table-column>
+                </el-table>
+              </div>
             </el-tab-pane>
 
             <el-tab-pane :label="`审核规则（${enabledRules.length} 启用）`" name="rules">
-              <el-table :data="config.rules" border stripe size="small" max-height="420">
-                <el-table-column label="启用" width="80">
-                  <template #default="{ row }">
-                    <el-switch v-model="row.enabled" :aria-label="`启用规则 ${row.name}，适用材料 ${ruleMaterialNames(row)}`" />
-                  </template>
-                </el-table-column>
-                <el-table-column prop="name" label="规则名称" min-width="220" show-overflow-tooltip />
-                <el-table-column label="阶段" width="130"><template #default="{ row }">{{ nodeName(row.node_code) }}</template></el-table-column>
-                <el-table-column label="类型" width="90"><template #default="{ row }">{{ row.is_system ? "系统" : "业务" }}</template></el-table-column>
-                <el-table-column label="适用材料" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
-              </el-table>
-              <div class="text-hint tab-hint">已启用 {{ enabledRules.length }} 条，已取消 {{ disabledRules.length }} 条。保存后才会影响后续任务。</div>
+              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ businessRules.length }} 条规则，已启用 {{ enabledRules.length }} 条，未启用 {{ disabledRules.length }} 条</span></div>
+              <div class="plan-table-wrap">
+                <el-table :data="businessRules" row-key="rule_key" border stripe size="small" height="100%" empty-text="当前方案没有审核规则">
+                  <el-table-column type="index" label="序号" width="60" />
+                  <el-table-column prop="name" label="规则名称" min-width="220" show-overflow-tooltip />
+                  <el-table-column label="适用材料" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
+                  <el-table-column label="审核要求" min-width="300" show-overflow-tooltip><template #default="{ row }">{{ row.rule_json.requirement || "—" }}</template></el-table-column>
+                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('rule', row.rule_key)">编辑</el-button></template></el-table-column>
+                </el-table>
+              </div>
             </el-tab-pane>
 
             <el-tab-pane :label="`计算规则（${config.calculation_rules.length}）`" name="calculations">
-              <el-table :data="config.calculation_rules" border stripe size="small" max-height="420" empty-text="当前方案没有计算规则">
-                <el-table-column type="expand" width="48"><template #default="{ row }"><CalculationSources :origin="row.origin" :parameter-sources="row.parameter_sources" /></template></el-table-column>
-                <el-table-column label="启用" width="80"><template #default="{ row }"><el-switch v-model="row.enabled" :aria-label="`启用计算规则 ${row.rule_code}`" /></template></el-table-column>
-                <el-table-column prop="rule_name" label="指标名称" min-width="220" show-overflow-tooltip />
-                <el-table-column prop="formula" label="计算方法" min-width="220" show-overflow-tooltip />
-                <el-table-column prop="requirement" label="业务要求" min-width="220" show-overflow-tooltip />
-                <el-table-column prop="rule_code" label="编号" width="150" />
-                <el-table-column label="计算节点" min-width="150"><template #default="{ row }">{{ nodeName(row.node_code) }}</template></el-table-column>
-              </el-table>
+              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ config.calculation_rules.length }} 条计算规则</span></div>
+              <div class="plan-table-wrap">
+                <el-table :data="config.calculation_rules" row-key="rule_code" border stripe size="small" height="100%" empty-text="当前方案没有计算规则">
+                  <el-table-column type="index" label="序号" width="60" />
+                  <el-table-column prop="rule_name" label="指标名称" min-width="220" show-overflow-tooltip />
+                  <el-table-column prop="formula" label="计算方法" min-width="240" show-overflow-tooltip />
+                  <el-table-column prop="requirement" label="业务要求" min-width="240" show-overflow-tooltip />
+                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('calculation', row.rule_code)">编辑</el-button></template></el-table-column>
+                </el-table>
+              </div>
             </el-tab-pane>
 
             <el-tab-pane :label="`报告章节（${config.sections.length}）`" name="sections">
-              <div class="app-toolbar">
-                <div class="app-toolbar__left"><el-button @click="openSectionEditor()">新增章节</el-button></div>
+              <div class="plan-tab-toolbar">
+                <span class="text-muted">共 {{ config.sections.length }} 个报告章节</span>
+                <el-button type="primary" plain size="small" @click="openSectionEditor()">新增章节</el-button>
               </div>
-              <el-table :data="config.sections" border stripe size="small" max-height="420" empty-text="当前方案没有报告章节">
-                <el-table-column prop="report_code" label="报告编号" width="130" show-overflow-tooltip />
-                <el-table-column prop="title" label="章节名称" min-width="180" show-overflow-tooltip />
-                <el-table-column prop="report_name" label="所属报告" min-width="150" show-overflow-tooltip />
-                <el-table-column label="材料范围" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
-                <el-table-column label="绑定字段" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ fieldNames(row.field_keys) }}</template></el-table-column>
-                <el-table-column label="章节处理" width="115"><template #default="{ row }">{{ row.config_status === "PENDING" ? "待核对" : row.config_status === "DISABLED" ? "不生成" : "生成" }}</template></el-table-column>
-                <el-table-column label="操作" width="120" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
-              </el-table>
+              <div class="plan-table-wrap">
+                <el-table :data="config.sections" row-key="section_key" border stripe size="small" height="100%" empty-text="当前方案没有报告章节">
+                  <el-table-column type="index" label="序号" width="60" />
+                  <el-table-column prop="title" label="章节名称" min-width="180" show-overflow-tooltip />
+                  <el-table-column prop="report_name" label="所属报告" min-width="150" show-overflow-tooltip />
+                  <el-table-column label="材料范围" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
+                  <el-table-column label="业务数据引用" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ dataNames(row.data_refs) }}</template></el-table-column>
+                  <el-table-column label="章节处理" width="130"><template #default="{ row }"><el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'" size="small">{{ row.config_status === "PENDING" ? "待确认·不生成" : row.config_status === "DISABLED" ? "不生成" : "生成" }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="120" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
+                </el-table>
+              </div>
             </el-tab-pane>
 
           </el-tabs>
@@ -748,9 +691,9 @@ function adjustmentValue(value: unknown): string {
             <el-form-item label="章节名称" required>
               <el-input v-model="sectionForm.title" maxlength="255" />
             </el-form-item>
-            <el-form-item label="绑定字段">
-              <el-select v-model="sectionForm.field_keys" multiple filterable style="width: 100%">
-                <el-option v-for="field in fieldOptions" :key="field.value" :value="field.value" :label="field.label" />
+            <el-form-item label="业务数据">
+              <el-select v-model="sectionForm.data_refs" multiple filterable allow-create placeholder="选择字段、计算结果或规则结论，也可填写引用" style="width: 100%">
+                <el-option v-for="item in dataOptions" :key="item.value" :value="item.value" :label="item.label" />
               </el-select>
             </el-form-item>
             <el-form-item label="内容要求">
@@ -791,7 +734,7 @@ function adjustmentValue(value: unknown): string {
             <el-form-item label="章节处理">
               <el-select v-model="sectionForm.config_status" style="width: 100%">
                 <el-option value="CLEAR" label="生成（已核对）" />
-                <el-option value="PENDING" label="待核对（方案暂不可用）" />
+                <el-option value="PENDING" label="待确认（本章节不生成）" />
                 <el-option value="DISABLED" label="不生成" />
               </el-select>
             </el-form-item>
@@ -802,42 +745,97 @@ function adjustmentValue(value: unknown): string {
           </template>
         </el-dialog>
 
-        <el-dialog v-model="fieldSchemaDialogVisible" title="编辑字段结构" width="min(680px, 96vw)" :close-on-click-modal="false">
-          <el-alert
-            type="info"
-            show-icon
-            :closable="false"
-            :title="editingFieldSchema ? `字段：${editingFieldSchema.name}` : '结构化字段'"
-          />
-          <el-input
-            v-model="fieldSchemaText"
-            class="block-gap-sm"
-            type="textarea"
-            :rows="14"
-            placeholder='例如：{"type":"object","properties":{"付款期限":{"type":"string"}},"required":["付款期限"],"additionalProperties":false}'
-          />
-          <div class="text-hint">填写 JSON Schema。保存方案时后端会继续校验支持的类型、属性和约束。</div>
-          <template #footer>
-            <el-button @click="fieldSchemaDialogVisible = false">取消</el-button>
-            <el-button type="primary" @click="applyFieldSchema">应用修改</el-button>
-          </template>
-        </el-dialog>
+        <PlanExtractionEditor
+          v-model="extractionEditorVisible"
+          :config="config"
+          :kind="extractionEditorKind"
+          :item-key="extractionEditorKey"
+        />
+
+        <PlanBusinessEditor
+          v-if="config"
+          v-model="businessEditorVisible"
+          :config="config"
+          :kind="businessEditorKind"
+          :item-key="businessEditorKey"
+        />
 
       </template>
   </div>
 </template>
 
 <style scoped>
+.plan-editor {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--app-header-height) - var(--app-main-padding-y) - var(--app-main-padding-y));
+}
+
+.plan-editor > * {
+  flex-shrink: 0;
+}
+
+.plan-editor > .plan-config-workspace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .adjustment-line {
   overflow-wrap: anywhere;
 }
 
 .plan-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   margin-top: 8px;
 }
 
+.plan-tabs :deep(.el-tabs__header) {
+  flex-shrink: 0;
+  margin-bottom: 12px;
+}
+
+.plan-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+}
+
 .plan-tabs :deep(.el-tab-pane) {
-  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.plan-tab-toolbar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 32px;
+  margin-bottom: 12px;
+}
+
+.plan-table-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.plan-table-wrap > .el-table {
+  position: absolute;
+  inset: 0;
+}
+
+.plan-tabs :deep(.el-table__cell) {
+  padding: 8px 0;
 }
 
 .plan-status-line {
@@ -852,7 +850,4 @@ function adjustmentValue(value: unknown): string {
   max-width: 720px;
 }
 
-.tab-hint {
-  margin-top: 10px;
-}
 </style>

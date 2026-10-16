@@ -1,6 +1,6 @@
 /** 场景配置：草稿、材料、字段、规则、章节与发布。 */
 
-import type { ApiResponse, JsonValue } from "./common";
+import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 
 export interface RuleSnapshotEntry {
   rule_key: string;
@@ -23,6 +23,9 @@ export interface DocumentUploadResponse extends ApiResponse {
   filename: string;
   size_bytes: number;
   status: string;
+  material_classify: Record<string, JsonValue> | null;
+  /** 文件已经保存，自动校验通过此后台操作查询。 */
+  classification_operation: OperationAccepted;
 }
 
 export interface ScenarioListItem {
@@ -37,10 +40,12 @@ export interface ScenarioListItem {
   material_count: number;
   field_count: number;
   rule_count: number;
+  /** 数量与编辑页对应；有草稿时取草稿，否则取发布快照。 */
+  configuration_kind: "DRAFT" | "PUBLISHED";
   draft_revision: number | null;
   draft_source: string | null;
   draft_base_version_no: number | null;
-  /** 当前配置是否已生效：null 表示已生效；非空时为 {code, message, details}。 */
+  /** 配置编译错误；null 不表示草稿已发布。 */
   sync_error: ConfigSyncError | null;
   updated_at: string;
 }
@@ -59,7 +64,7 @@ export interface ScenarioDraftInfo {
   source: string;
   source_label: string;
   base_version_no: number | null;
-  /** 当前配置是否已生效：null 表示已生效。 */
+  /** 草稿编译错误；发布状态由草稿是否存在与发布版本共同表达。 */
   sync_error: ConfigSyncError | null;
   updated_at: string;
 }
@@ -133,11 +138,10 @@ export interface DraftRuleInputView {
 
 export interface ConfigOrigin {
   import_job_no?: string;
-  sheet_key: string;
   sheet_name: string;
   row_no: number;
-  cells: string[];
-  texts: Record<string, string>;
+  related_rows: { sheet_name: string; row_no: number }[];
+  rows: { sheet_name: string; row_no: number; cells: Record<string, JsonValue> }[];
 }
 
 export interface DraftRuleItem {
@@ -145,6 +149,7 @@ export interface DraftRuleItem {
   name: string;
   node: string;
   operator: string;
+  rule_role: "CHECK" | "RISK";
   enabled: boolean;
   /** 系统派生规则（字段抽取 / 报告生成）只读，不能独立删除。 */
   system: boolean;
@@ -168,7 +173,6 @@ export interface DraftRuleItem {
   source_rule_keys?: string[];
   source_rule_codes?: string[];
   config_status?: string | null;
-  quality_supported?: boolean | null;
   updated_at?: string | null;
 }
 
@@ -178,6 +182,8 @@ export interface DraftSectionItem {
   content_instruction: string;
   field_keys: string[];
   field_names: string[];
+  data_refs: string[];
+  data_names: string[];
   sort_no?: number;
   /** 报告的分组属性：报告编号、名称、材料范围、输出格式、章节顺序、内容类型、结果排序与配置状态。 */
   report_code?: string | null;
@@ -212,20 +218,6 @@ export interface DraftNodeItem {
   updated_at: string;
 }
 
-/**
- * 场景选入的来源表；自由布局表可同时承载多个节点的业务配置。
- */
-export interface DraftSheetItem {
-  sheet_role: string;
-  sheet_role_label: string;
-  /** 新导入保存真实身份和表名；历史配置可能没有记录。 */
-  sheet_key?: string | null;
-  sheet_name?: string | null;
-  /** 历史模板的节点绑定；自由布局导入为 null，字段和规则各自指定节点。 */
-  node_code: string | null;
-  sort_no: number;
-}
-
 /** 草稿中的计算配置核对行。来自 calculation_json，不是运行结果。 */
 export interface DraftCalculationItem {
   rule_code: string | null;
@@ -239,59 +231,34 @@ export interface DraftCalculationItem {
   currency: string | null;
   status: string | null;
   origin?: ConfigOrigin | null;
-  parameter_sources: Array<{ code: string | null; origin: ConfigOrigin | null }>;
 }
 
-export interface DraftDisabledSourceRow {
-  row_key: string;
-  sheet_role: string;
-  sheet_name: string;
-  import_job_no?: string;
-  source_id: string | null;
-  source: { sheet_key: string; row_no: number; cells: string[]; texts: Record<string, string> };
-  columns: Array<{ key: string; label: string; value: string; cell?: string | null }>;
-}
-
-export interface DraftSourceActivationPreviewData {
-  preview_id: string;
-  revision_no: number;
-  can_activate: boolean;
-  rows: Array<{
-    row_key: string;
-    sheet_role: string;
-    sheet_name: string;
-    row_no: number;
-    source_id: string | null;
-  }>;
-  items: Array<{ kind: string; name: string; description: string }>;
-  notices: string[];
-}
-
-export interface DraftSourceActivationPreview extends DraftSourceActivationPreviewData, ApiResponse {}
-
-export interface ScenarioDraftView extends ApiResponse {
+export interface ScenarioConfigurationView extends ApiResponse {
   scenario_code: string;
-  revision_no: number;
+  configuration_kind: "DRAFT" | "PUBLISHED";
+  version_no: number | null;
+  revision_no: number | null;
   source: string;
   source_label: string;
   base_version_no: number | null;
-  /** 内部能力与参考格式的版本标识；页面新建时为 null。 */
+  /** 规则执行契约的版本标识；页面新建时为 null。 */
   profile_version?: string | null;
-  /** 当前配置是否已生效：null 表示已生效；非空时页面显示“尚未生效 + 原因”。 */
+  /** 配置编译错误；null 不表示草稿已发布。 */
   sync_error?: ConfigSyncError | null;
   updated_at: string;
   /** 执行记录技术容器，不供用户编排业务流程。 */
   nodes: DraftNodeItem[];
-  /** 导入来源工作表清单；动态来源无表级节点，历史来源可保留旧绑定。 */
-  sheets: DraftSheetItem[];
   calculations: DraftCalculationItem[];
-  disabled_source_rows: DraftDisabledSourceRow[];
   materials: DraftMaterialItem[];
   fields: DraftFieldItem[];
   rules: DraftRuleItem[];
   sections: DraftSectionItem[];
   business_rule_count: number;
   system_rule_count: number;
+}
+export interface ScenarioDraftView extends ScenarioConfigurationView {
+  configuration_kind: "DRAFT";
+  revision_no: number;
 }
 export interface ScenarioPublishResult extends ApiResponse {
   scenario_code: string;
@@ -300,7 +267,6 @@ export interface ScenarioPublishResult extends ApiResponse {
   status: string;
   source: string;
   change_summary: string | null;
-  manifest_hash: string;
   material_count: number;
   field_count: number;
   rule_count: number;

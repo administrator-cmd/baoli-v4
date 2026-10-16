@@ -1,8 +1,10 @@
-"""SQLAlchemy 数据库实体，按业务域分组。"""
+"""数据库实体与编辑器 JSON 属性形状，按业务域分组。
+
+配置属性形状不注册到数据库 Base，也不创建业务明细表。
+"""
 
 from .base import TimestampMixin
-from .agents import AgentToolCall, EvaluationSnapshot
-from .imports import FieldCandidate, ImportIssue, ImportJob, ImportSheet
+from .imports import ImportJob
 from .operations import BackgroundOperation, OperationLog
 from .plans import AuditPlan, PlanField, PlanMaterial, PlanRule, PlanSection
 from .reports import AuditReport
@@ -13,35 +15,26 @@ from .scenario_drafts import (
     ScenarioDraftNode,
     ScenarioDraftRule,
     ScenarioDraftSection,
-    ScenarioDraftSheet,
 )
-from .scenarios import ScenarioMaterial, ScenarioNode, ScenarioRule, ScenarioTemplate, ScenarioVersion
-from .retrieval import EvidenceChunk, EvidenceIndexVersion, EvidenceRetrieval
+from .scenarios import ScenarioNode, ScenarioTemplate, ScenarioVersion
 from .tasks import (
     AuditTask,
     DocumentUpload,
     Evidence,
     ManualReview,
     NodeExecution,
-    ReviewDraft,
     RuleResult,
     StoredArtifact,
     TaskDocument,
     TaskFact,
     TaskFieldValue,
-    WorkflowCheckpoint,
 )
 
 __all__ = [
     "TimestampMixin",
-    "AgentToolCall",
-    "EvaluationSnapshot",
     "BackgroundOperation",
     "OperationLog",
-    "FieldCandidate",
-    "ImportIssue",
     "ImportJob",
-    "ImportSheet",
     "AuditPlan",
     "PlanField",
     "PlanMaterial",
@@ -54,26 +47,18 @@ __all__ = [
     "ScenarioDraftNode",
     "ScenarioDraftRule",
     "ScenarioDraftSection",
-    "ScenarioDraftSheet",
-    "ScenarioMaterial",
     "ScenarioNode",
-    "ScenarioRule",
     "ScenarioTemplate",
     "ScenarioVersion",
-    "EvidenceChunk",
-    "EvidenceIndexVersion",
-    "EvidenceRetrieval",
     "AuditTask",
     "DocumentUpload",
     "Evidence",
     "ManualReview",
     "NodeExecution",
-    "ReviewDraft",
     "RuleResult",
     "StoredArtifact",
     "TaskDocument",
     "TaskFact",
     "TaskFieldValue",
-    "WorkflowCheckpoint",
 ]
 

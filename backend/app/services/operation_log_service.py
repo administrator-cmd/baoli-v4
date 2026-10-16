@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, literal, or_, select, text, union_all
 from sqlalchemy.orm import Session
 
+from ..common.pagination import PageResult, page_result
 from ..common.exceptions import BusinessError
 from ..entity import ImportJob
 from ..entity import AuditTask, BackgroundOperation, OperationLog
@@ -192,7 +193,7 @@ def list_operations_page(
     created_to: datetime | None,
     page: int,
     page_size: int,
-) -> dict[str, Any]:
+) -> PageResult[dict[str, Any]]:
     """操作日志分页：业务写操作与后台命令并列展示，各自的编号独立可查。"""
     business = _business_entry_select().subquery()
     command = _command_entry_select().subquery()
@@ -285,6 +286,6 @@ def list_operations_page(
                 "finished_at": row.finished_at,
             }
         )
-    return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+    return page_result(items, total, page, page_size)
 
 

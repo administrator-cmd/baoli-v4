@@ -4,7 +4,7 @@ from typing import Any
 
 
 def empty_config() -> dict[str, Any]:
-    return {"nodes": [], "sheets": [], "materials": [], "fields": [], "rules": [], "sections": [], "calculation_json": None, "disabled_source_rows": [], "context": {}}
+    return {"nodes": [], "materials": [], "fields": [], "rules": [], "sections": [], "calculation_json": None, "context": {}}
 
 
 def config_property(key: str) -> property:

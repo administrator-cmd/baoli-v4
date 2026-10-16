@@ -30,22 +30,6 @@ class ScenarioPublishRequest(BaseModel):
     change_summary: str | None = Field(default=None, max_length=500)
 
 
-class DraftDisabledSourceRowUpdateRequest(BaseModel):
-    expected_revision: int = Field(ge=0)
-    values: dict[str, str]
-
-
-class DraftSourceActivationPreviewRequest(BaseModel):
-    expected_revision: int = Field(ge=0)
-    row_keys: list[str] = Field(min_length=1)
-    idempotency_key: str | None = Field(default=None, max_length=120)
-
-
-class DraftSourceActivationConfirmRequest(BaseModel):
-    expected_revision: int = Field(ge=0)
-    preview_id: str = Field(pattern=r"^[0-9a-f]{32}$")
-
-
 class DraftMaterialRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     required: bool = True
@@ -107,6 +91,7 @@ class DraftRuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     node: str = "RULE_EXECUTION"
     operator: str = "LLM_EXECUTE"
+    rule_role: Literal["CHECK", "RISK"] = "CHECK"
     enabled: bool = True
     inputs: list[DraftRuleInput] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
@@ -130,6 +115,7 @@ class DraftSectionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     content_instruction: str = Field(default="", max_length=4000)
     field_keys: list[str] = Field(default_factory=list)
+    data_refs: list[str] = Field(default_factory=list)
     report_code: str | None = Field(default=None, max_length=80)
     report_name: str | None = Field(default=None, max_length=255)
     material_keys: list[str] = Field(default_factory=list)
@@ -145,6 +131,7 @@ class DraftSectionUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     content_instruction: str | None = Field(default=None, max_length=4000)
     field_keys: list[str] | None = None
+    data_refs: list[str] | None = None
     report_code: str | None = Field(default=None, max_length=80)
     report_name: str | None = Field(default=None, max_length=255)
     material_keys: list[str] | None = None

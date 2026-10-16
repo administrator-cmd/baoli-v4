@@ -131,8 +131,7 @@ def check_materials(
 def applicability_state(applicability: dict[str, Any], uploaded_keys: set[str]) -> dict[str, Any]:
     """规则的适用条件是否成立，以及适用条件引用到的未上传材料。
 
-    节点（`services.audit.shared._applicability_state`）与 Agent 工具都调它：
-    材料可选不等于规则不适用，这条口径只在这里实现一次。
+    材料存在性工具使用此函数读取适用条件；材料可选不等于规则不适用。
 
     `applicability` 是 `{"kind","label","material_keys"}`，来自已发布配置。
     """

@@ -2,13 +2,14 @@ import hashlib
 from pathlib import Path
 
 from fastapi import UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from ..config import get_settings
 from ..common.exceptions import BusinessError
 
 
 RULEBOOK_EXTENSIONS = {".xlsx", ".xlsm"}
-DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xlsm", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+DOCUMENT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
 
 def resolve_storage_path(relative_path: str) -> Path:
@@ -21,6 +22,18 @@ def resolve_storage_path(relative_path: str) -> Path:
 
 
 async def save_upload(
+    upload: UploadFile,
+    *,
+    relative_path: str,
+    allowed_extensions: set[str],
+    max_bytes: int,
+) -> tuple[int, str]:
+    """异步入口将磁盘和哈希操作交给工作线程。"""
+    return await run_in_threadpool(save_upload_sync, upload, relative_path=relative_path,
+                                  allowed_extensions=allowed_extensions, max_bytes=max_bytes)
+
+
+def save_upload_sync(
     upload: UploadFile,
     *,
     relative_path: str,
@@ -41,7 +54,7 @@ async def save_upload(
     total = 0
     try:
         with target.open("wb") as output:
-            while chunk := await upload.read(1024 * 1024):
+            while chunk := upload.file.read(1024 * 1024):
                 total += len(chunk)
                 if total > max_bytes:
                     raise BusinessError(

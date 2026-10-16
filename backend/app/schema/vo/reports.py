@@ -30,8 +30,11 @@ class ReportFormatSupport(BaseModel):
 
 class ReportResponse(ApiResponse):
     task_no: str
+    report_no: str | None = None
+    report_name: str | None = None
+    reports: list[dict[str, Any]] = Field(default_factory=list)
     status: Literal["COMPLETE", "INCOMPLETE", "NOT_GENERATED"]
-    content_type: Literal["text/markdown"]
+    content_type: Literal["text/markdown", "text/plain", "text/html"]
     content: str | None
     reasons: list[str]
     # 三个信号必须分开表达：报告是否生成、已配置审核范围是否执行完整、风险是否可判定。

@@ -1,5 +1,4 @@
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -8,13 +7,11 @@ from sqlalchemy import (
     CHAR,
     CheckConstraint,
     Computed,
-    Date,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
-    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -43,44 +40,30 @@ class AuditTask(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     task_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
     scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
-    # 任务创建时使用的审核方案。旧任务没有方案关联时为空，页面显示「历史任务配置」，
-    # 不猜测迁移、不改写历史结果。
+    # 任务创建时使用的审核方案。
     plan_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("audit_plan.id"))
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 任务备注：属于可编辑的基本资料，不进入执行快照。
     remark: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     current_node: Mapped[str] = mapped_column(String(80), nullable=False)
-    thread_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    # 本任务的执行快照：方案的编译产物整份冻结（材料/字段/规则/报告章节/节点/Sheet）。
+    # 本任务的执行快照：方案的编译产物整份冻结（材料/字段/规则/报告章节/节点）。
     # 执行期只读它，不读场景版本、也不读方案当前配置——方案后来怎么改都不影响已建任务。
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 本任务的规则范围（启用/未启用规则与字段清单）。从上面的 manifest 算出。
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # 流程进度：当前节点、阶段与节点序号。这是任务自身的进度标记，不是图状态快照。
     checkpoint_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    pending_review_hash: Mapped[str | None] = mapped_column(CHAR(64))
-    # 业务中间值 CSV 的已提交文件指针；事务回滚不覆盖上一份文件。
-    intermediate_csv_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 不可变业务 CSV 批次清单：format_version、batches（batch_id/files/record_count）、record_count；
+    # legacy_files 登记显式转换后保留的原文件。由 task_value_service 读写。
+    value_file_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 任务输入修订号：首次补传、替换材料和人工有效值变化都会递增。
     # 写入口在对象锁内核对命令携带的修订号，过期命令不得覆盖新输入。
     input_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    # 逻辑删除：历史事实、报告与文件保留；有活跃后台操作时拒绝删除。
+    # 旧结构中的删除时间列仍映射以免要求重建数据库；当前任务采用永久删除，不再读写此列。
     deleted_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
 
 
-class WorkflowCheckpoint(Base, TimestampMixin):
-    __tablename__ = "workflow_checkpoint"
-    __table_args__ = (
-        UniqueConstraint("audit_task_id", "checkpoint_ns"),
-        Index("idx_workflow_checkpoint_thread_status", "thread_id", "status"),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
-    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False)
-    status: Mapped[str] = mapped_column(String(30), nullable=False)
-    state_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
 class TaskDocument(Base, TimestampMixin):
@@ -174,8 +157,10 @@ class StoredArtifact(Base, TimestampMixin):
 
 
 class TaskFieldValue(Base, TimestampMixin):
-    """一次抽取（或一次人工纠错）产生的字段事实版本。
+    """字段事实的版本与当前位索引；取值本身存在本次任务的 CSV。
 
+    这里只回答「哪个任务、哪个字段、哪个材料位的哪一版是当前」，
+    业务取值（抽取原文与规范值）由 `services.task_value_service` 按 id 从任务 CSV 取。
     事实不可变：重跑不覆盖旧行，而是新增一个 revision_no 并把它置为当前；
     旧行保留为历史，旧复核和旧证据仍然指向它们当时依据的那一版事实。
     同一任务同一字段同一材料位最多只有一个当前事实，由生成列唯一键在数据库层保证。
@@ -227,8 +212,6 @@ class TaskFieldValue(Base, TimestampMixin):
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    raw_value: Mapped[str | None] = mapped_column(Text)
-    normalized_value_json: Mapped[Any | None] = mapped_column(JSON)
     evidence_id: Mapped[int | None] = mapped_column(BigInteger)
     # 产生这条事实的执行批次；人工纠错产生的版本没有抽取执行，记为 NULL。
     extraction_execution_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -243,7 +226,7 @@ class TaskFieldValue(Base, TimestampMixin):
 
 
 class TaskFact(Base, TimestampMixin):
-    """统一事实：字段抽取事实与计算派生事实。
+    """统一事实的身份、口径与当前位索引；取值本身存在本次任务的 CSV。
 
     与 `task_field_value` 的抽取候选分开，统一表达字段事实和计算结果。
     事实身份包含来源编号、材料、期间、报表口径与主体范围，定位口径来自业务配置，
@@ -253,10 +236,7 @@ class TaskFact(Base, TimestampMixin):
     旧复核与旧证据仍指向它们当时依据的那一版事实。同一 (任务, 事实编号, 材料位, 期间,
     报表口径, 主体范围) 最多只有一条当前事实，由生成列唯一键在数据库层保证。
 
-    计算派生事实的追溯：`input_snapshot_json` 记录本次计算用到的每一版事实
-    （fact_id + revision_no）及实际输入信息；`judgement_json` 记录模型判断与业务结论。
-
-    RAG 只保存证据、原文与检索信息，不是 `decimal_value` 的权威来源。
+    业务取值、单位与币种、计算判断由 `services.task_value_service` 按 id 从任务 CSV 取。
     """
 
     __tablename__ = "task_fact"
@@ -305,17 +285,7 @@ class TaskFact(Base, TimestampMixin):
     period_scope: Mapped[str] = mapped_column(String(30), nullable=False)
     statement_scope: Mapped[str] = mapped_column(String(20), nullable=False)
     value_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    # 数值事实用 DECIMAL(38, 10) 定点保存，不用浮点：float 的二进制误差会让
-    # 「恰好等于阈值」的判定随机翻转。
-    decimal_value: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
-    text_value: Mapped[str | None] = mapped_column(Text)
-    date_value: Mapped[date | None] = mapped_column(Date)
-    boolean_value: Mapped[bool | None] = mapped_column(Boolean)
-    unit: Mapped[str | None] = mapped_column(String(40))
-    currency: Mapped[str | None] = mapped_column(String(40))
     source_execution_id: Mapped[int | None] = mapped_column(BigInteger)
-    input_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    judgement_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     calculation_status: Mapped[str | None] = mapped_column(String(30))
     calculation_rule_code: Mapped[str | None] = mapped_column(String(80))
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
@@ -335,11 +305,13 @@ class TaskFact(Base, TimestampMixin):
 
 
 class RuleResult(Base, TimestampMixin):
-    """一次规则执行的结果。
+    """一次规则执行的身份、状态与诊断；业务结论存在本次任务的 CSV。
 
     普通规则的 `rule_key` 是配置中的稳定键，计算结果的 `rule_key` 是计算业务编号。
     两者可能重名，结果须结合所属节点执行定位；数据库唯一键为
     (`node_execution_id`, `rule_key`)，不能按裸 `rule_key` 跨节点合并。
+
+    `message` 与 `risk_level` 同时保留为列表索引列；CSV 也有对应的可读业务列。
     """
 
     __tablename__ = "rule_result"
@@ -353,6 +325,7 @@ class RuleResult(Base, TimestampMixin):
         Index("idx_rule_result_task_status", "audit_task_id", "status"),
         Index("idx_rule_result_task_rule", "audit_task_id", "rule_key"),
         Index("idx_rule_result_task_code", "audit_task_id", "rule_code"),
+        Index("idx_rule_result_task_risk_level", "audit_task_id", "risk_level"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -360,18 +333,20 @@ class RuleResult(Base, TimestampMixin):
     node_execution_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     rule_key: Mapped[str] = mapped_column(String(80), nullable=False)
     rule_code: Mapped[str | None] = mapped_column(String(80))
-    legacy_rule_key: Mapped[str | None] = mapped_column(String(40))
     rule_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
+    # 风险等级：风险结果列表按它筛选与排序，因此单独成列而不是压进 JSON。
+    risk_level: Mapped[str | None] = mapped_column(String(40))
+    # 执行诊断：模型原始响应、格式修正记录、循环状态、未解决事项与本条输入引用。
+    # 业务结论（outputs、计算结果、风险上下文等）不在这里，按 id 从任务 CSV 取。
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class Evidence(Base, TimestampMixin):
     """一条证据引用。
 
-    引用原文及所属材料/产物供内容核对使用。page_no、bbox_json、locator_status、
-    locator_note 仅保留历史存储兼容；新证据不生成定位信息，接口不返回这些历史列。
+    只保存引用原文、字段属性及所属材料/产物，供内容核对使用。
     """
 
     __tablename__ = "evidence"
@@ -394,7 +369,6 @@ class Evidence(Base, TimestampMixin):
             ["stored_artifact.id", "stored_artifact.audit_task_id"],
         ),
         CheckConstraint("document_upload_id IS NOT NULL OR rule_result_id IS NOT NULL OR field_value_id IS NOT NULL"),
-        CheckConstraint("page_no IS NULL OR page_no >= 1"),
         CheckConstraint("field_path IS NULL OR field_value_id IS NOT NULL"),
         Index("idx_evidence_task", "audit_task_id"),
         Index("idx_evidence_upload", "document_upload_id"),
@@ -410,14 +384,8 @@ class Evidence(Base, TimestampMixin):
     field_value_id: Mapped[int | None] = mapped_column(BigInteger)
     # 结构化字段的顶层属性路径；普通字段与规则证据为空。
     field_path: Mapped[str | None] = mapped_column(String(255))
-    page_no: Mapped[int | None] = mapped_column(Integer)
     quote_text: Mapped[str] = mapped_column(Text, nullable=False)
-    bbox_json: Mapped[list[float] | None] = mapped_column(JSON)
     artifact_id: Mapped[int | None] = mapped_column(BigInteger)
-    locator_status: Mapped[str] = mapped_column(
-        String(30), nullable=False, default="UNVERIFIED", server_default=text("'UNVERIFIED'")
-    )
-    locator_note: Mapped[str | None] = mapped_column(Text)
 
 
 class ManualReview(Base, TimestampMixin):
@@ -471,28 +439,6 @@ class ManualReview(Base, TimestampMixin):
     decision_command_no: Mapped[str | None] = mapped_column(String(40))
 
 
-class ReviewDraft(Base, TimestampMixin):
-    """复核草稿：未提交的复核答案按“待办版本”持久化暂存。
-
-    pending_hash 是保存草稿时任务的待办版本（audit_task.pending_review_hash）；
-    读取只返回与当前待办版本一致的草稿——旧草稿不会套用到变化后的待办，
-    提交（正式裁决）仍走后台命令，与草稿互不替代。
-    """
-
-    __tablename__ = "review_draft"
-    __table_args__ = (
-        UniqueConstraint("audit_task_id", "review_no"),
-        Index("idx_review_draft_task_hash", "audit_task_id", "pending_hash"),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
-    review_no: Mapped[str] = mapped_column(String(40), nullable=False)
-    pending_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    decision: Mapped[str | None] = mapped_column(String(40))
-    business_note: Mapped[str | None] = mapped_column(Text)
-    field_value: Mapped[str | None] = mapped_column(Text)
-    basis_type: Mapped[str | None] = mapped_column(String(30))
 
 
 class NodeExecution(Base, TimestampMixin):

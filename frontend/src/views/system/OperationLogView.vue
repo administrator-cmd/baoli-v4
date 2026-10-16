@@ -96,7 +96,6 @@ onMounted(() => {
     <PageHeader
       eyebrow="系统管理"
       title="操作日志"
-      subtitle="业务写操作与后台命令的追加记录；失败保留错误码与原因，命令可按编号继续查询。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -130,14 +129,6 @@ onMounted(() => {
       </el-form-item>
     </el-form>
 
-    <div class="app-toolbar">
-      <div class="app-toolbar__left">
-        <span class="text-hint">
-          业务写操作与后台命令并列展示；命令编号与操作编号都可以独立查询。
-          系统当前没有登录用户体系，操作日志不记录操作人，也没有逐条请求编号。
-        </span>
-      </div>
-    </div>
 
     <el-alert v-if="error" type="error" show-icon :closable="false" :title="`读取失败：${error}`">
       <el-button size="small" @click="list.load()">重试</el-button>
@@ -223,9 +214,6 @@ onMounted(() => {
           <span v-else>—</span>
         </el-descriptions-item>
       </el-descriptions>
-      <p class="text-hint block-gap-sm">
-        操作日志为追加记录，不支持修改或删除；后台命令的完整阶段可通过操作编号在任务页继续查询。
-      </p>
     </el-drawer>
   </div>
 </template>

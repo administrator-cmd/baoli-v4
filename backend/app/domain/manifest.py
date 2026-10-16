@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 from copy import deepcopy
 from datetime import datetime
 from typing import Any
@@ -10,8 +9,15 @@ from . import tool_catalog, field_strategy
 from .audit_vocab import SCOPE_NOT_APPLICABLE
 from ..common.exceptions import BusinessError
 from .identity import stable_key
-# 参数常量存于叶子模块，工具目录不依赖规则库编译。
-from .parameter_contract import CONFIG_STATUS_DISABLED
+from .report_data import report_data_refs
+from .rule_library import active, is_risk_rule
+from .proposals import MaterialProposal, FieldProposal, RuleProposal, ReportSectionProposal
+
+
+def _proposal_context(item: dict[str, Any], model: type) -> dict[str, Any]:
+    """补充业务属性进入执行上下文，不覆盖编译器维护的身份与类型。"""
+    return deepcopy({**item.get("business_context", {}),
+                     **{key: value for key, value in item.items() if key not in model.model_fields}})
 
 
 # 参数契约常量见文件顶部从 `parameter_contract` 的导入（叶子模块，避免成环）。
@@ -46,13 +52,6 @@ def operator_uses_addends(operator: str) -> bool:
     return operator == "DECIMAL_SUM_COMPARE"
 
 
-EVIDENCE_RETRIEVAL = tool_catalog.EVIDENCE_RETRIEVAL
-# 主体检索：只对印章识别产物中的主体名称建向量，用待核对主体查相似印章主体。
-# 它不是全文检索：不检索材料正文，也不检索条款。
-EVIDENCE_SEAL_SUBJECT = tool_catalog.EVIDENCE_SEAL_SUBJECT
-
-
-
 def applicability_view(rule: dict[str, Any]) -> dict[str, Any]:
     """把适用条件统一成结构化形式并附中文口径，供预览与执行使用。"""
     applicability = rule.get("applicability")
@@ -83,7 +82,8 @@ def _compiled_applicability(
     for material_key in material_scope:
         if material_key not in material_keys:
             material_keys.append(material_key)
-    return {"kind": applicability["kind"], "material_keys": material_keys}
+    return {**deepcopy(rule.get("applicability") or {}),
+            "kind": applicability["kind"], "material_keys": material_keys}
 
 
 
@@ -116,10 +116,7 @@ def rule_comparison_view(
         for item in rule.get("inputs", [])
     ]
     applicability = applicability_view(rule)
-    source = rule.get("source") if isinstance(rule.get("source"), dict) else {}
     requirement = rule.get("requirement") or None
-    # 规则原文是用户实际写下的内容；模型改写后的措辞不能替代它出现在预览里。
-    source_texts = source.get("texts") if isinstance(source.get("texts"), dict) else {}
     direction = comparison_label(rule.get("operator", ""), parameters.get("operator"))
     threshold = parameters.get("threshold")
     source_rule_refs = list(dict.fromkeys([
@@ -138,8 +135,6 @@ def rule_comparison_view(
         "parameters": parameters,
         # 审核要求原文：页面展示的必须是用户实际填写的内容，不是模型的改写结果。
         "requirement": requirement,
-        # 规则所在行的原始单元格文本（列名 → 原文），供预览逐项对照 Excel。
-        "source_texts": source_texts,
         "applicability": {"kind": applicability["kind"], "material_keys": applicability["material_keys"]},
         "applicability_label": applicability["label"],
         "source_rule_name": rule_names.get(rule.get("source_rule_ref")) if rule.get("source_rule_ref") else None,
@@ -187,7 +182,7 @@ def refresh_calculation_references(calculations: list[dict[str, Any]]) -> list[d
     """使用显式参数清单刷新计算依赖，不解析业务方法。"""
     refreshed = []
     for item in calculations:
-        if item.get("status") == CONFIG_STATUS_DISABLED:
+        if not active(item):
             refreshed.append(deepcopy(item))
             continue
         parameters = item.get("parameters") or []
@@ -201,227 +196,34 @@ def refresh_calculation_references(calculations: list[dict[str, Any]]) -> list[d
     return refreshed
 
 
-def _alias_map(
-    items: list[dict[str, Any]],
-    key_map: dict[str, str],
-    *,
-    shared_source_ids: bool = False,
-) -> tuple[dict[str, str], dict[tuple[str, str], list[str]]]:
-    candidate_aliases: dict[str, str] = {}
-    source_aliases: dict[tuple[str, str], list[str]] = {}
-    # 同一行展开的候选可共用来源编号；材料还允许跨行共享。具体引用优先使用
-    # candidate_ref，共享编号解析为多项时由调用方明确处理，不任选一项。
-    rows_by_source: dict[tuple[str, str], set[int]] = {}
-    for item in items:
-        source_id = item.get("source_id")
-        if not source_id:
-            continue
-        rows_by_source.setdefault((item["source"]["sheet_key"], source_id), set()).add(
-            int(item["source"].get("row_no") or 0)
-        )
-    for item in items:
-        key = key_map[item["candidate_ref"]]
-        candidate_aliases[item["candidate_ref"]] = key
-        source_id = item.get("source_id")
-        if not source_id:
-            continue
-        scope = (item["source"]["sheet_key"], source_id)
-        if not shared_source_ids and len(rows_by_source.get(scope, set())) > 1:
-            raise BusinessError(
-                "MANIFEST_DUPLICATE_SOURCE_ID",
-                "同一工作表内的来源编码重复：同一编号出现在多行业务记录上，无法生成场景",
-                details={
-                    "sheet_key": scope[0],
-                    "source_ref": source_id,
-                    "row_nos": sorted(rows_by_source[scope]),
-                },
-            )
-        source_aliases.setdefault(scope, []).append(key)
-    return candidate_aliases, source_aliases
-
-
-def _resolve_aliases(
-    reference: str,
-    owner_sheet_key: str,
-    candidate_aliases: dict[str, str],
-    source_aliases: dict[tuple[str, str], list[str]],
-    *,
-    target_type: str,
-    error_code: str,
-    error_message: str,
-    details: dict[str, Any],
-) -> list[str]:
-    candidate = candidate_aliases.get(reference)
-    if candidate is not None:
-        return [candidate]
-    source = source_aliases.get((owner_sheet_key, reference))
-    if source is not None:
-        return source
-    cross_sheet_matches = [keys for (_, source_ref), keys in source_aliases.items() if source_ref == reference]
-    if len(cross_sheet_matches) == 1:
-        return cross_sheet_matches[0]
-    if cross_sheet_matches:
-        raise BusinessError(
-            "MANIFEST_SOURCE_SCOPE_INVALID",
-            "来源编码在多个工作表中重复，无法跨工作表唯一解析，请使用候选引用关联",
-            details={"target_type": target_type, "reference": reference, "owner_sheet_key": owner_sheet_key, **details},
-        )
-    raise BusinessError(error_code, error_message, details=details)
-
-
-def _resolve_alias(
-    reference: str,
-    owner_sheet_key: str,
-    candidate_aliases: dict[str, str],
-    source_aliases: dict[tuple[str, str], list[str]],
-    *,
-    target_type: str,
-    error_code: str,
-    error_message: str,
-    details: dict[str, Any],
-) -> str:
-    matches = _resolve_aliases(
-        reference, owner_sheet_key, candidate_aliases, source_aliases,
-        target_type=target_type, error_code=error_code, error_message=error_message, details=details,
-    )
-    if len(matches) != 1:
-        raise BusinessError(
-            "MANIFEST_SOURCE_SCOPE_INVALID",
-            "来源编号对应同一业务行展开的多个候选，请使用明确的候选引用",
-            details={"target_type": target_type, "reference": reference, "matches": matches, **details},
-        )
-    return matches[0]
-
-
-def import_origin_of(
-    item: dict[str, Any], *, sheet_names: dict[str, str], import_job_no: str
-) -> dict[str, Any]:
-    source = item["source"]
-    sheet_key = source["sheet_key"]
-    if sheet_key not in sheet_names:
-        raise BusinessError(
-            "IMPORT_SOURCE_SHEET_MISSING",
-            "导入候选的来源工作表不在本次导入范围内",
-            details={"sheet_key": sheet_key, "import_job_no": import_job_no},
-        )
-    return {
-        "import_job_no": import_job_no,
-        "sheet_key": sheet_key,
-        "sheet_name": sheet_names[sheet_key],
-        "row_no": source["row_no"],
-        "cells": list(source["cells"]),
-        "texts": dict(source.get("texts") or {}),
-    }
-
-
 def draft_config_of_import(
     *,
     proposals: dict[str, Any],
     namespace: str,
-    selected_sheets: list[dict[str, Any]],
-    import_job_no: str,
-    existing_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """将本次解析候选投影为草稿；不读取或叠加旧业务裁决。"""
+    """将模型业务配置投影为草稿，保留原始业务编号与来源。"""
+    from .rule_library import EXECUTION_VERSION, execution_container
+
     resolved = deepcopy(proposals)
-    included = resolved["sheets"]
-    if not included:
-        raise BusinessError("SCENARIO_SHEET_REQUIRED", "本次没有选择工作表", status_code=409)
-    selected_sheet_keys = {item["sheet_key"] for item in selected_sheets}
-    for sheet in included:
-        if sheet["sheet_key"] not in selected_sheet_keys:
-            raise BusinessError(
-                "IMPORT_SHEET_SELECTION_CHANGED",
-                "候选来源不在本次选入的工作表中，请重新选择工作表并解析规则库",
-                status_code=409,
-                details={
-                    "sheet_key": sheet["sheet_key"],
-                },
-            )
-    included_keys = {sheet["sheet_key"] for sheet in included}
-    sheet_names = {sheet["sheet_key"]: sheet["sheet_name"] for sheet in selected_sheets}
-
-    def original_source(item: dict[str, Any]) -> dict[str, Any]:
-        return import_origin_of(item, sheet_names=sheet_names, import_job_no=import_job_no)
-
-    def with_nested_origins(
-        rows: list[dict[str, Any]], original_rows: list[dict[str, Any]], key: str
-    ) -> list[dict[str, Any]]:
-        originals = {row[key]: row for row in original_rows}
-        return [
-            {
-                **row,
-                **({"origin": original_source(originals[row[key]])}
-                   if row[key] in originals and originals[row[key]].get("source") else {}),
-            }
-            for row in rows
-        ]
-
-    materials = [
-        item for sheet in included for item in sheet.get("materials", [])
-    ]
-    fields = [
-        item for sheet in included for item in sheet.get("fields", [])
-    ]
-    rules = [
-        item for sheet in included for item in sheet.get("rules", [])
-    ]
-    sections = [
-        item for sheet in included for item in sheet.get("report_sections", [])
-    ]
-    calculations = [
-        item for item in resolved.get("calculations", [])
-        if item["source"]["sheet_key"] in included_keys
-    ]
-    original_calculations = {item["candidate_ref"]: item for item in proposals.get("calculations", [])}
-    calculations = [
-        {
-            **item,
-            "origin": original_source(original_calculations[item["candidate_ref"]]),
-            "parameters": with_nested_origins(
-                item.get("parameters") or [],
-                original_calculations[item["candidate_ref"]].get("parameters") or [],
-                "parameter_code",
-            ),
-        }
-        for item in calculations
-    ]
-    def business_code(item: dict[str, Any], target_type: str) -> str:
-        value = item.get("source_id")
-        if target_type == "RULE" and item.get("rule_code"):
-            value = item["rule_code"]
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        # 内部候选身份与 Excel 业务编号分开；没有编号也可设计场景。
-        return item["candidate_ref"]
-
+    materials = resolved["materials"]
+    fields = resolved["fields"]
+    rules = resolved["rules"]
+    sections = resolved["report_sections"]
+    calculations = resolved["calculations"]
     # 同一 Excel 业务行可以拆出多个材料位，共享 source_id。内部身份使用候选引用，
     # source_id 仅保留为来源编号，不能让资产负债表、利润表等不同材料生成同一个键。
     material_keys = {
         item["candidate_ref"]: stable_key("mat", namespace, item["candidate_ref"])
         for item in materials
     }
-    # 规则执行分支也按实际材料身份区分，不能再次通过来源编号把多个材料合并。
-    material_codes = dict(material_keys)
-    if existing_config is not None:
-        material_codes.update({
-            item["material_key"]: item["material_key"]
-            for item in existing_config["materials"]
-        })
     field_keys = {
         item["candidate_ref"]: stable_key("fld", namespace, item["candidate_ref"]) for item in fields
     }
-    field_source_codes = {item["candidate_ref"]: field_keys[item["candidate_ref"]] for item in fields if not item.get("source_id")}
-    if existing_config is not None:
-        # 增量提案用已有 field_key 引用；计算编译按 source_ref 或无编号字段键定位。
-        field_source_codes.update({
-            item["field_key"]: str(item.get("source_ref") or item["field_key"])
-            for item in existing_config["fields"]
-        })
+    # 执行引用映射到内部字段键；同一原编号拆出的材料/期间不能互相覆盖。
     for calculation in calculations:
         for parameter in calculation["parameters"]:
-            if parameter["source_type"] == "FIELD" and parameter["source_code"] in field_source_codes:
-                parameter["source_code"] = field_source_codes[parameter["source_code"]]
+            if parameter["source_type"] == "FIELD" and parameter["source_code"] in field_keys:
+                parameter["source_code"] = field_keys[parameter["source_code"]]
     rule_keys = {item["candidate_ref"]: stable_key("rule", namespace, item["candidate_ref"]) for item in rules}
     for target_type, keys in (("MATERIAL", material_keys), ("FIELD", field_keys), ("RULE", rule_keys)):
         if len(set(keys.values())) != len(keys):
@@ -435,59 +237,27 @@ def draft_config_of_import(
                     refs for refs in owners.values() if len(refs) > 1
                 ]},
             )
-    material_aliases, material_sources = _alias_map(materials, material_keys, shared_source_ids=True)
-    field_aliases, field_sources = _alias_map(fields, field_keys)
-    rule_aliases, rule_sources = _alias_map(rules, rule_keys)
-    if existing_config is not None:
-        for section, key, aliases in (
-            ("materials", "material_key", material_aliases),
-            ("fields", "field_key", field_aliases),
-            ("rules", "rule_key", rule_aliases),
-        ):
-            for existing in existing_config[section]:
-                aliases[existing[key]] = existing[key]
-
     def resolve(
         reference: str, owner: dict[str, Any], target: str, *, multiple: bool = False
     ) -> str | list[str]:
-        aliases, sources = {
-            "MATERIAL": (material_aliases, material_sources),
-            "FIELD": (field_aliases, field_sources),
-            "RULE": (rule_aliases, rule_sources),
-        }[target]
-        options = {
-            "MATERIAL": ("MANIFEST_MATERIAL_REF_MISSING", "引用的材料不存在"),
-            "FIELD": ("MANIFEST_RULE_INPUT_MISSING", "引用的字段不存在"),
-            "RULE": ("MANIFEST_RISK_SOURCE_MISSING", "引用的来源规则不存在"),
-        }
-        code, message = options[target]
-        args = (
-            reference, owner["source"]["sheet_key"], aliases, sources,
-        )
-        kwargs = {
-            "target_type": target,
-            "error_code": code,
-            "error_message": message,
-            "details": {"candidate_ref": owner["candidate_ref"], "reference": reference},
-        }
-        if multiple:
-            return _resolve_aliases(*args, **kwargs)
-        return _resolve_alias(*args, **kwargs)
+        keys = {"MATERIAL": material_keys, "FIELD": field_keys, "RULE": rule_keys}[target]
+        resolved = keys.get(reference, reference)
+        return [resolved] if multiple else resolved
+
 
     manifest_like: dict[str, Any] = {
-        "selected_sheets": [
-            {"sheet_role": item["sheet_role"], "node_code": item["node_code"],
-             "sheet_key": item["sheet_key"], "sheet_name": item["sheet_name"]}
-            for item in selected_sheets if item["sheet_key"] in included_keys
-        ],
+        "execution_contract_version": EXECUTION_VERSION,
+        "nodes": [execution_container()],
         "materials": [
             {
                 "material_key": material_keys[item["candidate_ref"]],
+                "business_context": _proposal_context(item, MaterialProposal),
                 "name": item["name"],
                 "required": item["required"],
                 "description": item.get("description", ""),
+                "config_status": item.get("config_status"),
                 "source_ref": item.get("source_id"),
-                "origin": original_source(item),
+                "origin": deepcopy(item.get("origin")),
             }
             for item in materials
         ],
@@ -496,16 +266,14 @@ def draft_config_of_import(
         "report_template": [],
         "calculation_inputs": calculations,
     }
-    field_materials: dict[str, str] = {
-        item["field_key"]: item["material_key"]
-        for item in (existing_config["fields"] if existing_config is not None else [])
-    }
     for item in fields:
         material_key = resolve(item["material_ref"], item, "MATERIAL")
         field_key = field_keys[item["candidate_ref"]]
-        field_materials[field_key] = material_key
         manifest_like["fields"].append({
             "field_key": field_key,
+            "business_context": _proposal_context(item, FieldProposal),
+            "enabled": active(item),
+            "config_status": item.get("config_status"),
             "material_key": material_key,
             "name": item["name"],
             "value_type": item["value_type"],
@@ -520,11 +288,12 @@ def draft_config_of_import(
             "required": item["required"],
             "instruction": item["instruction"],
             "source_ref": item.get("source_id"),
-            "origin": original_source(item),
+            "origin": deepcopy(item.get("origin")),
         })
     for item in rules:
         inputs = [
             {
+                **deepcopy(entry),
                 "field_key": resolve(entry["field_ref"], item, "FIELD"),
                 "material_key": resolve(entry["material_ref"], item, "MATERIAL"),
             }
@@ -542,17 +311,19 @@ def draft_config_of_import(
         output_keys = [resolve(ref, item, "FIELD") for ref in item.get("output_field_refs", [])]
         manifest_like["rules"].append({
             "rule_key": rule_keys[item["candidate_ref"]],
+            "business_context": _proposal_context(item, RuleProposal),
             "rule_code": item.get("rule_code") or item.get("source_id"),
             "name": item["name"],
             "node": "RULE_EXECUTION",
             "operator": item["operator"],
-            "enabled": item.get("config_status") != CONFIG_STATUS_DISABLED,
+            "rule_role": "RISK" if is_risk_rule(item) else "CHECK",
+            "enabled": active(item),
             "inputs": inputs,
             "outputs": output_keys,
             "materials": material_scope,
             "parameters": item.get("parameters") or {},
             "requirement": item.get("requirement") or "",
-            "description": (item.get("requirement") or "") if item.get("operator") == "RISK_TRIGGER" else "",
+            "description": (item.get("requirement") or "") if is_risk_rule(item) else "",
             "applicability": _compiled_applicability(item, inputs, material_scope),
             "source_rule_key": source_keys[0] if source_keys else None,
             "source_rule_keys": source_keys,
@@ -562,19 +333,29 @@ def draft_config_of_import(
             "risk_level_value": item.get("risk_level_value"),
             "risk_condition": item.get("risk_condition"),
             "config_status": item.get("config_status"),
-            "quality_supported": item.get("quality_supported"),
             "source_ref": item.get("rule_code") or item.get("source_id"),
-            "origin": original_source(item),
+            "origin": deepcopy(item.get("origin")),
         })
+    # 报告可消费字段、计算与规则结果；未知引用如实保留给执行阶段说明。
+    report_reference_keys = {
+        **field_keys, **rule_keys,
+        **{item["candidate_ref"]: item["result_code"] for item in calculations},
+    }
+    known_field_keys = set(field_keys.values())
     for item in sections:
-        field_scope = [resolve(ref, item, "FIELD") for ref in item.get("field_refs", [])]
+        data_refs = list(dict.fromkeys(
+            report_reference_keys.get(ref, ref) for ref in item.get("field_refs", [])
+        ))
+        field_scope = [ref for ref in data_refs if ref in known_field_keys]
         material_scope = [resolve(ref, item, "MATERIAL") for ref in item.get("material_refs", [])]
         section_identity = item["candidate_ref"]
         manifest_like["report_template"].append({
             "section_key": stable_key("sec", namespace, section_identity),
+            "business_context": _proposal_context(item, ReportSectionProposal),
             "section_name": item["section_name"],
             "content_instruction": item["content_instruction"],
             "field_keys": field_scope,
+            "data_refs": data_refs,
             "material_keys": material_scope,
             "report_code": item.get("report_code"),
             "report_name": item.get("report_name"),
@@ -584,26 +365,8 @@ def draft_config_of_import(
             "result_sort": item.get("result_sort"),
             "risk_level_order": list(item.get("risk_level_order") or []),
             "config_status": item.get("config_status"),
-            "origin": original_source(item),
+            "origin": deepcopy(item.get("origin")),
         })
-    manifest_like["disabled_source_rows"] = [
-        {
-            "row_key": stable_key(
-                "disabled", namespace,
-                json.dumps(
-                    [sheet["suggested_role"], row["source"]["sheet_key"], row["source"]["row_no"]],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ),
-            "sheet_role": sheet["suggested_role"],
-            "import_job_no": import_job_no,
-            **row,
-            "sheet_name": sheet_names[row["source"]["sheet_key"]],
-        }
-        for sheet in included
-        for row in sheet.get("disabled_rows", [])
-    ]
     return editable_config_of(manifest_like, namespace=namespace)
 
 
@@ -612,18 +375,16 @@ def draft_config_of_import(
 FIELD_SCOPE_LABELS = {"period_scope": "取数期间", "statement_scope": "报表口径"}
 
 
-def required_field_scope(
+def normalize_field_scope(
     field: dict[str, Any],
     key: str,
     *,
-    code: str = "MANIFEST_FIELD_SCOPE_MISSING",
     status_code: int = 400,
 ) -> str:
     """字段口径的内部归一化。
 
     业务字段不必属于财报期间或报表口径体系；缺省只表示该口径不适用，
     不猜测本期、上期、合并或母公司。数据库事实定位仍使用显式 sentinel。
-    `code` 与 `status_code` 保留兼容参数，缺省时不再抛出缺项错误。
     """
     value = field.get(key)
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -666,17 +427,14 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
         }
         for node in manifest.get("nodes", [])
     ]
-    sheets = [
-        {"sheet_role": str(sheet["sheet_role"]), "node_code": sheet.get("node_code"),
-         **{key: sheet[key] for key in ("sheet_key", "sheet_name") if key in sheet}}
-        for sheet in manifest.get("selected_sheets", [])
-    ]
     materials = [
         {
             "material_key": material["material_key"],
+            "business_context": deepcopy(material.get("business_context", {})),
             "name": material["name"],
             "required": bool(material.get("required")),
             "description": str(material.get("description") or ""),
+            "config_status": material.get("config_status"),
             # 来源业务编号：导出时要按它写回 Excel 的「材料编号」，丢掉会让导出缺必填编号。
             "source_ref": material.get("source_ref"),
             "origin_json": material.get("origin"),
@@ -686,6 +444,9 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
     fields = [
         {
             "field_key": field["field_key"],
+            "business_context": deepcopy(field.get("business_context", {})),
+            "enabled": active(field),
+            "config_status": field.get("config_status"),
             "material_key": field["material_key"],
             "name": field["name"],
             "value_type": field["value_type"],
@@ -698,8 +459,8 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
             # 产物来源：主体核对据此确定字段取自哪种产物，必须保留。
             "artifact_source": field.get("artifact_source"),
             # 取数期间与报表口径：计算参数按它们定位字段事实。
-            "period_scope": required_field_scope(field, "period_scope", code="MANIFEST_FIELD_SCOPE_MISSING"),
-            "statement_scope": required_field_scope(field, "statement_scope", code="MANIFEST_FIELD_SCOPE_MISSING"),
+            "period_scope": normalize_field_scope(field, "period_scope"),
+            "statement_scope": normalize_field_scope(field, "statement_scope"),
             "required": bool(field.get("required")),
             "instruction": str(field.get("instruction") or ""),
             "source_ref": field.get("source_ref"),
@@ -716,7 +477,7 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
                 "name": rule["name"],
                 "node_code": rule["node"],
                 "operator_code": rule["operator"],
-                "enabled": bool(rule.get("enabled", True)),
+                "enabled": active(rule),
                 # 是不是系统派生规则。判据只有一处（`is_system_rule`），调用方据此决定去留：
                 # 场景草稿丢掉它们（发布时重新派生），方案保留它们（用户可逐条取消）。
                 "is_system": is_system_rule(rule),
@@ -726,9 +487,9 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
                     "name": rule["name"],
                     "node": rule["node"],
                     "operator": rule["operator"],
-                    "enabled": bool(rule.get("enabled", True)),
+                    "enabled": active(rule),
                     "inputs": [
-                        {"field_key": item["field_key"], "material_key": item["material_key"]}
+                        deepcopy(item)
                         for item in rule.get("inputs", [])
                     ],
                     "outputs": list(rule.get("outputs") or []),
@@ -737,6 +498,7 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
                     "requirement": str(rule.get("requirement") or ""),
                     "description": str(rule.get("description") or ""),
                     "applicability": {
+                        **deepcopy(applicability),
                         "kind": applicability.get("kind", "ALWAYS"),
                         **(
                             {"material_keys": list(applicability.get("material_keys") or [])}
@@ -763,7 +525,6 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
                         else {}
                     ),
                     **optional("config_status", rule.get("config_status")),
-                    **optional("quality_supported", rule.get("quality_supported")),
                 },
                 "source_ref": rule.get("source_ref"),
                 "origin_json": rule.get("origin"),
@@ -774,9 +535,11 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
         section_key = section["section_key"]
         sections.append({
             "section_key": section_key,
+            "business_context": deepcopy(section.get("business_context", {})),
             "title": section.get("section_name", f"章节{index}"),
             "content_instruction": str(section.get("content_instruction") or ""),
             "field_keys": list(section.get("field_keys", [])),
+            "data_refs": report_data_refs(section),
             # 报告分组属性：少了它们，页面保存一次就会把按编号分组的报告
             # 退回成旧的「附加展示章节」。
             "report_code": section.get("report_code"),
@@ -792,13 +555,13 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
         })
     calculation_json = deepcopy(manifest["calculation_inputs"])
     return {
-        "nodes": nodes,
-        "sheets": sheets,
+        # 键名必须与 `compile_form_manifest` 的参数一致：调用方用 `**inputs` 展开，
+        # 写成 `nodes` 会让编译在缺 `node_instances` 处直接 TypeError。
+        "node_instances": nodes,
         "materials": materials,
         "fields": fields,
         "rules": rules,
         "sections": sections,
-        "disabled_source_rows": list(manifest.get("disabled_source_rows") or []),
         "calculation_json": calculation_json,
     }
 
@@ -821,7 +584,6 @@ def compile_inputs_of_config(
     rules: list[Any],
     sections: list[Any],
     nodes: list[Any],
-    sheets: list[Any],
     profile_version: str | None,
     scenario_schema_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -857,7 +619,7 @@ def compile_inputs_of_config(
     }
     rules_by_key = {str(item["rule_key"]): item for item in rule_items}
     for rule in rule_items:
-        if not rule.get("enabled", True) or rule.get("config_status") == CONFIG_STATUS_DISABLED or rule.get("operator") != "RISK_TRIGGER":
+        if not active(rule) or not is_risk_rule(rule):
             continue
         material_keys = list(dict.fromkeys(str(key) for key in (rule.get("materials") or []) if str(key)))
         source_keys = list(dict.fromkeys([
@@ -884,9 +646,11 @@ def compile_inputs_of_config(
         "materials": [
             {
                 "material_key": _config_value(item, "material_key"),
+                "business_context": deepcopy(_config_value(item, "business_context", {})),
                 "name": _config_value(item, "name"),
                 "required": bool(_config_value(item, "required")),
                 "description": str(_config_value(item, "description") or ""),
+                "config_status": _config_value(item, "config_status"),
                 # 来源业务编号进入编译结果，导出时按它写回 Excel 对应列。
                 "source_ref": _config_value(item, "source_ref"),
                 "origin": _config_value(item, "origin_json"),
@@ -896,6 +660,9 @@ def compile_inputs_of_config(
         "fields": [
             {
                 "field_key": _config_value(item, "field_key"),
+                "business_context": deepcopy(_config_value(item, "business_context", {})),
+                "enabled": bool(_config_value(item, "enabled", True)),
+                "config_status": _config_value(item, "config_status"),
                 "material_key": _config_value(item, "material_key"),
                 "name": _config_value(item, "name"),
                 "value_type": _config_value(item, "value_type"),
@@ -920,9 +687,14 @@ def compile_inputs_of_config(
         "sections": [
             {
                 "section_key": _config_value(item, "section_key"),
+                "business_context": deepcopy(_config_value(item, "business_context", {})),
                 "section_name": _config_value(item, "title"),
                 "content_instruction": _config_value(item, "content_instruction"),
                 "field_keys": list(_config_value(item, "field_keys") or []),
+                "data_refs": report_data_refs({
+                    "data_refs": _config_value(item, "data_refs"),
+                    "field_keys": _config_value(item, "field_keys"),
+                }),
                 "report_code": _config_value(item, "report_code"),
                 "report_name": _config_value(item, "report_name"),
                 "material_keys": list(_config_value(item, "material_keys") or []),
@@ -936,7 +708,7 @@ def compile_inputs_of_config(
             }
             for item in sections
         ],
-        # 节点实例是用户配置的流程：原样固化，不由系统按规则内容生成。
+        # 规则执行记录的技术容器。
         "node_instances": [
             {
                 "node_code": _config_value(node, "node_code"),
@@ -948,13 +720,6 @@ def compile_inputs_of_config(
                 "enabled": bool(_config_value(node, "enabled")),
             }
             for node in nodes
-        ],
-        # 保留真实来源表身份；自由布局工作表不与单个节点绑定。
-        "selected_sheets": [
-            {"sheet_role": _config_value(item, "sheet_role"), "node_code": _config_value(item, "node_code"),
-             **{key: _config_value(item, key) for key in ("sheet_key", "sheet_name")
-                if _config_value(item, key) is not None}}
-            for item in sheets
         ],
         # 执行契约版本身份，记录生成配置时的当前协议；
         # 由调用方解析（没记来源时用当前版本），不在这里默认——那会让本函数反向依赖协议模块。
@@ -971,27 +736,23 @@ def enabled_extraction_field_keys(
     return {
         field_key
         for rule in manifest["rules"]
-        if rule["rule_key"] in selected_keys and rule.get("enabled", True)
+        if rule["rule_key"] in selected_keys and active(rule)
         for field_key in rule.get("outputs", [])
     }
 
 
 def build_task_schema(manifest: dict[str, Any], enabled_rule_keys: list[str] | None, *, allow_empty: bool = False) -> dict[str, Any]:
-    """冻结用户实际选中的生效规则；停用项不参与执行检查。"""
+    """冻结用户实际选中的生效规则；待确认和暂停项不参与执行。"""
     known = {r["rule_key"]: r for r in manifest["rules"]}
     requested = set(known) if enabled_rule_keys is None else set(enabled_rule_keys)
     if requested - known.keys():
         raise BusinessError("TASK_RULE_UNKNOWN", "任务选择了不存在的规则身份", details={"rule_keys": sorted(requested - known.keys())})
-    selected = {key for key in requested if known[key].get("enabled", True)}
+    selected = {key for key in requested if active(known[key])}
     field_keys = {key for r in manifest["rules"] if r["rule_key"] in selected for key in [*(i["field_key"] for i in r.get("inputs") or []), *(r.get("outputs") or [])]}
     extracted = enabled_extraction_field_keys(manifest, sorted(selected))
     return {"schema_version": "2.0", "enabled_rule_keys": sorted(selected), "unenabled_rule_keys": sorted(known.keys() - selected),
             "fields": [{**f, "extraction_enabled": f["field_key"] in extracted} for f in manifest["fields"] if f["field_key"] in field_keys]}
 
-
-# 页面表单配置的来源标记：材料/字段/规则/报告章节由页面直接维护，没有 Excel 工作表，
-# 因此 source 中不包含工作表与行号——不伪造导入作业、工作表行号或供应商结果。
-FORM_SOURCE = {"sheet_key": None, "row_no": None, "cells": []}
 
 # 场景字段维护与导入候选共用的数据类型，包含大写金额（DECIMAL_CN）。
 FORM_VALUE_TYPES = {"STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"}
@@ -1000,13 +761,12 @@ FORM_VALUE_TYPES = {"STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEA
 def manifest_scope_hash(manifest: dict[str, Any]) -> str:
     """范围指纹：忽略编译时间等非业务字段，用于判断“两个版本内容是否一致”。
 
-    manifest_hash 把 compiled_at 也算进去，两次编译必然不同，因此不能用它判断
-    “内容没变、可以复用已发布版本”。范围指纹覆盖规则库定义与冻结工具信息，与发布时间无关。
+    仅比较规则库业务定义，与编译和发布时间无关。
     """
     payload = {
         key: value
         for key, value in manifest.items()
-        if key not in {"manifest_hash", "compiled_at", "published_at", "source_workbook_id"}
+        if key not in {"compiled_at", "published_at", "source_workbook_id"}
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -1022,14 +782,13 @@ def compile_form_manifest(
     rules: list[dict[str, Any]],
     sections: list[dict[str, Any]],
     node_instances: list[dict[str, Any]],
-    selected_sheets: list[dict[str, Any]],
     profile_version: str,
     compiled_at: datetime,
     scenario_schema_config: dict[str, Any] | None = None,
     calculation_candidates: list[dict[str, Any]] | None = None,
-    disabled_source_rows: list[dict[str, Any]] | None = None,
     system_rule_enabled: dict[str, bool] | None = None,
     import_proposals: dict[str, Any] | None = None,
+    source_kind: str = "FORM",
 ) -> dict[str, Any]:
     """只组织规则库执行项，不编译九类业务节点或固定算子路径。"""
     from .rule_library import compile_library

@@ -1,7 +1,6 @@
 /** 审核方案与任务创建：方案选择、范围预览与任务创建结果。 */
 
 import type { ApiResponse, JsonValue } from "./common";
-import type { DraftCalculationItem } from "./scenes";
 
 export interface PlanListItem {
   plan_code: string;
@@ -46,7 +45,7 @@ export interface PlanSelection extends ApiResponse {
   updated_at: string;
 }
 
-/** 方案的可编辑配置：材料、字段、普通规则、计算规则启停和报告章节。 */
+/** 方案的可编辑配置：材料、字段、审核规则、计算定义和报告章节。 */
 export interface PlanConfig extends ApiResponse {
   plan_code: string;
   materials: PlanMaterialItem[];
@@ -63,8 +62,6 @@ export interface PlanConfig extends ApiResponse {
     depends_on: string[];
     enabled: boolean;
   }>;
-  /** 只读：本方案选用了哪些 Sheet。 */
-  selected_sheets: Array<{ sheet_role: string; node_code: string | null; sheet_key?: string; sheet_name?: string }>;
 }
 
 export interface PlanMaterialItem {
@@ -72,12 +69,17 @@ export interface PlanMaterialItem {
   name: string;
   required: boolean;
   description: string;
+  config_status?: string | null;
+  business_context?: Record<string, unknown>;
   source_ref?: string | null;
   sort_no?: number;
 }
 
 export interface PlanFieldItem {
   field_key: string;
+  enabled?: boolean;
+  config_status?: string | null;
+  business_context?: Record<string, unknown>;
   material_key: string;
   node_code?: string | null;
   name: string;
@@ -108,14 +110,33 @@ export interface PlanRuleItem {
   sort_no?: number;
 }
 
-export interface PlanCalculationRuleItem extends Pick<DraftCalculationItem, "origin" | "parameter_sources"> {
+export interface PlanCalculationRuleItem {
   formula: string;
   requirement: string;
   business_context: Record<string, JsonValue>;
   rule_code: string;
   rule_name: string;
+  result_code: string;
+  source_id: string | null;
+  result_type: string;
+  unit: string | null;
+  currency: string | null;
+  period_policy: string | null;
+  statement_scope: string | null;
+  status: "CLEAR" | "PENDING" | "DISABLED";
+  remark: string;
+  parameters: PlanCalculationParameter[];
+  depends_on_result_codes: string[];
   node_code: string | null;
   enabled: boolean;
+}
+
+export interface PlanCalculationParameter {
+  parameter_code: string;
+  source_type: string;
+  source_code: string | null;
+  constant_value?: JsonValue;
+  [key: string]: unknown;
 }
 
 export interface PlanAdjustmentField {
@@ -143,6 +164,7 @@ export interface PlanSectionItem {
   title: string;
   content_instruction: string;
   field_keys: string[];
+  data_refs: string[];
   report_code?: string | null;
   report_name?: string | null;
   material_keys?: string[] | null;
@@ -155,13 +177,13 @@ export interface PlanSectionItem {
   sort_no?: number;
 }
 
-/** 整体提交方案的配置与计算规则选择。 */
+/** 整体提交方案的业务配置。 */
 export interface PlanConfigPayload {
   materials: PlanMaterialItem[];
   fields: PlanFieldItem[];
   rules: PlanRuleItem[];
   sections: PlanSectionItem[];
-  calculation_rules: Array<Pick<PlanCalculationRuleItem, "rule_code" | "enabled">>;
+  calculation_rules: PlanCalculationRuleItem[];
 }
 
 export interface TaskPlanInfo {
@@ -180,7 +202,6 @@ export interface AuditTaskRow {
   scenario_version_no: number;
   plan_code: string | null;
   plan_name: string | null;
-  is_legacy_config: boolean;
   current_node: string;
   current_node_name: string;
   status: string;

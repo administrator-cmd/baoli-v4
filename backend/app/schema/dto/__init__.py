@@ -2,8 +2,6 @@
 
 from .imports import (
     ApplyImportDraftRequest,
-    SheetBindingItem,
-    SheetBindingsRequest,
 )
 from .plans import (
     PlanConfigUpdateRequest,
@@ -15,7 +13,6 @@ from .plans import (
     TaskFromPlanRequest,
 )
 from .scenarios import (
-    DraftDisabledSourceRowUpdateRequest,
     DraftFieldRequest,
     DraftFieldUpdateRequest,
     DraftMaterialRequest,
@@ -32,9 +29,8 @@ from .scenarios import (
     ScenarioUpdateRequest,
 )
 from .reports import ReportRemarkRequest
-from .retrieval import RetrievalDecisionRequest, RetrievalRequest
-from .reviews import ReviewDraftItem, ReviewDraftRequest
 from .tasks import (
+    DocumentOcrRetryRequest,
     ExecuteNodeRequest,
     ExternalArtifactReconcileRequest,
     FieldCorrectionRequest,
@@ -42,7 +38,6 @@ from .tasks import (
     ManualReviewRequest,
     OcrReconcileRequest,
     OperationRequest,
-    RecoverFailedNodeRequest,
     TaskCopyRequest,
     TaskSchemaPreviewRequest,
     TaskUpdateRequest,
@@ -50,8 +45,6 @@ from .tasks import (
 
 __all__ = [
     "ApplyImportDraftRequest",
-    "SheetBindingItem",
-    "SheetBindingsRequest",
     "PlanConfigUpdateRequest",
     "PlanCopyRequest",
     "PlanCreateRequest",
@@ -59,7 +52,6 @@ __all__ = [
     "PlanFromTaskRequest",
     "PlanUpdateRequest",
     "TaskFromPlanRequest",
-    "DraftDisabledSourceRowUpdateRequest",
     "DraftFieldRequest",
     "DraftFieldUpdateRequest",
     "DraftMaterialRequest",
@@ -75,18 +67,14 @@ __all__ = [
     "ScenarioPublishRequest",
     "ScenarioUpdateRequest",
     "ReportRemarkRequest",
-    "RetrievalDecisionRequest",
-    "RetrievalRequest",
-    "ReviewDraftItem",
-    "ReviewDraftRequest",
     "ExecuteNodeRequest",
+    "DocumentOcrRetryRequest",
     "ExternalArtifactReconcileRequest",
     "FieldCorrectionRequest",
     "ManualReviewItem",
     "ManualReviewRequest",
     "OcrReconcileRequest",
     "OperationRequest",
-    "RecoverFailedNodeRequest",
     "TaskCopyRequest",
     "TaskSchemaPreviewRequest",
     "TaskUpdateRequest",

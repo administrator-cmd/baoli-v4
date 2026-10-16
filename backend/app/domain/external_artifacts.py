@@ -15,13 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExternalEvidence(BaseModel):
-    """一条证据：页码、引文原文与可选坐标。"""
+    """所属处理产物中的一条引用原文。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    page_no: int | None = Field(default=None, ge=1)
     quote_text: str = Field(min_length=1)
-    bbox: list[float] | None = None
 
 
 class ExternalArtifact(BaseModel):
@@ -44,11 +42,14 @@ class ReadyOcrArtifact(BaseModel):
     job_id: str = Field(min_length=1)
     deadline_at: datetime
     submit_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    provider_state: str | None = None
+    extract_progress: dict[str, Any] | None = None
+    progress_updated_at: str | None = None
 
 
-def ready_artifact_payload(metadata: Any) -> ExternalArtifact:
-    """读取旧版直接信封或带作业身份的 OCR 信封。"""
-    if isinstance(metadata, dict) and "schema_version" in metadata:
+def ready_artifact_payload(metadata: Any, *, artifact_type: str) -> ExternalArtifact:
+    """按当前产物类型读取信封；OCR 包含真实作业身份，其余类型为直接信封。"""
+    if artifact_type == "OCR":
         return ReadyOcrArtifact.model_validate(metadata).artifact
     return ExternalArtifact.model_validate(metadata)
 

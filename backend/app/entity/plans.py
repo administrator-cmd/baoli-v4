@@ -20,7 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
 from ..domain.configuration import empty_config, config_property
-from .base import TimestampMixin
+from .base import ConfigurationShape, TimestampMixin
 
 
 class AuditPlan(Base, TimestampMixin):
@@ -29,7 +29,7 @@ class AuditPlan(Base, TimestampMixin):
     创建方案时把那一版配置整份复制到 `config_json`，之后由用户增删改。节点与 Sheet 是场景级执行结构，只读地
     存在 `context_json` 里随方案一起冻结，用户在方案页只能看不能改。
 
-    保存方案 = 用自己的配置重新编译并写 `manifest_json` / `manifest_hash`，再按编译产物算
+    保存方案 = 用自己的配置重新编译并写 `manifest_json`，再按编译产物算
     任务范围写 `scope_json` / `scope_hash`；算不出来时保存照常成功，原因记在 `sync_error`，
     页面显示「待核对」。
 
@@ -61,7 +61,6 @@ class AuditPlan(Base, TimestampMixin):
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=empty_config)
     # 方案的编译产物：报告渲染、任务冻结都读它。未编译成功时为空，原因见 sync_error。
     manifest_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    manifest_hash: Mapped[str | None] = mapped_column(CHAR(64))
     # 最近一次保存时范围未能生效的原因（编译未通过：没选规则、字段引用缺失等）。
     # NULL 表示当前范围已生效。这是可展示状态，不是静默降级。
     sync_error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -71,7 +70,7 @@ class AuditPlan(Base, TimestampMixin):
     scope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
-class PlanMaterial(Base, TimestampMixin):
+class PlanMaterial(ConfigurationShape, TimestampMixin):
     """方案自己的材料位。创建方案时从钉住的场景版本复制一份，之后由用户在方案里增删改。
 
     形状与 `ScenarioDraftMaterial` 一致，只是归属换成 `plan_id`：方案是场景版本的**可编辑
@@ -97,7 +96,7 @@ class PlanMaterial(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class PlanField(Base, TimestampMixin):
+class PlanField(ConfigurationShape, TimestampMixin):
     """方案自己的字段定义。列语义与 `ScenarioDraftField` 完全一致。"""
 
     __tablename__ = "plan_field"
@@ -138,7 +137,7 @@ class PlanField(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class PlanRule(Base, TimestampMixin):
+class PlanRule(ConfigurationShape, TimestampMixin):
     """方案自己的规则定义。
 
     `enabled` 就是「这条规则要不要在这个方案里跑」：用户在方案页勾选与取消，直接改它。
@@ -168,7 +167,7 @@ class PlanRule(Base, TimestampMixin):
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class PlanSection(Base, TimestampMixin):
+class PlanSection(ConfigurationShape, TimestampMixin):
     """方案自己的报告章节。列语义与 `ScenarioDraftSection` 完全一致。"""
 
     __tablename__ = "plan_section"
@@ -184,6 +183,8 @@ class PlanSection(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     content_instruction: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("('')"))
     field_keys: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # 仅为 config_json 中的配置属性形状，不新增业务明细表。
+    data_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     report_code: Mapped[str | None] = mapped_column(String(80))
     report_name: Mapped[str | None] = mapped_column(String(255))

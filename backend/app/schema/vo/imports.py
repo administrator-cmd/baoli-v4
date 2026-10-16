@@ -15,11 +15,7 @@ class ImportJobResponse(ApiResponse):
     schema_version: str | None = Field(default=None, description="业务场景 Schema 版本")
     schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
     profile: dict[str, Any] = Field(default_factory=dict)
-    sheets: list[dict[str, Any]]
-    issues: list[dict[str, Any]]
     proposals: dict[str, Any] | None = None
-    manifest_draft: dict[str, Any] | None = None
-    coverage: dict[str, Any] | None = None
     draft_revision: int = 0
     failure: dict[str, str] | None = None
     latest_operation: dict[str, Any] | None = None

@@ -7,10 +7,10 @@ import type {
   Paged,
   ScenarioDetail,
   ScenarioDraftView,
+  ScenarioConfigurationView,
   ScenarioListItem,
   ScenarioPublishResult,
 } from "./contracts";
-import type { OperationAccepted } from "./contracts/common";
 import { request } from "./http";
 import { toQuery } from "./query";
 
@@ -113,35 +113,9 @@ export function getSceneDraft(scenarioCode: string): Promise<ScenarioDraftView> 
   return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft`);
 }
 
-export function updateDisabledSourceRow(
-  scenarioCode: string,
-  rowKey: string,
-  payload: { expected_revision: number; values: Record<string, string> },
-): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/disabled-source-rows/${encodeURIComponent(rowKey)}`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
-  );
-}
-
-export function previewSourceActivation(
-  scenarioCode: string, rowKeys: string[], expectedRevision: number, idempotencyKey: string,
-): Promise<OperationAccepted> {
-  return request<OperationAccepted>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/source-activations/preview`,
-    { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ row_keys: rowKeys, expected_revision: expectedRevision, idempotency_key: idempotencyKey }) },
-  );
-}
-
-export function confirmSourceActivation(
-  scenarioCode: string, previewId: string, expectedRevision: number,
-): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/source-activations/confirm`,
-    { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ preview_id: previewId, expected_revision: expectedRevision }) },
-  );
+/** 查看当前配置不创建草稿；有草稿时读取草稿，否则读取发布内容。 */
+export function getSceneConfiguration(scenarioCode: string, view?: "DRAFT" | "PUBLISHED"): Promise<ScenarioConfigurationView> {
+  return request<ScenarioConfigurationView>(`/scenarios/${encodeURIComponent(scenarioCode)}/configuration${toQuery({ view })}`);
 }
 
 /** 草稿内的每次写入都返回最新的完整草稿视图，页面据服务端结果刷新。 */
@@ -231,6 +205,7 @@ export interface DraftRulePayload {
   source_ref: string | null;
   node: string;
   operator: string;
+  rule_role: "CHECK" | "RISK";
   enabled: boolean;
   inputs: Array<{ field_key: string; material_key: string }>;
   outputs: string[];
@@ -281,9 +256,9 @@ export function deleteDraftRule(scenarioCode: string, ruleKey: string): Promise<
 export interface DraftSectionPayload {
   title: string;
   content_instruction: string;
-  field_keys: string[];
+  data_refs: string[];
   /**
-   * 场景报告分组属性。无报告编号的历史章节可留空：
+   * 场景报告分组属性。未声明报告编号时可留空：
    * 留空表示该章节没有报告编号，归为一份报告，按章节要求生成正文。
    */
   report_code?: string | null;

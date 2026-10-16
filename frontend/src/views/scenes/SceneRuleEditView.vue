@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import type { DraftFieldItem, DraftMaterialItem, DraftRuleItem, JsonValue } from "@/api/contracts";
-import { createDraftRule, getSceneDraft, updateDraftRule, type DraftRulePayload } from "@/api/scenes";
+import { createDraftRule, getSceneConfiguration, updateDraftRule, type DraftRulePayload } from "@/api/scenes";
 import BackButton from "@/components/BackButton.vue";
 
 const route = useRoute();
@@ -19,7 +19,7 @@ const loading = ref(false);
 const saving = ref(false);
 const errorMessage = ref("");
 const form = reactive({ name: "", source_ref: "", requirement: "", enabled: true,
-  field_keys: [] as string[], output_keys: [] as string[], material_keys: [] as string[], source_rule_keys: [] as string[] });
+  rule_role: "CHECK" as "CHECK" | "RISK", field_keys: [] as string[], output_keys: [] as string[], material_keys: [] as string[], source_rule_keys: [] as string[] });
 
 function applyRule(rule: DraftRuleItem) {
   existing.value = rule;
@@ -27,6 +27,7 @@ function applyRule(rule: DraftRuleItem) {
   form.source_ref = rule.source_ref ?? "";
   form.requirement = rule.requirement;
   form.enabled = rule.enabled;
+  form.rule_role = rule.rule_role ?? "CHECK";
   form.field_keys = rule.inputs.flatMap((i) => i.field_key ? [i.field_key] : []);
   form.output_keys = rule.outputs.flatMap((i) => i.field_key ? [i.field_key] : []);
   form.material_keys = rule.materials.map((i) => i.material_key);
@@ -37,7 +38,7 @@ async function load() {
   loading.value = true;
   errorMessage.value = "";
   try {
-    const draft = await getSceneDraft(scenarioCode.value);
+    const draft = await getSceneConfiguration(scenarioCode.value);
     fields.value = draft.fields;
     materials.value = draft.materials;
     rules.value = draft.rules;
@@ -58,7 +59,8 @@ async function load() {
 }
 
 async function back() {
-  await router.push({ name: "scene-detail", params: { scenarioCode: scenarioCode.value }, query: { tab: "rules" } });
+  await router.push({ name: "scene-detail", params: { scenarioCode: scenarioCode.value },
+    query: { tab: "rules" } });
 }
 
 async function submit() {
@@ -68,7 +70,7 @@ async function submit() {
   const parameters: Record<string, JsonValue> = { ...(existing.value?.parameters ?? {}) };
   const payload: DraftRulePayload = {
     name: form.name.trim(), source_ref: form.source_ref.trim() || null,
-    node: "RULE_EXECUTION", operator: existing.value?.operator ?? "LLM_EXECUTE", enabled: form.enabled,
+    node: "RULE_EXECUTION", operator: existing.value?.operator ?? "LLM_EXECUTE", rule_role: form.rule_role, enabled: form.enabled,
     inputs: form.field_keys.map((key) => {
       const field = fields.value.find((f) => f.field_key === key);
       if (!field) throw new Error("所选字段不存在");
@@ -91,13 +93,14 @@ onMounted(load);
 
 <template>
   <div class="page-shell">
-    <BackButton @click="back" />
+    <BackButton @click="back()" />
     <h2>{{ creating ? '新增规则' : '编辑规则' }}</h2>
     <el-alert v-if="errorMessage" type="error" :title="errorMessage" :closable="false" />
     <el-form v-else v-loading="loading" label-width="110px">
       <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
       <el-form-item label="业务编号"><el-input v-model="form.source_ref" placeholder="原规则库未提供编号时可留空" /></el-form-item>
       <el-form-item label="生效"><el-switch v-model="form.enabled" /></el-form-item>
+      <el-form-item label="规则角色"><el-select v-model="form.rule_role"><el-option value="CHECK" label="普通核查" /><el-option value="RISK" label="风险结论" /></el-select></el-form-item>
       <el-form-item label="执行要求"><el-input v-model="form.requirement" type="textarea" :rows="8" placeholder="填写完整业务规则、方法、公式、条件和输出要求" /></el-form-item>
       <el-form-item label="适用材料"><el-select v-model="form.material_keys" multiple style="width:100%">
         <el-option v-for="material in materials" :key="material.material_key" :value="material.material_key" :label="material.name" />

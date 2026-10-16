@@ -22,13 +22,12 @@ from ..schema.dto.plans import (
     TaskFromPlanRequest,
 )
 from ..schema.query import validate_page_params
-from ..services import plan_service, plan_task_service
+from ..services.plan_query_service import list_plans_page, list_plan_options, plan_selection_view
+from ..services import plan_task_service
 from ..services.plan_service import (
     copy_plan,
     create_plan,
     delete_plan,
-    list_plan_options,
-    list_plans_page,
     plan_adjustments_view,
     plan_config_view,
     plan_or_404,
@@ -39,7 +38,6 @@ from ..services.plan_service import (
     update_plan_config,
 )
 from ..schema.vo import PagedResponse, PlanSelectionResponse, TaskCreatedResponse
-from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])
 
@@ -84,45 +82,6 @@ def plan_options(request: Request, scenario_code: str | None = None, db: Session
     return {"request_id": request.state.request_id, "items": list_plan_options(db, scenario_code=scenario_code)}
 
 
-@router.get("/export")
-def export_plans(
-    name: str | None = None,
-    scenario_code: str | None = None,
-    enabled: bool | None = None,
-    effective: bool | None = None,
-    deleted: bool = False,
-    db: Session = Depends(get_db),
-):
-    """按当前筛选导出方案列表 CSV。"""
-    result = list_plans_page(
-        db,
-        name=name,
-        scenario_code=scenario_code,
-        enabled=enabled,
-        effective=effective,
-        deleted=deleted,
-        page=1,
-        page_size=EXPORT_PAGE_SIZE,
-    )
-    rows = [
-        [
-            item["plan_name"],
-            item["scenario_name"],
-            item["base_scenario_version_no"],
-            item["enabled_rule_count"],
-            item["explicit_rule_count"],
-            "已生效" if item["effective"] else "待核对",
-            item["updated_at"],
-        ]
-        for item in result["items"]
-    ]
-    return csv_response(
-        "审核方案列表.csv",
-        ["方案名称", "所属场景", "场景版本", "启用规则数", "显式规则数", "范围状态", "更新时间"],
-        rows,
-    )
-
-
 @router.post("", response_model=PlanSelectionResponse, status_code=201)
 def create_plan_endpoint(payload: PlanCreateRequest, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """创建方案：按请求携带的页面预览版本号固定场景版本，并同事务算一次范围。
@@ -131,13 +90,13 @@ def create_plan_endpoint(payload: PlanCreateRequest, request: Request, db: Sessi
     不静默改取「当前最新版本」。
     """
     plan = create_plan(db, payload.model_dump())
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 
 @router.get("/{plan_code}/config")
 def get_plan_config(plan_code: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    """方案的可编辑配置：材料 / 字段 / 全部规则 / 报告章节 / 计算规则启停。
+    """方案的可编辑配置：材料 / 字段 / 审核规则 / 报告章节 / 完整计算定义。
 
     方案页各页签的数据源。节点与选用 Sheet 一并返回，但它们是场景级执行结构，
     方案里只读。
@@ -170,14 +129,14 @@ def put_plan_config(
 def plan_from_task(payload: PlanFromTaskRequest, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """拒绝用任务反向生成方案。"""
     plan = save_task_range_as_plan(payload.model_dump())
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.get("/{plan_code}", response_model=PlanSelectionResponse)
 def get_plan(plan_code: str, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """方案详情：场景版本来源与方案自己的规则启停。"""
     plan = plan_or_404(db, plan_code, include_deleted=True)
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.put("/{plan_code}", response_model=PlanSelectionResponse)
@@ -186,7 +145,7 @@ def update_plan_endpoint(
 ) -> PlanSelectionResponse:
     """编辑方案基本资料（名称、说明）；不修改规则范围。"""
     plan = update_plan(db, plan_code, payload.model_dump(exclude_unset=True))
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.put("/{plan_code}/enabled", response_model=PlanSelectionResponse)
@@ -195,21 +154,21 @@ def set_plan_enabled_endpoint(
 ) -> PlanSelectionResponse:
     """启用 / 停用方案；已停用的方案不能用于创建任务。"""
     plan = set_plan_enabled(db, plan_code, payload.enabled)
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.delete("/{plan_code}", response_model=PlanSelectionResponse)
 def delete_plan_endpoint(plan_code: str, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """逻辑删除方案；历史任务保留。"""
     plan = delete_plan(db, plan_code)
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.post("/{plan_code}/restore", response_model=PlanSelectionResponse)
 def restore_plan_endpoint(plan_code: str, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """恢复已逻辑删除的方案。"""
     plan = restore_plan(db, plan_code)
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.post("/{plan_code}/copy", response_model=PlanSelectionResponse, status_code=201)
@@ -218,7 +177,7 @@ def copy_plan_endpoint(
 ) -> PlanSelectionResponse:
     """复制方案：场景门禁与新建相同，并继续钉住源方案的场景版本。"""
     plan = copy_plan(db, plan_code, payload.model_dump())
-    return _selection_response(request, plan_service._selection_view(db, plan))
+    return _selection_response(request, plan_selection_view(db, plan))
 
 
 @router.post("/{plan_code}/tasks", response_model=TaskCreatedResponse, status_code=201)

@@ -12,10 +12,10 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..schema.dto.imports import ImportProposalGroup, UpdateImportProposalRequest
 from ..schema.dto import (
     ApplyImportDraftRequest,
     OperationRequest,
-    SheetBindingsRequest,
 )
 from ..schema.query import validate_page_params
 from ..schema.vo import OperationAcceptedResponse
@@ -27,11 +27,9 @@ from ..services.import_service import (
     import_job_summaries,
     import_job_view,
     apply_import_to_draft,
-    update_sheet_bindings,
 )
 from ..services.operation_gateway import submit_conversion
 from ..schema.vo import ImportJobResponse, ImportJobSummaryResponse, PagedResponse
-from .export_utils import EXPORT_PAGE_SIZE, csv_response
 
 
 router = APIRouter(prefix="/import-jobs", tags=["规则库导入"])
@@ -73,42 +71,9 @@ def list_jobs_page(
     return PagedResponse.model_validate({**result, "request_id": request.state.request_id})
 
 
-@router.get("/export")
-def export_jobs(
-    scenario_code: str | None = None,
-    filename: str | None = None,
-    status: str | None = None,
-    created_from: datetime | None = None,
-    created_to: datetime | None = None,
-    db: Session = Depends(get_db),
-):
-    """按当前筛选导出导入作业列表 CSV。"""
-    result = admin_query_service.list_import_jobs_page(
-        db,
-        scenario_code=scenario_code,
-        filename=filename,
-        status=status,
-        created_from=created_from,
-        created_to=created_to,
-        page=1,
-        page_size=EXPORT_PAGE_SIZE,
-    )
-    rows = [
-        [
-            item["source_filename"],
-            item["scenario_name"] or item["scenario_code"] or "",
-            item["status"],
-            item["pending_issue_count"],
-            item["created_at"],
-        ]
-        for item in result["items"]
-    ]
-    return csv_response("规则库导入列表.csv", ["文件名称", "所属场景", "导入状态", "待处理数", "创建时间"], rows)
-
-
 @router.delete("/{job_no}", status_code=204)
 def delete_job(job_no: str, db: Session = Depends(get_db)) -> None:
-    """删除导入作业（仅限未发布的草稿作业；已发布作业保留来源追溯）。"""
+    """删除验证项目中的导入作业；已发布版本解除来源引用后保留版本。"""
     admin_query_service.delete_import_job(db, job_no)
 
 
@@ -136,8 +101,7 @@ async def create_job(
     """在指定场景下上传规则库 Excel，读取为工作簿 IR 并返回新建作业。
 
     `scenario_code` 必填：上传流程以场景为起点（用户先建场景、再在该场景下上传），
-    场景不由 Excel 表头推断。此时还没有规则候选；管理员选择参与解析的工作表，
-    LLM 将表内字段、规则和计算分别归到当前场景的实际节点。
+    场景不由 Excel 表头推断。此时还没有规则配置，解析时使用全部非空工作表。
     """
     job = await create_import_job(db, file, scenario_code=scenario_code)
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
@@ -145,15 +109,8 @@ async def create_job(
 
 @router.get("/{job_no}", response_model=ImportJobResponse)
 def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
-    """导入作业详情：工作表、问题、候选与草稿修订号。"""
+    """导入作业详情：二轮整理结果与修订号。"""
     return ImportJobResponse.model_validate({**import_job_view(db, get_import_job(db, job_no)), "request_id": request.state.request_id})
-
-
-@router.put("/{job_no}/sheet-bindings", response_model=ImportJobResponse)
-def put_sheet_bindings(job_no: str, payload: SheetBindingsRequest, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
-    """保存参与解析的工作表；与后台转换互斥（先锁作业行再检查活跃操作）。"""
-    job = update_sheet_bindings(db, job_no, payload)
-    return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
 @router.post("/{job_no}/retry", response_model=OperationAcceptedResponse, status_code=202)
@@ -192,5 +149,19 @@ def apply_draft(
         db, job_no,
         expected_job_revision=payload.expected_job_revision,
         expected_scene_revision=payload.expected_scene_revision,
+    )
+    return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
+
+
+@router.patch("/{job_no}/proposals/{group}/{candidate_ref}", response_model=ImportJobResponse)
+def update_proposal(
+    job_no: str, group: ImportProposalGroup, candidate_ref: str,
+    payload: UpdateImportProposalRequest, request: Request, db: Session = Depends(get_db),
+) -> ImportJobResponse:
+    """修改解析结果中的单项配置，供后续写入场景草稿。"""
+    job = import_service.update_import_proposal(
+        db, job_no, group=group, candidate_ref=candidate_ref,
+        expected_job_revision=payload.expected_job_revision,
+        changes=payload.changes.model_dump(exclude_unset=True),
     )
     return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})

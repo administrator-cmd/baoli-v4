@@ -16,7 +16,7 @@ import PageHeader from "@/components/PageHeader.vue";
 
 /**
  * 场景列表：管理场景身份（名称/业务类型/启停/实际删除）与配置入口。
- * 列表数字来自真实草稿配置；发布版本列来自已发布版本。
+ * 已发布场景的数量读取发布配置；未发布场景的数量读取草稿。
  * 管理员在这里创建场景，再到规则库导入和场景配置完成设置。
  */
 const creating = ref(false);
@@ -167,7 +167,6 @@ onMounted(() => {
     <PageHeader
       eyebrow="场景管理"
       title="场景列表"
-      subtitle="管理场景基本资料与启用状态。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="search">
@@ -235,8 +234,8 @@ onMounted(() => {
       <el-table-column label="配置状态" width="150">
         <template #default="{ row }">
           <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>配置待完善</el-tag>
-          <el-tag v-else-if="row.published_version_no" type="success" size="small" effect="light" disable-transitions>已生效</el-tag>
-          <el-tag v-else type="info" size="small" effect="light" disable-transitions>待发布</el-tag>
+          <el-tag v-else-if="row.configuration_kind === 'DRAFT'" type="warning" size="small" effect="light" disable-transitions>{{ row.published_version_no ? '有未发布修改' : '尚未发布' }}</el-tag>
+          <el-tag v-else type="success" size="small" effect="light" disable-transitions>已发布</el-tag>
           <div v-if="row.sync_error" class="text-hint">{{ row.sync_error.message }}</div>
         </template>
       </el-table-column>

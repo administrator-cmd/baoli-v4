@@ -1,20 +1,11 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
-
-
-class WorkbookCell(BaseModel):
-    address: str
-    column_no: int
-    raw_text: str
-    truncated_text: str
-    truncated: bool
 
 
 class WorkbookRow(BaseModel):
     row_no: int
     cells: dict[str, str | int | float | bool | None]
-    cell_details: list[WorkbookCell]
 
 
 class WorkbookSheet(BaseModel):
@@ -35,6 +26,26 @@ class WorkbookSheet(BaseModel):
     rows_truncated: bool
     columns_truncated: bool
     cells_truncated: bool
+
+    def snapshot(self) -> dict[str, Any]:
+        """页面要读的那部分：表级摘要加有上限的预览行。
+
+        完整 rows 只用于这一次的模型转换，不落库——落库后既没有读取方，
+        又和原始 Excel 文件重复。
+        """
+        return {
+            "state": self.state,
+            "max_row": self.max_row,
+            "max_column": self.max_column,
+            "non_empty_rows": self.non_empty_rows,
+            "used_range": self.used_range,
+            "merged_ranges": self.merged_ranges,
+            "header_candidates": self.header_candidates,
+            "rows_truncated": self.rows_truncated,
+            "columns_truncated": self.columns_truncated,
+            "cells_truncated": self.cells_truncated,
+            "preview_rows": [row.model_dump(mode="json") for row in self.preview_rows],
+        }
 
 
 class WorkbookIR(BaseModel):

@@ -196,7 +196,7 @@ def parse_format_set(standard_value: str | None) -> set[str]:
         raise _failed("RULE_QUALITY_STANDARD_VALUE_REQUIRED", "文件格式检查缺少「标准值」，无法判定")
     entries = [
         item.strip().upper()
-        for item in str(standard_value).replace(",", "；").split("；")
+        for item in str(standard_value).replace(",", "；").replace("，", "；").replace(";", "；").replace("/", "；").replace("、", "；").split("；")
         if item.strip()
     ]
     if not entries:

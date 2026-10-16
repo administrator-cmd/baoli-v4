@@ -51,8 +51,6 @@ const statusOptions = [
   { value: "PROPOSED", label: "已生成候选" },
   { value: "CONFIRMED", label: "已确认" },
   { value: "APPLIED", label: "已写入场景配置" },
-  // 保留历史作业的 PUBLISHED 状态；新导入写入后为 APPLIED。
-  { value: "PUBLISHED", label: "已发布" },
 ];
 
 function openJob(row: ImportJobRow): void {
@@ -107,7 +105,7 @@ async function submitCreate(): Promise<void> {
 async function removeJob(row: ImportJobRow): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确认删除导入作业「${row.source_filename}」？已写入场景或已发布的作业不可删除；正在转换的作业请先中止。`,
+      `确认删除导入作业「${row.source_filename}」？验证项目允许直接删除，已发布版本会解除这份导入来源引用。`,
       "删除导入作业",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -135,12 +133,10 @@ async function removeJob(row: ImportJobRow): Promise<void> {
 /**
  * 这份规则库所属的场景。
  *
- * 显示服务端给出的场景名与保存时的 Profile 版本；旧格式作业明确标为「旧格式」，
- * 不把来源能力版本与场景 Schema 混成同一个没有版本语义的名字。
+ * 显示服务端保存的所属场景，不根据表头或文件名猜测。
  */
 function sceneText(row: ImportJobRow): string {
-  // 作业所属场景在上传时指定；历史作业没有记录，如实显示「未记录场景」，
-  // 不按表头或文件名替它补一个。
+  // 作业所属场景在上传时指定。
   return row.scenario_name || row.scenario_code || "未记录场景";
 }
 
@@ -156,7 +152,7 @@ function canAbort(row: ImportJobRow): boolean {
 async function abortJob(row: ImportJobRow): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确认中止「${row.source_filename}」正在进行的转换？中止后该作业不再处于执行中，可重新发起转换或删除；作业状态与已保存的裁决不会被改动。`,
+      `确认中止「${row.source_filename}」正在进行的转换？中止后该作业不再处于执行中，可重新发起转换或删除；作业状态与已保存的候选不会被改动。`,
       "中止转换",
       { type: "warning", confirmButtonText: "中止", cancelButtonText: "取消" },
     );
@@ -222,7 +218,6 @@ watch(scopedScenarioCode, () => {
     <PageHeader
       eyebrow="场景管理"
       title="规则库导入"
-      :subtitle="scopedScenarioCode ? `当前场景 ${scopedScenarioCode} 的规则库作业` : '规则库作业'"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -269,18 +264,13 @@ watch(scopedScenarioCode, () => {
       <el-table-column label="导入状态" width="130">
         <template #default="{ row }">
           <el-tag
-            :type="row.status === 'PUBLISHED' ? 'success' : 'primary'"
+            :type="row.status === 'APPLIED' ? 'success' : 'primary'"
             size="small"
             effect="light"
             disable-transitions
           >
             {{ statusLabel(row.status) }}
           </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="待处理数" width="100">
-        <template #default="{ row }">
-          <span :class="row.pending_issue_count ? 'text-danger' : ''">{{ row.pending_issue_count }}</span>
         </template>
       </el-table-column>
       <el-table-column label="创建时间" width="170">
@@ -343,7 +333,6 @@ watch(scopedScenarioCode, () => {
               :label="item.latest_version_no ? `${item.scenario_name}（已发布第 ${item.latest_version_no} 版）` : `${item.scenario_name}（尚未发布）`"
             />
           </el-select>
-          <div class="text-hint">包含尚未发布的场景。作业只属于这里选中的场景，系统不从 Excel 内容猜测。</div>
         </el-form-item>
       </el-form>
       <div class="block-gap-sm">
@@ -358,7 +347,6 @@ watch(scopedScenarioCode, () => {
           <div class="upload-block__icon">⬆</div>
           <div class="el-upload__text">拖拽规则库 Excel 到此处，或<em>点击选择文件</em></div>
           <template #tip>
-            <div class="text-hint">支持 .xlsx / .xlsm；系统会根据 Excel 的实际内容解析材料、字段、规则和计算配置。</div>
           </template>
         </el-upload>
       </div>

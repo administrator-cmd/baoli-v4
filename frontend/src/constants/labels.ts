@@ -5,6 +5,8 @@
  * 状态色由 statusTone() 统一决定，任何页面都不再自己判断颜色。
  */
 
+import { AUDIT_RESULT_LABELS, AUDIT_RESULT_TONES } from "./auditStatus";
+
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
 
 const statusLabels: Record<string, string> = {
@@ -12,7 +14,6 @@ const statusLabels: Record<string, string> = {
   OPEN: "待处理",
   CONNECTED: "已连接",
   DEGRADED: "服务降级",
-  RUNNING: "服务运行中",
   UNCONFIGURED: "未配置",
   CONFIGURATION_INCOMPLETE: "配置不完整",
   CONFIGURED_UNVERIFIED: "已配置，未验证",
@@ -23,7 +24,7 @@ const statusLabels: Record<string, string> = {
   BOUND: "已选择",
   PROPOSED: "已转换",
   CONFIRMED: "已确认",
-  // 仅用于历史作业展示，不是当前可写入状态。
+  // 场景版本发布状态；导入作业写入草稿后为 APPLIED。
   PUBLISHED: "已发布",
   APPLIED: "已写入场景草稿",
   CONTRACT_INVALID: "转换结果无效",
@@ -40,7 +41,6 @@ const statusLabels: Record<string, string> = {
   BLOCKED: "已阻断",
   WAITING_REVIEW: "等待人工复核",
   COMPLETED: "已全部完成",
-  SKIPPED: "已跳过",
   INVALIDATED: "已失效",
   WAITING_UPLOAD: "待上传",
   UPLOADED: "已上传",
@@ -55,15 +55,8 @@ const statusLabels: Record<string, string> = {
   EXTRACTION_FAILED: "抽取失败",
   EVIDENCE_UNCLEAR: "证据不足",
   NORMALIZATION_FAILED: "标准化失败",
-  NOT_EXECUTED: "未执行",
-  REVIEWED: "已复核",
-  PASSED: "通过",
-  COMPUTED: "已计算",
+  ...AUDIT_RESULT_LABELS,
   PASS: "通过",
-  ABNORMAL: "异常",
-  EVIDENCE_INSUFFICIENT: "证据不足",
-  PENDING_REVIEW: "待复核",
-  NOT_APPLICABLE: "不适用",
   COMPLETE: "已生成",
   INCOMPLETE: "未完整执行",
   NOT_GENERATED: "未生成",
@@ -94,11 +87,6 @@ const statusLabels: Record<string, string> = {
   NOT_CONFIGURED: "未配置",
   STALE: "已失效",
 
-  // 证据索引与检索。注意：READY 在任务状态里已经表示「待执行」，索引状态不能复用这个键，
-  // 因此索引状态的中文名与颜色由 evidenceIndexStatusLabel / evidenceIndexStatusTone 单独提供。
-  BUILDING: "索引构建中",
-  NO_INDEX: "范围内没有可用索引",
-  PARTIAL_COVERAGE: "检索范围未完整覆盖",
 };
 
 /**
@@ -109,7 +97,6 @@ const statusLabels: Record<string, string> = {
 const statusTones: Record<string, StatusTone> = {
   // 连接与系统
   CONNECTED: "success",
-  RUNNING: "info",
   DEGRADED: "warning",
 
   // 导入作业与工作表
@@ -137,7 +124,6 @@ const statusTones: Record<string, StatusTone> = {
   FAILED: "danger",
   INTERRUPTED: "danger",
   BLOCKED: "danger",
-  SKIPPED: "neutral",
   INVALIDATED: "neutral",
   WAITING_REVIEW: "warning",
   COMPLETED: "success",
@@ -157,15 +143,8 @@ const statusTones: Record<string, StatusTone> = {
   EXTRACTION_FAILED: "danger",
   EVIDENCE_UNCLEAR: "warning",
   NORMALIZATION_FAILED: "danger",
-  NOT_EXECUTED: "neutral",
-  REVIEWED: "success",
-  PASSED: "success",
-  COMPUTED: "info",
+  ...AUDIT_RESULT_TONES,
   PASS: "success",
-  ABNORMAL: "danger",
-  EVIDENCE_INSUFFICIENT: "warning",
-  PENDING_REVIEW: "warning",
-  NOT_APPLICABLE: "neutral",
 
   // 报告
   COMPLETE: "success",
@@ -200,9 +179,6 @@ const statusTones: Record<string, StatusTone> = {
   UNCONFIGURED: "neutral",
   CONFIGURATION_INCOMPLETE: "warning",
   NOT_CONFIGURED: "neutral",
-  PARTIAL_COVERAGE: "warning",
-  // 索引状态色由 evidenceIndexStatusTone 提供（READY 在任务状态里另有所指）。
-  BUILDING: "info",
 };
 
 /**
@@ -339,6 +315,7 @@ const operationTypeLabels: Record<string, string> = {
   IMPORT_CONVERT: "规则解析与转换",
   SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
   NODE_EXECUTE: "规则执行",
+  DOCUMENT_CLASSIFY: "文件自动校验",
   MANUAL_REVIEW_RESUME: "人工复核恢复",
   // 管理模块：业务写操作与命令
   CREATE: "新增",
@@ -391,17 +368,9 @@ export function objectTypeLabel(objectType: string | null | undefined): string {
   return objectType ? objectTypeLabels[objectType] ?? objectType : "未知对象";
 }
 
-/** 业务节点中文名，用于节点编码兜底展示。 */
+/** 规则执行技术容器的展示名称。 */
 const nodeLabels: Record<string, string> = {
   RULE_EXECUTION: "执行生效规则",
-  MATERIAL_CHECK: "材料检查",
-  DOCUMENT_PREPARE: "文件处理",
-  FIELD_EXTRACTION: "字段抽取",
-  INTERNAL_VALIDATE: "文件内部校验",
-  CROSS_VALIDATE: "文件交叉校验",
-  MANUAL_REVIEW: "人工复核",
-  RISK_RATING: "风险评定",
-  REPORT_OUTPUT: "报告输出",
 };
 
 export function nodeLabel(nodeCode: string | null | undefined): string {
@@ -431,30 +400,6 @@ export function progressPercent(done: number | null | undefined, total: number |
   return Math.min(100, Math.round((Math.min(done, total) / total) * 100));
 }
 
-/** 已存角色码的业务用途标签，不对应固定工作表名称。 */
-export const sheetRoleOptions = [
-  { value: "MATERIAL_LIST", label: "材料配置" },
-  { value: "MATERIAL_QUALITY", label: "文件处理规则" },
-  { value: "FIELD_EXTRACTION", label: "字段抽取" },
-  { value: "INTERNAL_VALIDATE", label: "文件内部校验" },
-  { value: "CROSS_VALIDATE", label: "文件交叉校验" },
-  { value: "CALC_DEFINITION", label: "计算定义" },
-  { value: "CALC_PARAMETER", label: "计算输入" },
-  { value: "CALC_JUDGEMENT", label: "计算判定" },
-  { value: "RISK", label: "风险规则" },
-  { value: "REPORT_TEMPLATE", label: "报告配置" },
-];
-
-/**
- * 非业务用途的中文名。
- *
- * 旧格式模板可能返回 INSTRUCTION（填写说明页）。它属于模板元数据，不能作为业务用途发布，
- * 但必须给出中文说明，避免页面上出现原始编码。
- */
-const nonBusinessSheetRoleLabels: Record<string, string> = {
-  INSTRUCTION: "填写说明（模板元数据，不参与本次导入）",
-};
-
 /**
  * 风险来源的业务属性标签。
  *
@@ -476,17 +421,6 @@ export function statusLabel(status: string | null | undefined): string {
   return label ? label : `未识别状态（${status}）`;
 }
 
-export function sheetRoleLabel(role: string | null | undefined): string {
-  if (!role) {
-    return "未指定用途";
-  }
-  return (
-    sheetRoleOptions.find((option) => option.value === role)?.label ??
-    nonBusinessSheetRoleLabels[role] ??
-    "未识别的用途"
-  );
-}
-
 const valueTypeLabels: Record<string, string> = {
   STRING: "文本",
   DECIMAL: "数值",
@@ -499,75 +433,6 @@ const valueTypeLabels: Record<string, string> = {
 
 export function valueTypeLabel(valueType: string | null | undefined): string {
   return valueType ? valueTypeLabels[valueType] ?? "未指定类型" : "未指定类型";
-}
-
-/** 人工复核的选项：全部使用业务语言，不出现内部编码。 */
-const reviewOptionLabels: Record<string, string> = {
-  CONFIRM_FIELD: "确认系统抽取的字段值",
-  MODIFY_FIELD: "修改为人工确认的字段值",
-  MARK_NOT_PRESENT: "确认字段在文档中不存在",
-  CONFIRM_ABNORMAL: "确认异常",
-  MARK_NORMAL: "判定为正常",
-  EVIDENCE_INSUFFICIENT: "证据不足，无法判定",
-};
-
-export function reviewOptions(reviewType: string): Array<{ value: string; label: string }> {
-  const values =
-    reviewType === "FIELD_CONFIRMATION"
-      ? ["CONFIRM_FIELD", "MODIFY_FIELD", "MARK_NOT_PRESENT", "EVIDENCE_INSUFFICIENT"]
-      : ["CONFIRM_ABNORMAL", "MARK_NORMAL", "EVIDENCE_INSUFFICIENT"];
-  return values.map((value) => ({ value, label: reviewOptionLabels[value] }));
-}
-
-/** 人工复核的业务类型说明。 */
-export function reviewTypeLabel(reviewType: string | null | undefined): string {
-  if (reviewType === "FIELD_CONFIRMATION") {
-    return "字段确认";
-  }
-  if (reviewType === "RULE_RESULT") {
-    return "规则结论复核";
-  }
-  if (reviewType === "MATERIAL_TYPE_MISMATCH") {
-    return "材料类型复核";
-  }
-  return "人工复核";
-}
-
-/**
- * 人工结论的中文口径。多处页面共用一份，避免各写一份后出现同码不同词。
- * 未裁决返回「未裁决」，不返回空串——空串会被读成「没有这一项」。
- */
-const reviewDecisionLabels: Record<string, string> = {
-  CONFIRM_ABNORMAL: "确认异常",
-  MARK_NORMAL: "判定正常",
-  EVIDENCE_INSUFFICIENT: "证据不足",
-  CONFIRM_FIELD: "确认字段",
-  MODIFY_FIELD: "修改字段",
-  MARK_NOT_PRESENT: "确认字段不存在",
-};
-
-export function reviewDecisionLabel(decision: string | null | undefined): string {
-  if (!decision) {
-    return "未裁决";
-  }
-  return reviewDecisionLabels[decision] ?? `未识别结论（${decision}）`;
-}
-
-/**
- * 复核对象的业务类型。服务端的 object_kind 是稳定契约值，这里只做中文映射；
- * 未知取值必须显出原始码，不能笼统写成「材料」——那会把新增对象类型说成材料。
- */
-export function reviewObjectKindLabel(kind: string | null | undefined): string {
-  if (kind === "FIELD") {
-    return "字段事实";
-  }
-  if (kind === "RULE") {
-    return "规则判断";
-  }
-  if (kind === "MATERIAL") {
-    return "材料";
-  }
-  return kind ? `未识别类型（${kind}）` : "未识别类型";
 }
 
 /** 业务取值 → 展示文本；null / undefined / 空串统一显示为「未提供」，不留空白。 */
@@ -591,8 +456,14 @@ export function formatBusinessValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * 后端时间统一按 UTC 写入 MySQL DATETIME，序列化后没有时区后缀。
+ * 无后缀时明确按 UTC 解析，再交给浏览器转换为用户本地时间；已有偏移量的
+ * ISO 时间则按其自身时区解析。
+ */
 export function formatDate(value: string): string {
-  const date = new Date(value);
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`;
+  const date = new Date(normalized);
   return Number.isNaN(date.getTime())
     ? value
     : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
@@ -784,7 +655,6 @@ const failureNextSteps: Record<string, string> = {
   REQUEST_TIMEOUT: "已提交的后台操作不会丢失，可稍后重新查询状态；不要重复提交。",
   OPERATION_ALREADY_ACTIVE: "该对象已有正在执行的后台操作，请等待其结束或用「再次查询」查看真实状态。",
   INVALID_RESPONSE: "服务返回的内容无法识别，请查看后端日志确认接口版本是否一致。",
-  MANUAL_REVIEW_NOT_WAITING: "任务当前不在人工复核等待状态，请先进入规则要求的人工确认等待点。",
   TASK_DOCUMENT_REPLACE_CONFIRMATION_REQUIRED: "该材料位已有文件，替换上传需要先明确确认替换。",
   TASK_DOCUMENT_LOCKED: "任务已结束，材料不可再替换；如需继续请新建审核任务。",
   AUDIT_TASK_RUNNING: "任务正在执行当前节点，等待执行结束后再替换材料。",
@@ -804,13 +674,6 @@ const failureNextSteps: Record<string, string> = {
   RULE_CAPABILITY_UNSUPPORTED: "该规则存在执行能力缺口，请按返回的具体原因核对规则内容和场景节点配置。",
   LLM_STREAM_INCOMPLETE: "模型流式响应未完整结束，本次生成结果未保存；请查看后端流式请求日志。",
   LLM_OUTPUT_TRUNCATED: "模型因输出长度限制而截断了响应，本次生成结果未保存；请核对模型接口的输出限制。",
-  RETRIEVAL_SCOPE_EMPTY: "本次检索没有明确材料范围。请在任务的字段结果里确认材料是否已上传并完成文件处理，再重新检索。",
-  EMBEDDING_MODEL_UNCONFIGURED: "本机没有配置本地嵌入模型路径。需要检索取证的规则无法执行；请配置 BAOLI_EMBEDDING_MODEL_PATH 后重新执行文件处理节点。",
-  EMBEDDING_MODEL_MISSING: "本地嵌入模型目录不存在。请在部署机上确认模型已下载到配置的路径，然后重新执行文件处理节点。",
-  EMBEDDING_MODEL_INCOMPLETE: "本地嵌入模型目录缺少必要文件（权重或 tokenizer）。请补齐模型后重新执行文件处理节点。",
-  EMBEDDING_DEPENDENCY_MISSING: "本机缺少运行本地 Embedding 所需的依赖。请按交付说明安装后重新执行文件处理节点。",
-  EMBEDDING_INFERENCE_FAILED: "本地嵌入模型推理失败，索引或检索未完成。请检查部署机资源与模型文件后重试。",
-  EVIDENCE_INDEX_MISSING: "本次范围内还没有可检索的索引。请先执行文件处理节点建立索引；索引为空不等于材料不存在该条款。",
   RULE_CELL_FORMULA_UNSUPPORTED: "把公式单元格改成业务描述文字后重新上传规则库。",
   RULE_REQUIRED_CELL_EMPTY: "补齐该单元格内容后重新上传规则库。",
 
@@ -889,59 +752,14 @@ export function failureNextStep(code: string | null | undefined): string {
 }
 
 
-/**
- * 证据索引状态的中文口径。
- *
- * 「可检索」只表示索引已构建成功，不表示证据充分或检查通过；
- * 「构建失败」与「索引为空」是两件事，页面不能混为一谈。
- */
-const evidenceIndexStatusLabels: Record<string, string> = {
-  BUILDING: "索引构建中",
-  READY: "可检索",
-  FAILED: "索引构建失败",
-  INVALIDATED: "已失效（不再适用于当前上传版本）",
-};
-
-export function evidenceIndexStatusLabel(status: string | null | undefined): string {
-  return status ? evidenceIndexStatusLabels[status] ?? "索引状态未知" : "索引状态未知";
-}
-
-export function evidenceIndexStatusTone(status: string | null | undefined): StatusTone {
-  if (status === "READY") {
-    return "success";
-  }
-  if (status === "FAILED") {
-    return "danger";
-  }
-  if (status === "BUILDING") {
-    return "info";
-  }
-  return "neutral";
-}
-
-/**
- * 主体核对结论的候选取值。
- *
- * 只有这三种：相似度不能代替审核结论，本系统不提供“采纳前几条候选”的入口。
- */
-export const retrievalDecisionOptions = [
-  { value: "CONSISTENT", label: "一致" },
-  { value: "INCONSISTENT", label: "不一致" },
-  { value: "EVIDENCE_INSUFFICIENT", label: "证据不足" },
-] as const;
-
 /** 取证方式与判定方式的中文口径：让用户一眼看懂这条检查是怎么判的。 */
 const evidenceRouteLabels: Record<string, string> = {
   DIRECT_FACTS: "直接读取结构化字段",
-  // 只对印章识别产物的主体名称建向量：不是材料全文检索，也不是条款检索。
-  SEAL_SUBJECT_RETRIEVAL: "用待核对主体检索印章主体",
-  TASK_RETRIEVAL: "在材料中检索相关证据",
 };
 
 const judgeRouteLabels: Record<string, string> = {
   PROGRAM: "由程序判定",
   LLM: "由大模型按规则分析",
-  HUMAN_REVIEW: "需要人工裁决",
 };
 
 export function evidenceRouteLabel(evidence: string | null | undefined): string {

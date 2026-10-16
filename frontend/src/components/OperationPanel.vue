@@ -34,8 +34,10 @@ const props = withDefaults(
     percent?: number | null;
     /** 标题上方的分组说明。 */
     eyebrow?: string;
+    /** 业务页面使用简洁布局，内部操作信息默认折叠。 */
+    compact?: boolean;
   }>(),
-  { label: null, pollSeconds: 2, canRetry: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作" },
+  { label: null, pollSeconds: 2, canRetry: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false },
 );
 
 defineEmits<{
@@ -56,11 +58,11 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
 </script>
 
 <template>
-  <el-card v-if="operation" shadow="never" class="operation-panel">
+  <el-card v-if="operation" shadow="never" class="operation-panel" :class="{ 'operation-panel--compact': compact }">
     <template #header>
       <div class="operation-panel__header">
         <div>
-          <div class="text-hint">{{ eyebrow }}</div>
+          <div v-if="!compact" class="text-hint">{{ eyebrow }}</div>
           <div class="operation-panel__title">{{ title }}</div>
         </div>
         <div class="card-actions">
@@ -87,22 +89,29 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
       </div>
     </template>
 
-    <el-descriptions :column="2" size="small" border>
-      <el-descriptions-item label="当前步骤">{{ operationTypeLabel(operation.operation_type) }}</el-descriptions-item>
-      <el-descriptions-item label="状态">
-        {{ statusLabel(operation.status) }} · {{ operation.message }}
-      </el-descriptions-item>
-      <el-descriptions-item v-if="phaseText" label="命令阶段">{{ phaseText }}</el-descriptions-item>
-      <el-descriptions-item v-if="operation.external_job_ref" label="外部作业引用">
-        <span class="mono">{{ operation.external_job_ref }}</span>
-      </el-descriptions-item>
-      <el-descriptions-item label="受理方式">
-        {{ operation.reused ? "复用了同一次操作的受理记录，没有重复执行" : "本次新提交的后台操作" }}
-      </el-descriptions-item>
-      <el-descriptions-item label="操作编号">
-        <span class="mono">{{ operation.operation_no }}</span>
-      </el-descriptions-item>
-    </el-descriptions>
+    <p v-if="compact && operation.message && !operation.failure_message" class="operation-message">{{ operation.message }}</p>
+
+    <details :open="!compact" class="operation-details">
+      <summary v-if="compact">技术信息</summary>
+      <el-descriptions :column="2" size="small" border>
+        <el-descriptions-item label="当前步骤">{{ operationTypeLabel(operation.operation_type) }}</el-descriptions-item>
+        <el-descriptions-item label="状态">
+          {{ statusLabel(operation.status) }} · {{ operation.message }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="phaseText" label="命令阶段">{{ phaseText }}</el-descriptions-item>
+        <el-descriptions-item v-if="operation.external_job_ref" label="外部作业引用">
+          <span class="mono">{{ operation.external_job_ref }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="受理方式">
+          {{ operation.reused ? "复用了同一次操作的受理记录，没有重复执行" : "本次新提交的后台操作" }}
+        </el-descriptions-item>
+        <el-descriptions-item label="操作编号">
+          <span class="mono">{{ operation.operation_no }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="operation.failure_code" label="错误码">{{ operation.failure_code }}</el-descriptions-item>
+        <el-descriptions-item v-if="operation.request_id" label="请求编号"><span class="mono">{{ operation.request_id }}</span></el-descriptions-item>
+      </el-descriptions>
+    </details>
 
     <!-- 有真实总量才画进度条；否则只说明「处理中」，不编百分比 -->
     <div v-if="tone === 'running'" class="block-gap">
@@ -112,22 +121,15 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
         :status="undefined"
       />
       <el-progress v-else :percentage="100" :show-text="false" indeterminate :duration="3" />
-      <p class="text-hint block-gap-sm">
-        {{ hasPercent ? "进度来自服务端返回的真实完成数量。" : "服务端没有返回可计数的总量，因此只显示处理中，不显示百分比。" }}
-      </p>
     </div>
 
-    <el-alert v-if="watching" class="block-gap" type="info" show-icon :closable="false"
-      :title="`正在查询服务端真实状态，每 ${pollSeconds} 秒一次`">
-      离开本页即停止查询，操作本身仍在服务端继续。
-    </el-alert>
 
-    <el-alert v-else-if="queryStopped" class="block-gap" type="warning" show-icon :closable="false" title="状态查询已停止">
+    <el-alert v-if="queryStopped" class="block-gap" type="warning" show-icon :closable="false" title="状态查询已停止">
       本次操作在服务端仍在进行。可点「再次查询」查看真实状态；系统不会自动重新提交。
     </el-alert>
 
     <el-alert
-      v-if="operation.status === 'SUCCEEDED'"
+      v-if="operation.status === 'SUCCEEDED' && !compact"
       class="block-gap"
       type="success"
       show-icon
@@ -143,9 +145,11 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
       :closable="false"
       :title="operation.failure_message || '本次操作未完成'"
     >
-      <div>错误码：{{ operation.failure_code ?? "未提供错误码" }}</div>
-      <div class="mono">操作编号：{{ operation.operation_no }}</div>
-      <div v-if="operation.request_id" class="mono">请求编号：{{ operation.request_id }}</div>
+      <template v-if="!compact">
+        <div>错误码：{{ operation.failure_code ?? "未提供错误码" }}</div>
+        <div class="mono">操作编号：{{ operation.operation_no }}</div>
+        <div v-if="operation.request_id" class="mono">请求编号：{{ operation.request_id }}</div>
+      </template>
     </el-alert>
   </el-card>
 </template>
@@ -162,5 +166,29 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
 .operation-panel__title {
   font-size: 15px;
   font-weight: 600;
+}
+
+.operation-panel--compact :deep(.el-card__header) {
+  padding: 12px 16px;
+}
+
+.operation-panel--compact :deep(.el-card__body) {
+  padding: 12px 16px;
+}
+
+.operation-message {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.operation-details summary {
+  width: fit-content;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.operation-details[open] summary {
+  margin-bottom: 12px;
 }
 </style>

@@ -15,14 +15,17 @@ class ExecuteNodeRequest(BaseModel):
     # 提交者看到的任务输入修订号；与任务当前修订不一致时明确冲突，不执行旧输入。
     input_revision: int | None = Field(default=None, ge=0)
 
-class RecoverFailedNodeRequest(BaseModel):
-    node_code: str
-    input_revision: int = Field(ge=0)
-
 class OperationRequest(BaseModel):
     """可能触发长处理的操作入口共用请求体。"""
 
     idempotency_key: str | None = Field(default=None, max_length=120)
+
+class DocumentOcrRetryRequest(BaseModel):
+    """只续查或重试当前材料的 OCR，绑定页面看到的输入和作业身份。"""
+
+    idempotency_key: str = Field(min_length=1, max_length=120)
+    input_revision: int = Field(ge=0)
+    artifact_no: str | None = Field(default=None, min_length=1, max_length=40)
 
 class ManualReviewItem(BaseModel):
     review_no: str
@@ -57,11 +60,11 @@ class FieldCorrectionRequest(BaseModel):
     input_revision: int | None = Field(default=None, ge=0)
 
 class OcrReconcileRequest(BaseModel):
-    """OCR 提交结果未知时的人工对账动作。
+    """OCR 提交结果未知、超时或明确失败后的人工处理动作。
 
     系统没有真实的供应商幂等/查询能力时既不自动重发也不标成功：
     ADOPT_JOB=人工提供已确认的供应商作业号并据此续查；
-    RETRY_SUBMIT=人工明确放弃未知状态并重新提交（会记录新的提交尝试）。
+    RETRY_SUBMIT=人工明确重提未知、超时或失败作业（会记录新的提交尝试）。
     """
 
     action: Literal["ADOPT_JOB", "RETRY_SUBMIT"]
@@ -95,8 +98,8 @@ class TaskCopyRequest(BaseModel):
 __all__ = [
     "TaskSchemaPreviewRequest",
     "ExecuteNodeRequest",
-    "RecoverFailedNodeRequest",
     "OperationRequest",
+    "DocumentOcrRetryRequest",
     "ManualReviewItem",
     "ManualReviewRequest",
     "FieldCorrectionRequest",

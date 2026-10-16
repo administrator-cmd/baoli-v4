@@ -64,9 +64,10 @@ class ToolCatalogItem(BaseModel):
     # 只有一个笼统的「可调用」会让「注册了但模型调不到」显示成模型能用。
     registered: bool = True
     implemented: bool = False
+    judgement_supported: bool | None = None
+    judgement_unsupported_reason: str | None = None
     agent_selectable: bool = False
     agent_unselectable_reason: str | None = None
-    error_codes: list[str] = Field(default_factory=list)
     unimplemented_reason: str | None = None
     input_count: str | None = None
     runtime_keys: list[str] = Field(default_factory=list)
@@ -74,8 +75,6 @@ class ToolCatalogItem(BaseModel):
 class ToolCatalogResponse(ApiResponse):
     """模型可调用工具的唯一目录，不声明业务节点或发布能力缺口。"""
 
-    tool_catalog_version: str
-    tool_catalog_fingerprint: str
     tools: list[ToolCatalogItem] = Field(default_factory=list)
 
 class RuleCapabilityStatusResponse(BaseModel):

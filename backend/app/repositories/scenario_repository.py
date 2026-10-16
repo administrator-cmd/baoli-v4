@@ -1,9 +1,7 @@
-from . import configuration_store as config_store
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..entity import ScenarioDraft, ScenarioDraftSheet, ScenarioTemplate, ScenarioVersion
+from ..entity import ScenarioTemplate, ScenarioVersion
 
 
 def find_template_by_code(db: Session, scenario_code: str) -> ScenarioTemplate | None:
@@ -20,8 +18,6 @@ def find_version_by_id(db: Session, version_id: int | None) -> ScenarioVersion |
     return db.get(ScenarioVersion, version_id) if version_id is not None else None
 
 
-
-
 def find_published_version(db: Session, scenario_code: str, version_no: int) -> ScenarioVersion | None:
     return db.scalar(
         select(ScenarioVersion).where(
@@ -36,8 +32,12 @@ def add_template(db: Session, template: ScenarioTemplate) -> None:
     db.add(template)
 
 
-def draft_sheet_roles(db: Session, scenario_code: str) -> list[str]:
-    draft = db.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_code == scenario_code))
-    if draft is None:
-        return []
-    return [item.sheet_role for item in config_store.rows(db, ScenarioDraftSheet, draft.id)]
+def find_latest_published_version(db: Session, scenario_code: str) -> ScenarioVersion | None:
+    # 排序只读取 ID，完整 JSON 配置按主键读取，不进入排序缓冲区。
+    version_id = db.scalar(
+        select(ScenarioVersion.id)
+        .where(ScenarioVersion.scenario_code == scenario_code, ScenarioVersion.status == "PUBLISHED")
+        .order_by(ScenarioVersion.version_no.desc())
+        .limit(1)
+    )
+    return db.get(ScenarioVersion, version_id) if version_id is not None else None

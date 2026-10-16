@@ -11,7 +11,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 from ...domain.external_artifacts import ExternalServiceResult, OcrJobSubmission
 from ...common.exceptions import BusinessError
@@ -47,7 +47,10 @@ class DocumentServicePort(Protocol):
 
     def submit_processed_document(self, *, file_path: Path, filename: str) -> OcrJobSubmission: ...
 
-    def poll_ocr_job(self, *, job_id: str, deadline_at: datetime) -> ExternalServiceResult: ...
+    def poll_ocr_job(
+        self, *, job_id: str, deadline_at: datetime,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ExternalServiceResult: ...
 
 
 _PORT: DocumentServicePort | None = None

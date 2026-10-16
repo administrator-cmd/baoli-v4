@@ -1,26 +1,9 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from ...common.api import ApiResponse
-
-
-class DraftSourceActivationPreviewItem(BaseModel):
-    row_key: str
-    sheet_role: str
-    sheet_name: str
-    row_no: int
-    source_id: str | None = None
-
-
-class DraftSourceActivationPreviewResponse(ApiResponse):
-    preview_id: str
-    revision_no: int
-    can_activate: bool
-    rows: list[DraftSourceActivationPreviewItem]
-    items: list[dict[str, str]]
-    questions: list[str]
 
 
 class ScenarioVersionResponse(ApiResponse):
@@ -36,6 +19,8 @@ class ScenarioVersionResponse(ApiResponse):
 
 
 class ScenarioDraftViewResponse(ApiResponse):
+    configuration_kind: Literal["DRAFT", "PUBLISHED"] = "DRAFT"
+    version_no: int | None = None
     scenario_code: str
     schema_key: str | None = None
     schema_version: str | None = None
@@ -48,15 +33,17 @@ class ScenarioDraftViewResponse(ApiResponse):
     sync_error: dict[str, Any] | None = None
     updated_at: datetime
     nodes: list[dict[str, Any]] = Field(default_factory=list)
-    sheets: list[dict[str, Any]] = Field(default_factory=list)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     fields: list[dict[str, Any]] = Field(default_factory=list)
     rules: list[dict[str, Any]] = Field(default_factory=list)
     sections: list[dict[str, Any]] = Field(default_factory=list)
-    disabled_source_rows: list[dict[str, Any]] = Field(default_factory=list)
     calculations: list[dict[str, Any]] = Field(default_factory=list)
     business_rule_count: int = 0
     system_rule_count: int = 0
+
+
+class ScenarioConfigurationViewResponse(ScenarioDraftViewResponse):
+    revision_no: int | None
 
 
 class ScenarioPublishResponse(ApiResponse):
@@ -66,7 +53,6 @@ class ScenarioPublishResponse(ApiResponse):
     status: str
     source: str
     change_summary: str | None = None
-    manifest_hash: str
     material_count: int
     field_count: int
     rule_count: int

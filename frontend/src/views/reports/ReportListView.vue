@@ -9,7 +9,6 @@ import {
   getReport,
   listReports,
   reportDownloadUrl,
-  reportExportUrl,
   setReportArchived,
   updateReportRemark,
 } from "@/api/reports";
@@ -52,18 +51,6 @@ const list = usePagedList<ReportRow, {
 );
 
 const { filters, page, pageSize, total, items, loading, error } = list;
-
-function exportUrl(): string {
-  return reportExportUrl({
-    name: filters.name || undefined,
-    task_no: filters.task_no || undefined,
-    scenario_code: filters.scenario_code || undefined,
-    plan_code: filters.plan_code || undefined,
-    archived: filters.archived === "" ? undefined : filters.archived === "true",
-    generated_from: filters.generated_from || undefined,
-    generated_to: filters.generated_to || undefined,
-  });
-}
 
 /** 方案筛选下拉：与任务、风险结果页一致，读取失败时提示但不阻塞查询。 */
 const planOptions = ref<PlanOption[]>([]);
@@ -174,7 +161,6 @@ onMounted(async () => {
     <PageHeader
       eyebrow="报告管理"
       title="审核报告"
-      subtitle="报告输出节点生成的真实快照；生成、范围完整性与风险可判定三个信号分开呈现，正文不可手改。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -203,7 +189,6 @@ onMounted(async () => {
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
         <el-button @click="list.reset()">重置</el-button>
-        <el-button tag="a" :href="exportUrl()">导出</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
@@ -237,7 +222,6 @@ onMounted(async () => {
           <el-button link type="primary" class="table-link" @click="openDetail(row)">{{ row.report_name }}</el-button>
           <el-tag v-if="row.stale" type="warning" size="small" effect="plain" disable-transitions>已失效</el-tag>
           <el-tag v-else-if="row.current" type="success" size="small" effect="plain" disable-transitions>当前</el-tag>
-          <el-tag v-if="row.origin === 'LEGACY_BACKFILL'" type="info" size="small" effect="plain" disable-transitions>历史回填</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="任务" min-width="180" show-overflow-tooltip>
@@ -254,8 +238,7 @@ onMounted(async () => {
       </el-table-column>
       <el-table-column label="方案版本" width="140">
         <template #default="{ row }">
-          <span v-if="row.is_legacy_config" class="text-hint">历史任务配置</span>
-          <span v-else>{{ row.plan_name }}</span>
+          <span>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
       </el-table-column>
       <el-table-column label="范围完整性" width="110">
@@ -348,7 +331,7 @@ onMounted(async () => {
           <el-descriptions :column="2" border size="small" class="block-gap-sm">
             <el-descriptions-item label="任务">{{ detail.task_name }}（{{ detail.task_no }}）</el-descriptions-item>
             <el-descriptions-item label="方案版本">
-              {{ detail.plan_name || "历史任务配置" }}
+              {{ detail.plan_name || "方案名称未记录" }}
             </el-descriptions-item>
             <el-descriptions-item label="生成时间">{{ String(detail.generated_at).replace("T", " ").slice(0, 19) }}</el-descriptions-item>
             <el-descriptions-item label="输入修订">
@@ -356,9 +339,6 @@ onMounted(async () => {
             </el-descriptions-item>
             <el-descriptions-item label="备注" :span="2">{{ detail.remark || "—" }}</el-descriptions-item>
           </el-descriptions>
-          <el-alert v-if="detail.origin === 'LEGACY_BACKFILL'" class="block-gap-sm" type="info" show-icon :closable="false" title="历史回填报告">
-            该快照由增量升级时从历史报告节点结果原值回填，未做任何改写。
-          </el-alert>
           <el-card shadow="never" class="block-gap">
             <template #header>报告正文（Markdown）</template>
             <pre v-if="detail.content" class="report-content">{{ detail.content }}</pre>

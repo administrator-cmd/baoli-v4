@@ -4,8 +4,7 @@ from ..domain.identity import public_no
 from ..common.exceptions import BusinessError
 from ..entity import AuditTask
 from ..repositories import task_repository
-from .audit.interrupt import resume_task_creation_interrupt
-from .operation_log_service import require_idempotent_replay
+from .operation_log_service import normalized_request_hash
 from .operation_types import OBJECT_AUDIT_TASK
 from .task_service import (
     claim_task_command,
@@ -25,32 +24,7 @@ def copy_audit_task(
 ) -> AuditTask:
     """执行幂等的任务复制命令，事务和恢复逻辑不泄露到 API 层。"""
     request_payload = {"task_no": source_task_no, "task_name": task_name}
-    existing, request_hash = require_idempotent_replay(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        operation_type="TASK_COPY",
-        idempotency_key=idempotency_key,
-        request=request_payload,
-    )
-    if existing is not None:
-        if str(existing.result or "") != "SUCCEEDED":
-            raise BusinessError(
-                "TASK_COPY_PREVIOUSLY_FAILED",
-                f"该幂等标识对应的复制任务命令此前执行失败：{existing.failure_message or '原因未记录'}。"
-                "请更换幂等标识后重试",
-                status_code=409,
-                details={"log_no": existing.log_no, "failure_code": existing.failure_code},
-            )
-        detail = existing.detail_json if isinstance(existing.detail_json, dict) else {}
-        replayed = task_repository.find_by_no(db, detail.get("new_task_no"))
-        if replayed is None:
-            raise BusinessError(
-                "TASK_COPY_REPLAY_UNAVAILABLE",
-                "该幂等标识对应的任务记录不存在，请更换标识后重新复制",
-                status_code=409,
-                details={"log_no": existing.log_no},
-            )
-        return replayed
+    request_hash = normalized_request_hash(request_payload)
 
     new_task_no = public_no("TASK")
     command, reused = claim_task_command(
@@ -80,13 +54,7 @@ def copy_audit_task(
                 },
             )
         if command.status == "PENDING":
-            try:
-                resume_task_creation_interrupt(db, copied, command.id)
-            except BusinessError:
-                record_failed_task_command(
-                    db, command, object_no=source_task_no, object_name=task_name, detail=detail
-                )
-                raise
+            # 任务创建不再需要建立图等待点：提交命令记录即可。
             finish_task_command(
                 db,
                 command,
@@ -104,7 +72,6 @@ def copy_audit_task(
             source_task_no,
             task_name=task_name,
             new_task_no=new_task_no,
-            creation_operation_id=command.id,
         )
     except BusinessError:
         db.rollback()

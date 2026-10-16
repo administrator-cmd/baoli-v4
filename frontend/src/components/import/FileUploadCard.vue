@@ -125,8 +125,6 @@ function onFileChange(file: { raw?: File; name: string }): void {
             支持 {{ policy.allowed_extensions.join("、") }} 格式，单个文件不超过 {{ maxSizeText }}。
           </template>
           <template v-else>文件格式与大小上限以上传策略为准，当前未取得该策略。</template>
-          每张工作表读取前 200 行、前 40 列只用于页面预览摘要；
-          业务转换读取的是完整业务行，不按该范围截断。
         </div>
       </template>
     </el-upload>

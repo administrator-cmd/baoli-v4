@@ -1,9 +1,8 @@
-import { createRouter, createWebHistory, type LocationQuery, type RouteRecordRaw } from "vue-router";
+import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
 
 import AuditTaskDetailView from "@/views/audits/AuditTaskDetailView.vue";
 import AuditTaskListView from "@/views/audits/AuditTaskListView.vue";
 import ExecutionListView from "@/views/audits/ExecutionListView.vue";
-import ReviewListView from "@/views/audits/ReviewListView.vue";
 import DocumentListView from "@/views/documents/DocumentListView.vue";
 import EvidenceListView from "@/views/documents/EvidenceListView.vue";
 import ImportWorkbenchView from "@/views/imports/ImportWorkbenchView.vue";
@@ -26,22 +25,10 @@ import ServiceStatusView from "@/views/system/ServiceStatusView.vue";
  * meta.group 决定侧边栏分组；meta.menu 决定所属列表菜单。
  * 详情页高亮所属分组与列表菜单。
  */
-/** 旧链接重定向时保留除对象参数以外的查询参数（operation/tab 等）。 */
-function forwardQuery(source: LocationQuery, drop: string): Record<string, string> {
-  const query: Record<string, string> = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (key === drop || typeof value !== "string") {
-      continue;
-    }
-    query[key] = value;
-  }
-  return query;
-}
-
 /**
  * 场景配置类页面与场景详情 tab 的关系。
  *
- * 材料、字段、规则、节点这些配置属于某个场景，因此它们是场景详情的 tab，
+ * 材料、字段、规则这些配置属于某个场景，因此它们是场景详情的 tab，
  * 不是独立页面：独立的「不选场景就能进」的路由会让用户绕过
  * 「建场景 → 上传规则库 → 选择解析工作表 → 核对候选 → 保存草稿」的主流程，
  * 直接改到某一份配置上。场景身份只在路径里（`:scenarioCode`）。
@@ -95,7 +82,6 @@ const routes: RouteRecordRaw[] = [
     component: AuditTaskDetailView,
     meta: { title: "任务详情", group: "审核管理", menu: "/audit-tasks" },
   },
-  { path: "/reviews", name: "reviews", component: ReviewListView, meta: { title: "人工复核", group: "审核管理", menu: "/reviews" } },
   { path: "/executions", name: "executions", component: ExecutionListView, meta: { title: "执行记录", group: "审核管理", menu: "/executions" } },
 
   // 资料管理
@@ -109,22 +95,6 @@ const routes: RouteRecordRaw[] = [
   // 系统管理
   { path: "/system/services", name: "system-services", component: ServiceStatusView, meta: { title: "服务状态", group: "系统管理", menu: "/system/services" } },
   { path: "/system/operations", name: "system-operations", component: OperationLogView, meta: { title: "操作日志", group: "系统管理", menu: "/system/operations" } },
-
-  // 旧链接兼容：显式重定向并保留对象与其余查询参数（operation / tab），不跳到别的记录
-  {
-    path: "/imports",
-    redirect: (to) =>
-      typeof to.query.job === "string" && to.query.job
-        ? { name: "scene-import-detail", params: { jobNo: to.query.job }, query: forwardQuery(to.query, "job") }
-        : { name: "scene-imports" },
-  },
-  {
-    path: "/audits",
-    redirect: (to) =>
-      typeof to.query.task === "string" && to.query.task
-        ? { name: "audit-task-detail", params: { taskNo: to.query.task }, query: forwardQuery(to.query, "task") }
-        : { name: "audit-tasks" },
-  },
 
   { path: "/:pathMatch(.*)*", name: "not-found", component: NotFoundView, meta: { title: "页面不存在", group: "" } },
 ];

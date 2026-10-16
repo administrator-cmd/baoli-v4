@@ -159,7 +159,8 @@ a {
 }
 
 .app-main {
-  padding: 20px;
+  --app-main-padding-y: 20px;
+  padding: var(--app-main-padding-y);
   background: var(--app-page-bg);
   overflow-y: auto;
 }
@@ -553,7 +554,8 @@ a {
 /* ---- 响应式 ---- */
 @media (max-width: 1024px) {
   .app-main {
-    padding: 12px;
+    --app-main-padding-y: 12px;
+    padding: var(--app-main-padding-y);
   }
 
   .review-layout {
@@ -577,7 +579,7 @@ a {
   }
 
   .app-main {
-    padding: 12px 10px;
+    padding: var(--app-main-padding-y) 10px;
   }
 
   .sticky-actions {

@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Python 格式化、导入排序和静态代码检查使用同一个工具。
+ruff>=0.14,<0.15

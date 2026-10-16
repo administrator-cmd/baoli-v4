@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 
 import type { RiskResultRow } from "@/api/contracts";
 import { listPlanOptions, type PlanOption } from "@/api/plans";
-import { listRiskResults, riskExportUrl, type RiskPage } from "@/api/reports";
+import { listRiskResults, type RiskPage } from "@/api/reports";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -62,20 +62,10 @@ const statusOptions = [
   { value: "EVIDENCE_INSUFFICIENT", label: "证据不足" },
   { value: "NOT_APPLICABLE", label: "不适用" },
   { value: "NOT_EXECUTED", label: "未执行" },
-  { value: "PENDING_REVIEW", label: "待复核" },
+  { value: "PENDING_REVIEW", label: "未确认" },
 ];
 
 
-
-function exportUrl(): string {
-  return riskExportUrl({
-    task_no: filters.task_no || undefined,
-    scenario_code: filters.scenario_code || undefined,
-    plan_code: filters.plan_code || undefined,
-    risk_level: filters.risk_level || undefined,
-    status: filters.status || undefined,
-  });
-}
 
 /** 方案筛选下拉：与任务、报告页一致，读取失败时提示但不阻塞查询。 */
 const planOptions = ref<PlanOption[]>([]);
@@ -108,7 +98,6 @@ onMounted(async () => {
     <PageHeader
       eyebrow="报告管理"
       title="风险结果"
-      subtitle="当前有效执行批次的风险结论；命中只统计异常，证据不足与不适用分别展示。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -136,7 +125,6 @@ onMounted(async () => {
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
         <el-button @click="list.reset()">重置</el-button>
-        <el-button tag="a" :href="exportUrl()">导出</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
@@ -157,7 +145,7 @@ onMounted(async () => {
 
     <div class="app-toolbar">
       <div class="app-toolbar__left">
-        <span class="text-muted">当前筛选作用域命中（异常）{{ hitCount }} 条；命中只统计异常，不含证据不足与不适用。</span>
+        <span>命中 {{ hitCount }} 条</span>
       </div>
     </div>
 
@@ -231,9 +219,6 @@ onMounted(async () => {
         <el-descriptions-item label="处理建议">{{ detail.suggestion || "—" }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ String(detail.created_at).replace("T", " ").slice(0, 19) }}</el-descriptions-item>
       </el-descriptions>
-      <p class="text-hint block-gap-sm">
-        风险结果只来自当前有效执行批次；证据不足与不适用表示风险尚不能形成结论，不等于无风险。
-      </p>
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="detail" type="primary" @click="openTask(detail)">进入任务风险页签</el-button>

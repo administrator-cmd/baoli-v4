@@ -19,11 +19,6 @@ export function listReports(query: ReportQuery): Promise<Paged<ReportRow>> {
   return request<Paged<ReportRow>>(`/reports${toQuery({ ...query })}`);
 }
 
-/** 报告列表导出地址；与当前筛选同一作用域。 */
-export function reportExportUrl(query: Omit<ReportQuery, "page" | "page_size">): string {
-  return apiFileUrl(`/reports/export${toQuery({ ...query })}`);
-}
-
 /** 报告详情：正文、三信号与结构化结论。 */
 export function getReport(reportNo: string): Promise<ReportDetail> {
   return request<ReportDetail>(`/reports/${encodeURIComponent(reportNo)}`);
@@ -74,9 +69,4 @@ export interface RiskPage extends Paged<RiskResultRow> {
 /** 风险结果分页列表；命中数取服务端 hit_count，不用总数冒充。 */
 export function listRiskResults(query: RiskQuery): Promise<RiskPage> {
   return request<RiskPage>(`/risk-results${toQuery({ ...query })}`);
-}
-
-/** 风险结果导出地址；与当前筛选同一作用域。 */
-export function riskExportUrl(query: Omit<RiskQuery, "page" | "page_size">): string {
-  return apiFileUrl(`/risk-results/export${toQuery({ ...query })}`);
 }

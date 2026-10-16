@@ -5,6 +5,7 @@ import { Download } from "lucide-vue-next";
 import type { Report } from "@/api/contracts";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
+import ReportBody from "@/components/audit/ReportBody.vue";
 
 /**
  * 审核报告。
@@ -29,6 +30,7 @@ const props = defineProps<{
   /** 报告读取失败的中文原因；非空时不能显示成「尚未生成」。 */
   error?: string | null;
 }>();
+const emit = defineEmits<{ "select-report": [reportNo: string] }>();
 
 /** 服务端结构化结论；旧报告可能没有。 */
 const conclusion = computed(() => props.report?.conclusion ?? null);
@@ -119,6 +121,9 @@ const businessSectionCount = computed(() => props.report?.business_section_count
     description="还没有取得服务端返回的报告；请刷新后重试。这不代表审核通过或未通过。"
   />
   <div v-else class="stack">
+    <el-select v-if="report.reports.length > 1" :model-value="report.report_no" class="report-picker" @change="(value: string) => emit('select-report', value)">
+      <el-option v-for="item in report.reports" :key="item.report_no" :value="item.report_no" :label="`${item.report_name}${item.current ? '（当前）' : '（历史）'}`" />
+    </el-select>
     <!-- 1. 首屏业务结论：报告有效性 → 范围完整性 → 风险可判定性 -->
     <el-alert
       v-if="!generated"
@@ -157,7 +162,7 @@ const businessSectionCount = computed(() => props.report?.business_section_count
           :tone="scopeComplete ? 'success' : 'warning'"
         />
       </el-descriptions-item>
-      <el-descriptions-item label="风险是否可判定">
+      <el-descriptions-item label="风险结论状态">
         <StatusBadge
           :status="riskAvailable ? 'CONFIRMED' : 'NOT_APPLICABLE'"
           :label="riskAvailable ? '可判定' : '不可判定'"
@@ -170,23 +175,10 @@ const businessSectionCount = computed(() => props.report?.business_section_count
     <el-alert v-if="generated" type="info" show-icon :closable="false" title="审核结论（服务端返回）">
       <div>审核范围：{{ scopeSummary }}</div>
       <div>风险结论：{{ riskSummary }}</div>
-      <div class="text-hint">
-        报告是否生成只表示报告已产出，不代表审核通过；逐条判断请到「规则结果」与「风险」页签查看。
-      </div>
     </el-alert>
 
-    <el-alert
-      v-if="generated"
-      type="warning"
-      show-icon
-      :closable="false"
-      title="服务端没有返回本次审核的总体结论字段"
-    >
-      当前报告结论只包含「是否生成 / 范围是否完整 / 风险是否可判定 / 未实现格式 / 能力缺口」，
-      <strong>没有</strong>「本次审核总体是否通过」这一业务字段。页面不会从 Markdown 正文里提取或推断该结论。
-      <div class="text-hint">
-        需要后端接口支持：在报告结论里补充总体审核结论字段（例如总体判定与判定依据），页面才能显示。
-      </div>
+    <el-alert v-if="generated && !conclusion" type="info" show-icon :closable="false" title="本报告没有单独的总体结论字段">
+      请结合报告正文、逐条规则和风险页查看审核结果。
     </el-alert>
 
     <!-- 3. 下一步动作 -->
@@ -210,7 +202,7 @@ const businessSectionCount = computed(() => props.report?.business_section_count
       </template>
       <el-collapse>
         <el-collapse-item title="在页面中查看报告全文" name="content">
-          <pre class="report-content">{{ report.content }}</pre>
+          <ReportBody :content="report.content" :content-type="report.content_type" />
         </el-collapse-item>
       </el-collapse>
     </el-card>
@@ -227,9 +219,6 @@ const businessSectionCount = computed(() => props.report?.business_section_count
         >
           <div v-for="item in unsupportedFormats" :key="`${item.report_code}-${item.format}`">
             {{ item.report_name || item.report_code || "本报告" }} 要求 {{ item.format }}：{{ item.message }}
-          </div>
-          <div class="text-hint">
-            当前只生成 Markdown 正文。系统不会按这些格式产出文件，也不会改扩展名冒充。
           </div>
         </el-alert>
 
@@ -292,14 +281,6 @@ const businessSectionCount = computed(() => props.report?.business_section_count
   justify-content: space-between;
   gap: 12px;
 }
+.report-picker { width: min(100%, 360px); }
 
-.report-content {
-  max-height: 420px;
-  margin: 0;
-  overflow: auto;
-  color: var(--el-text-color-regular);
-  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 </style>

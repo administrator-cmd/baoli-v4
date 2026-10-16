@@ -5,8 +5,10 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DocumentDetail, DocumentRow } from "@/api/contracts";
 import { uploadTaskDocument } from "@/api/audits";
-import { documentExportUrl, documentFileUrl, getDocument, listDocuments } from "@/api/materials";
+import { getDocument, listDocuments } from "@/api/materials";
 import { usePagedList } from "@/composables/usePagedList";
+import { useOperationTracker } from "@/composables/useOperationTracker";
+import OperationPanel from "@/components/OperationPanel.vue";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import { formatFileSize, statusLabel } from "@/constants/labels";
@@ -15,7 +17,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
 /**
  * 审核材料：跨任务的材料位与当前文件。
  * 上传/替换/移除都必须指定任务与材料位（不建设游离文件仓库）；
- * 替换与移除都会产生输入修订，历史文件保留可下载。
+ * 替换与移除都会产生输入修订，历史文件保留为历史版本。
  */
 const router = useRouter();
 
@@ -35,33 +37,8 @@ const list = usePagedList<DocumentRow, { task_no: string; keyword: string; mater
 
 const { filters, page, pageSize, total, items, loading, error } = list;
 
-function exportUrl(): string {
-  return documentExportUrl({
-    task_no: filters.task_no || undefined,
-    keyword: filters.keyword || undefined,
-    material_name: filters.material_name || undefined,
-    has_file: filters.has_file === "" ? undefined : filters.has_file === "true",
-  });
-}
-
 function openTask(row: DocumentRow): void {
   void router.push({ name: "audit-task-detail", params: { taskNo: row.task_no }, query: { tab: "materials" } });
-}
-
-function downloadCurrent(row: DocumentRow): void {
-  if (!row.upload_no) {
-    ElMessage.warning("该材料位没有当前文件");
-    return;
-  }
-  window.open(documentFileUrl(row.document_no, row.upload_no), "_blank");
-}
-
-function previewCurrent(row: DocumentRow): void {
-  if (!row.upload_no) {
-    ElMessage.warning("该材料位没有当前文件");
-    return;
-  }
-  window.open(documentFileUrl(row.document_no, row.upload_no, true), "_blank");
 }
 
 /* 上传 / 替换 */
@@ -75,8 +52,16 @@ const uploadImpact = ref<string | null>(null);
 /** 真实上传进度百分比；上传中由浏览器 XHR 进度事件驱动。 */
 const uploadPercent = ref<number | null>(null);
 const uploadError = ref<string | null>(null);
+const classificationError = ref<string | null>(null);
+const { operation: classificationOperation, watching: classificationWatching, track: trackClassification,
+  requery: requeryClassification, reset: resetClassification } = useOperationTracker();
+let uploadGeneration = 0;
 
 function openUpload(row: DocumentRow): void {
+  uploadGeneration += 1;
+  uploadSaving.value = false;
+  resetClassification();
+  classificationError.value = null;
   uploadRow.value = row;
   uploadFile.value = null;
   uploadMaterialType.value = "";
@@ -103,6 +88,7 @@ async function submitUpload(): Promise<void> {
     return;
   }
   const row = uploadRow.value;
+  const token = uploadGeneration;
   const replacing = Boolean(row.filename);
   if (replacing) {
     try {
@@ -115,34 +101,47 @@ async function submitUpload(): Promise<void> {
       return;
     }
   }
+  if (token !== uploadGeneration) return;
   uploadSaving.value = true;
   uploadImpact.value = null;
   uploadError.value = null;
   uploadPercent.value = 0;
+  let uploaded: Awaited<ReturnType<typeof uploadTaskDocument>>;
   try {
-    const uploaded = await uploadTaskDocument(
+    uploaded = await uploadTaskDocument(
       row.task_no,
       row.document_no,
       uploadFile.value,
       uploadMaterialType.value,
       replacing,
       (percent) => {
-        uploadPercent.value = percent;
+        if (token === uploadGeneration) uploadPercent.value = percent;
       },
     );
-    uploadPercent.value = 100;
-    uploadImpact.value = uploaded.impact?.description ?? "上传完成；该材料位当前文件已更新。";
-    ElMessage.success(replacing ? "已替换为新的文件版本" : "文件已上传");
-    uploadFile.value = null;
-    uploadMaterialType.value = "";
-    await list.load();
   } catch (failure) {
     // 失败原因保留在弹窗里，不随提示消失。
-    uploadError.value = failure instanceof Error ? failure.message : "上传失败";
-    uploadPercent.value = null;
+    if (token === uploadGeneration) {
+      uploadError.value = failure instanceof Error ? failure.message : "上传失败";
+      uploadPercent.value = null;
+    }
+    return;
   } finally {
-    uploadSaving.value = false;
+    if (token === uploadGeneration) uploadSaving.value = false;
   }
+  if (token !== uploadGeneration) return;
+  uploadPercent.value = 100;
+  uploadImpact.value = uploaded.impact?.description ?? "文件已保存；自动校验状态见下方。";
+  ElMessage.success(replacing ? "已替换为新的文件版本" : "文件已保存");
+  uploadFile.value = null;
+  uploadMaterialType.value = "";
+  classificationError.value = null;
+  trackClassification(uploaded.classification_operation, {
+    onFinished: async () => { if (token === uploadGeneration) await list.load(); },
+    onError: (failure) => {
+      if (token === uploadGeneration) classificationError.value = failure instanceof Error ? failure.message : "校验状态查询失败";
+    },
+  });
+  await list.load();
 }
 
 /* 历史版本 */
@@ -175,7 +174,6 @@ onMounted(() => {
     <PageHeader
       eyebrow="资料管理"
       title="审核材料"
-      subtitle="跨任务的材料位与文件版本；上传或替换都会产生输入修订，历史文件保留可下载。"
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
@@ -197,20 +195,10 @@ onMounted(() => {
       <el-form-item>
         <el-button type="primary" @click="list.search()">查询</el-button>
         <el-button @click="list.reset()">重置</el-button>
-        <el-button tag="a" :href="exportUrl()">导出</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
       </el-form-item>
     </el-form>
 
-    <div class="app-toolbar">
-      <div class="app-toolbar__left">
-        <span class="text-hint">
-          上传/替换/移除都在对应任务的材料位上操作；本页上传会自动进入该材料的输入修订流程。
-          后端材料位只有单一处理状态（待上传/已上传/已处理/类型待复核），没有单独的“解析状态”，
-          也不带材料类型：类型属于每一次上传（在上传时选择），不是材料位的属性。
-        </span>
-      </div>
-    </div>
 
     <el-alert v-if="error" type="error" show-icon :closable="false" :title="`读取失败：${error}`">
       <el-button size="small" @click="list.load()">重试</el-button>
@@ -253,10 +241,8 @@ onMounted(() => {
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="290" fixed="right">
+      <el-table-column label="操作" width="230" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" :disabled="!row.filename" @click="downloadCurrent(row)">下载</el-button>
-          <el-button link type="primary" size="small" :disabled="!row.filename" @click="previewCurrent(row)">预览</el-button>
           <el-button link type="primary" size="small" @click="openUpload(row)">{{ row.filename ? "替换" : "上传" }}</el-button>
           <el-button link type="primary" size="small" @click="openHistory(row)">历史版本</el-button>
         </template>
@@ -298,11 +284,11 @@ onMounted(() => {
       </div>
       <el-alert v-if="uploadImpact" class="block-gap-sm" type="warning" show-icon :closable="false" :title="uploadImpact" />
       <el-alert v-if="uploadError" class="block-gap-sm" type="error" show-icon :closable="false" :title="`上传失败：${uploadError}`" />
-      <p class="text-hint">
-        材料位本身已由任务模板确定；这里只能为该材料位上传或替换文件，不能新建材料位。
-        材料类型是这次上传要声明的值，必须从 8018 支持目录中选择——它随本次上传保存，
-        替换文件时可以改选。
-      </p>
+      <OperationPanel v-if="classificationOperation" class="block-gap-sm" compact
+        :operation="classificationOperation" :watching="classificationWatching" label="文件已保存，自动校验"
+        @requery="classificationError = null; requeryClassification()" />
+      <el-alert v-if="classificationError" class="block-gap-sm" type="error" show-icon :closable="false"
+        :title="`文件已保存；校验状态查询失败：${classificationError}`" />
       <template #footer>
         <el-button @click="uploadVisible = false">关闭</el-button>
         <el-button type="primary" :loading="uploadSaving" @click="submitUpload">
@@ -340,14 +326,7 @@ onMounted(() => {
             <el-table-column label="上传时间" width="160">
               <template #default="{ row }">{{ String(row.created_at).replace("T", " ").slice(0, 19) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="140" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="primary" size="small" tag="a" :href="documentFileUrl(detail.document_no, row.upload_no)">下载</el-button>
-                <el-button link type="primary" size="small" tag="a" :href="documentFileUrl(detail.document_no, row.upload_no, true)">预览</el-button>
-              </template>
-            </el-table-column>
           </el-table>
-          <p class="text-hint block-gap-sm">移除当前文件在任务详情的材料页签执行（输入修订：旧文件保留本页历史，依赖结果失效）。</p>
         </template>
       </div>
     </el-drawer>

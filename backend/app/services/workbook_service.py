@@ -7,7 +7,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 
 from ..config import get_settings
-from ..domain.workbook import WorkbookCell, WorkbookIR, WorkbookRow, WorkbookSheet
+from ..domain.workbook import WorkbookIR, WorkbookRow, WorkbookSheet
 from ..common.exceptions import BusinessError
 from ..domain.identity import stable_key
 
@@ -76,38 +76,25 @@ def read_workbook_ir(
         preview_rows: list[WorkbookRow] = []
         for row_no in range(1, sheet.max_row + 1):
             cells: dict[str, str | int | float | bool | None] = {}
-            cell_details: list[WorkbookCell] = []
             for column_no in range(1, sheet.max_column + 1):
                 cell = sheet.cell(row_no, column_no)
                 if cell.value in (None, ""):
                     continue
                 value, _ = _cell_value(cell.value)
                 address = f"{get_column_letter(column_no)}{row_no}"
-                raw_text = str(cell.value)
-                truncated_text, truncated = _cell_value(cell.value, settings.workbook_cell_chars)
                 cells[address] = value
-                cell_details.append(
-                    WorkbookCell(
-                        address=address,
-                        column_no=column_no,
-                        raw_text=raw_text,
-                        truncated_text=str(truncated_text),
-                        truncated=truncated,
-                    )
-                )
                 used_min_row = row_no if used_min_row is None else min(used_min_row, row_no)
                 used_max_row = row_no if used_max_row is None else max(used_max_row, row_no)
                 used_min_column = column_no if used_min_column is None else min(used_min_column, column_no)
                 used_max_column = column_no if used_max_column is None else max(used_max_column, column_no)
             if cells:
                 non_empty_rows += 1
-                rows.append(WorkbookRow(row_no=row_no, cells=cells, cell_details=cell_details))
+                rows.append(WorkbookRow(row_no=row_no, cells=cells))
         cells_truncated = False
         preview_row_limit = min(sheet.max_row, settings.workbook_preview_rows)
         preview_column_limit = min(sheet.max_column, settings.workbook_preview_columns)
         for row_no in range(1, preview_row_limit + 1):
             cells: dict[str, str | int | float | bool | None] = {}
-            cell_details: list[WorkbookCell] = []
             for column_no in range(1, preview_column_limit + 1):
                 cell = sheet.cell(row_no, column_no)
                 if cell.value in (None, ""):
@@ -116,17 +103,8 @@ def read_workbook_ir(
                 cells_truncated = cells_truncated or truncated
                 address = f"{get_column_letter(column_no)}{row_no}"
                 cells[address] = value
-                cell_details.append(
-                    WorkbookCell(
-                        address=address,
-                        column_no=column_no,
-                        raw_text=str(cell.value),
-                        truncated_text=str(value),
-                        truncated=truncated,
-                    )
-                )
             if cells:
-                preview_rows.append(WorkbookRow(row_no=row_no, cells=cells, cell_details=cell_details))
+                preview_rows.append(WorkbookRow(row_no=row_no, cells=cells))
         header_candidates = _header_candidates(sheet, settings.workbook_preview_columns)
         used_range = (
             f"{get_column_letter(used_min_column)}{used_min_row}:{get_column_letter(used_max_column)}{used_max_row}"

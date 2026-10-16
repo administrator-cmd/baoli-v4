@@ -6,10 +6,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type { AuditTaskRow, PlanSelection } from "@/api/contracts";
 import { operationIdempotencyKey } from "@/api/http";
 import {
-  copyAuditTask,
   deleteAuditTask,
   listAuditTasksPage,
-  restoreAuditTask,
   updateAuditTask,
 } from "@/api/audits";
 import {
@@ -18,54 +16,41 @@ import {
   listPlanOptions,
   type PlanOption,
 } from "@/api/plans";
-import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { DetailTab } from "@/constants/auditWorkspaces";
-import { nodeLabel, nodeOptions, statusLabel } from "@/constants/labels";
+import { statusLabel } from "@/constants/labels";
 
 /**
  * 审核任务列表：任务从已启用且配置生效的方案创建；
- * 旧任务没有方案关联时显示“历史任务配置”，不伪造关联、不改写历史结果。
+ * 方案名称来自任务创建时的冻结快照。
  */
 const route = useRoute();
 const router = useRouter();
 
 const list = usePagedList<AuditTaskRow, {
   name: string;
-  scenario_code: string;
   plan_code: string;
-  legacy: string;
   status: string;
-  current_node: string;
   created_from: string;
   created_to: string;
-  deleted: boolean;
 }>({
   key: "audit-tasks",
   initialFilters: {
     name: "",
-    scenario_code: "",
     plan_code: "",
-    legacy: "",
     status: "",
-    current_node: "",
     created_from: "",
     created_to: "",
-    deleted: false,
   },
   fetch: (params) =>
     listAuditTasksPage({
       name: params.name || undefined,
-      scenario_code: params.scenario_code || undefined,
       plan_code: params.plan_code || undefined,
-      legacy: params.legacy === "" ? undefined : params.legacy === "true",
       status: params.status || undefined,
-      current_node: params.current_node || undefined,
       created_from: params.created_from || undefined,
       created_to: params.created_to || undefined,
-      deleted: params.deleted,
       page: params.page,
       page_size: params.page_size,
     }),
@@ -78,15 +63,14 @@ const statusOptions = [
   { value: "RUNNING", label: "执行中" },
   { value: "WAITING_REVIEW", label: "等待人工复核" },
   { value: "BLOCKED", label: "已阻断" },
-  { value: "COMPLETED", label: "已完成" },
+  { value: "COMPLETED", label: "执行已结束" },
   { value: "FAILED", label: "执行失败" },
 ];
 
 const selectedRows = ref<AuditTaskRow[]>([]);
-const editDisabled = computed(() => selectedRows.value.length !== 1);
 const deleteDisabled = computed(() => selectedRows.value.length === 0);
 
-/** 方案筛选下拉：与建任务一致，只列启用且已有发布版本的方案。 */
+/** 方案筛选下拉：与建任务一致，只列启用且配置生效的方案。 */
 const planFilterOptions = ref<PlanOption[]>([]);
 
 /** 进入任务详情并打开指定页签；没有页签时由任务详情页按「材料」页处理。 */
@@ -99,10 +83,10 @@ function openTask(row: AuditTaskRow, tab?: DetailTab): void {
 }
 
 /**
- * 操作列的主入口。每个状态只有一个明确的下一步，其余入口收进「更多」菜单：
- *   待执行   → 继续审核；
+ * 操作列按状态提供任务详情入口；「更多」只提供名称备注编辑和删除。
+ *   待执行   → 进入审核；
  *   执行中   → 查看进度；
- *   等待复核 → 进入复核；
+ *   历史等待复核 → 查看记录；
  *   已完成   → 查看结果；
  *   失败/阻断 → 查看原因。
  */
@@ -116,7 +100,7 @@ function primaryEntry(row: AuditTaskRow): PrimaryEntry {
     return { label: "查看进度", tab: "executions" };
   }
   if (row.status === "WAITING_REVIEW") {
-    return { label: "进入复核", tab: "reviews" };
+    return { label: "查看记录", tab: "executions" };
   }
   if (row.status === "COMPLETED") {
     return { label: "查看结果", tab: "rules" };
@@ -124,11 +108,10 @@ function primaryEntry(row: AuditTaskRow): PrimaryEntry {
   if (row.status === "FAILED" || row.status === "BLOCKED") {
     return { label: "查看原因", tab: "executions" };
   }
-  return { label: "继续审核", tab: "materials" };
+  return { label: "进入审核", tab: "materials" };
 }
 
 /* 新增任务 */
-const scenes = ref<ScenarioOption[]>([]);
 const planOptions = ref<PlanOption[]>([]);
 const createVisible = ref(false);
 const createSaving = ref(false);
@@ -301,7 +284,7 @@ async function submitEdit(): Promise<void> {
       task_name: editForm.task_name.trim(),
       remark: editForm.remark.trim() || null,
     });
-  ElMessage.success("任务资料已保存（冻结的创建时范围不受影响）");
+    ElMessage.success("任务名称与备注已保存");
     editVisible.value = false;
     await list.load();
   } catch (failure) {
@@ -311,46 +294,11 @@ async function submitEdit(): Promise<void> {
   }
 }
 
-/* 复制 */
-const copyVisible = ref(false);
-const copyRowTarget = ref<AuditTaskRow | null>(null);
-const copyName = ref("");
-const copySaving = ref(false);
-let copyAttemptKey: string | null = null;
-
-function openCopy(row: AuditTaskRow): void {
-  copyRowTarget.value = row;
-  copyName.value = `${row.task_name} 副本`;
-  copyVisible.value = true;
-}
-
-async function submitCopy(): Promise<void> {
-  if (!copyRowTarget.value || !copyName.value.trim()) {
-    ElMessage.warning("请填写新任务名称");
-    return;
-  }
-  copySaving.value = true;
-  try {
-    // 与新建任务同一口径：幂等标识在本次尝试内复用，响应丢失后重发返回原任务。
-    copyAttemptKey =
-      copyAttemptKey ?? operationIdempotencyKey("TASK_COPY", copyRowTarget.value.task_no, copyName.value.trim());
-    const created = await copyAuditTask(copyRowTarget.value.task_no, copyName.value.trim(), copyAttemptKey);
-    copyAttemptKey = null;
-    ElMessage.success("已按方案当前范围创建新任务（材料与结果重新开始，原任务报告保留）");
-    copyVisible.value = false;
-    await router.push({ name: "audit-task-detail", params: { taskNo: created.task_no } });
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "复制失败");
-  } finally {
-    copySaving.value = false;
-  }
-}
-
-/* 删除 / 恢复 */
+/* 永久删除 */
 async function removeRow(row: AuditTaskRow): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确认删除任务「${row.task_name}」？删除为逻辑删除：历史事实、文件、证据与报告保留；执行中的任务会被服务端拒绝。`,
+      `确认删除任务「${row.task_name}」？删除后，该任务的材料文件和审核结果将一并永久删除，无法恢复。`,
       "删除审核任务",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -359,7 +307,7 @@ async function removeRow(row: AuditTaskRow): Promise<void> {
   }
   try {
     await deleteAuditTask(row.task_no);
-    ElMessage.success("任务已移入已删除列表");
+    ElMessage.success("任务已永久删除");
     selectedRows.value = [];
     await list.load();
   } catch (failure) {
@@ -374,7 +322,7 @@ async function deleteSelected(): Promise<void> {
   }
   const failures: string[] = [];
   try {
-    await ElMessageBox.confirm(`确认删除选中的 ${targets.length} 个任务？删除为逻辑删除，历史资料保留。`, "批量删除任务", {
+    await ElMessageBox.confirm(`确认删除选中的 ${targets.length} 个任务？删除后，这些任务的材料文件和审核结果将一并永久删除，无法恢复。`, "批量删除任务", {
       type: "warning",
       confirmButtonText: "删除",
       cancelButtonText: "取消",
@@ -392,20 +340,10 @@ async function deleteSelected(): Promise<void> {
   if (failures.length) {
     ElMessage.warning(`部分删除失败：${failures.join("；")}`);
   } else {
-    ElMessage.success("选中的任务已移入已删除列表");
+    ElMessage.success("选中的任务已永久删除");
   }
   selectedRows.value = [];
   await list.load();
-}
-
-async function restoreRow(row: AuditTaskRow): Promise<void> {
-  try {
-    await restoreAuditTask(row.task_no);
-    ElMessage.success("任务已恢复");
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "恢复失败");
-  }
 }
 
 onMounted(async () => {
@@ -420,12 +358,6 @@ async function loadFilterOptions(): Promise<void> {
   filterOptionsError.value = null;
   const failures: string[] = [];
   try {
-    scenes.value = (await listSceneOptions()).items;
-  } catch (failure) {
-    scenes.value = [];
-    failures.push(`场景：${failure instanceof Error ? failure.message : "读取失败"}`);
-  }
-  try {
     planFilterOptions.value = (await listPlanOptions()).items;
   } catch (failure) {
     planFilterOptions.value = [];
@@ -436,24 +368,18 @@ async function loadFilterOptions(): Promise<void> {
 </script>
 
 <template>
-  <div class="app-panel">
+  <div class="app-panel audit-task-list">
     <PageHeader
       eyebrow="审核管理"
       title="审核任务"
-      subtitle="任务从已启用且配置生效的方案创建；创建时冻结方案配置，后续修改不影响已有任务。"
       :show-refresh="false"
     />
-    <el-form inline class="app-query" @submit.prevent="list.search()">
+    <el-form class="app-query task-query" @submit.prevent="list.search()">
       <el-form-item label="任务/编号">
-        <el-input v-model="filters.name" clearable placeholder="任务名称或任务编号" style="width: 200px" @keyup.enter="list.search()" />
-      </el-form-item>
-      <el-form-item label="场景">
-        <el-select v-model="filters.scenario_code" clearable filterable placeholder="全部场景" style="width: 200px">
-          <el-option v-for="item in scenes" :key="item.scenario_code" :value="item.scenario_code" :label="item.scenario_name" />
-        </el-select>
+        <el-input v-model="filters.name" clearable placeholder="任务名称或任务编号" @keyup.enter="list.search()" />
       </el-form-item>
       <el-form-item label="方案">
-        <el-select v-model="filters.plan_code" clearable filterable placeholder="全部方案" style="width: 200px">
+        <el-select v-model="filters.plan_code" clearable filterable placeholder="全部方案">
           <el-option
             v-for="item in planFilterOptions"
             :key="item.plan_code"
@@ -463,46 +389,29 @@ async function loadFilterOptions(): Promise<void> {
         </el-select>
       </el-form-item>
       <el-form-item label="任务状态">
-        <el-select v-model="filters.status" clearable placeholder="全部" style="width: 150px">
+        <el-select v-model="filters.status" clearable placeholder="全部">
           <el-option v-for="item in statusOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
-      <el-form-item label="当前节点">
-        <el-select v-model="filters.current_node" clearable filterable placeholder="全部节点" style="width: 150px">
-          <el-option v-for="item in nodeOptions" :key="item.value" :value="item.value" :label="item.label" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="方案归属">
-        <el-select v-model="filters.legacy" clearable placeholder="全部" style="width: 150px">
-          <el-option value="true" label="仅历史任务配置" />
-          <el-option value="false" label="仅方案任务" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="创建时间">
-        <el-date-picker v-model="filters.created_from" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" style="width: 150px" />
+      <el-form-item label="创建时间" class="task-query__dates">
+        <el-date-picker v-model="filters.created_from" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" />
         <span style="margin: 0 6px">至</span>
-        <el-date-picker v-model="filters.created_to" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" style="width: 150px" />
+        <el-date-picker v-model="filters.created_to" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" />
       </el-form-item>
-      <el-form-item>
+      <el-form-item class="task-query__submit">
         <el-button type="primary" @click="list.search()">查询</el-button>
       </el-form-item>
     </el-form>
 
     <div class="app-toolbar">
       <div class="app-toolbar__left">
-        <template v-if="!filters.deleted">
-          <el-button type="primary" @click="openCreate()">新增</el-button>
-          <el-button type="success" plain :disabled="editDisabled" @click="selectedRows[0] && openEdit(selectedRows[0])">编辑</el-button>
-          <el-button type="danger" plain :disabled="deleteDisabled" @click="deleteSelected">删除</el-button>
-        </template>
-      </div>
-      <div class="app-toolbar__right">
-        <el-checkbox v-model="filters.deleted" @change="list.search()">已删除</el-checkbox>
+        <el-button type="primary" @click="openCreate()">新增任务</el-button>
+        <el-button type="danger" plain :disabled="deleteDisabled" @click="deleteSelected">批量删除</el-button>
       </div>
     </div>
 
     <el-alert v-if="filterOptionsError" type="warning" show-icon :closable="false" :title="`筛选下拉读取失败：${filterOptionsError}`">
-      对应的筛选下拉为空，筛选条件仍可手工输入。
+      方案筛选选项读取失败。
       <el-button size="small" @click="loadFilterOptions">重试</el-button>
     </el-alert>
 
@@ -520,24 +429,14 @@ async function loadFilterOptions(): Promise<void> {
       <el-table-column label="任务名称" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">{{ row.task_name }}</template>
       </el-table-column>
-      <el-table-column label="场景 / 版本" min-width="180">
-        <template #default="{ row }">
-          <span>{{ row.scenario_name }}</span>
-          <span class="text-hint"> · 第 {{ row.scenario_version_no }} 版</span>
-        </template>
-      </el-table-column>
       <el-table-column label="方案" min-width="190">
         <template #default="{ row }">
-          <span v-if="row.is_legacy_config" class="text-hint">历史任务配置</span>
-          <span v-else>{{ row.plan_name || "方案名称未记录" }}</span>
+          <span>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
-      </el-table-column>
-      <el-table-column label="当前阶段" width="130">
-        <template #default="{ row }">{{ row.current_node_name || nodeLabel(row.current_node) }}</template>
       </el-table-column>
       <el-table-column label="任务状态" width="130">
         <template #default="{ row }">
-          <StatusBadge :status="row.status" :label="statusLabel(row.status)" />
+          <StatusBadge :status="row.status" :label="row.status === 'COMPLETED' ? '执行已结束' : statusLabel(row.status)" />
         </template>
       </el-table-column>
       <el-table-column label="创建时间" width="170">
@@ -548,31 +447,18 @@ async function loadFilterOptions(): Promise<void> {
       </el-table-column>
       <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
-          <template v-if="!filters.deleted">
-            <el-button link type="primary" size="small" @click="openTask(row, primaryEntry(row).tab)">
-              {{ primaryEntry(row).label }}
-            </el-button>
-            <el-dropdown trigger="click">
-              <el-button link type="primary" size="small">更多</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item @click="openTask(row, 'materials')">材料</el-dropdown-item>
-                  <el-dropdown-item @click="openTask(row, 'fields')">字段结果</el-dropdown-item>
-                  <el-dropdown-item @click="openTask(row, 'rules')">规则结果</el-dropdown-item>
-                  <el-dropdown-item @click="openTask(row, 'reviews')">人工复核</el-dropdown-item>
-                  <el-dropdown-item @click="openTask(row, 'risks')">风险</el-dropdown-item>
-                  <el-dropdown-item @click="openTask(row, 'report')">报告</el-dropdown-item>
-                  <el-dropdown-item divided @click="openEdit(row)">编辑资料</el-dropdown-item>
-                  <el-dropdown-item @click="openCopy(row)">复制任务</el-dropdown-item>
-                  <el-dropdown-item divided @click="removeRow(row)">删除</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
-          <template v-else>
-            <el-button link type="primary" size="small" @click="restoreRow(row)">恢复</el-button>
-            <el-button link type="primary" size="small" @click="openTask(row)">详情</el-button>
-          </template>
+          <el-button link type="primary" size="small" @click="openTask(row, primaryEntry(row).tab)">
+            {{ primaryEntry(row).label }}
+          </el-button>
+          <el-dropdown trigger="click">
+            <el-button link type="primary" size="small">更多</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="openEdit(row)">编辑名称与备注</el-dropdown-item>
+                <el-dropdown-item divided @click="removeRow(row)">删除任务</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </template>
       </el-table-column>
     </el-table>
@@ -623,7 +509,7 @@ async function loadFilterOptions(): Promise<void> {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="editVisible" title="编辑任务资料" width="600px" :close-on-click-modal="false">
+    <el-dialog v-model="editVisible" title="编辑任务名称与备注" width="600px" :close-on-click-modal="false">
       <el-form label-width="100px">
         <el-form-item label="任务名称" required>
           <el-input v-model="editForm.task_name" maxlength="255" />
@@ -632,24 +518,72 @@ async function loadFilterOptions(): Promise<void> {
           <el-input v-model="editForm.remark" type="textarea" :rows="3" maxlength="4000" />
         </el-form-item>
       </el-form>
-      <p class="text-hint">冻结的创建时范围不会随重命名或备注修改变化；已完成任务需要更换输入时，请按方案当前范围重新创建任务。</p>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="editSaving" @click="submitEdit">保存</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="copyVisible" title="复制为新任务" width="600px" :close-on-click-modal="false">
-      <el-form label-width="100px">
-        <el-form-item label="新任务名称" required>
-          <el-input v-model="copyName" maxlength="255" />
-        </el-form-item>
-      </el-form>
-      <p class="text-hint">按所属方案的当前范围重新创建一个新任务；材料与结果重新开始，原任务报告保留。</p>
-      <template #footer>
-        <el-button @click="copyVisible = false">取消</el-button>
-        <el-button type="primary" :loading="copySaving" @click="submitCopy">复制</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.audit-task-list {
+  container: task-list / inline-size;
+}
+
+.task-query {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.85fr) minmax(340px, 1.5fr) auto;
+  column-gap: 16px;
+}
+
+.task-query :deep(.el-form-item) {
+  min-width: 0;
+  margin-right: 0;
+}
+
+.task-query :deep(.el-form-item__content) {
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.task-query :deep(.el-select) {
+  width: 100%;
+}
+
+.task-query__dates :deep(.el-date-editor) {
+  flex: 1;
+  min-width: 0;
+  width: 0;
+}
+
+@container task-list (max-width: 1050px) {
+  .task-query {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
+
+  .task-query__submit {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .task-query__dates {
+    grid-column: 2 / 4;
+  }
+}
+
+@container task-list (max-width: 640px) {
+  .task-query {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .task-query__submit {
+    grid-column: 2;
+  }
+
+  .task-query :deep(.el-form-item:not(.task-query__submit):not(:first-child)) {
+    grid-column: 1 / -1;
+  }
+}
+</style>
