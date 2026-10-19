@@ -309,10 +309,12 @@ def field_not_equal(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
     if result["status"] != "PASSED" and result["status"] != "ABNORMAL":
         return result
     passed = result["status"] == "ABNORMAL"
+    comparison = {**result["comparison"], "mode_label": "两侧取值应当不同"}
     return {
         **result,
         "status": "PASSED" if passed else "ABNORMAL",
         "message": "两侧取值不相同" if passed else "两侧取值相同",
+        "comparison": comparison,
     }
 
 
@@ -512,16 +514,17 @@ def field_not_empty(parameters: dict[str, Any], inputs: list[dict[str, Any]]) ->
     if problem:
         return problem
     value = selected[0].get("normalized_value")
+    is_empty = value is None or (isinstance(value, str) and not value.strip())
     comparison = _comparison(
         kind="EXISTENCE",
         left_index=0,
         right_index=-1,
         left_value=value,
         right_value="非空",
-        expression="该字段已取得非空值" if value else "该字段没有取得非空值",
+        expression="该字段没有取得非空值" if is_empty else "该字段已取得非空值",
         mode_label="字段非空",
     )
-    if value is None or (isinstance(value, str) and not value.strip()):
+    if is_empty:
         return {"status": "ABNORMAL", "message": "该字段没有取得非空值", "comparison": comparison}
     return {"status": "PASSED", "message": "该字段已取得非空值", "comparison": comparison}
 
@@ -640,7 +643,7 @@ def date_compare(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> di
 @tool("RISK_TRIGGER")
 def risk_trigger(parameters: dict[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """按当前场景的完整风险条件，由大模型判断真实来源结果是否构成风险。"""
-    from ..services.llm_risk import evaluate_risk
+    from ..services.audit.risk_llm import evaluate_risk
 
     return evaluate_risk(parameters)
 

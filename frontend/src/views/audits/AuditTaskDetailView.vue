@@ -104,6 +104,8 @@ const risksLoading = ref(false);
 const report = ref<Report | null>(null);
 const reportError = ref<string | null>(null);
 const reportLoading = ref(false);
+let selectedReportNo: string | undefined;
+let reportRequestGeneration = 0;
 const lastExecution = ref<ExecuteNodeResponse | null>(null);
 const executingNode = ref<{ code: string; name: string } | null>(null);
 const tab = ref<DetailTab>("materials");
@@ -209,8 +211,8 @@ const prerequisites = computed(() => {
     { label: "任务不在后台执行中", satisfied: task.value.status !== "RUNNING" && !watching.value },
     { label: "没有仍在执行的后台操作", satisfied: !isOperationActive(task.value.latest_operation?.status) },
     {
-      label: task.value.status === "COMPLETED" ? "任务执行已结束" : "任务已失败",
-      satisfied: task.value.status !== "COMPLETED" && task.value.status !== "FAILED",
+      label: "任务执行已结束",
+      satisfied: task.value.status !== "COMPLETED",
     },
   ];
   return items;
@@ -225,7 +227,6 @@ const executeDisabledReason = computed(() => {
   if (!task.value) return null;
   if (atWaitingReview.value) return "该任务已停在原人工复核等待点；人工审核暂不启用，请复制为新任务重新执行。";
   if (task.value.status === "COMPLETED") return "任务执行已结束，具体结论见规则结果。";
-  if (task.value.status === "FAILED") return "任务已失败，请按失败原因处理后复制为新任务或联系管理员。";
   if (watching.value) return "正在查询上一次执行的服务端状态，请等待查询结束。";
   if (unsatisfiedPrerequisites.value.length) {
     return `前置条件未满足：${unsatisfiedPrerequisites.value.map((item) => item.label).join("；")}。`;
@@ -251,7 +252,7 @@ interface PrimaryAction {
  *
  * 同一个位置在不同状态下给出唯一明确的下一步：
  *   执行中 → 查看进度；已完成 → 查看结果；
- *   失败 → 查看原因；阻断 → 重新执行当前节点；可执行 → 执行当前节点。
+ *   失败 → 重试审核；阻断 → 重新执行当前节点；可执行 → 执行当前节点。
  * 任务未到可执行状态时不显示一个点不动的「执行当前节点」。
  */
 const primaryAction = computed<PrimaryAction>(() => {
@@ -269,11 +270,11 @@ const primaryAction = computed<PrimaryAction>(() => {
   }
   if (task.value.status === "FAILED") {
     return {
-      label: "查看失败原因",
-      tab: "executions",
-      disabled: false,
-      reason: null,
-      loading: false,
+      label: "重试审核",
+      run: () => void executeCurrentNode(),
+      disabled: !canExecuteNode.value,
+      reason: executeDisabledReason.value,
+      loading: watching.value || pending.value,
     };
   }
   if (task.value.status === "BLOCKED") {
@@ -338,7 +339,15 @@ const blockers = computed<BlockerItem[]>(() => {
       tabLabel: "去材料页上传",
     });
   }
-  if (task.value.current_node.failure_message) {
+  if (task.value.status === "FAILED") {
+    items.push({
+      tone: "error",
+      title: "上次审核执行失败",
+      description: "处理失败原因后可点击「重试审核」。沿用已上传材料，重新执行生效规则，保留旧失败记录。",
+      tab: "executions",
+      tabLabel: "查看失败原因",
+    });
+  } else if (task.value.current_node.failure_message) {
     items.push({
       tone: "error",
       title: `上次执行失败：${task.value.current_node.failure_message}`,
@@ -431,7 +440,7 @@ const reportDownloadUrl = computed(() => {
 });
 
 const retryableOperation = computed(() => {
-  if (!task.value || task.value.status === "FAILED") return false;
+  if (!task.value) return false;
   if (operation.value?.status !== "FAILED" && operation.value?.status !== "INTERRUPTED") return false;
   return lastOperationType.value === "NODE_EXECUTE" && canExecuteNode.value;
 });
@@ -455,6 +464,8 @@ function resetWorkspace(): void {
   risksError.value = null;
   risksLoading.value = false;
   report.value = null;
+  selectedReportNo = undefined;
+  reportRequestGeneration += 1;
   reportError.value = null;
   reportLoading.value = false;
   lastExecution.value = null;
@@ -495,18 +506,21 @@ async function loadRisks(currentTaskNo: string, token: number): Promise<void> {
 }
 
 async function loadReport(currentTaskNo: string, token: number, reportNo?: string): Promise<void> {
+  if (reportNo !== undefined) selectedReportNo = reportNo;
+  const generation = ++reportRequestGeneration;
+  const stale = () => isStale(token, currentTaskNo) || generation !== reportRequestGeneration;
   reportLoading.value = true;
   reportError.value = null;
   try {
-    const value = await getTaskReport(currentTaskNo, reportNo);
-    if (isStale(token, currentTaskNo)) return;
+    const value = await getTaskReport(currentTaskNo, selectedReportNo);
+    if (stale()) return;
     report.value = value;
   } catch (error) {
-    if (isStale(token, currentTaskNo)) return;
+    if (stale()) return;
     report.value = null;
     reportError.value = error instanceof Error ? error.message : "未知原因";
   } finally {
-    if (!isStale(token, currentTaskNo)) reportLoading.value = false;
+    if (!stale()) reportLoading.value = false;
   }
 }
 
@@ -968,9 +982,10 @@ watch(
               <el-table-column label="执行节点" width="140">
                 <template #default="{ row }">{{ row.node_name }}</template>
               </el-table-column>
-              <el-table-column label="执行状态" width="120">
+              <el-table-column label="执行状态" width="180">
                 <template #default="{ row }">
                   <StatusBadge :status="row.status" :tone="statusTone(row.status)" />
+                  <el-tag v-if="row.invalidated" type="info" size="small">已失效</el-tag>
                 </template>
               </el-table-column>
               <el-table-column label="开始时间" width="170">
@@ -1019,6 +1034,7 @@ watch(
       <el-descriptions v-if="executionDetail" :column="1" border size="small">
         <el-descriptions-item label="执行节点">{{ executionDetail.node_name }}（第 {{ executionDetail.sequence_no }} 次执行）</el-descriptions-item>
         <el-descriptions-item label="执行状态"><StatusBadge :status="executionDetail.status" /></el-descriptions-item>
+        <el-descriptions-item label="结果有效性">{{ executionDetail.invalidated ? "已被后续操作取代，原执行结局保留" : "未失效" }}</el-descriptions-item>
         <el-descriptions-item label="开始时间">{{ executionDetail.started_at ? formatDate(executionDetail.started_at) : "—" }}</el-descriptions-item>
         <el-descriptions-item label="结束时间">{{ executionDetail.finished_at ? formatDate(executionDetail.finished_at) : "—" }}</el-descriptions-item>
         <el-descriptions-item label="任务输入修订">{{ executionDetail.input_revision ?? "—" }}</el-descriptions-item>
@@ -1039,9 +1055,6 @@ watch(
     <MaterialProcessingDialog
       :state="processingState"
       @update:visible="processingState.processingDialogVisible = $event"
-      @update:job-id="processingState.processingJobId = $event"
-      @update:reason="processingState.processingReason = $event"
-      @cancel-action="processingState.processingAction = null"
     />
 
 

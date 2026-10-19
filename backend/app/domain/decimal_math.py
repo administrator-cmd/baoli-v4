@@ -1,4 +1,4 @@
-"""有限十进制数的精确加减乘；精度按操作数确定，不修改全局上下文。
+"""有限十进制数的精确加减与求和；精度按操作数确定，不修改全局上下文。
 
 除法可能产生无限小数，其精度由计算求值器单独声明。
 """
@@ -31,14 +31,6 @@ def exact_subtract(left: Decimal, right: Decimal) -> Decimal:
     with localcontext() as context:
         context.prec = _additive_precision(left, right)
         return left - right
-
-
-def exact_multiply(left: Decimal, right: Decimal) -> Decimal:
-    """乘积的系数位数最多为两个操作数系数位数之和。"""
-    _require_finite(left, right)
-    with localcontext() as context:
-        context.prec = len(left.as_tuple().digits) + len(right.as_tuple().digits)
-        return left * right
 
 
 def exact_sum(values: Iterable[Decimal]) -> Decimal:

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ...common.exceptions import BusinessError, exception_summary
 from ...entity import AuditTask, DocumentUpload, NodeExecution, StoredArtifact
-from ..storage_service import resolve_storage_path
+from ..shared.storage import resolve_storage_path
 from .artifacts import _artifact_payload, _complete_ocr_job, _ensure_external_artifact, _submit_ocr_job
 from .document_ports import document_service
 from .shared import _current_uploads

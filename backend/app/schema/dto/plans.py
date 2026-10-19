@@ -8,6 +8,7 @@ class PlanCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    idempotency_key: str = Field(min_length=1, max_length=120)
     plan_name: str = Field(min_length=1, max_length=255)
     scenario_code: str = Field(min_length=1, max_length=80)
     scenario_version_no: int = Field(ge=1)

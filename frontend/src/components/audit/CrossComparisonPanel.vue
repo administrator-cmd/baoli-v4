@@ -34,10 +34,12 @@ const left = computed<SideValue>(() => ({
 }));
 
 const right = computed<SideValue>(() => ({
-  label: props.comparison.right_label ?? null,
+  label: props.comparison.right_label ?? (["EXISTENCE", "CLAUSE_EXISTENCE"].includes(props.comparison.kind ?? "") ? "判定要求" : null),
   value: props.comparison.right_value ?? null,
   rawValue: props.comparison.right_raw_value ?? null,
 }));
+const differenceApplicable = computed(() => ["DECIMAL", "DECIMAL_SUM", "DATE"].includes(props.comparison.kind ?? ""));
+const thresholdConfigured = computed(() => props.comparison.threshold !== null && props.comparison.threshold !== undefined);
 
 /**
  * 加总比较的加数：服务端给出 addends（标准化值）与 addend_labels（业务名），
@@ -61,10 +63,7 @@ const missingFields = computed(() => {
   if (left.value.value === null) missing.push("左侧标准化值");
   if (right.value.value === null) missing.push("右侧标准化值");
   if (!props.comparison.expression) missing.push("计算表达式");
-  if (props.comparison.threshold === null || props.comparison.threshold === undefined) {
-    missing.push("允许差值");
-  }
-  if (props.comparison.actual_diff === null || props.comparison.actual_diff === undefined) {
+  if (differenceApplicable.value && (props.comparison.actual_diff === null || props.comparison.actual_diff === undefined)) {
     missing.push("实际差额");
   }
   return missing;
@@ -108,16 +107,16 @@ function rawDiffers(side: SideValue): boolean {
         <dl class="cross-middle__list">
           <dt>判定方式</dt>
           <dd>{{ comparison.mode_label || "服务端未返回判定方式" }}</dd>
-          <dt>允许差值</dt>
-          <dd>
+          <dt v-if="thresholdConfigured">允许差值</dt>
+          <dd v-if="thresholdConfigured">
             <template v-if="comparison.threshold !== null && comparison.threshold !== undefined">
               {{ comparison.threshold }}
             </template>
             <span v-else class="text-muted">服务端未返回允许差值</span>
           </dd>
-          <dt>实际差额</dt>
-          <dd>
-            <template v-if="comparison.actual_diff">{{ comparison.actual_diff }}</template>
+          <dt v-if="differenceApplicable">实际差额</dt>
+          <dd v-if="differenceApplicable">
+            <template v-if="comparison.actual_diff !== null && comparison.actual_diff !== undefined">{{ comparison.actual_diff }}</template>
             <span v-else class="text-muted">服务端未返回实际差额</span>
           </dd>
         </dl>

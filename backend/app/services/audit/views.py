@@ -12,19 +12,19 @@ from ...common.exceptions import BusinessError
 from ...domain.audit_vocab import CONCLUSIVE_RESULT_STATUSES
 from ...domain.rule_library import is_risk_rule
 from ...entity import AuditReport, DocumentUpload, Evidence, NodeExecution, RuleResult, StoredArtifact, TaskDocument, TaskFieldValue
-from .. import task_value_service
-from ..task_lookup import task_or_404
+from . import value_store as task_value_service
+from .tasks.lookup import task_or_404
 from .evidence import _quote_check_of
 from .shared import QUOTE_CHECK_LABELS, _task_manifest
 from .state import _current_node_executions
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typing import Any
 
 
 def risks_view(db: Session, task_no: str) -> dict[str, Any]:
     """风险结果只读视图：只统计 ABNORMAL 为命中，未配置 / 未执行 / 无法判断分开表达。"""
-    task = task_or_404(db, task_no)
+    task = task_or_404(db, task_no, values=True)
     manifest = _task_manifest(task)
     enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
     risk_rules = [
@@ -98,11 +98,14 @@ def risks_view(db: Session, task_no: str) -> dict[str, Any]:
 
 def report_view(db: Session, task_no: str, report_no: str | None = None) -> dict[str, Any]:
     """读取真实保存的报告，不要求固定报告阶段或节点结果格式。"""
-    task = task_or_404(db, task_no)
+    task = task_or_404(db, task_no, values=True)
     reports = list(db.scalars(select(AuditReport).where(AuditReport.audit_task_id == task.id).order_by(AuditReport.id.desc())))
+    latest_execution_ids = set(db.scalars(select(func.max(NodeExecution.id)).where(
+        NodeExecution.audit_task_id == task.id, NodeExecution.status != "INVALIDATED",
+    ).group_by(NodeExecution.node_code)))
     def is_current(item):
         execution = db.get(NodeExecution, item.node_execution_id) if item.node_execution_id else None
-        return item.input_revision == task.input_revision and execution is not None and execution.status != "INVALIDATED"
+        return item.input_revision == task.input_revision and execution is not None and execution.id in latest_execution_ids
     # 每个报告定义保留最新版本供选择；最新当前报告优先，历史报告明确标识。
     latest_by_rule = {}
     for item in reports:

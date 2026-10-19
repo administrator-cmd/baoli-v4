@@ -17,6 +17,7 @@ import {
   updateScene,
 } from "@/api/scenes";
 import SceneFieldsPanel from "@/components/scenes/SceneFieldsPanel.vue";
+import SceneCalculationsPanel from "@/components/scenes/SceneCalculationsPanel.vue";
 import SceneMaterialsPanel from "@/components/scenes/SceneMaterialsPanel.vue";
 import SceneRulesPanel from "@/components/scenes/SceneRulesPanel.vue";
 import SceneSectionsPanel from "@/components/scenes/SceneSectionsPanel.vue";
@@ -358,16 +359,7 @@ function openPlanCreation(): void {
           </el-tab-pane>
           <el-tab-pane label="计算规则" name="calculations">
             <el-alert v-if="configError" type="error" show-icon :closable="false" :title="configError" />
-            <el-table v-else :data="calculations" border empty-text="当前配置没有计算规则">
-              <el-table-column prop="rule_code" label="规则编号" min-width="120" />
-              <el-table-column prop="name" label="名称" min-width="160" />
-              <el-table-column prop="formula" label="计算方法" min-width="220" show-overflow-tooltip />
-              <el-table-column prop="requirement" label="业务要求" min-width="220" show-overflow-tooltip />
-              <el-table-column prop="result_code" label="结果编号" min-width="120" />
-              <el-table-column prop="unit" label="单位" width="90" />
-              <el-table-column prop="currency" label="币种" width="90" />
-              <el-table-column prop="status" label="状态" width="110" />
-            </el-table>
+            <SceneCalculationsPanel v-else :key="detail.scenario_code" :items="calculations" />
           </el-tab-pane>
           <el-tab-pane label="报告" name="sections">
             <SceneSectionsPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />

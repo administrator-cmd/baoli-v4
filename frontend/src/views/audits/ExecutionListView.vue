@@ -125,8 +125,8 @@ onMounted(() => {
       <el-table-column label="执行节点" width="140">
         <template #default="{ row }">{{ row.node_name || nodeLabel(row.node_code) }}</template>
       </el-table-column>
-      <el-table-column label="执行状态" width="110">
-        <template #default="{ row }"><StatusBadge :status="row.status" /></template>
+      <el-table-column label="执行状态" width="180">
+        <template #default="{ row }"><StatusBadge :status="row.status" /> <el-tag v-if="row.invalidated" type="info" size="small">已失效</el-tag></template>
       </el-table-column>
       <el-table-column label="开始时间" width="170">
         <template #default="{ row }">{{ executionTime(row.started_at) }}</template>
@@ -167,6 +167,7 @@ onMounted(() => {
         <el-descriptions-item label="任务">{{ detail.task_name }}（{{ detail.task_no }}）</el-descriptions-item>
         <el-descriptions-item label="执行节点">{{ detail.node_name }}（第 {{ detail.sequence_no }} 次执行）</el-descriptions-item>
         <el-descriptions-item label="执行状态"><StatusBadge :status="detail.status" /></el-descriptions-item>
+        <el-descriptions-item label="结果有效性">{{ detail.invalidated ? "已被后续操作取代，原执行结局保留" : "未失效" }}</el-descriptions-item>
         <el-descriptions-item label="开始时间">{{ executionTime(detail.started_at) }}</el-descriptions-item>
         <el-descriptions-item label="结束时间">{{ executionTime(detail.finished_at) }}</el-descriptions-item>
         <el-descriptions-item label="任务输入修订">{{ detail.input_revision ?? "—" }}</el-descriptions-item>

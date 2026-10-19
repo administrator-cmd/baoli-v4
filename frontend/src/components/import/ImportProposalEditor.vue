@@ -27,6 +27,7 @@ interface ProposalRow {
   ref: string;
   group: ImportProposalGroup;
   name: string;
+  ruleCode?: string | null;
   text: string;
   context: string;
   formula?: string;
@@ -106,6 +107,7 @@ const rows = computed<ProposalRow[]>(() => {
     }));
     case "rules": return proposals.rules.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "rules", name: item.name, text: item.requirement,
+      ruleCode: item.rule_code ?? item.source_id ?? null,
       context: ruleRole(item) === "RISK" ? "风险结论" : "普通核查", role: ruleRole(item), status: item.config_status ?? null,
       materials: ruleMaterialsText(item),
       inputFields: ruleFieldsText(item),
@@ -143,7 +145,7 @@ const filteredRows = computed(() => {
     const matchesStatus = !supportsStatus.value || statusFilter.value === "all"
       || (statusFilter.value === "enabled" && row.status !== "DISABLED" && row.status !== "PENDING")
       || row.status === statusFilter.value;
-    return matchesStatus && (!term || [row.name, row.text, row.context, row.formula, row.materials, row.inputFields,
+    return matchesStatus && (!term || [row.name, row.ruleCode, row.text, row.context, row.formula, row.materials, row.inputFields,
       row.sourceRules, row.outputFields, row.fieldType, row.unit, row.currency, row.formats].filter(Boolean).join(" ").toLocaleLowerCase().includes(term));
   });
 });
@@ -251,6 +253,9 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
       :empty-text="rows.length ? '没有匹配的配置，请调整搜索或筛选条件' : `本次解析没有${groupLabels[activeGroup]}`"
     >
       <el-table-column type="index" label="序号" width="52" align="center" />
+      <el-table-column v-if="activeGroup === 'rules'" prop="ruleCode" label="规则 ID" width="130" show-overflow-tooltip>
+        <template #default="{ row }"><span class="mono">{{ row.ruleCode || '未填写' }}</span></template>
+      </el-table-column>
       <el-table-column prop="name" :label="`${groupLabels[activeGroup]}名称`" min-width="180" show-overflow-tooltip>
         <template #default="{ row }"><el-button link class="proposal-name" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button></template>
       </el-table-column>

@@ -12,7 +12,8 @@ from ...domain.tool_context import ToolExecutionContext
 from ...common.exceptions import BusinessError
 from ...integrations.llm.gateway import ModelTurn, call_chat
 from ...entity import AuditTask
-from .. import task_value_service, tool_service
+from . import value_store as task_value_service
+from .tools import runtime as tool_service
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -212,6 +213,7 @@ def initial_messages(
 
 def call_model_once(
     messages: list[dict[str, Any]], *, tools: list[dict[str, Any]], tool_choice: Any = "auto",
+    idempotency_key: str | None = None,
 ) -> ModelTurn:
     """调用模型一次，返回这一次的响应契约。
 
@@ -224,6 +226,7 @@ def call_model_once(
         tool_choice=tool_choice,
         # 工具轮次允许原生函数调用；JSON 格式只约束没有工具的直接结论请求。
         response_format=None if tools else _VERDICT_RESPONSE_FORMAT,
+        idempotency_key=idempotency_key,
     )
 
 

@@ -46,6 +46,7 @@ export function listPlanOptions(scenarioCode?: string): Promise<{ request_id: st
  * 不再提交规则选择 —— 创建时整份复制，规则在方案里逐条勾。
  */
 export function createPlan(payload: {
+  idempotency_key: string;
   plan_name: string;
   scenario_code: string;
   scenario_version_no: number;

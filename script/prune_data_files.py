@@ -9,7 +9,8 @@
 - `stored_artifact.relative_path`：文件处理 / OCR / 印章 / 材料识别产物
 - `audit_task.value_file_json`：取值主表、全部业务明细表及显式转换保留的原文件
 
-除这 5 处指向的文件外，data/ 下的其它文件都是孤儿，属于本脚本的清理范围。
+固定锁文件以及 .rollback/.restoring 恢复文件不属于业务孤儿，自动清理时保留；
+恢复文件须结合失败日志人工核对。其余文件按以上数据库引用判断。
 
 安全约束：
 - 默认只列清单，不做任何修改；必须显式加 --yes 才会真正删除。
@@ -95,8 +96,10 @@ def _referenced_paths(connection: pymysql.Connection) -> dict[str, str]:
 
 
 def _storage_files(root: Path) -> list[Path]:
-    """存储根目录下的全部真实文件（不含目录本身）。"""
-    return sorted((path for path in root.rglob("*") if path.is_file()), key=lambda item: item.as_posix())
+    """参与业务引用检查的文件；固定锁身份和事务恢复文件不能按孤儿删除。"""
+    return sorted((path for path in root.rglob("*")
+                   if path.is_file() and path.relative_to(root).parts[0] != ".locks"
+                   and path.suffix not in {".rollback", ".restoring"}), key=lambda item: item.as_posix())
 
 
 def _relative_of(root: Path, path: Path) -> str:
@@ -208,7 +211,7 @@ def main() -> int:
     print(f"已删除 {deleted} 个文件，回收空目录 {len(removed_dirs)} 个，释放 {_human_size(orphan_bytes)}。")
     if leftover:
         raise SystemExit(f"清理未完成，仍有 {len(leftover)} 个孤儿文件存在")
-    print(f"现在 data/ 下 {len(remaining)} 个文件全部有数据库记录引用。")
+    print(f"本次检查的 {len(remaining)} 个业务文件全部有数据库记录引用；锁文件及事务恢复文件未清理。")
     return 0
 
 

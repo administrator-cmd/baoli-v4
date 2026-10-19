@@ -54,8 +54,8 @@ class AuditTask(Base, TimestampMixin):
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 流程进度：当前节点、阶段与节点序号。这是任务自身的进度标记，不是图状态快照。
     checkpoint_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    # 不可变业务 CSV 批次清单：format_version、batches（batch_id/files/record_count）、record_count；
-    # legacy_files 登记显式转换后保留的原文件。由 task_value_service 读写。
+    # 业务 CSV 清单：format_version、batches（当前只登记 current/files/record_count）、record_count；
+    # legacy_files 登记显式转换后保留的原文件。由 services.audit.value_store 读写。
     value_file_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 任务输入修订号：首次补传、替换材料和人工有效值变化都会递增。
     # 写入口在对象锁内核对命令携带的修订号，过期命令不得覆盖新输入。
@@ -160,7 +160,7 @@ class TaskFieldValue(Base, TimestampMixin):
     """字段事实的版本与当前位索引；取值本身存在本次任务的 CSV。
 
     这里只回答「哪个任务、哪个字段、哪个材料位的哪一版是当前」，
-    业务取值（抽取原文与规范值）由 `services.task_value_service` 按 id 从任务 CSV 取。
+    业务取值（抽取原文与规范值）由 `services.audit.value_store` 按 id 从任务 CSV 取。
     事实不可变：重跑不覆盖旧行，而是新增一个 revision_no 并把它置为当前；
     旧行保留为历史，旧复核和旧证据仍然指向它们当时依据的那一版事实。
     同一任务同一字段同一材料位最多只有一个当前事实，由生成列唯一键在数据库层保证。
@@ -236,7 +236,7 @@ class TaskFact(Base, TimestampMixin):
     旧复核与旧证据仍指向它们当时依据的那一版事实。同一 (任务, 事实编号, 材料位, 期间,
     报表口径, 主体范围) 最多只有一条当前事实，由生成列唯一键在数据库层保证。
 
-    业务取值、单位与币种、计算判断由 `services.task_value_service` 按 id 从任务 CSV 取。
+    业务取值、单位与币种、计算判断由 `services.audit.value_store` 按 id 从任务 CSV 取。
     """
 
     __tablename__ = "task_fact"
@@ -291,13 +291,15 @@ class TaskFact(Base, TimestampMixin):
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    # 当前事实的唯一定位：只有 is_current=1 的行才有值。material_key 可空，
-    # CONCAT 会把 NULL 吞掉，因此用 COALESCE 归一成固定串。
+    # 长度前缀编码区分分隔符和 NULL，避免不同完整身份拼出同一个唯一键。
     current_fact_scope: Mapped[str | None] = mapped_column(
         String(255),
         Computed(
-            "IF(is_current = 1, CONCAT(fact_code, ':', COALESCE(material_key, '-'), ':',"
-            " period_scope, ':', statement_scope, ':', entity_scope), NULL)",
+            "IF(is_current = 1, CONCAT(CHAR_LENGTH(fact_code), ':', fact_code,"
+            " IF(material_key IS NULL, '-1:', CONCAT(CHAR_LENGTH(material_key), ':', material_key)),"
+            " CHAR_LENGTH(period_scope), ':', period_scope,"
+            " CHAR_LENGTH(statement_scope), ':', statement_scope,"
+            " CHAR_LENGTH(entity_scope), ':', entity_scope), NULL)",
             persisted=False,
         ),
         nullable=True,

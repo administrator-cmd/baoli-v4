@@ -16,21 +16,6 @@ from sqlalchemy.orm import Session
 from typing import Any
 
 
-def evidence_content_view(value: dict[str, Any] | None) -> dict[str, Any] | None:
-    """返回证据原文和来源，排除处理产物内部位置元数据。"""
-    if value is None:
-        return None
-    return {
-        key: item for key, item in value.items()
-        if key not in {
-            "page_no", "page_no_source", "bbox", "bbox_json", "locator_status", "locator_note",
-            "char_start", "char_end", "heading_path",
-        }
-    }
-
-
-
-
 def result_content_view(value: dict[str, Any]) -> dict[str, Any]:
     """返回规则结果，不触碰字段值和业务配置 JSON。"""
     return dict(value)

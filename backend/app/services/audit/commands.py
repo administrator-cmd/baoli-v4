@@ -1,10 +1,11 @@
-"""审核的对外命令入口：节点执行、人工复核提交、字段纠错、OCR 对账、中断恢复。
+"""审核的对外命令入口：节点执行、人工复核提交、字段纠错、单份 OCR 重试、中断恢复。
 
 这些是 API 与后台操作调用的唯一入口；每个入口在进入图之前先完成并发与状态校验
 （任务已结束 / 正在执行 / 节点不一致 / 输入修订过期都明确拒绝），
 再走「恢复图等待点」的路径，不留下绕开图的旁路。
 
-失败语义：图运行时异常会把任务标记为 FAILED 并返回带摘要的错误，不重试、不静默；
+失败语义：图运行时异常会把任务标记为 FAILED 并返回带摘要的错误，不自动重试；
+用户可在处理原因后主动重试，沿用原材料与冻结配置，创建新执行批次并保留旧失败记录。
 checkpoint 存储暂时不可达保留确认/复核等待状态；若本次节点已经开始执行，则明确记录
 执行中断并置 BLOCKED，不能留下没有实际执行过程的 RUNNING。"""
 
@@ -12,8 +13,8 @@ import logging
 from ...config import get_settings
 from ...domain.identity import public_no
 from ...common.exceptions import BusinessError, exception_summary
-from ...graphs.audit_graph import STORAGE_UNAVAILABLE, run_audit_node
-from . import flow as audit_flow
+from ...graphs.audit_graph import run_audit_node
+from .flow.runner import audit_runner
 from ...entity import (
     AuditTask,
     DocumentUpload,
@@ -22,25 +23,24 @@ from ...entity import (
     StoredArtifact,
     TaskDocument,
 )
-from ...schema.dto import ExecuteNodeRequest, ExternalArtifactReconcileRequest, FieldCorrectionRequest, ManualReviewRequest, OcrReconcileRequest
-from ..task_lookup import task_or_404
-from .. import task_value_service
+from ...schema.dto import ExecuteNodeRequest, FieldCorrectionRequest
+from .tasks.lookup import task_or_404
+from . import value_store as task_value_service
 from .artifacts import (
     _artifact_for_upload, _artifact_payload, _complete_ocr_job, _ocr_job_metadata,
     _submit_authorized_ocr_retry, _submit_ocr_job,
 )
 from .evidence import _evidence_snapshot, _evidence_snapshots
 from .facts import _current_field_fact_pairs, _write_human_field_fact
-from .flow import _fail_running_execution, _mark_graph_runtime_failed, _raise_graph_error
-from ..background_service import assert_no_active_operation
-from ..operation_log_service import find_by_idempotency, record_operation, require_idempotent_replay
-from ..operation_types import OBJECT_AUDIT_TASK
-from .reviews import _decision_command_no, _invalidate_retry_results, _invalidate_validation_results, _next_node_for_recalculation
+from .flow.errors import fail_running_execution, raise_graph_error
+from ..system.background import assert_no_active_operation
+from ..system.operation_types import OBJECT_AUDIT_TASK
+from .reviews import _decision_command_no, _invalidate_validation_results, _next_node_for_recalculation
 from .shared import _normalize_field_value, _task_field_definitions, _task_manifest
 from .state import _scenario_nodes, _set_task_checkpoint
 from datetime import UTC, datetime, timedelta
 from decimal import InvalidOperation
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
 
@@ -91,12 +91,12 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
     }
 
 def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest) -> dict[str, Any]:
-    """节点执行命令入口：先做并发与状态校验，再一次性跑完当前节点的全部规则。
+    """节点执行与手动重试入口：先做并发与状态校验，再跑完当前节点的全部规则。
 
     执行不再有等待点，也没有「恢复」这一段：一次后台操作就是一次完整执行。
     """
     task = task_or_404(db, task_no, lock=True)
-    if task.status in {"COMPLETED", "FAILED"}:
+    if task.status == "COMPLETED":
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
     # 必须在进入图之前就拦住并发，否则第二个请求会与正在执行的图互相覆盖。
     if task.status == "RUNNING":
@@ -111,47 +111,42 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
     )
     if running_execution:
         raise BusinessError("AUDIT_NODE_RUNNING", "当前任务已有执行中的节点，不能并发执行或重跑", status_code=409)
-    if task.status == "BLOCKED":
-        # 失败或阻断的任务需要重跑当前节点：旧执行记录由 _begin_node_execution 在真正
-        # 开始时失效，原失败保留供审计。
+    if task.status in {"BLOCKED", "FAILED"}:
+        # 只在本次执行事务内恢复可执行状态，不在后台命令受理时单独提交复位。
+        # _begin_node_execution 会失效旧模型结果并建立新批次；失败原因保留供审计。
         _, nodes, current_index = _scenario_nodes(db, task)
+        task.status = "BLOCKED"
         task.checkpoint_json = {
             "node_index": current_index, "current_node": nodes[current_index]["node_code"],
             "phase": "AWAITING_CONFIRMATION",
         }
         db.flush()
+    # 图节点多次提交，最终推进也可能失败；用本次执行身份收尾，不能误伤其他批次。
+    attempt = {"task_no": task_no, "execution_id": None}
+    db.info["audit_execution_attempt"] = attempt
     try:
-        state = run_audit_node(task.task_no, db, audit_flow)
+        state = run_audit_node(task.task_no, db, audit_runner)
+        raise_graph_error(state)
+        result = state.get("last_execution")
+        if not isinstance(result, dict):
+            raise BusinessError("AUDIT_GRAPH_RESULT_MISSING", "审核流程未返回当前节点执行结果", status_code=500,
+                                details={"phase": state.get("phase"), "execution_id": state.get("execution_id")})
+        return result
     except BusinessError as exc:
-        if exc.code == "AUDIT_GRAPH_EXECUTION_FAILED":
-            _mark_graph_runtime_failed(db, task_no, failure_code=exc.code,
-                                       failure_message=str(exc.details.get("reason") or exc.message))
-        elif exc.code == STORAGE_UNAVAILABLE:
-            _fail_running_execution(db, task_no, code=exc.code,
-                                    message=str(exc.details.get("reason") or exc.message))
+        if attempt["execution_id"] is not None:
+            fail_running_execution(db, task_no, execution_id=attempt["execution_id"], code=exc.code,
+                                   message=str(exc.details.get("reason") or exc.message))
         raise
     except Exception as exc:
         logger.exception("审核流程执行发生未处理异常", extra={"task_no": task_no, "node_code": request.node_code})
-        _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError("AUDIT_GRAPH_RUNTIME_FAILED",
-                            f"审核流程执行失败，任务已标记为失败（{exception_summary(exc)}）", status_code=500) from exc
-    try:
-        _raise_graph_error(state)
-    except BusinessError as exc:
-        if exc.code == "AUDIT_GRAPH_RESULT_INVALID":
-            _mark_graph_runtime_failed(db, task_no)
-        raise
-    except Exception as exc:
-        logger.exception("审核流程返回状态无效", extra={"task_no": task_no, "node_code": request.node_code})
-        _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError("AUDIT_GRAPH_RUNTIME_FAILED",
-                            f"审核流程返回状态无效，任务已标记为失败（{exception_summary(exc)}）", status_code=500) from exc
-    result = state.get("last_execution")
-    if not isinstance(result, dict):
-        _mark_graph_runtime_failed(db, task_no)
-        raise BusinessError("AUDIT_GRAPH_RESULT_MISSING", "审核流程未返回当前节点执行结果", status_code=500,
-                            details={"phase": state.get("phase"), "execution_id": state.get("execution_id")})
-    return result
+        if attempt["execution_id"] is not None:
+            fail_running_execution(db, task_no, execution_id=attempt["execution_id"],
+                                   code="AUDIT_GRAPH_RUNTIME_FAILED", message=exception_summary(exc))
+        raise BusinessError("AUDIT_GRAPH_RUNTIME_FAILED", "审核流程执行失败，具体原因见执行记录和服务日志",
+                            status_code=500, details={"reason": exception_summary(exc)}) from exc
+    finally:
+        db.info.pop("audit_execution_attempt", None)
+
 
 
 def correct_field_value(db: Session, task_no: str, request: FieldCorrectionRequest) -> dict[str, Any]:
@@ -329,81 +324,12 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         "next_node_code": task.current_node,
     }
 
-def reconcile_external_artifact(
-    db: Session,
-    task_no: str,
-    document_no: str,
-    artifact_type: str,
-    request: ExternalArtifactReconcileRequest,
-) -> dict[str, Any]:
-    """人工确认同步外部调用状态未知，解除占位以允许重新执行当前节点。"""
-    if artifact_type not in {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "SEAL"}:
-        raise BusinessError("ARTIFACT_TYPE_INVALID", "仅支持对账材料校验、去章或印章识别产物", status_code=400)
-    task = task_or_404(db, task_no, lock=True)
-    operation_request = {
-        "task_no": task_no,
-        "document_no": document_no,
-        "artifact_type": artifact_type,
-        "artifact_no": request.artifact_no,
-        "reason": request.reason,
-    }
-    prior_operation, request_hash = require_idempotent_replay(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        operation_type="ARTIFACT_RECONCILE",
-        idempotency_key=request.idempotency_key,
-        request=operation_request,
-    )
-    if prior_operation is not None:
-        return dict((prior_operation.detail_json or {})["response"])
-    assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
-    if task.status in {"COMPLETED", "FAILED", "RUNNING"}:
-        raise BusinessError("AUDIT_TASK_NOT_RECONCILABLE", "任务当前不能对账文件处理产物", status_code=409)
-    document = db.scalar(
-        select(TaskDocument).where(
-            TaskDocument.audit_task_id == task.id,
-            TaskDocument.document_no == document_no,
-        )
-    )
-    if document is None or document.current_upload_id is None:
-        raise BusinessError("OCR_UPLOAD_MISSING", "该材料位没有当前上传文件", status_code=404)
-    upload = db.get(DocumentUpload, document.current_upload_id)
-    if upload is None:
-        raise BusinessError("OCR_UPLOAD_MISSING", "该材料位当前上传文件不存在", status_code=500)
-    artifact = _artifact_for_upload(db, upload, artifact_type)
-    if artifact is None or artifact.artifact_no != request.artifact_no or artifact.status != "PROCESSING":
-        raise BusinessError(
-            "ARTIFACT_RECONCILE_STATUS_INVALID",
-            "当前文件没有结果未知的处理占位，不能解除",
-            status_code=409,
-        )
-    result = {
-        "document_no": document_no,
-        "artifact_type": artifact_type,
-        "artifact_no": artifact.artifact_no,
-        "status": "CLEARED",
-        "message": "结果未知的占位已解除；重新执行当前节点会再次调用外部服务",
-    }
-    db.delete(artifact)
-    record_operation(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        object_no=task.task_no,
-        object_name=task.task_name,
-        operation_type="ARTIFACT_RECONCILE",
-        detail={"request": operation_request, "response": result},
-        idempotency_key=request.idempotency_key,
-        request_hash=request_hash,
-    )
-    db.commit()
-    return result
-
 
 def _document_ocr_retry_target(
-    db: Session, task: AuditTask, document_no: str, artifact_no: str | None,
+    db: Session, task: AuditTask, document_no: str, artifact_no: str | None, *, resubmit_unknown: bool,
 ) -> tuple[TaskDocument, DocumentUpload, StoredArtifact, StoredArtifact | None]:
-    """续查只定位当前材料；未知提交仍由现有人工对账入口处理。"""
-    if task.status in {"RUNNING", "COMPLETED", "FAILED"}:
+    """只定位当前上传版本；结果未知的作业需要用户明确确认才重新提交。"""
+    if task.status in {"RUNNING", "COMPLETED"}:
         raise BusinessError("TASK_DOCUMENT_LOCKED", "任务正在执行或已结束，不能重试材料识别", status_code=409)
     document = db.scalar(select(TaskDocument).where(
         TaskDocument.audit_task_id == task.id, TaskDocument.document_no == document_no,
@@ -416,10 +342,12 @@ def _document_ocr_retry_target(
     artifact = _artifact_for_upload(db, upload, "OCR")
     if (artifact.artifact_no if artifact else None) != artifact_no:
         raise BusinessError("OCR_ARTIFACT_STALE", "OCR 作业记录已变化，请刷新后重试", status_code=409)
-    if artifact is not None and artifact.status not in {"PENDING", "FAILED"}:
+    if artifact is not None and artifact.status == "SUBMITTING" and not resubmit_unknown:
         raise BusinessError(
-            "OCR_SUBMISSION_STATE_UNKNOWN", "OCR 提交结果未知，请在处理状态中核对原作业后再操作", status_code=409,
+            "OCR_SUBMISSION_STATE_UNKNOWN", "OCR 提交结果未知；重新提交可能创建重复作业，需要在材料处理状态中确认后操作", status_code=409,
         )
+    if artifact is not None and artifact.status not in {"PENDING", "FAILED", "SUBMITTING"}:
+        raise BusinessError("OCR_RETRY_STATE_INVALID", "当前 OCR 状态不支持重试，请刷新处理状态", status_code=409)
     parsed = _artifact_for_upload(db, upload, "DOCUMENT_PARSE")
     if parsed is None or parsed.status != "READY":
         raise BusinessError("PROCESSED_ARTIFACT_MISSING", "该材料尚无已完成的去章产物，请先执行材料前置处理", status_code=409)
@@ -428,19 +356,24 @@ def _document_ocr_retry_target(
 
 def retry_document_ocr(
     db: Session, task: AuditTask, document_no: str, artifact_no: str | None, *, operation_no: str,
+    resubmit_unknown: bool = False,
 ) -> dict[str, Any]:
-    """只处理一份材料：续查原作业，或对明确失败的作业提交一次新识别。"""
-    document, upload, parsed, artifact = _document_ocr_retry_target(db, task, document_no, artifact_no)
+    """只处理一份材料：续查原作业，或由用户主动提交一次新识别。"""
+    document, upload, parsed, artifact = _document_ocr_retry_target(
+        db, task, document_no, artifact_no, resubmit_unknown=resubmit_unknown,
+    )
     if artifact is None:
         artifact = _submit_ocr_job(db, task, upload, parsed)
-    elif artifact.status == "FAILED":
+    elif artifact.status in {"FAILED", "SUBMITTING"}:
         metadata = dict(artifact.metadata_json or {})
         attempts = list(metadata.pop("submit_attempts", []) or [])
         attempt = {
-            "at": datetime.now(UTC).isoformat(), "reason": "用户重试当前材料的 OCR 识别",
+            "at": datetime.now(UTC).isoformat(),
+            "reason": "用户确认重新提交结果未知的 OCR" if artifact.status == "SUBMITTING" else "用户重试当前材料的 OCR 识别",
             "idempotency_key": operation_no, "state": "SUBMITTING",
             "previous_status": artifact.status, "previous_relative_path": artifact.relative_path,
             "previous_metadata": metadata,
+            "resubmit_unknown": resubmit_unknown,
         }
         artifact.status = "SUBMITTING"
         artifact.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting"
@@ -477,280 +410,3 @@ def retry_document_ocr(
         "status": artifact.status, "document_status": document.status,
         "message": "当前材料的正文识别结果已保存，其他材料的处理结果已保留",
     }
-
-
-def reconcile_ocr(db: Session, task_no: str, document_no: str, request: OcrReconcileRequest) -> dict[str, Any]:
-    """OCR 提交结果未知、等待超时或供应商明确失败后的人工处理出口。
-
-    系统没有真实的供应商幂等/查询能力时既不自动重发也不标成功：
-    ADOPT_JOB 按人工确认的作业号接管并续查；RETRY_SUBMIT 由人工明确重提未知、超时或失败的作业。
-    本地等待超时只让本次操作失败，不改变产物状态机。
-    """
-    task = task_or_404(db, task_no, lock=True)
-    operation_request = {
-        "task_no": task_no,
-        "document_no": document_no,
-        "action": request.action,
-        "artifact_no": request.artifact_no,
-        "job_id": request.job_id,
-        "reason": request.reason,
-    }
-    prior_operation, request_hash = require_idempotent_replay(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        operation_type="OCR_RECONCILE",
-        idempotency_key=request.idempotency_key,
-        request=operation_request,
-    )
-    if prior_operation is not None:
-        if request.action == "RETRY_SUBMIT":
-            outcome = find_by_idempotency(
-                db,
-                object_type=OBJECT_AUDIT_TASK,
-                operation_type="OCR_RETRY_OUTCOME",
-                idempotency_key=request.idempotency_key,
-            )
-            if outcome is None:
-                submitted = db.scalar(
-                    select(StoredArtifact).where(
-                        StoredArtifact.audit_task_id == task.id,
-                        StoredArtifact.artifact_no == request.artifact_no,
-                        StoredArtifact.artifact_type == "OCR",
-                    )
-                )
-                metadata = submitted.metadata_json if submitted and isinstance(submitted.metadata_json, dict) else {}
-                attempts = metadata.get("submit_attempts") or []
-                attempt = next(
-                    (
-                        item for item in attempts
-                        if isinstance(item, dict)
-                        and item.get("idempotency_key") == request.idempotency_key
-                        and item.get("request_hash") == request_hash
-                        and item.get("state") == "PENDING"
-                    ),
-                    None,
-                )
-                if attempt is not None:
-                    job_id = attempt.get("job_id")
-                    deadline_raw = attempt.get("deadline_at")
-                    if not isinstance(job_id, str) or not job_id or not isinstance(deadline_raw, str):
-                        raise BusinessError("OCR_RETRY_RESULT_INVALID", "已提交的 OCR 作业缺少作业身份", status_code=500)
-                    try:
-                        deadline_at = datetime.fromisoformat(deadline_raw)
-                    except ValueError as exc:
-                        raise BusinessError("OCR_RETRY_RESULT_INVALID", "已提交的 OCR 作业截止时间无效", status_code=500) from exc
-                    return {
-                        "document_no": document_no,
-                        "artifact_no": submitted.artifact_no,
-                        "status": "PENDING",
-                        "job_id": job_id,
-                        "deadline_at": deadline_at,
-                        "message": "已按人工明确动作重新提交 OCR 作业，并记录了本次提交尝试",
-                    }
-                raise BusinessError(
-                    "OCR_RETRY_OUTCOME_UNKNOWN",
-                    "该人工重提请求已受理，但外部提交结果尚未确认，不能重复提交",
-                    status_code=409,
-                    details={"artifact_no": request.artifact_no},
-                )
-            if outcome.result == "FAILED":
-                raise BusinessError(
-                    outcome.failure_code or "OCR_RETRY_FAILED",
-                    outcome.failure_message or "OCR 人工重提失败",
-                    status_code=int((outcome.detail_json or {})["status_code"]),
-                )
-            return dict((outcome.detail_json or {})["response"])
-        return dict((prior_operation.detail_json or {})["response"])
-    assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
-    if task.status in {"COMPLETED", "FAILED"}:
-        raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能对账 OCR 作业", status_code=409)
-    if task.status == "RUNNING":
-        raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能对账 OCR 作业", status_code=409)
-    document = db.scalar(
-        select(TaskDocument).where(
-            TaskDocument.audit_task_id == task.id,
-            TaskDocument.document_no == document_no,
-        )
-    )
-    if not document:
-        raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
-    if not document.current_upload_id:
-        raise BusinessError("OCR_UPLOAD_MISSING", "该材料位没有当前上传文件，不能对账 OCR 作业", status_code=409)
-    upload = db.get(DocumentUpload, document.current_upload_id)
-    if not upload:
-        raise BusinessError("OCR_UPLOAD_MISSING", "该材料位当前上传文件不存在", status_code=500)
-    artifact = _artifact_for_upload(db, upload, "OCR")
-    if not artifact:
-        raise BusinessError("OCR_ARTIFACT_MISSING", "该材料位当前上传没有 OCR 作业记录", status_code=404)
-    if artifact.artifact_no != request.artifact_no:
-        raise BusinessError("OCR_ARTIFACT_STALE", "OCR 作业记录已变化，请刷新后重新确认", status_code=409)
-    current_metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-    current_attempts = current_metadata.get("submit_attempts") or []
-    if current_attempts and current_attempts[-1].get("state") == "SUBMITTING":
-        raise BusinessError(
-            "OCR_SUBMISSION_STATE_UNKNOWN",
-            "已有人工重提请求正在提交或结果未知，请先核对，不能并发提交",
-            status_code=409,
-        )
-    expired_pending = (
-        artifact.status == "PENDING"
-        and _ocr_job_metadata(artifact)[1].astimezone(UTC) <= datetime.now(UTC)
-    )
-    if request.action == "ADOPT_JOB":
-        if artifact.status not in {"SUBMITTING", "PROCESSING"} and not expired_pending:
-            raise BusinessError(
-                "OCR_RECONCILE_STATUS_INVALID",
-                "当前 OCR 作业状态明确，不能改挂人工提供的作业号",
-                status_code=409,
-                details={"artifact_no": artifact.artifact_no, "artifact_type": "OCR"},
-            )
-        job_id = (request.job_id or "").strip()
-        if not job_id:
-            raise BusinessError("OCR_JOB_ID_REQUIRED", "采用已确认作业时必须提供非空作业号")
-        adopted_at = datetime.now(UTC)
-        deadline_at = adopted_at + timedelta(seconds=get_settings().ocr_max_wait_seconds)
-        artifact.status = "PENDING"
-        artifact.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.pending"
-        # 人工接管的事实与来源必须落库，后续查询据此说明这个作业是谁、为什么确认的。
-        previous_metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-        artifact.metadata_json = {
-            "job_id": job_id,
-            "deadline_at": deadline_at.isoformat(),
-            "adopted_manually": True,
-            "adopt_reason": request.reason,
-            "adopted_at": adopted_at.isoformat(),
-            "previous_job_id": previous_metadata.get("job_id"),
-            "submit_attempts": list(previous_metadata.get("submit_attempts") or []),
-        }
-        result = {
-            "document_no": document.document_no,
-            "artifact_no": artifact.artifact_no,
-            "status": artifact.status,
-            "job_id": job_id,
-            "deadline_at": deadline_at,
-            "message": "已按人工确认的作业号接管本次 OCR 作业，后续按该作业查询结果",
-        }
-        record_operation(
-            db,
-            object_type=OBJECT_AUDIT_TASK,
-            object_no=task.task_no,
-            object_name=task.task_name,
-            operation_type="OCR_RECONCILE",
-            detail={"request": operation_request, "response": {**result, "deadline_at": deadline_at.isoformat()}},
-            idempotency_key=request.idempotency_key,
-            request_hash=request_hash,
-        )
-        db.commit()
-        return result
-    if artifact.status not in {"SUBMITTING", "PROCESSING", "FAILED"} and not expired_pending:
-        raise BusinessError(
-            "OCR_RECONCILE_STATUS_INVALID",
-            "当前 OCR 作业状态明确，不能重新提交（会重复产生外部作业）",
-            status_code=409,
-            details={"artifact_no": artifact.artifact_no, "artifact_type": "OCR"},
-        )
-    parsed_artifact = db.scalar(
-        select(StoredArtifact).where(
-            StoredArtifact.document_upload_id == upload.id,
-            StoredArtifact.artifact_type == "DOCUMENT_PARSE",
-            StoredArtifact.upload_sha256 == upload.sha256,
-            StoredArtifact.status == "READY",
-        )
-    )
-    if not parsed_artifact:
-        raise BusinessError("PROCESSED_ARTIFACT_MISSING", "当前上传缺少可用的 8010 处理产物，无法重新提交 OCR", status_code=409)
-    previous_metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-    previous_attempts = list(previous_metadata.get("submit_attempts") or [])
-    previous_job_metadata = {key: value for key, value in previous_metadata.items() if key != "submit_attempts"}
-    attempt = {
-        "at": datetime.now(UTC).isoformat(),
-        "reason": request.reason,
-        "idempotency_key": request.idempotency_key,
-        "request_hash": request_hash,
-        "state": "SUBMITTING",
-        "previous_status": artifact.status,
-        "previous_relative_path": artifact.relative_path,
-        "previous_metadata": previous_job_metadata,
-    }
-    artifact.status = "SUBMITTING"
-    artifact.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting"
-    artifact.metadata_json = {**previous_job_metadata, "submit_attempts": [*previous_attempts, attempt]}
-    record_operation(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        object_no=task.task_no,
-        object_name=task.task_name,
-        operation_type="OCR_RECONCILE",
-        detail={
-            "request": operation_request,
-            "intent": {
-                "artifact_no": artifact.artifact_no,
-                "previous_status": attempt["previous_status"],
-                "previous_job_id": previous_metadata.get("job_id"),
-                "previous_deadline_at": previous_metadata.get("deadline_at"),
-                "previous_attempts": previous_attempts,
-            },
-        },
-        idempotency_key=request.idempotency_key,
-        request_hash=request_hash,
-        result="ACCEPTED",
-    )
-    # 授权、幂等身份和提交占位同一事务持久化，之后才联系供应商。
-    db.commit()
-    try:
-        record = _submit_authorized_ocr_retry(
-            db, task, upload, parsed_artifact, artifact, idempotency_key=request.idempotency_key
-        )
-    except BusinessError as exc:
-        record_operation(
-            db,
-            object_type=OBJECT_AUDIT_TASK,
-            object_no=task.task_no,
-            object_name=task.task_name,
-            operation_type="OCR_RETRY_OUTCOME",
-            detail={"status_code": exc.status_code, "artifact_no": artifact.artifact_no},
-            idempotency_key=request.idempotency_key,
-            request_hash=request_hash,
-            result="FAILED",
-            failure_code=exc.code,
-            failure_message=exc.message,
-        )
-        db.commit()
-        raise
-    except Exception as exc:
-        record_operation(
-            db,
-            object_type=OBJECT_AUDIT_TASK,
-            object_no=task.task_no,
-            object_name=task.task_name,
-            operation_type="OCR_RETRY_OUTCOME",
-            detail={"status_code": 500, "artifact_no": artifact.artifact_no},
-            idempotency_key=request.idempotency_key,
-            request_hash=request_hash,
-            result="FAILED",
-            failure_code="OCR_RETRY_UNEXPECTED_ERROR",
-            failure_message=exception_summary(exc),
-        )
-        db.commit()
-        raise
-    job_id, deadline_at = _ocr_job_metadata(record)
-    result = {
-        "document_no": document.document_no,
-        "artifact_no": record.artifact_no,
-        "status": record.status,
-        "job_id": job_id,
-        "deadline_at": deadline_at,
-        "message": "已按人工明确动作重新提交 OCR 作业，并记录了本次提交尝试",
-    }
-    record_operation(
-        db,
-        object_type=OBJECT_AUDIT_TASK,
-        object_no=task.task_no,
-        object_name=task.task_name,
-        operation_type="OCR_RETRY_OUTCOME",
-        detail={"response": {**result, "deadline_at": deadline_at.isoformat()}},
-        idempotency_key=request.idempotency_key,
-        request_hash=request_hash,
-    )
-    db.commit()
-    return result

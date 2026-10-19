@@ -12,7 +12,7 @@ from ...domain.identity import public_no
 from ...domain.manifest import normalize_field_scope
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, DocumentUpload, Evidence, ManualReview, TaskDocument, TaskFact, TaskFieldValue
-from .. import task_value_service
+from . import value_store as task_value_service
 from .shared import _task_field_definitions
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session

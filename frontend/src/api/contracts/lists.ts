@@ -65,6 +65,8 @@ export interface ExecutionRow {
   node_name: string;
   sequence_no: number;
   status: string;
+  /** 是否已被重试、纠错或材料换版取代；不改变本次原执行结局。 */
+  invalidated: boolean;
   started_at: string | null;
   finished_at: string | null;
   duration_ms: number | null;

@@ -5,14 +5,13 @@ import type { AuditDocument } from "@/api/contracts";
 import {
   getDocumentArtifact,
   getDocumentOcr,
-  reconcileDocumentArtifact,
-  reconcileDocumentOcr,
   retryDocumentOcr,
+  retryDocumentArtifact,
   type AuditTaskView,
-  type DocumentArtifactStatus,
-  type DocumentOcrStatus,
 } from "@/api/audits";
 import { isOperationActive, operationIdempotencyKey, type OperationView } from "@/api/http";
+
+import { processingStatusLabel, processingStatusTone, processingArtifactLabel, type ProcessingArtifact } from "@/constants/materialProcessing";
 
 interface MaterialProcessingOptions {
   task: Readonly<Ref<AuditTaskView | null>>;
@@ -24,76 +23,40 @@ interface MaterialProcessingOptions {
   onOperationAccepted: (operation: OperationView) => void;
 }
 
-type ProcessingArtifact = {
-  artifact_type: DocumentArtifactStatus["artifact_type"] | "OCR";
-  artifact_no: string | null;
-  status: string;
-  message: string;
-  job_id?: string | null;
-  deadline_at?: string | null;
-  provider_state?: string | null;
-  extract_progress?: DocumentOcrStatus["extract_progress"];
-  progress_updated_at?: string | null;
-};
-type ProcessingAction = "ADOPT_JOB" | "RETRY_SUBMIT" | "CLEAR";
-
-/** 材料处理状态查询与人工对账，沿用任务页面的响应代次。 */
+/** 材料处理状态查询与单项重试，沿用任务页面的响应代次。 */
 export function useMaterialProcessing(options: MaterialProcessingOptions) {
   const processingDialogVisible = ref(false);
   const processingDocument = ref<AuditDocument | null>(null);
   const processingStatuses = ref<ProcessingArtifact[]>([]);
   const processingLoading = ref(false);
   const processingErrors = ref<Array<{ artifact_type: ProcessingArtifact["artifact_type"]; message: string }>>([]);
-  const processingAction = ref<{ artifact: ProcessingArtifact; action: ProcessingAction } | null>(null);
-  const processingReason = ref("");
-  const processingJobId = ref("");
   const processingSubmitting = ref(false);
-  const processingActionError = ref<string | null>(null);
+  const processingError = ref<string | null>(null);
+  // 受理响应丢失时复用同一提交；收到受理结果后，下一次手动重试才创建新命令。
+  const retryAttempts = new Map<string, { idempotency_key: string; resubmit_unknown: boolean }>();
   let processingRequestGeneration = 0;
-  let processingAttempt: { signature: string; key: string } | null = null;
 
-  const processingActionAllowed = computed(() => {
+  const processingRetryAllowed = computed(() => {
     const current = options.task.value;
     return Boolean(current
-      && !["RUNNING", "COMPLETED", "FAILED"].includes(current.status)
+      && !["RUNNING", "COMPLETED"].includes(current.status)
       && !isOperationActive(current.latest_operation?.status)
       && !options.watching.value && !options.pending.value && !processingLoading.value && !processingSubmitting.value);
   });
 
-  function processingStatusLabel(artifact: ProcessingArtifact): string {
-    if (artifact.artifact_type === "OCR" && artifact.status === "PENDING") {
-      if (artifact.provider_state === "running") return "识别中";
-      if (artifact.provider_state === "pending") return "排队中";
-      if (artifact.provider_state === "done") return "识别完成，正在保存";
-      if (artifact.job_id) return "可继续查询";
-    }
-    const labels: Record<string, string> = {
-      NOT_SUBMITTED: "未提交",
-      SUBMITTING: "提交结果未知",
-      PROCESSING: "处理结果未知",
-      PENDING: "等待完成",
-      READY: "已就绪",
-      FAILED: "失败",
-      INVALIDATED: "已失效",
-    };
-    return labels[artifact.status] ?? artifact.status;
-  }
-
-  function processingArtifactLabel(artifactType: ProcessingArtifact["artifact_type"]): string {
-    return {
-      MATERIAL_CLASSIFY: "8018 文件校验",
-      DOCUMENT_PARSE: "8010 去除印章",
-      OCR: "PaddleOCR 正文识别",
-      SEAL: "8003 印章识别",
-    }[artifactType];
-  }
-
-  function processingRecoverable(artifact: ProcessingArtifact): boolean {
+  function processingRetryable(artifact: ProcessingArtifact): boolean {
     if (!artifact.artifact_no) return false;
-    if (artifact.artifact_type !== "OCR") return artifact.status === "PROCESSING";
-    if (["SUBMITTING", "PROCESSING", "FAILED"].includes(artifact.status)) return true;
-    // PENDING 可以直接续查同一个远端作业；不必等本地等待截止，也不会创建新作业。
-    return artifact.status === "PENDING" && Boolean(artifact.job_id);
+    if (artifact.artifact_type !== "OCR") return ["FAILED", "PROCESSING"].includes(artifact.status);
+    // 已受理的作业续查原作业；提交结果未知时由用户明确确认后重新提交。
+    return artifact.status === "FAILED" || artifact.status === "SUBMITTING"
+      || (artifact.status === "PENDING" && Boolean(artifact.job_id));
+  }
+
+  function processingRetryLabel(artifact: ProcessingArtifact): string {
+    if (artifact.artifact_type !== "OCR") return artifact.status === "PROCESSING" ? "确认后重试" : "重试此项";
+    if (artifact.status === "PENDING") return "继续查询 OCR";
+    if (artifact.status === "SUBMITTING") return "重新提交 OCR";
+    return "重试 OCR";
   }
 
   async function loadProcessingStatuses(): Promise<void> {
@@ -128,12 +91,6 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
       });
       processingStatuses.value = statuses;
       processingErrors.value = errors;
-      const selected = processingAction.value;
-      if (selected) {
-        const current = statuses.find((item) => item.artifact_no === selected.artifact.artifact_no && item.artifact_type === selected.artifact.artifact_type);
-        processingAction.value = current && processingRecoverable(current) ? { ...selected, artifact: current } : null;
-        if (!processingAction.value) processingActionError.value = null;
-      }
     } finally {
       if (!options.isStale(token, currentTaskNo) && generation === processingRequestGeneration) processingLoading.value = false;
     }
@@ -143,119 +100,61 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
     processingDocument.value = document;
     processingDialogVisible.value = true;
     processingStatuses.value = [];
-    processingAction.value = null;
-    processingActionError.value = null;
+    processingError.value = null;
     void loadProcessingStatuses();
   }
 
-  function chooseProcessingAction(artifact: ProcessingArtifact, action: ProcessingAction): void {
-    processingAction.value = { artifact, action };
-    processingReason.value = "";
-    processingJobId.value = action === "ADOPT_JOB" ? artifact.job_id ?? "" : "";
-    processingActionError.value = null;
-  }
-
-  async function submitProcessingAction(): Promise<void> {
-    const selected = processingAction.value;
+  async function retrySingleArtifact(artifact: ProcessingArtifact): Promise<void> {
     const document = processingDocument.value;
     const currentTaskNo = options.task.value?.task_no;
-    if (!selected || !document || !currentTaskNo || !selected.artifact.artifact_no || !processingActionAllowed.value) return;
-    const reason = processingReason.value.trim();
-    const jobId = processingJobId.value.trim();
-    if (!reason) {
-      processingActionError.value = "请填写本次人工对账的原因";
-      return;
-    }
-    if (selected.action === "ADOPT_JOB" && !jobId) {
-      processingActionError.value = "请填写已向供应商确认的作业号";
-      return;
-    }
-    const label = processingArtifactLabel(selected.artifact.artifact_type);
-    const warning = selected.action === "ADOPT_JOB"
-      ? `确认已向供应商核实「${label}」的作业号？系统将按此作业号继续查询。`
-      : selected.action === "RETRY_SUBMIT" && selected.artifact.status === "FAILED"
-        ? `「${label}」的作业已明确失败。确认重新提交该材料进行识别？`
-        : `确认「${label}」的当前请求结果未知，并已核实外部处理情况？继续操作可能再次调用外部服务。`;
-    try {
-      await ElMessageBox.confirm(warning, "确认人工对账", {
-        type: "warning", confirmButtonText: "确认提交", cancelButtonText: "取消",
-      });
-    } catch {
-      return;
-    }
+    const currentTask = options.task.value;
+    if (!document || !currentTaskNo || !currentTask || !artifact.artifact_no || !processingRetryable(artifact)
+      || !processingRetryAllowed.value) return;
     const token = options.generation();
-    if (options.isStale(token, currentTaskNo) || !processingDialogVisible.value) return;
-    const artifactNo = selected.artifact.artifact_no;
-    const signature = JSON.stringify([currentTaskNo, document.document_no, selected.artifact.artifact_type, artifactNo, selected.action, reason, jobId]);
-    if (processingAttempt?.signature !== signature) {
-      processingAttempt = {
-        signature,
-        key: operationIdempotencyKey("ARTIFACT_RECONCILE", currentTaskNo, document.document_no, artifactNo),
-      };
-    }
-    processingSubmitting.value = true;
-    processingActionError.value = null;
-    let successMessage: string;
-    try {
-      const response = selected.artifact.artifact_type === "OCR"
-        ? await reconcileDocumentOcr(currentTaskNo, document.document_no, {
-            action: selected.action as "ADOPT_JOB" | "RETRY_SUBMIT",
-            artifact_no: artifactNo,
-            job_id: selected.action === "ADOPT_JOB" ? jobId : undefined,
-            reason,
-            idempotency_key: processingAttempt.key,
-          })
-        : await reconcileDocumentArtifact(currentTaskNo, document.document_no, selected.artifact.artifact_type, {
-            artifact_no: artifactNo,
-            reason,
-            idempotency_key: processingAttempt.key,
-          });
-      successMessage = response.message;
-    } catch (error) {
-      if (!options.isStale(token, currentTaskNo)) processingActionError.value = error instanceof Error ? error.message : "人工对账失败";
-      return;
-    } finally {
-      if (!options.isStale(token, currentTaskNo)) processingSubmitting.value = false;
-    }
-    if (options.isStale(token, currentTaskNo)) return;
-    processingAttempt = null;
-    processingAction.value = null;
-    processingReason.value = "";
-    processingJobId.value = "";
-    ElMessage.success(successMessage);
-    await Promise.all([loadProcessingStatuses(), options.refresh()]);
-  }
-
-  async function retrySingleOcr(artifact: ProcessingArtifact): Promise<void> {
-    const document = processingDocument.value;
-    const currentTaskNo = options.task.value?.task_no;
-    if (!document || !currentTaskNo || artifact.artifact_type !== "OCR" || !artifact.artifact_no
-      || !processingActionAllowed.value) return;
+    const inputRevision = currentTask.input_revision;
+    const resubmitUnknown = artifact.status === "SUBMITTING" || artifact.status === "PROCESSING";
+    const message = artifact.artifact_type !== "OCR"
+      ? `只重试「${document.material_name}」的${processingArtifactLabel(artifact.artifact_type)}，其他已完成结果会保留。${resubmitUnknown ? "上次处理结果未知，再次提交可能产生重复调用或再次计费。" : ""}确认继续？`
+      : resubmitUnknown
+      ? `「${document.material_name}」上次 OCR 提交未拿到作业号，无法确认云端是否已受理。重新提交可能创建重复作业并再次计费。确认只重新提交这份材料的 OCR？已完成的其他处理结果会保留。`
+      : artifact.status === "PENDING"
+        ? `继续查询「${document.material_name}」已有的 OCR 作业，不创建新作业。其他材料的已完成结果会保留。`
+        : `只重新提交「${document.material_name}」的 PaddleOCR，其他材料和已完成的去章、印章识别结果会保留。确认继续？`;
     try {
       await ElMessageBox.confirm(
-        `只重新处理「${document.material_name}」的 PaddleOCR，其他材料的已完成结果会保留。确认继续？`,
-        "确认单份材料重试", { type: "warning", confirmButtonText: "确认重试", cancelButtonText: "取消" },
+        message, processingRetryLabel(artifact),
+        { type: "warning", confirmButtonText: artifact.status === "PENDING" ? "继续查询" : "确认提交", cancelButtonText: "取消" },
       );
     } catch {
       return;
     }
-    const token = options.generation();
-    const key = operationIdempotencyKey("OCR_DOCUMENT_RETRY", currentTaskNo, document.document_no, artifact.artifact_no);
+    if (options.isStale(token, currentTaskNo) || !processingDialogVisible.value
+      || processingDocument.value?.document_no !== document.document_no || !processingRetryAllowed.value) return;
+    const attemptId = JSON.stringify([currentTaskNo, document.document_no, artifact.artifact_type, artifact.artifact_no, inputRevision]);
+    const attempt = retryAttempts.get(attemptId) ?? {
+      idempotency_key: operationIdempotencyKey("DOCUMENT_RETRY", artifact.artifact_no),
+      resubmit_unknown: resubmitUnknown,
+    };
+    retryAttempts.set(attemptId, attempt);
     processingSubmitting.value = true;
-    processingActionError.value = null;
+    processingError.value = null;
     try {
-      const accepted = await retryDocumentOcr(currentTaskNo, document.document_no, {
+      const payload = {
         artifact_no: artifact.artifact_no,
-        input_revision: options.task.value?.input_revision ?? 0,
-        idempotency_key: key,
-      });
+        input_revision: inputRevision,
+        ...attempt,
+      };
+      const accepted = artifact.artifact_type === "OCR"
+        ? await retryDocumentOcr(currentTaskNo, document.document_no, payload)
+        : await retryDocumentArtifact(currentTaskNo, document.document_no, artifact.artifact_type, payload);
       if (options.isStale(token, currentTaskNo)) return;
+      retryAttempts.delete(attemptId);
       options.onOperationAccepted(accepted);
-      ElMessage.success("已受理该材料的 OCR 重试，其他材料结果已保留");
+      ElMessage.success("已受理该材料的单项处理，完成后可重新执行审核");
       await options.refresh();
       await loadProcessingStatuses();
     } catch (error) {
-      if (!options.isStale(token, currentTaskNo)) processingActionError.value = error instanceof Error ? error.message : "OCR 重试失败";
+      if (!options.isStale(token, currentTaskNo)) processingError.value = error instanceof Error ? error.message : "材料处理重试失败";
     } finally {
       if (!options.isStale(token, currentTaskNo)) processingSubmitting.value = false;
     }
@@ -267,10 +166,9 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
     processingStatuses.value = [];
     processingLoading.value = false;
     processingErrors.value = [];
-    processingAction.value = null;
-    processingActionError.value = null;
+    processingError.value = null;
     processingSubmitting.value = false;
-    processingAttempt = null;
+    retryAttempts.clear();
     processingRequestGeneration += 1;
   }
 
@@ -280,20 +178,17 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
     processingStatuses,
     processingLoading,
     processingErrors,
-    processingAction,
-    processingReason,
-    processingJobId,
     processingSubmitting,
-    processingActionError,
-    processingActionAllowed,
+    processingError,
+    processingRetryAllowed,
     processingStatusLabel,
+    processingStatusTone,
     processingArtifactLabel,
-    processingRecoverable,
+    processingRetryable,
+    processingRetryLabel,
     loadProcessingStatuses,
     openProcessingDialog,
-    chooseProcessingAction,
-    submitProcessingAction,
-    retrySingleOcr,
+    retrySingleArtifact,
     reset,
   };
 }

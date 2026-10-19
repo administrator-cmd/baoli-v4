@@ -10,7 +10,6 @@ import type {
   FieldCorrectionRequest,
   FieldCorrectionResponse,
   JsonValue,
-  OcrReconcileResponse,
   OperationAccepted,
   Paged,
   Report,
@@ -36,18 +35,6 @@ export type AuditFieldView = AuditField & {
   extraction_message?: string | null;
   extraction_presentation_version?: number | null;
 };
-/**
- * OCR 对账请求。ADOPT_JOB 用于把结果未知或超时的提交人工绑定到已知 jobId；
- * RETRY_SUBMIT 会明确重新提交外部作业，两者都必须填写理由。
- */
-export interface OcrReconcileRequest {
-  action: "ADOPT_JOB" | "RETRY_SUBMIT";
-  artifact_no: string;
-  /** ADOPT_JOB 时填写的供应商作业号。 */
-  job_id?: string;
-  reason: string;
-  idempotency_key: string;
-}
 /** 只读 OCR 状态查询结果。 */
 export interface DocumentOcrStatus {
   document_no: string;
@@ -65,18 +52,6 @@ export interface DocumentArtifactStatus {
   document_no: string;
   artifact_type: "MATERIAL_CLASSIFY" | "DOCUMENT_PARSE" | "SEAL";
   artifact_no: string | null;
-  status: string;
-  message: string;
-}
-export interface ExternalArtifactReconcileRequest {
-  artifact_no: string;
-  reason: string;
-  idempotency_key: string;
-}
-export interface ExternalArtifactReconcileResponse {
-  document_no: string;
-  artifact_type: string;
-  artifact_no: string;
   status: string;
   message: string;
 }
@@ -191,9 +166,10 @@ export function uploadTaskDocument(
   );
 }
 /**
- * 执行当前业务节点。长处理只受理不等待：返回 202 语义的受理状态，页面再用
+ * 执行当前业务节点，或手动重试失败的审核。长处理只受理不等待：返回 202 语义的受理状态，页面再用
  * operation_no 查询真实执行状态。幂等标识与任务、节点绑定，换节点不会复用。
  * input_revision 提交页面看到的任务输入修订，服务端据此拒绝过期命令。
+ * 新一轮重试使用新幂等键；响应丢失后的同一次请求仍复用原键。
  */
 export function executeAuditNode(
   taskNo: string,
@@ -235,43 +211,11 @@ export function getDocumentArtifact(
     `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/artifacts/${encodeURIComponent(artifactType)}`,
   );
 }
-/** 人工确认同步外部调用结果未知后，解除当前占位以重新执行节点。 */
-export function reconcileDocumentArtifact(
-  taskNo: string,
-  documentNo: string,
-  artifactType: DocumentArtifactStatus["artifact_type"],
-  payload: ExternalArtifactReconcileRequest,
-): Promise<ExternalArtifactReconcileResponse> {
-  return request<ExternalArtifactReconcileResponse>(
-    `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/artifacts/${encodeURIComponent(artifactType)}/reconcile`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-  );
-}
-/** OCR 对账：绑定已知 jobId 继续查询，或明确重提未知、超时及失败的作业。 */
-export function reconcileDocumentOcr(
-  taskNo: string,
-  documentNo: string,
-  payload: OcrReconcileRequest,
-): Promise<OcrReconcileResponse> {
-  return request<OcrReconcileResponse>(
-    `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/ocr/reconcile`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
-/** 只续查/重试一份材料的 OCR，不重新执行整个审核任务。 */
+/** 只续查/重试一份材料的 OCR；结果未知时需要用户明确确认重新提交。 */
 export function retryDocumentOcr(
   taskNo: string,
   documentNo: string,
-  payload: { artifact_no?: string | null; input_revision: number; idempotency_key: string },
+  payload: { artifact_no?: string | null; input_revision: number; idempotency_key: string; resubmit_unknown: boolean },
 ): Promise<OperationAccepted> {
   return request<OperationAccepted>(
     `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/ocr/retry`,
@@ -282,6 +226,19 @@ export function retryDocumentOcr(
     },
   );
 }
+/** 只重试一份材料的校验、去章或印章识别。 */
+export function retryDocumentArtifact(
+  taskNo: string,
+  documentNo: string,
+  artifactType: DocumentArtifactStatus["artifact_type"],
+  payload: { artifact_no: string; input_revision: number; idempotency_key: string; resubmit_unknown: boolean },
+): Promise<OperationAccepted> {
+  return request<OperationAccepted>(
+    `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/artifacts/${encodeURIComponent(artifactType)}/retry`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+  );
+}
+
 /** 该任务的风险结果（命中只统计 ABNORMAL）。 */
 export function getTaskRisks(taskNo: string): Promise<RiskList> {
   return request<RiskList>(`/audit-tasks/${encodeURIComponent(taskNo)}/risks`);

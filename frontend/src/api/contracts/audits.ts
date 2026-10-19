@@ -249,15 +249,6 @@ export interface FieldCorrectionResponse extends ApiResponse {
   recomputed_rules: string[];
 }
 
-export interface OcrReconcileResponse extends ApiResponse {
-  document_no: string;
-  artifact_no: string;
-  status: string;
-  job_id: string | null;
-  deadline_at: string | null;
-  message: string;
-}
-
 export interface DocumentRemoveResult extends ApiResponse {
   document_no: string;
   material_name: string;

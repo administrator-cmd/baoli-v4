@@ -639,6 +639,9 @@ def _ocr_request_error(exc: requests.RequestException, operation: str) -> Busine
     }
     if exc.response is not None:
         details["http_status"] = exc.response.status_code
+        response_text = exc.response.text.strip()
+        if response_text:
+            details["provider_response"] = response_text
     logger.warning("PaddleOCR HTTP 请求失败 details=%s", details)
     return BusinessError(
         "EXTERNAL_SERVICE_TIMEOUT" if timed_out else "EXTERNAL_SERVICE_FAILED",

@@ -9,7 +9,7 @@ from ...domain import tool_catalog
 from ...domain.manifest import comparison_label
 from ...domain.rule_library import is_risk_rule
 from ...entity import AuditTask, Evidence, NodeExecution, RuleResult
-from .. import task_value_service
+from . import value_store as task_value_service
 from .evidence import _copy_evidence_to_rule, save_artifact_references
 
 
@@ -44,6 +44,7 @@ def save_rule_result(
     unresolved_items: list[dict[str, Any]] | None,
     evaluation_id: str | None,
     inputs: list[dict[str, Any]] | None = None,
+    output_values: list[tuple[str, int, dict[str, Any]]] | None = None,
 ) -> RuleResult:
     """保存本条规则的业务结论与执行诊断。
 
@@ -110,10 +111,6 @@ def save_rule_result(
         )
         db.add(record)
         db.flush()
-    # 业务结论写进任务 CSV；表里只留身份、状态与诊断。
-    task_value_service.append_values(
-        db, task, [(task_value_service.RECORD_RULE_RESULT, record.id, payload)]
-    )
     evidence_numbers = list(
         db.scalars(
             select(Evidence.evidence_no)
@@ -121,7 +118,8 @@ def save_rule_result(
             .order_by(Evidence.id)
         ).all()
     )
-    if not evidence_numbers:
+    # 没有可保存结论时只记录真实错误与输入诊断；不再次复制导致本条失败的证据。
+    if not evidence_numbers and verdict is not None:
         source_evidence_ids = save_artifact_references(db, task, execution, record, rule, verdict)
         source_evidence_ids.extend([
             evidence_id
@@ -158,4 +156,8 @@ def save_rule_result(
         evidence_numbers = list(db.scalars(select(Evidence.evidence_no).where(
             Evidence.audit_task_id == task.id, Evidence.rule_result_id == record.id).order_by(Evidence.id)))
     record.result_json = {**(record.result_json or {}), "evidence_nos": evidence_numbers}
+    # 所有引用核对成功后再合并产出与结论，一条规则只改写一次六表。
+    task_value_service.append_values(
+        db, task, [*(output_values or []), (task_value_service.RECORD_RULE_RESULT, record.id, payload)]
+    )
     return record

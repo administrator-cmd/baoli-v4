@@ -7,6 +7,7 @@ import type { DraftRuleItem } from "@/api/contracts";
 import { ApiError } from "@/api/http";
 import { deleteDraftRule, getSceneConfiguration, setDraftRuleEnabled } from "@/api/scenes";
 import { ruleOperatorOptions } from "@/constants/labels";
+import { sourceSheetLabel, useRuleSourceFilter } from "@/composables/useRuleSourceFilter";
 
 /**
  * 规则配置面板：业务规则可增删改；自动抽取与报告生成规则由系统派生，只读。
@@ -32,23 +33,25 @@ let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
-/**
- * 列表筛选：规则名称 / 启用状态。
- *
- * 没有「规则类别」这一项，表格里也没有这一类标签。系统派生的规则与业务规则是同一个
- * 列表里的不同行，「是不是系统派生的」只决定这一行能不能编辑——页面用操作列有没有
- * 按钮、详情里的一句说明来表达就够了。给它一个筛选下拉或一个恒为「业务规则」的标签列，
- * 只会让人以为这两类需要分开办理。
- */
+/** 来源工作表、名称 / 业务编号与启用状态可组合筛选。 */
 const query = reactive({ name: "", enabled: "" });
+const { selectedSheet, sourceSheetOptions, matchesSourceSheet } = useRuleSourceFilter(() => rules.value);
+const keyword = computed(() => query.name.trim().toLowerCase());
 const filteredRules = computed(() =>
   rules.value.filter((item) => {
+    if (!matchesSourceSheet(item)) return false;
     if (query.enabled === "true" && !item.enabled) return false;
     if (query.enabled === "false" && item.enabled) return false;
-    if (query.name.trim() && !item.name.includes(query.name.trim())) return false;
+    if (keyword.value && !`${item.name}\n${item.source_ref ?? ""}`.toLowerCase().includes(keyword.value)) return false;
     return true;
   }),
 );
+
+function resetFilters(): void {
+  query.name = "";
+  query.enabled = "";
+  selectedSheet.value = "";
+}
 
 const operatorLabels = new Map(ruleOperatorOptions.map((item) => [item.value, item.label]));
 function operatorLabel(operator: string): string {
@@ -85,6 +88,10 @@ async function load(): Promise<void> {
 }
 
 watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immediate: true });
+watch(() => props.scenarioCode, () => {
+  resetFilters();
+  detailRule.value = null;
+});
 
 function openEditor(ruleKey: string, options?: { from?: string }): void {
   if (!props.scenarioCode) {
@@ -172,8 +179,13 @@ function scopeText(rule: DraftRuleItem): string {
 
     <template v-else>
       <el-form inline class="app-query block-gap-sm">
-        <el-form-item label="规则名称">
-          <el-input v-model="query.name" clearable placeholder="请输入规则名称" style="width: 200px" />
+        <el-form-item label="来源工作表">
+          <el-select v-model="selectedSheet" clearable filterable placeholder="全部工作表" style="width: 240px">
+            <el-option v-for="sheet in sourceSheetOptions" :key="sheet.value" :value="sheet.value" :label="sheet.label" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="规则搜索">
+          <el-input v-model="query.name" clearable placeholder="规则名称或业务编号" style="width: 220px" />
         </el-form-item>
         <el-form-item label="启用状态">
           <el-select v-model="query.enabled" clearable placeholder="全部" style="width: 120px">
@@ -181,11 +193,15 @@ function scopeText(rule: DraftRuleItem): string {
             <el-option value="false" label="停用" />
           </el-select>
         </el-form-item>
+        <el-form-item>
+          <el-button @click="resetFilters">重置</el-button>
+        </el-form-item>
       </el-form>
 
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="canEdit" type="primary" @click="openEditor('new')">新增规则</el-button>
+          <span v-if="!loadError" class="text-muted">显示 {{ filteredRules.length }} / {{ rules.length }} 条</span>
         </div>
         <div class="app-toolbar__right">
           <el-button :loading="loading" @click="load">刷新</el-button>
@@ -196,7 +212,7 @@ function scopeText(rule: DraftRuleItem): string {
         <el-button size="small" @click="load">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="filteredRules" border stripe v-loading="loading" empty-text="暂无规则配置">
+      <el-table v-else :data="filteredRules" border stripe v-loading="loading" :empty-text="rules.length ? '未找到匹配的规则' : '暂无规则配置'">
         <el-table-column type="index" label="序号" width="60" />
         <el-table-column label="业务编号" width="155" show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.source_ref || (row.system ? "系统派生" : "未填写") }}</span></template>
@@ -206,7 +222,12 @@ function scopeText(rule: DraftRuleItem): string {
             <el-button link type="primary" class="table-link" @click="detailRule = row">{{ row.name }}</el-button>
           </template>
         </el-table-column>
-        <el-table-column label="算子" width="170" show-overflow-tooltip>
+        <el-table-column label="来源工作表" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ sourceSheetLabel(row.origin) }}<span v-if="row.origin?.sheet_name" class="text-hint"> · 第 {{ row.origin.row_no }} 行</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="执行方式" width="170" show-overflow-tooltip>
           <template #default="{ row }">{{ operatorLabel(row.operator) }}</template>
         </el-table-column>
         <el-table-column label="严重级别" width="100">
@@ -259,7 +280,7 @@ function scopeText(rule: DraftRuleItem): string {
               >{{ detailRule.origin.sheet_name }} 第 {{ detailRule.origin.row_no }} 行</el-button>
               <span v-else>{{ detailRule.origin.sheet_name }} 第 {{ detailRule.origin.row_no }} 行</span>
             </el-descriptions-item>
-            <el-descriptions-item label="检查方式">{{ operatorLabel(detailRule.operator) }}</el-descriptions-item>
+            <el-descriptions-item label="执行方式">{{ operatorLabel(detailRule.operator) }}</el-descriptions-item>
             <el-descriptions-item label="输入对象">{{ inputText(detailRule) }}</el-descriptions-item>
             <el-descriptions-item label="材料范围 / 输出">{{ scopeText(detailRule) }}</el-descriptions-item>
             <el-descriptions-item label="审核要求">{{ detailRule.requirement || "—" }}</el-descriptions-item>

@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type { PlanAdjustments, PlanConfig, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
 import { createPlan, getPlan, getPlanAdjustments, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
+import { operationIdempotencyKey } from "@/api/http";
 import BackButton from "@/components/BackButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import PlanBusinessEditor from "@/components/plans/PlanBusinessEditor.vue";
@@ -83,6 +84,7 @@ const loading = ref(false);
 const loadError = ref<string | null>(null);
 const planStatusError = ref<string | null>(null);
 const saving = ref(false);
+let createAttempt: { signature: string; key: string } | null = null;
 const reference = ref<PlanAdjustments | null>(null);
 const referenceLoading = ref(false);
 const referenceError = ref<string | null>(null);
@@ -204,7 +206,7 @@ async function load(): Promise<void> {
   }
 }
 
-watch(() => planCode.value, () => void load(), { immediate: true });
+watch(() => planCode.value, () => { createAttempt = null; void load(); }, { immediate: true });
 watch(previousCode, () => void loadReference(), { immediate: true });
 watch([previousCode, requestedSceneCode], ([previous, code]) => {
   if (!previous) basicForm.scenario_code = code ?? "";
@@ -250,6 +252,7 @@ function openCreateTask(): void {
 }
 
 async function submitCreate(): Promise<void> {
+  if (saving.value) return;
   const createRoute = route.fullPath;
   const scene = selectedScene.value;
   if (previousCode.value && (!reference.value || referenceLoading.value || referenceError.value)) {
@@ -261,15 +264,22 @@ async function submitCreate(): Promise<void> {
     ElMessage.warning("请填写方案名称，并选择一个已发布且已启用的场景");
     return;
   }
-  saving.value = true;
-  try {
-    const created = await createPlan({
+  const payload = {
       plan_name: basicForm.plan_name.trim(),
       scenario_code: scene.scenario_code,
       scenario_version_no: scene.latest_version_no,
       description: basicForm.description.trim() || null,
       enabled: basicForm.enabled,
-    });
+  };
+  const signature = JSON.stringify(payload);
+  let attempt = createAttempt;
+  if (!attempt || attempt.signature !== signature) {
+    attempt = { signature, key: operationIdempotencyKey("PLAN_CREATE", scene.scenario_code) };
+    createAttempt = attempt;
+  }
+  saving.value = true;
+  try {
+    const created = await createPlan({ ...payload, idempotency_key: attempt.key });
     if (route.fullPath !== createRoute) return;
     ElMessage.success("方案已创建，配置已从场景版本复制");
     await router.replace({ name: "plan-edit", params: { planCode: created.plan_code } });

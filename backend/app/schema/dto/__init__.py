@@ -30,13 +30,12 @@ from .scenarios import (
 )
 from .reports import ReportRemarkRequest
 from .tasks import (
+    DocumentArtifactRetryRequest,
     DocumentOcrRetryRequest,
     ExecuteNodeRequest,
-    ExternalArtifactReconcileRequest,
     FieldCorrectionRequest,
     ManualReviewItem,
     ManualReviewRequest,
-    OcrReconcileRequest,
     OperationRequest,
     TaskCopyRequest,
     TaskSchemaPreviewRequest,
@@ -69,11 +68,10 @@ __all__ = [
     "ReportRemarkRequest",
     "ExecuteNodeRequest",
     "DocumentOcrRetryRequest",
-    "ExternalArtifactReconcileRequest",
+    "DocumentArtifactRetryRequest",
     "FieldCorrectionRequest",
     "ManualReviewItem",
     "ManualReviewRequest",
-    "OcrReconcileRequest",
     "OperationRequest",
     "TaskCopyRequest",
     "TaskSchemaPreviewRequest",

@@ -51,7 +51,8 @@ def ready_artifact_payload(metadata: Any, *, artifact_type: str) -> ExternalArti
     """按当前产物类型读取信封；OCR 包含真实作业身份，其余类型为直接信封。"""
     if artifact_type == "OCR":
         return ReadyOcrArtifact.model_validate(metadata).artifact
-    return ExternalArtifact.model_validate(metadata)
+    # 非 OCR 产物沿用业务信封，调用历史是存储诊断，不属于供应商产物内容。
+    return ExternalArtifact.model_validate({key: value for key, value in metadata.items() if key != "processing_attempts"})
 
 
 @dataclass(frozen=True)

@@ -622,13 +622,16 @@ CREATE TABLE task_fact (
         REFERENCES node_execution (id, audit_task_id)
         ON DELETE RESTRICT ON UPDATE RESTRICT,
     -- 当前事实的唯一定位：只有 is_current=1 的行才有值，因此唯一键对历史版本不生效。
-    -- material_key 可能为 NULL，CONCAT 会把 NULL 吞掉，因此用 COALESCE 归一成固定串。
+    -- 各维度使用字符长度前缀；NULL 使用 -1:，不与任意真实材料键混淆。
     current_fact_scope VARCHAR(255) GENERATED ALWAYS AS (
         IF(
             is_current = 1,
             CONCAT(
-                fact_code, ':', COALESCE(material_key, '-'), ':',
-                period_scope, ':', statement_scope, ':', entity_scope
+                CHAR_LENGTH(fact_code), ':', fact_code,
+                IF(material_key IS NULL, '-1:', CONCAT(CHAR_LENGTH(material_key), ':', material_key)),
+                CHAR_LENGTH(period_scope), ':', period_scope,
+                CHAR_LENGTH(statement_scope), ':', statement_scope,
+                CHAR_LENGTH(entity_scope), ':', entity_scope
             ),
             NULL
         )

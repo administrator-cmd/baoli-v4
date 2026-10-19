@@ -14,6 +14,7 @@ from . import field_strategy
 # 被显式编码的标量类型。`kind` 取值即这几个，解码时据此还原。
 ENCODED_KINDS = ("decimal", "date", "datetime")
 _ENVELOPE_KEYS = frozenset({"kind", "value"})
+_ESCAPED_MAPPING_KIND = "mapping"
 
 def encode_value(value: Any) -> Any:
     """把一个取值投影成 JSON 可表达、且可无损还原的形式。
@@ -46,7 +47,13 @@ def encode_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [encode_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): encode_value(item) for key, item in value.items()}
+        if any(not isinstance(key, str) for key in value):
+            raise BusinessError("FACT_VALUE_UNENCODABLE", "结构化事实的对象键必须为字符串", status_code=500)
+        encoded = {key: encode_value(item) for key, item in value.items()}
+        if set(value) == _ENVELOPE_KEYS and isinstance(value.get("kind"), str) and value["kind"] in (*ENCODED_KINDS, _ESCAPED_MAPPING_KIND):
+            # 转义负载使用键值对列表，与业务对象和标量封套明确区分。
+            return {"kind": _ESCAPED_MAPPING_KIND, "value": [[key, item] for key, item in encoded.items()]}
+        return encoded
     raise BusinessError(
         "FACT_VALUE_UNENCODABLE",
         "事实取值无法投影成 JSON 安全形式，规则上下文未写入",
@@ -58,13 +65,25 @@ def encode_value(value: Any) -> Any:
 def decode_value(value: Any) -> Any:
     """`encode_value` 的逆运算：还原成 Python 取值。
 
-    只认「恰好由 kind 与 value 两个键组成、且 kind 是已编码类型」的字典；
-    其余字典按业务数据原样返回，不做任何解释。
+    标量封套按声明类型还原；与保留封套同形的业务字典通过 mapping 封套转义。
+    转义层只解码成员，不把原始业务字典再次当作标量封套。
     """
     if isinstance(value, list):
         return [decode_value(item) for item in value]
     if isinstance(value, dict):
-        if set(value) == _ENVELOPE_KEYS and value.get("kind") in ENCODED_KINDS:
+        if set(value) == _ENVELOPE_KEYS and value.get("kind") == _ESCAPED_MAPPING_KIND:
+            raw = value["value"]
+            if not isinstance(raw, list):
+                raise BusinessError("FACT_VALUE_INVALID", "结构化事实的转义对象无效", status_code=500)
+            decoded: dict[str, Any] = {}
+            for pair in raw:
+                if not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str):
+                    raise BusinessError("FACT_VALUE_INVALID", "结构化事实的转义键值对无效", status_code=500)
+                if pair[0] in decoded:
+                    raise BusinessError("FACT_VALUE_INVALID", "结构化事实的转义对象包含重复键", status_code=500)
+                decoded[pair[0]] = decode_value(pair[1])
+            return decoded
+        if set(value) == _ENVELOPE_KEYS and isinstance(value.get("kind"), str) and value["kind"] in ENCODED_KINDS:
             return _decode_scalar(str(value["kind"]), value.get("value"))
         return {key: decode_value(item) for key, item in value.items()}
     return value
@@ -237,6 +256,7 @@ def facts_of_task_fact_rows(
     rows: list[Any], *, values: dict[int, dict[str, Any]],
     field_definitions: dict[str, dict[str, Any]] | None = None,
     material_states: dict[str, Any] | None = None,
+    raw_values: dict[int, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """把事实索引行与它们的取值投影为模型和工具共用的输入。
 
@@ -251,7 +271,7 @@ def facts_of_task_fact_rows(
             raise BusinessError("TASK_VALUE_RECORD_MISSING", "事实索引存在，但任务 CSV 缺少对应取值", status_code=500,
                                 details={"record_type": "TaskFact", "record_id": row.id})
         payload = values[row.id]
-        raw_value = payload.get("value")
+        normalized_value = payload.get("value")
         executable = (row.status in {"PRESENT", "REVIEWED"} if row.fact_kind == "EXTRACTED"
                       else row.fact_kind == "DERIVED" and row.status == "COMPUTED")
         field_key = str(row.fact_code) if row.fact_kind == "DERIVED" else index.get(fact_identity(row))
@@ -266,8 +286,8 @@ def facts_of_task_fact_rows(
             "revision_no": row.revision_no, "value_type": row.value_type,
             "unit": payload.get("unit"), "currency": payload.get("currency"), "status": row.status,
             "material_state": states.get(row.material_key) if row.material_key else None,
-            "raw_value": encode_value(raw_value if executable else None),
-            "normalized_value": encode_value(raw_value if executable else None),
+            "raw_value": encode_value((raw_values or {}).get(row.id) if executable else None),
+            "normalized_value": encode_value(normalized_value if executable else None),
             "evidence_id": None, "evidence_ids": [],
         })
     return facts

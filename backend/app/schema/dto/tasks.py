@@ -26,6 +26,15 @@ class DocumentOcrRetryRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=120)
     input_revision: int = Field(ge=0)
     artifact_no: str | None = Field(default=None, min_length=1, max_length=40)
+    resubmit_unknown: bool = Field(default=False, description="用户确认重新提交结果未知的 OCR，可能产生重复的外部作业")
+
+
+class DocumentArtifactRetryRequest(BaseModel):
+    """单项材料处理重试；未知结果必须由用户明确确认。"""
+    idempotency_key: str = Field(min_length=1, max_length=120)
+    input_revision: int = Field(ge=0)
+    artifact_no: str = Field(min_length=1, max_length=40)
+    resubmit_unknown: bool = False
 
 class ManualReviewItem(BaseModel):
     review_no: str
@@ -59,26 +68,6 @@ class FieldCorrectionRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=120)
     input_revision: int | None = Field(default=None, ge=0)
 
-class OcrReconcileRequest(BaseModel):
-    """OCR 提交结果未知、超时或明确失败后的人工处理动作。
-
-    系统没有真实的供应商幂等/查询能力时既不自动重发也不标成功：
-    ADOPT_JOB=人工提供已确认的供应商作业号并据此续查；
-    RETRY_SUBMIT=人工明确重提未知、超时或失败作业（会记录新的提交尝试）。
-    """
-
-    action: Literal["ADOPT_JOB", "RETRY_SUBMIT"]
-    artifact_no: str = Field(min_length=1, max_length=40)
-    job_id: str | None = Field(default=None, max_length=200)
-    reason: str = Field(min_length=1, max_length=2000)
-    idempotency_key: str = Field(min_length=1, max_length=120)
-
-class ExternalArtifactReconcileRequest(BaseModel):
-    """人工确认同步外部调用结果未知，解除占位后重新执行节点。"""
-
-    artifact_no: str = Field(min_length=1, max_length=40)
-    reason: str = Field(min_length=1, max_length=2000)
-    idempotency_key: str = Field(min_length=1, max_length=120)
 
 class TaskUpdateRequest(BaseModel):
     task_name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -100,11 +89,10 @@ __all__ = [
     "ExecuteNodeRequest",
     "OperationRequest",
     "DocumentOcrRetryRequest",
+    "DocumentArtifactRetryRequest",
     "ManualReviewItem",
     "ManualReviewRequest",
     "FieldCorrectionRequest",
-    "OcrReconcileRequest",
-    "ExternalArtifactReconcileRequest",
     "TaskUpdateRequest",
     "TaskCopyRequest",
 ]

@@ -12,7 +12,7 @@ Excel 由 LLM 解析为规则库 JSON，任务执行方案中生效的规则。�
 
 后端统一读取仓库根目录 `.env`，以 `.env.example` 为配置说明。至少填写 `BAOLI_DATABASE_URL`，数据库名允许 `baoli_v4` 或开发验证库 `baoli_v4_dev`；相对的 `BAOLI_DATA_DIR` 也相对于仓库根目录。环境变量优先于 `.env`，修改配置后需重启后端。
 
-当前处于开发验证阶段，数据库结构直接维护在 `backend/database/schema.sql`。结构变更后清空开发库，再从空库执行该文件；不备份开发数据、不维护 Alembic 或增量升级脚本。建表遇到同名表直接报错，应用启动只读核对实际结构，不自动建库、建表或迁移。数据库密码中的 URL 特殊字符需按 SQLAlchemy URL 规则编码。
+当前处于开发验证阶段，数据库结构直接维护在 `backend/database/schema.sql`。结构变更后清空开发库，再从空库执行该文件；不备份开发数据、不维护 Alembic 或增量升级脚本。建表遇到同名表直接报错；应用启动只读核对必需表是否存在，不校验列、唯一键或生成列表达式，也不自动建库、建表或迁移。修改过生成列（如 `TaskFact.current_fact_scope`）后必须重建空库，否则旧约束会继续生效且启动不会报错。数据库密码中的 URL 特殊字符需按 SQLAlchemy URL 规则编码。
 
 开发库需要重建时，可用 `python script/reset_database.py` 先预览将清空的表，确认后再加 `--yes` 执行；随后重新运行 `backend/database/schema.sql`。这会删除业务数据，不用于需要保留数据的库。
 
@@ -50,6 +50,8 @@ npm run dev
 前端开发代理指向 `http://127.0.0.1:8000`。默认首页为审核任务列表；服务配置详情在“系统管理 / 服务状态”。
 
 ## 代码格式与静态检查
+
+后端保留 `api`、`services`、`repositories` 三层，每层内部按场景 `scenario/`、方案 `plan/`、审核 `audit/`、材料 `material/`、报告 `report/`、导入 `imports/`、系统 `system/` 分业务目录，再拆分具体职责文件。仓储目录按实际需要建立，共用能力归入 `shared/`。代码导航与职责说明见[后端分层约定](docs/后端分层约定.md)。
 
 编辑器基础格式由 `.editorconfig` 统一。Python 使用根目录 `pyproject.toml` 中的 Ruff 配置，开发依赖位于 `backend/requirements-dev.txt`；前端使用 ESLint、Prettier 和现有 TypeScript 配置。前端新增 `npm run lint`、`npm run typecheck`、`npm run format:check` 和 `npm run format` 命令。Python 对应 `ruff check backend/app`、`ruff format --check backend/app` 和 `ruff format backend/app`。
 

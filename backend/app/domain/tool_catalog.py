@@ -203,13 +203,13 @@ _TOOL_METADATA = {item.tool_id: item for item in (*_OPERATOR_METADATA, *_QUALITY
 OPERATOR_LABELS = {item.tool_id: item.label for item in _TOOL_METADATA.values()}
 
 
-# handler 所在的模块与函数。解析在 services.tool_service 里完成：
+# handler 所在的模块与函数。解析在 services.audit.tools.runtime 里完成：
 # domain 层不导入 operators 与 services，避免领域层依赖执行层。
 _OPERATOR_MODULE = "app.operators.registry"
 _OPERATOR_FUNCTION = "execute_operator"
 # 需要任务上下文与数据库会话的工具（材料存在性、文件质量）走 adapter 模块。
 # adapter 不含判定逻辑：它把上下文转成共享领域服务的输入，然后调同一个实现。
-_ADAPTER_MODULE = "app.services.agent_tools"
+_ADAPTER_MODULE = "app.services.audit.tools.handlers"
 
 # 当前可独立调用的算子工具：原函数签名为 `(parameters, inputs) -> dict`，
 # 标准 @tool 对象保存在 operators.registry.REGISTRY 中，调用通过 .invoke() 完成。
@@ -234,7 +234,6 @@ _CALLABLE_OPERATORS: tuple[str, ...] = (
 _CONTEXT_TOOLS: dict[str, str] = {
     "MATERIAL_EXISTS": "check_materials_tool",
     "FILE_QUALITY_CHECK": "check_file_quality_tool",
-    "DECIMAL_CN_EQUAL": "decimal_cn_equal_tool",
 }
 
 # 工具输入只提交身份引用，真实取值由系统按身份读取。
@@ -450,7 +449,8 @@ class ToolSpec:
     idempotent: bool
     # 是否支持按作业号查询执行进度（外部作业才需要）。
     supports_query: bool
-    # 当前能否被真实执行：底层能力已实现 且 有可独立调用的 handler。
+    # 当前能否进入真实 handler：有可独立调用的 handler；业务判定是否有口径由
+    # judgement_supported 单独表达。这样“可调用但只能返回不可判定”不会被误报成无入口。
     implemented: bool
     # 模型是否可以选择该工具，由实际调用入口决定。
     agent_selectable: bool
@@ -463,7 +463,7 @@ class ToolSpec:
     input_count: str = ""
     # 需要调用方注入的运行期键 → 说明。模型不提供这些值（见 _RUNTIME_KEYS）。
     runtime_keys: tuple[str, ...] = ()
-    # 质量判断是否有真实实现；None 表示该工具不是质量判断项。
+    # 业务判定是否有真实实现；None 表示该工具只读取数据，不作判定。
     judgement_supported: bool | None = None
     judgement_unsupported_reason: str = ""
 
@@ -593,7 +593,7 @@ def _handler_ref_of(tool_id: str) -> dict[str, str] | None:
 
     - 算子工具：保留 `execute_operator` 分发引用与算子码；工具服务按算子码取得
       `operators.registry.REGISTRY` 中的标准工具对象，由工具服务按调用参数执行；
-    - 上下文工具：`services.agent_tools` 的标准工具对象，原函数接收
+    - 上下文工具：`services.audit.tools.handlers` 的标准工具对象，原函数接收
       `(parameters, inputs, *, context)`，使用 `domain/quality_judgement` 的判定实现。
     """
     if tool_id in _CALLABLE_OPERATORS:
@@ -607,9 +607,9 @@ def _handler_ref_of(tool_id: str) -> dict[str, str] | None:
 def _build_operator_tool(metadata: _ToolMetadata) -> ToolSpec:
     schema = _OPERATOR_ARGUMENT_SCHEMAS[metadata.tool_id]
     handler_ref = _handler_ref_of(metadata.tool_id)
-    callable_now = handler_ref is not None and (
-        metadata.implemented or metadata.tool_id in _CONTEXT_TOOLS
-    )
+    # handler 决定能否调用；判定能力由 judgement_supported 独立表达。
+    # 大小写金额工具可如实返回不可判定原因，不能因此宣称已有换算能力。
+    callable_now = handler_ref is not None
     reason = "" if callable_now else metadata.unimplemented_reason
     selectable = callable_now and _agent_selectable_of(metadata)
     return ToolSpec(
@@ -638,6 +638,8 @@ def _build_operator_tool(metadata: _ToolMetadata) -> ToolSpec:
         agent_unselectable_reason="" if selectable else _agent_unselectable_reason(metadata),
         input_count=_input_count_text(metadata),
         runtime_keys=tuple(sorted(_RUNTIME_KEYS.get(metadata.tool_id, {}))),
+        judgement_supported=metadata.implemented,
+        judgement_unsupported_reason=metadata.unimplemented_reason,
     )
 
 
@@ -647,7 +649,7 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
     每个子项都是独立工具，`check_item` 由工具身份固定，模型不需要（也不能）自己选——
     选错检查项目就是调了另一个工具。模型只需给要检查的材料位与合格标准。
 
-    判定调 `services.agent_tools.check_file_quality_tool`，
+    判定调 `services.audit.tools.handlers.check_file_quality_tool`，
     使用 `domain/quality_judgement` 的实现。
     """
     check_item = metadata.tool_id

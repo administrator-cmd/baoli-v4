@@ -45,6 +45,7 @@ const sceneOptionsError = ref<string | null>(null);
 const selectedRows = ref<PlanListItem[]>([]);
 const editSelectedDisabled = computed(() => selectedRows.value.length !== 1);
 const deleteSelectedDisabled = computed(() => selectedRows.value.length === 0);
+const singleSelectedRow = computed(() => selectedRows.value.length === 1 ? selectedRows.value[0] : null);
 const deleteSaving = ref(false);
 
 function goNew(): void {
@@ -57,6 +58,18 @@ function goEdit(row: PlanListItem): void {
 
 function goRegenerate(row: PlanListItem): void {
   void router.push({ name: "plan-new", query: { previous: row.plan_code } });
+}
+
+function copySelected(): void {
+  if (singleSelectedRow.value) {
+    void copyRow(singleSelectedRow.value);
+  }
+}
+
+function regenerateSelected(): void {
+  if (singleSelectedRow.value) {
+    goRegenerate(singleSelectedRow.value);
+  }
 }
 
 async function toggleEnabled(row: PlanListItem): Promise<void> {
@@ -226,6 +239,8 @@ async function loadSceneOptions(): Promise<void> {
         <template v-if="!filters.deleted">
           <el-button type="primary" @click="goNew">新增</el-button>
           <el-button type="success" plain :disabled="editSelectedDisabled" @click="selectedRows[0] && goEdit(selectedRows[0])">编辑</el-button>
+          <el-button plain :disabled="editSelectedDisabled" @click="copySelected">复制</el-button>
+          <el-button plain :disabled="editSelectedDisabled" @click="regenerateSelected">重新生成</el-button>
           <el-button type="danger" plain :disabled="deleteSelectedDisabled" :loading="deleteSaving" @click="removePlans([...selectedRows])">删除</el-button>
         </template>
       </div>
@@ -283,7 +298,7 @@ async function loadSceneOptions(): Promise<void> {
       <el-table-column label="更新时间" width="170">
         <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="330" fixed="right">
+      <el-table-column label="操作" width="250" fixed="right">
         <template #default="{ row }">
           <template v-if="!filters.deleted">
             <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
@@ -291,15 +306,6 @@ async function loadSceneOptions(): Promise<void> {
             <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
             <el-button link type="primary" size="small" @click="openCreateTask(row)">创建任务</el-button>
             <el-button link type="danger" size="small" :disabled="deleteSaving" @click="removePlans([row])">删除</el-button>
-            <el-dropdown trigger="click">
-              <el-button link type="primary" size="small">更多</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item @click="copyRow(row)">复制方案</el-dropdown-item>
-                  <el-dropdown-item @click="goRegenerate(row)">基于当前场景重新生成</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
           </template>
           <template v-else>
             <el-button link type="primary" size="small" @click="restoreRow(row)">恢复</el-button>

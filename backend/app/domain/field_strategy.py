@@ -111,19 +111,3 @@ def normalize_structured_value(value: Any, schema: dict[str, Any]) -> dict[str, 
         path = ".".join(str(part) for part in exc.absolute_path) or "$"
         raise ValueError(f"{path}：{exc.message}") from exc
     return value
-
-
-def structured_property_keys(value: Any) -> set[str]:
-    if not isinstance(value, dict):
-        return set()
-    return {str(key) for key, item in value.items() if _has_evidence_value(item)}
-
-
-def _has_evidence_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, dict)):
-        return bool(value)
-    return True

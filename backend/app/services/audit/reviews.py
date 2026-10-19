@@ -14,7 +14,8 @@ from ...domain.manifest import enabled_extraction_field_keys
 from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
 from ...common.exceptions import BusinessError
 from ...entity import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
-from ..operation_types import OBJECT_AUDIT_TASK
+from .execution_history import invalidate_executions
+from ..system.operation_types import OBJECT_AUDIT_TASK
 from .facts import _current_field_fact_pairs, _write_human_field_fact
 from .shared import REVIEW_DECISION_LABELS, _task_field_definitions, _task_manifest
 from .state import _task_field_value_of_current_upload
@@ -140,11 +141,7 @@ def _invalidate_execution_records(
         )
         .values(is_current=False)
     )
-    counts["invalidated_executions"] = db.execute(
-        update(NodeExecution)
-        .where(NodeExecution.id.in_(execution_ids))
-        .values(status="INVALIDATED")
-    ).rowcount or 0
+    counts["invalidated_executions"] = invalidate_executions(db, NodeExecution.id.in_(execution_ids), reason="字段纠错后重算")
     return counts
 
 
@@ -197,11 +194,7 @@ def _invalidate_retry_results(
                 .where(ManualReview.rule_result_id.in_(rule_result_ids), ManualReview.status == "PENDING")
                 .values(status="INVALIDATED")
             )
-        db.execute(
-            update(NodeExecution)
-            .where(NodeExecution.id.in_(execution_ids))
-            .values(status="INVALIDATED")
-        )
+        invalidate_executions(db, NodeExecution.id.in_(execution_ids), reason="用户重新执行审核")
         db.execute(
             update(TaskFact)
             .where(

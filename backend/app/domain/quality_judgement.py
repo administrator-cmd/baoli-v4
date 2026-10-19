@@ -159,7 +159,7 @@ def material_exists_result(
     """材料存在性检查的完整结果：判定 + 审核标准 + 实际比较 + 适用条件。
 
     节点（`services.audit.facts._material_check`）与 Agent 工具
-    （`services.agent_tools.check_materials_tool`）都调这一份，两条路径不可能给出
+    （`services.audit.tools.handlers.check_materials_tool`）都调这一份，两条路径不可能给出
     不同结论，也不会出现「工具目录声明的输出键在 Agent 路径上永远为空」。
 
     `status` / `message` 显式给出时（规则不适用，节点已判 NOT_APPLICABLE）原样采用，

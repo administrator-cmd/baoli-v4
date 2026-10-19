@@ -1,4 +1,4 @@
-"""审核链路的共享词汇：产物来源声明与材料类型状态。
+"""审核链路的共享词汇：规则结论、模型循环、事实与材料类型状态。
 
 取值同时被编译期与运行期使用，只能有一份定义。本模块不依赖 services，
 供 domain、services 与 operators 共同引用。
@@ -6,33 +6,13 @@
 
 from typing import Any, Literal
 
-from ..common.exceptions import BusinessError
 
-
-# 字段「产物来源」列唯一受支持的取值：印章识别产物。
-SEAL_ARTIFACT_SOURCE = "SEAL"
 
 # 字段「期间口径」「报表口径」的不适用取值，由当前业务是否涉及相应口径决定。
 # 必须是显式取值而不是 NULL——统一事实表的「当前版本」唯一键由这几个维度用 CONCAT 拼成，
 # MySQL 的 CONCAT 遇 NULL 会整体返回 NULL，唯一键随之失效，同一字段可有多条「当前」事实。
 # 它只表示不适用，不等于任何具体口径；计算参数可使用它定位不涉及该口径的事实。
 SCOPE_NOT_APPLICABLE = "NOT_APPLICABLE"
-
-
-def declared_artifact_source(item: dict[str, Any]) -> str | None:
-    """字段声明的产物来源；未声明返回 None。不认识的来源明确报错，不当成未声明。"""
-    declared = item.get("artifact_source")
-    if declared in (None, ""):
-        return None
-    source = str(declared)
-    if source != SEAL_ARTIFACT_SOURCE:
-        raise BusinessError(
-            "FIELD_ARTIFACT_SOURCE_UNSUPPORTED",
-            f"字段“{item.get('name') or item.get('field_key')}”声明的产物来源“{source}”当前不受支持，"
-            "系统无法确定该字段应取自哪种处理产物",
-            details={"field_key": item.get("field_key"), "field_name": item.get("name")},
-        )
-    return source
 
 
 # 材料类型待复核与已确认不符分别记录。
@@ -44,8 +24,6 @@ MATERIAL_TYPE_UNAVAILABLE_STATUSES = (MATERIAL_TYPE_REVIEW, MATERIAL_TYPE_REJECT
 def is_type_unavailable(status: str | None) -> bool:
     """材料位的类型是否不可用（待复核或已确认不符）。"""
     return status in MATERIAL_TYPE_UNAVAILABLE_STATUSES
-
-
 
 
 # 规则结果可能出现的状态。执行端与页面共用这一份集合：
@@ -126,14 +104,14 @@ STATUS_CATEGORIES: dict[str, str] = {
 # 状态的标准中文含义。它是系统对状态码的解释，与业务话术无关；
 # 页面显示状态时用这一份，未知状态码明确标为未识别，不用兜底文案冒充正常。
 RULE_STATUS_LABELS: dict[str, str] = {
-    "COMPUTED": "已完成产出（不作合格/异常判定）",
-    "PASSED": "合格",
-    "ABNORMAL": "不合格",
-    "EVIDENCE_INSUFFICIENT": "无法判断（证据或能力不足）",
+    "COMPUTED": "已完成产出",
+    "PASSED": "通过",
+    "ABNORMAL": "异常",
+    "EVIDENCE_INSUFFICIENT": "证据不足",
     "NOT_APPLICABLE": "不适用",
     "NOT_EXECUTED": "未执行",
     "PENDING_REVIEW": "未确认",
-    "REVIEWED": "已人工复核",
+    "REVIEWED": "已复核",
     "SKIPPED": "已跳过",
     "RUNNING": "执行中",
 }

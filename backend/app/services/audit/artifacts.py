@@ -3,10 +3,12 @@
 外部调用（8018 识别 / 8010 处理 / OCR / 印章识别）的产物一律先落库再使用，并且先占位后调用：
 占位在联系供应商之前提交，唯一键 (上传, 产物类型, 上传哈希) 保证同一份上传同一类产物只调用一次。
 
-失败语义：只有在能确认供应商未受理（调用前的本地错误，见 `PRE_CONTACT_ERROR_CODES`）时才删除
-占位，其余提交失败保留占位并报「结果未知」——自动重发会制造重复外部作业。OCR 是异步作业：
-本地等待预算耗尽只代表本次操作失败，不证明供应商作业已失效，因此不自动重新提交，交人工对账。
+8018/8010/8003 失败语义：调用前错误与供应商明确拒绝保存 FAILED；其他失败保留 PROCESSING
+并保存真实异常，表示结果未知。用户可单项重试，未知结果须明确确认，系统不自动重发。
+OCR 是异步作业：
+本地等待预算耗尽只代表本次操作失败，不证明供应商作业已失效；用户可通过单份重试续查原作业。
 供应商明确返回 failed 时保存 FAILED 终态与原因，用户可通过重新提交入口创建新作业。
+提交结果未知时不自动重发，允许用户确认可能重复创建作业后，单独重新提交该材料的 OCR。
 
 本模块不判断业务结论，只回答「产物是否存在、是否可读、内容哈希是什么」。"""
 
@@ -16,7 +18,7 @@ from ...common.exceptions import BusinessError, exception_summary
 from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult, ReadyOcrArtifact, ready_artifact_payload
 from .document_ports import document_service
 from ...entity import AuditTask, DocumentUpload, StoredArtifact
-from ..storage_service import resolve_storage_path
+from ..shared.storage import resolve_storage_path
 from datetime import UTC, datetime
 from pathlib import Path
 from pydantic import ValidationError
@@ -109,17 +111,20 @@ def _ensure_external_artifact(
     """先占位再调用外部服务：唯一键 (上传, 产物类型, sha256) 让同一上传同一产物只调用一次。
 
     占位在调用前提交，因此并发与进程中断都不会重复产生外部作业：
-    已 READY 直接复用；停在 PROCESSING 说明上次调用结果未知，明确报错交人工核对。
-    失败时只有在能确认供应商未受理（调用前的本地错误）才删除占位；
-    其余情况保留占位，避免自动重发制造重复作业。
+    已 READY 直接复用；FAILED 或 PROCESSING 明确报错，由材料弹窗单项重试。
+    占位与每次真实调用历史均保留，避免自动重发制造重复作业。
     """
     existing = _artifact_for_upload(db, upload, service_code)
     if existing is not None:
         if existing.status == "READY":
             return existing
+        if existing.status == "FAILED":
+            raise BusinessError("ARTIFACT_PROCESSING_FAILED", "此前该项处理失败，请在材料处理状态中重试此项", status_code=409,
+                                details={"artifact_no": existing.artifact_no, "artifact_type": service_code,
+                                         "failure_message": (existing.metadata_json or {}).get("failure_message")})
         raise BusinessError(
             "ARTIFACT_PROCESSING_UNKNOWN",
-            f"此前对当前文件的 {service_code} 调用结果未能确认，系统不会自动重复提交外部服务，请人工核对供应商作业状态",
+            f"此前对当前文件的 {service_code} 调用结果未能确认，系统不会自动重复提交外部服务，请在材料处理状态中确认后重试此项",
             status_code=409,
             details={"artifact_no": existing.artifact_no, "artifact_type": service_code},
         )
@@ -136,21 +141,44 @@ def _ensure_external_artifact(
     db.add(record)
     db.flush()
     db.commit()
+    return execute_external_artifact_call(db, task, upload, record, call)
+
+
+def execute_external_artifact_call(db, task, upload, record, call, *, operation_no=None, resubmit_unknown=False):
+    """联系服务前记录本次调用，保留失败原因与用户确认的重试意图。"""
+    metadata = record.metadata_json or {}
+    attempts = list(metadata.get("processing_attempts") or [])
+    attempt = {"operation_no": operation_no, "started_at": datetime.now(UTC).isoformat(),
+               "previous_status": record.status, "state": "PROCESSING", "resubmit_unknown": resubmit_unknown}
+    attempts.append(attempt)
+    record.status = "PROCESSING"
+    record.metadata_json = {**metadata, "processing_attempts": attempts}
+    db.commit()
     try:
         result = call()
-    except BusinessError as exc:
-        if exc.code in PRE_CONTACT_ERROR_CODES:
-            db.delete(record)
-            db.commit()
+        relative, artifact = _persist_external_artifact(task, upload, record.artifact_type, result)
+        content = artifact.model_dump(mode="json")
+        record.relative_path = relative
+        record.content_sha256 = _artifact_content_digest(content, result.binary_content)
+        record.status = "READY"
+        attempts[-1] = {**attempt, "state": "READY", "finished_at": datetime.now(UTC).isoformat()}
+        record.metadata_json = {**content, "processing_attempts": attempts}
+        db.flush()
+    except Exception as exc:
+        db.rollback()
+        # 调用前错误和明确拒绝属于已知失败；网络或落盘失败无法证明远端未处理。
+        known_failure = isinstance(exc, BusinessError) and exc.code in PRE_CONTACT_ERROR_CODES | {"EXTERNAL_SERVICE_REJECTED"}
+        record.status = "FAILED" if known_failure else "PROCESSING"
+        attempts[-1] = {**attempt, "state": "FAILED" if known_failure else "UNKNOWN",
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "failure_code": exc.code if isinstance(exc, BusinessError) else type(exc).__name__,
+                        "failure_message": exc.message if isinstance(exc, BusinessError) else exception_summary(exc)}
+        record.metadata_json = {**metadata, "processing_attempts": attempts,
+                                "failure_code": attempts[-1]["failure_code"], "failure_message": attempts[-1]["failure_message"]}
+        db.commit()
         raise
-    relative, artifact = _persist_external_artifact(task, upload, service_code, result)
-    record.relative_path = relative
-    record.status = "READY"
-    record.metadata_json = artifact.model_dump(mode="json")
-    # 同一份上传重新识别后内容可能变化：记录真实内容哈希，让索引能识别出“产物已重建”。
-    record.content_sha256 = _artifact_content_digest(record.metadata_json, result.binary_content)
-    db.flush()
     return record
+
 
 def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed_artifact: StoredArtifact) -> StoredArtifact:
     existing = _artifact_for_upload(db, upload, "OCR")
@@ -159,7 +187,7 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
             metadata = existing.metadata_json or {}
             raise BusinessError(
                 "OCR_JOB_FAILED",
-                "当前 OCR 作业已失败，请在材料处理状态中重新提交 OCR 后再执行审核",
+                "当前 OCR 作业已失败，请在材料处理状态中使用单份重试后再执行审核",
                 status_code=409,
                 details={"artifact_no": existing.artifact_no, "job_id": metadata.get("job_id"),
                          "failure_message": metadata.get("failure_message")},
@@ -167,7 +195,7 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
         if existing.status == "SUBMITTING":
             raise BusinessError(
                 "OCR_SUBMISSION_STATE_UNKNOWN",
-                "此前 OCR 提交结果未能确认，系统不会自动重复提交，请人工核对供应商作业状态",
+                "此前 OCR 提交结果未能确认，请在材料处理状态中确认后重新提交该材料的 OCR；系统不会自动重提",
                 status_code=409,
             )
         if existing.status == "PENDING":
@@ -175,7 +203,7 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
             if deadline_at.astimezone(UTC) <= datetime.now(UTC):
                 raise BusinessError(
                     "OCR_JOB_EXPIRED",
-                    "此前 OCR 作业已超过总等待时间，系统不会自动重复提交，请人工核对作业或明确重新上传材料",
+                    "此前 OCR 作业已超过总等待时间，请在材料处理状态中使用单份重试继续查询原作业",
                     status_code=409,
                 )
         if existing.status not in {"PENDING", "READY"}:
@@ -223,7 +251,7 @@ def _submit_authorized_ocr_retry(
     *,
     idempotency_key: str,
 ) -> StoredArtifact:
-    """执行已持久化的人工重提意图；保留原作业与每次提交尝试。"""
+    """执行已持久化的单份重试提交意图；保留原作业与每次提交尝试。"""
     metadata = record.metadata_json or {}
     attempts = list(metadata["submit_attempts"])
     attempt = dict(attempts[-1])
@@ -232,7 +260,7 @@ def _submit_authorized_ocr_retry(
         or attempt["idempotency_key"] != idempotency_key
         or attempt["state"] != "SUBMITTING"
     ):
-        raise BusinessError("OCR_RETRY_INTENT_INVALID", "OCR 人工重提意图与当前作业状态不一致", status_code=409)
+        raise BusinessError("OCR_RETRY_INTENT_INVALID", "OCR 单份重试提交意图与当前作业状态不一致", status_code=409)
 
     try:
         processed_path, processed_filename = _processed_document_source(parsed_artifact)

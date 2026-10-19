@@ -45,6 +45,25 @@ LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 LLM_RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 
 
+def _request_result_unknown(exc: BaseException) -> BusinessError:
+    """把请求已可能送达、但响应没有可靠返回的故障明确标记。
+
+    读超时、写超时和连接被远端提前关闭都不能证明模型没有处理请求。
+    这类故障不能盲目再次 POST，否则可能重复生成并重复计费；由业务层把本次
+    操作标记为失败，用户确认后再用新的业务操作重新提交。
+    """
+    logger.warning(
+        "远程大模型请求结果未知 error_type=%s",
+        type(exc).__name__,
+    )
+    return BusinessError(
+        "LLM_RESULT_UNKNOWN",
+        "远程大模型请求结果未知，系统未自动重复提交；请确认服务状态后重新提交",
+        status_code=502,
+        details={"service": "LLM", "error_type": type(exc).__name__},
+    )
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """一次工具调用请求。
@@ -274,8 +293,12 @@ def _read_stream(
     return envelope
 
 
-def _post(body: dict[str, Any]) -> dict[str, Any]:
-    """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。"""
+def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
+    """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。
+
+    ``idempotency_key`` 标识一次逻辑模型请求，而不是某一次网络尝试；
+    同一逻辑请求的自动重试始终复用它，供应商支持该契约时可避免重复生成。
+    """
     baseurl, api_key, _ = _require_settings()
     settings = get_settings()
     max_attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
@@ -296,10 +319,16 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                 attempt, max_attempts, settings.llm_timeout_seconds,
             )
             try:
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "text/event-stream",
+                }
+                if idempotency_key:
+                    headers["Idempotency-Key"] = idempotency_key
                 with client.stream(
                     "POST",
                     _endpoint(baseurl),
-                    headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
+                    headers=headers,
                     json={**body, "stream": True},
                     timeout=remaining,
                 ) as response:
@@ -312,7 +341,10 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                         timeout_seconds=settings.llm_timeout_seconds,
                     )
             except httpx.TimeoutException as exc:
-                if attempt < max_attempts and time.monotonic() < deadline:
+                # 只有尚未建立连接、尚未把请求交给远端的超时才自动重试。
+                # 读/写超时都可能发生在服务端已经接收请求之后，不能盲目再次 POST。
+                safe_to_retry = isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout))
+                if safe_to_retry and attempt < max_attempts and time.monotonic() < deadline:
                     delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                     logger.warning(
                         "远程大模型请求超时，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
@@ -323,6 +355,8 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                     )
                     time.sleep(delay)
                     continue
+                if not safe_to_retry:
+                    raise _request_result_unknown(exc) from exc
                 logger.warning(
                     "远程大模型请求超时，重试已用尽 attempt=%s retry_count=%s timeout_seconds=%s error_type=%s",
                     attempt,
@@ -369,7 +403,10 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                     details={"service": "LLM"},
                 ) from exc
             except httpx.RequestError as exc:
-                if attempt < max_attempts:
+                # ConnectError / ProxyError 发生在请求建立前，可以安全重试；
+                # ReadError、WriteError、RemoteProtocolError 等都无法证明远端未处理。
+                safe_to_retry = isinstance(exc, (httpx.ConnectError, httpx.PoolTimeout))
+                if safe_to_retry and attempt < max_attempts and time.monotonic() < deadline:
                     delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                     logger.warning(
                         "远程大模型网络请求失败，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
@@ -380,6 +417,8 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
                     )
                     time.sleep(delay)
                     continue
+                if not safe_to_retry:
+                    raise _request_result_unknown(exc) from exc
                 logger.warning(
                     "远程大模型网络请求失败，重试已用尽 attempt=%s retry_count=%s error_type=%s",
                     attempt,
@@ -397,8 +436,12 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
 def call_json(
     payload: dict[str, Any], system_prompt: str,
     *, on_content: Callable[[str], None] | None = None, reasoning_effort: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """单轮请求 JSON 对象，完整接收流式文本后解析；不带工具或工具循环。"""
+    """单轮请求 JSON 对象，完整接收流式文本后解析；不带工具或工具循环。
+
+    ``idempotency_key`` 在自动重试期间保持不变，标识这一次逻辑请求。
+    """
     _, _, model = _require_settings()
     request_body = {
         "model": model,
@@ -411,7 +454,7 @@ def call_json(
     }
     if reasoning_effort is not None:
         request_body["reasoning_effort"] = reasoning_effort
-    envelope = _post(request_body)
+    envelope = _post(request_body, idempotency_key=idempotency_key)
     try:
         content = envelope["choices"][0]["message"]["content"]
         if not isinstance(content, str):
@@ -514,6 +557,7 @@ def call_chat(
     tool_choice: Any = "auto",
     response_format: dict[str, Any] | None = None,
     temperature: float = 0,
+    idempotency_key: str | None = None,
 ) -> ModelTurn:
     """完整接收一次流式 Chat Completions 响应，返回明确的响应契约。
 
@@ -536,7 +580,7 @@ def call_chat(
     if response_format is not None:
         body["response_format"] = response_format
     requested_at = datetime.now(UTC).isoformat()
-    envelope = _post(body)
+    envelope = _post(body, idempotency_key=idempotency_key)
     responded_at = datetime.now(UTC).isoformat()
     try:
         choice = envelope["choices"][0]

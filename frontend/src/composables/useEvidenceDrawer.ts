@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, type ComputedRef, type Ref } from "vue";
+import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 
 import type { AuditField, Evidence } from "@/api/contracts";
 import { getTaskEvidence } from "@/api/audits";
@@ -32,21 +32,26 @@ export function useEvidenceDrawer(options: {
   const evidence = shallowRef<Evidence | null>(null);
   const error = ref<string | null>(null);
   const loading = ref(false);
+  let requestGeneration = 0;
 
   async function load(taskNo: string, evidenceNo: string): Promise<void> {
+    const generation = ++requestGeneration;
+    const stale = () => generation !== requestGeneration || taskNo !== options.taskNo.value;
     error.value = null;
     loading.value = true;
     try {
       await options.run(async () => {
         try {
-          evidence.value = await getTaskEvidence(taskNo, evidenceNo);
+          const value = await getTaskEvidence(taskNo, evidenceNo);
+          if (!stale()) evidence.value = value;
         } catch (err) {
+          if (stale()) return;
           error.value = err instanceof Error ? err.message : "证据读取失败";
           throw err;
         }
       });
     } finally {
-      loading.value = false;
+      if (!stale()) loading.value = false;
     }
   }
 
@@ -61,10 +66,14 @@ export function useEvidenceDrawer(options: {
 
 
   function close(): void {
+    requestGeneration += 1;
+    loading.value = false;
     field.value = null;
     evidence.value = null;
     error.value = null;
   }
+
+  watch(options.taskNo, close);
 
   return {
     open: computed(() => field.value !== null),

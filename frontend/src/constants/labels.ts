@@ -1,8 +1,8 @@
 /**
  * 中文业务标签与状态色。
  *
- * 页面只显示这里的中文名称；英文状态码最多出现在「查看技术信息」区域。
- * 状态色由 statusTone() 统一决定，任何页面都不再自己判断颜色。
+ * 通用任务与执行状态使用本文件；审核结论见 auditStatus.ts，材料产物见 materialProcessing.ts。
+ * 同一状态码在不同业务上下文中可以具有不同含义，由对应的状态表统一文案与颜色。
  */
 
 import { AUDIT_RESULT_LABELS, AUDIT_RESULT_TONES } from "./auditStatus";
@@ -316,7 +316,8 @@ const operationTypeLabels: Record<string, string> = {
   SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
   NODE_EXECUTE: "规则执行",
   DOCUMENT_CLASSIFY: "文件自动校验",
-  MANUAL_REVIEW_RESUME: "人工复核恢复",
+  DOCUMENT_ARTIFACT_RETRY: "材料单项重试",
+  OCR_DOCUMENT_RETRY: "OCR 单份重试",
   // 管理模块：业务写操作与命令
   CREATE: "新增",
   UPDATE: "编辑",
@@ -326,7 +327,7 @@ const operationTypeLabels: Record<string, string> = {
   RESTORE: "恢复",
   COPY: "复制",
   PUBLISH: "发布",
-  DRAFT_SAVE: "保存方案草稿",
+  SAVE: "保存方案配置",
   DRAFT_MATERIAL_CREATE: "新增材料配置",
   DRAFT_MATERIAL_UPDATE: "编辑材料配置",
   DRAFT_MATERIAL_DELETE: "删除材料配置",
@@ -629,13 +630,15 @@ export const dateCompareOperatorOptions = [
 
 
 /**
- * 规则算子的兜底中文名。
+ * 规则动作的中文展示名。
  *
  * 仅用于展示规则原文中的动作名称；不构成可执行能力或工具选项清单。
  */
 export const ruleOperatorOptions = [
   { value: "FILE_QUALITY_CHECK", label: "文件质量检查" },
-  { value: "LLM_EXTRACT", label: "大模型抽取" },
+  { value: "LLM_EXECUTE", label: "大模型审核" },
+  { value: "LLM_EXTRACT", label: "大模型提取信息" },
+  { value: "LLM_CALCULATE", label: "大模型计算" },
   { value: "FIELD_EQUAL", label: "字段相等" },
   { value: "FIELD_NOT_EQUAL", label: "字段不等" },
   { value: "DATE_COMPARE", label: "日期比较" },
@@ -646,7 +649,7 @@ export const ruleOperatorOptions = [
   { value: "CLAUSE_ABSENT", label: "条款不应存在" },
   { value: "LLM_VALIDATE", label: "大模型语义校验" },
   { value: "RISK_TRIGGER", label: "风险触发" },
-  { value: "REPORT_RENDER", label: "报告渲染" },
+  { value: "REPORT_RENDER", label: "生成报告" },
 ];
 
 /** 业务错误码 → 用户能执行的下一步。未收录的错误码只显示原始原因和错误码。 */
@@ -674,6 +677,9 @@ const failureNextSteps: Record<string, string> = {
   RULE_CAPABILITY_UNSUPPORTED: "该规则存在执行能力缺口，请按返回的具体原因核对规则内容和场景节点配置。",
   LLM_STREAM_INCOMPLETE: "模型流式响应未完整结束，本次生成结果未保存；请查看后端流式请求日志。",
   LLM_OUTPUT_TRUNCATED: "模型因输出长度限制而截断了响应，本次生成结果未保存；请核对模型接口的输出限制。",
+  LLM_RESULT_UNKNOWN: "模型请求的响应状态未知，系统未自动重复提交；确认模型服务状态后再重新提交解析。",
+  LLM_NETWORK_FAILED: "模型网络请求在自动重试后仍失败；确认模型服务和网络可达后再重新提交解析。",
+  LLM_TIMEOUT: "模型请求超时；确认模型服务和网络可达后再重新提交解析。",
   RULE_CELL_FORMULA_UNSUPPORTED: "把公式单元格改成业务描述文字后重新上传规则库。",
   RULE_REQUIRED_CELL_EMPTY: "补齐该单元格内容后重新上传规则库。",
 

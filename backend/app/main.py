@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import audits, imports, materials, operations, plans, reports, reviews, scenarios, system
+from .api import audit, imports, material, plan, report, scenario, system
 from .config import PROJECT_DIR, get_settings
 from .integrations import http_services
 from .services.audit import document_ports
@@ -21,8 +21,8 @@ from .common.exceptions import (
 )
 from .runtime.schema_check import verify_schema
 from .middleware.request_context import RequestContextMiddleware
-from .services.audit import recover_interrupted_executions
-from .services.background_service import recover_interrupted_operations
+from .services.audit.commands import recover_interrupted_executions
+from .services.system.background import recover_interrupted_operations
 
 
 def _configure_logging(level_name: str) -> None:
@@ -102,15 +102,11 @@ api_app.add_exception_handler(Exception, unhandled_error_handler)
 for router in (
     system.router,
     imports.router,
-    scenarios.router,
-    plans.router,
-    audits.router,
-    reviews.executions_router,
-    materials.router,
-    materials.evidence_router,
-    reports.router,
-    reports.risks_router,
-    operations.router,
+    scenario.router,
+    plan.router,
+    audit.router,
+    material.router,
+    report.router,
 ):
     api_app.include_router(router, prefix=settings.api_prefix)
 

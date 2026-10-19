@@ -12,7 +12,7 @@ from ...domain import fact_projection
 from ...domain.report_data import report_data_refs, report_format_support
 from ...domain.rule_library import is_risk_rule
 from ...entity import AuditReport, DocumentUpload, NodeExecution, TaskDocument, TaskFact, TaskFieldValue, RuleResult
-from .. import task_value_service
+from . import value_store as task_value_service
 
 
 def evaluation_context(db, task, rule) -> dict[str, Any]:
@@ -21,10 +21,11 @@ def evaluation_context(db, task, rule) -> dict[str, Any]:
     calculation = rule.get("calculation_definition") or {}
     codes.update(calculation.get("depends_on_result_codes") or [])
     codes.update(p["source_code"] for p in calculation.get("parameters") or [] if p.get("source_type") == "CALC_RESULT" and p.get("source_code"))
-    fields = {f["field_key"]: f for f in task.task_schema_json["fields"]}
+    # 引用声明来自完整冻结配置；未选中/停用字段仍可说明身份，不能当成整批程序异常。
+    fields = {f["field_key"]: f for f in task.manifest_json["fields"]}
     field_keys = {item["field_key"] for item in rule.get("inputs") or []}
     field_keys.update(f["field_key"] for f in rule.get("output_definitions") or [])
-    field_keys.update(p["source_code"] for p in calculation.get("parameters") or [] if p.get("source_type") == "FIELD" and p.get("source_code"))
+    # 计算 FIELD 参数已由编译器解析到 inputs，不把原始业务编号再次当成内部字段键。
     if field_keys - fields.keys():
         raise BusinessError("RULE_INPUT_FIELD_UNDECLARED", "规则引用的字段不属于任务冻结的字段身份", status_code=500,
                             details={"field_keys": sorted(field_keys - fields.keys())})
@@ -46,7 +47,7 @@ def evaluation_context(db, task, rule) -> dict[str, Any]:
     facts = list(db.scalars(fact_query.order_by(TaskFact.id)))
     results = list({r.rule_key: r for r in db.scalars(result_query.order_by(RuleResult.id))}.values())
     result_values = {r.id: task_value_service.value_of(db, task, task_value_service.RECORD_RULE_RESULT, r.id) for r in results}
-    projected = project_task_facts(db, task, facts)
+    projected = project_task_facts(db, task, facts, definitions=fields)
     context = {"upstream_facts": [
         {**fact, "value": task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FACT, fact["fact_id"]).get("value")}
         for fact in projected
@@ -144,7 +145,7 @@ def validate_outputs(rule, verdict):
 
 def save_outputs(db, task, execution, rule, verdict):
     if verdict is None:
-        return
+        return []
     definitions = {f["field_key"]: f for f in rule.get("output_definitions") or []}
     written: list[tuple[str, int, dict[str, Any]]] = []
     for item in verdict.get("outputs") or []:
@@ -203,7 +204,7 @@ def save_outputs(db, task, execution, rule, verdict):
             db.add(field_value)
             db.flush()
             written.append((task_value_service.RECORD_TASK_FIELD_VALUE, field_value.id,
-                            {"raw_value": str(item.get("raw_value") or ""), "normalized_value_json": value,
+                            {"raw_value": item.get("raw_value"), "normalized_value_json": value,
                              "unit": field.get("unit"), "currency": field.get("currency")}))
         task_fact = TaskFact(audit_task_id=task.id, scenario_version_id=task.scenario_version_id,
                              fact_code=fact_code, fact_kind="EXTRACTED" if field is not None else "DERIVED",
@@ -217,8 +218,7 @@ def save_outputs(db, task, execution, rule, verdict):
         written.append((task_value_service.RECORD_TASK_FACT, task_fact.id,
                         {"value": fact_projection.canonical_fact_value(value, definition),
                          "unit": definition.get("unit"), "currency": definition.get("currency")}))
-    # 一条规则的全部真实产出写入一个批次；表里只留身份、口径与当前位。
-    task_value_service.append_values(db, task, written)
+    # 先建立数据库索引；证据核对完成后，与规则结论一起写入六表。
     report = verdict.get("report")
     if rule.get("kind") == "REPORT" and report:
         scope = set(task.task_schema_json["enabled_rule_keys"])
@@ -243,6 +243,7 @@ def save_outputs(db, task, execution, rule, verdict):
                                report_generated=True, scope_execution_complete=complete, risk_conclusion_available=risk_available,
                                reasons_json={"unresolved": unresolved, "format_support": formats}, snapshot_json={"rule_key": rule["rule_key"], "task_input_revision": task.input_revision, "rule_result_ids": [r.id for r in result_by_key.values()]},
                                input_revision=task.input_revision, generated_at=datetime.now(UTC)))
+    return written
 
 
 def tool_runtime(db, task, rule, tool_name):

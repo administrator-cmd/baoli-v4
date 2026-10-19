@@ -53,7 +53,9 @@ def compile_library(**config: Any) -> dict[str, Any]:
         if any(not key for key in identities) or len(identities) != len(set(identities)):
             raise BusinessError("RULE_LIBRARY_IDENTITY_INVALID", "规则库对象缺少唯一身份", details={"identity": identity})
     field_by_key = {item["field_key"]: item for item in fields}
-    field_by_code = {str(item.get("source_ref") or item["field_key"]): item for item in fields}
+    fields_by_code: dict[str, list[dict[str, Any]]] = {}
+    for field in fields:
+        fields_by_code.setdefault(str(field.get("source_ref") or field["field_key"]), []).append(field)
     for field in fields:
         field["node_code"] = EXECUTION_CODE
         field["enabled"] = active(field)
@@ -91,11 +93,23 @@ def compile_library(**config: Any) -> dict[str, Any]:
         calculation["node_code"] = calculation["node_instance_code"] = EXECUTION_CODE
         calculation["node_type"] = EXECUTION_CODE
         inputs = []
+        reference_errors = []
         for parameter in calculation.get("parameters") or []:
             if parameter.get("source_type") == "FIELD":
-                field = field_by_key.get(str(parameter.get("source_code"))) or field_by_code.get(str(parameter.get("source_code")))
-                if field is not None:
+                code = str(parameter.get("source_code") or "")
+                candidates = [field_by_key[code]] if code in field_by_key else fields_by_code.get(code, [])
+                if len(candidates) == 1:
+                    field = candidates[0]
                     inputs.append({"field_key": field["field_key"], "material_key": field["material_key"]})
+                    parameter["resolved_field_key"] = field["field_key"]
+                    parameter["resolved_material_key"] = field["material_key"]
+                else:
+                    parameter.pop("resolved_field_key", None)
+                    parameter.pop("resolved_material_key", None)
+                    reference_errors.append({"parameter_code": parameter.get("parameter_code"), "source_code": code,
+                                             "status": "MISSING" if not candidates else "AMBIGUOUS",
+                                             "field_keys": [field["field_key"] for field in candidates]})
+        calculation["field_reference_errors"] = reference_errors
         calculation["depends_on_field_codes"] = [p["source_code"] for p in calculation.get("parameters") or [] if p.get("source_type") == "FIELD"]
         key = stable_key("rule", namespace, f"calculation:{calculation.get('candidate_ref') or calculation['rule_code']}")
         # 方案往返时计算执行项已经存在，不重新产生同一业务项。
@@ -103,6 +117,9 @@ def compile_library(**config: Any) -> dict[str, Any]:
         if existing is not None:
             existing["enabled"] = active(existing) and active(calculation)
             existing["calculation_definition"] = deepcopy(calculation)
+            existing["inputs"] = inputs
+            existing["materials"] = list(dict.fromkeys(i["material_key"] for i in inputs))
+            existing.pop("dependency_error", None)
             continue
         rules.append({"rule_key": key, "rule_code": calculation["rule_code"],
                       "name": calculation.get("rule_name") or calculation["rule_code"], "kind": "CALCULATION",
@@ -160,8 +177,12 @@ def compile_library(**config: Any) -> dict[str, Any]:
         missing += [f"material:{i['material_key']}" for i in rule["inputs"] if i["material_key"] not in material_keys]
         missing += [f"input_material:{i['field_key']}@{i['material_key']}" for i in rule["inputs"]
                     if i["field_key"] in field_by_key and field_by_key[i["field_key"]]["material_key"] != i["material_key"]]
+        missing += [f"parameter:{item['parameter_code']}:{item['source_code']}:{item['status']}"
+                    for item in (rule.get("calculation_definition") or {}).get("field_reference_errors", [])]
         if missing:
             rule["dependency_error"] = missing
+        else:
+            rule.pop("dependency_error", None)
     container = execution_container()
     container["execution_contract"].update(field_keys=list(field_by_key), rule_keys=[i["rule_key"] for i in rules], calculation_rule_codes=[c["rule_code"] for c in calculations])
     manifest = {"manifest_version": "2.0", "execution_contract_version": EXECUTION_VERSION,
@@ -181,25 +202,32 @@ def compile_library(**config: Any) -> dict[str, Any]:
 def execution_order(rules: list[dict[str, Any]], *, all_rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """只按显式输入/结果引用排序；无法满足的引用与环在执行项上暴露。"""
     rules = deepcopy(rules)
-    producers = {field: r["rule_key"] for r in rules for field in r.get("outputs") or []}
-    result_producers = {r["result_code"]: r["rule_key"] for r in rules if r.get("result_code")}
-    code_producers = {r["rule_code"]: r["rule_key"] for r in rules if r.get("rule_code")}
+    producers: dict[str, set[str]] = {}
+    for rule in all_rules:
+        for field in rule.get("outputs") or []:
+            producers.setdefault(field, set()).add(rule["rule_key"])
     selected = {r["rule_key"] for r in rules}
     known_by_key = {r["rule_key"]: r for r in all_rules}
-    known_by_code = {str(code): r for r in all_rules for code in (r.get("result_code"), r.get("rule_code")) if code}
+    known_by_code: dict[str, list[dict[str, Any]]] = {}
+    for rule in all_rules:
+        for code in {rule.get("result_code"), rule.get("rule_code")} - {None, ""}:
+            known_by_code.setdefault(str(code), []).append(rule)
     dependencies = {}
     for rule in rules:
+        rule.pop("unavailable_dependencies", None)
+        rule.pop("dependency_details", None)
         deps = set(rule.get("source_rule_keys") or [])
         if rule.get("source_rule_key"):
             deps.add(rule["source_rule_key"])
-        deps.update(producers[i["field_key"]] for i in rule.get("inputs") or [] if i["field_key"] in producers)
+        for item in rule.get("inputs") or []:
+            deps.update(producers.get(item["field_key"], {f"field:{item['field_key']}"}))
         codes = [*(rule.get("source_rule_codes") or []), *(rule.get("calculation_definition", {}).get("depends_on_result_codes") or []),
                  *(p["source_code"] for p in rule.get("calculation_definition", {}).get("parameters") or [] if p.get("source_type") == "CALC_RESULT")]
         missing_codes = []
         for code in codes:
-            producer = result_producers.get(code) or code_producers.get(code)
-            if producer is not None:
-                deps.add(producer)
+            definitions = known_by_code.get(str(code), [])
+            if len(definitions) == 1:
+                deps.add(definitions[0]["rule_key"])
             else:
                 missing_codes.append(str(code))
         # 报告消费任务结果集合，等该任务其他生效项执行完再生成。
@@ -208,15 +236,16 @@ def execution_order(rules: list[dict[str, Any]], *, all_rules: list[dict[str, An
         if rule.get("kind") == "EXTRACTION":
             deps.discard(rule["rule_key"])
         if deps - selected or missing_codes:
-            rule["unavailable_dependencies"] = sorted(deps - selected) + missing_codes
+            rule["unavailable_dependencies"] = sorted(set(deps - selected) | set(missing_codes))
             rule["dependency_details"] = []
             for reference in rule["unavailable_dependencies"]:
-                definition = known_by_key.get(reference) or known_by_code.get(reference)
+                definitions = ([known_by_key[reference]] if reference in known_by_key else known_by_code.get(reference, []))
+                definition = definitions[0] if len(definitions) == 1 else None
                 rule["dependency_details"].append({
                     "reference": reference,
                     "name": definition.get("name") if definition is not None else None,
                     "status": (
-                        "MISSING" if definition is None else
+                        "AMBIGUOUS" if len(definitions) > 1 else "MISSING" if definition is None else
                         "PENDING" if definition.get("config_status", definition.get("status")) == CONFIG_STATUS_PENDING else
                         "DISABLED" if not active(definition) else "NOT_SELECTED"
                     ),

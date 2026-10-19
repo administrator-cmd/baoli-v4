@@ -94,20 +94,6 @@ class ExternalArtifactStatusResponse(ApiResponse):
     status: str
     message: str
 
-class ExternalArtifactReconcileResponse(ApiResponse):
-    document_no: str
-    artifact_type: str
-    artifact_no: str
-    status: str
-    message: str
-
-class OcrReconcileResponse(ApiResponse):
-    document_no: str
-    artifact_no: str
-    status: str
-    job_id: str | None = None
-    deadline_at: datetime | None = None
-    message: str
 
 class RiskListResponse(ApiResponse):
     task_no: str
@@ -147,8 +133,6 @@ __all__ = [
     "ExecuteNodeResponse",
     "FieldCorrectionResponse",
     "ExternalArtifactStatusResponse",
-    "ExternalArtifactReconcileResponse",
-    "OcrReconcileResponse",
     "RiskListResponse",
     "ReplacementImpact",
     "EvidenceResponse",
