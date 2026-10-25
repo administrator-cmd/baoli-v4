@@ -1,12 +1,76 @@
 """任务材料外部处理产物与 OCR 状态视图。"""
 
-from datetime import datetime
 from typing import Any
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....entity import DocumentUpload, StoredArtifact, TaskDocument
+from ....entity.tasks import DocumentUpload, StoredArtifact, TaskDocument
 from .lookup import task_or_404
+
+MATERIAL_ARTIFACT_TYPES = ("MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL")
+
+
+def material_artifacts_summary(
+    db: Session, upload_ids: list[int]
+) -> dict[int, dict[str, dict[str, Any]]]:
+    """按当前上传批量汇总四项处理产物状态，供任务详情一次返回。
+
+    只读数据库，不触发外部请求；同一上传同一类型取最新一条记录。
+    """
+    if not upload_ids:
+        return {}
+    rows = db.execute(
+        select(
+            StoredArtifact.id,
+            StoredArtifact.document_upload_id,
+            StoredArtifact.artifact_type,
+            StoredArtifact.status,
+            StoredArtifact.artifact_no,
+            StoredArtifact.failure_message,
+            StoredArtifact.external_job_id,
+            StoredArtifact.deadline_at,
+            StoredArtifact.metadata_json,
+        )
+        .where(
+            StoredArtifact.document_upload_id.in_(upload_ids),
+            StoredArtifact.artifact_type.in_(MATERIAL_ARTIFACT_TYPES),
+        )
+        .order_by(StoredArtifact.id)
+    ).all()
+    latest: dict[tuple[int, str], Any] = {}
+    for row in rows:
+        latest[(row.document_upload_id, row.artifact_type)] = row
+    summary: dict[int, dict[str, dict[str, Any]]] = {}
+    for (upload_id, artifact_type), row in latest.items():
+        metadata = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+        entry: dict[str, Any] = {
+            "status": row.status,
+            "artifact_no": row.artifact_no,
+            "message": row.failure_message or _artifact_status_message(row.status),
+            # 统一用 ISO 文本，前端按字符串展示，不依赖响应模型的日期序列化。
+            "deadline_at": row.deadline_at.isoformat() if row.deadline_at else None,
+        }
+        if artifact_type == "OCR":
+            entry["job_id"] = row.external_job_id
+            # 供应商侧状态用于区分排队与识别中；只返回已保存的真实值。
+            entry["provider_state"] = metadata.get("provider_state")
+            entry["extract_progress"] = metadata.get("extract_progress")
+            entry["progress_updated_at"] = metadata.get("progress_updated_at")
+        summary.setdefault(upload_id, {})[artifact_type] = entry
+    return summary
+
+
+def _artifact_status_message(status: str) -> str:
+    return {
+        "READY": "已就绪",
+        "PENDING": "作业已提交，等待供应商完成",
+        "SUBMITTING": "提交结果未知，可确认后重新提交",
+        "PROCESSING": "处理结果未知，可确认后重试此项",
+        "FAILED": "处理失败，可在处理状态中重试此项",
+        "INVALIDATED": "已随材料替换失效",
+    }.get(status, f"处理产物状态：{status}")
 
 
 def external_artifact_status_view(
@@ -48,10 +112,10 @@ def external_artifact_status_view(
         "artifact_no": artifact.artifact_no,
         "status": artifact.status,
         "message": (
-            str((artifact.metadata_json or {}).get("failure_message") or "处理结果未知，可确认可能重复调用后重试此项")
+            str(artifact.failure_message or "处理结果未知，可确认可能重复调用后重试此项")
             if artifact.status == "PROCESSING"
             else "处理产物已就绪" if artifact.status == "READY"
-            else str((artifact.metadata_json or {}).get("failure_message") or f"处理产物状态：{artifact.status}")
+            else str(artifact.failure_message or f"处理产物状态：{artifact.status}")
         ),
     }
 
@@ -92,18 +156,14 @@ def ocr_status_view(db: Session, task_no: str, document_no: str) -> dict[str, An
     if artifact is None:
         return {**base, "status": "NOT_SUBMITTED", "message": "当前上传文件尚未提交 OCR 作业"}
     metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-    job_id = metadata.get("job_id")
-    deadline_raw = metadata.get("deadline_at")
-    try:
-        deadline_at = datetime.fromisoformat(deadline_raw) if isinstance(deadline_raw, str) else None
-    except ValueError as exc:
-        raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 截止时间无效", status_code=500) from exc
+    job_id = artifact.external_job_id
+    deadline_at = artifact.deadline_at
     attempts = metadata.get("submit_attempts")
     message = {
         "SUBMITTING": "OCR 提交结果未知，可点击「重新提交 OCR」；需确认可能重复创建云端作业",
         "PENDING": "OCR 作业已提交，等待供应商完成",
         "READY": "OCR 产物已就绪",
-        "FAILED": str(metadata["failure_message"]) if metadata.get("failure_message") else "OCR 作业失败",
+        "FAILED": str(artifact.failure_message or "OCR 作业失败"),
         "INVALIDATED": "OCR 产物已随材料替换失效",
     }.get(artifact.status, f"OCR 产物状态：{artifact.status}")
     return {

@@ -1,11 +1,11 @@
-"""固定六表的事务锁与保存点快照；不判断规则或吞掉读写失败。"""
+"""固定四表的事务锁与保存点快照；不判断规则或吞掉读写失败。"""
 
-from contextlib import contextmanager
 import hashlib
 import logging
 import os
-from pathlib import Path
 import shutil
+from contextlib import contextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import event
@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 
 from ..shared.file_lock import FileLock
 from ..shared.storage import resolve_storage_path
-
 
 logger = logging.getLogger(__name__)
 _LOCKS = "task_value_file_locks"
@@ -39,7 +38,7 @@ def lock_task_files(db: Session, task_no: str) -> None:
 
 @contextmanager
 def read_task_files(db: Session, task_no: str):
-    """只读调用只在加载六表时持锁；已有事务锁时复用，不提前释放。"""
+    """只读调用只在加载四表时持锁；已有事务锁时复用，不提前释放。"""
     if task_no in db.info.get(_LOCKS, {}):
         yield
         return
@@ -71,17 +70,6 @@ def snapshot_files(db: Session, targets: dict[str, Path]) -> None:
                 else:
                     files[target] = None
         transaction = transaction.parent
-
-
-def remove_obsolete_files(db: Session, batches, current_files, retained_files) -> None:
-    current = set(current_files.values())
-    targets = {relative: resolve_storage_path(relative)
-               for batch in batches for relative in batch["files"].values()
-               if relative not in current and relative not in retained_files}
-    # 删除在业务提交之前完成；失败会明确上抛，回滚同时恢复旧文件。
-    snapshot_files(db, targets)
-    for target in targets.values():
-        target.unlink(missing_ok=True)
 
 
 def _discard_backups(files) -> None:

@@ -35,8 +35,8 @@ defineEmits<{
     />
     <el-table v-else :data="jobs" border @row-click="$emit('select', $event)">
       <el-table-column label="规则库文件" prop="source_filename" min-width="240" show-overflow-tooltip />
-      <el-table-column label="上传时间" width="180">
-        <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
+      <el-table-column label="上传时间" width="190">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(row.created_at) }}</span></template>
       </el-table-column>
       <el-table-column label="状态" width="140">
         <template #default="{ row }">

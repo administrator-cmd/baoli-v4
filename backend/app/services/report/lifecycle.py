@@ -1,9 +1,12 @@
 """审核报告备注维护与归档状态变更。"""
 
 from datetime import UTC, datetime
+
 from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditReport, AuditTask
+from ...entity.reports import AuditReport
+from ...entity.tasks import AuditTask
 from ..system.operation_log import record_operation
 from ..system.operation_types import OBJECT_REPORT
 from .query import report_or_404

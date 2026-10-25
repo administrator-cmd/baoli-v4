@@ -8,24 +8,25 @@
 
 失效一律保留历史：旧批次标 INVALIDATED，旧事实与旧复核仍可追溯，不原地清空。"""
 
-import hashlib
-from ...domain import fact_projection
-from ...domain.manifest import enabled_extraction_field_keys
-from ...domain.audit_vocab import MATERIAL_TYPE_REJECTED, MATERIAL_TYPE_REVIEW
-from ...common.exceptions import BusinessError
-from ...entity import AuditTask, BackgroundOperation, DocumentUpload, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
-from .execution_history import invalidate_executions
-from ..system.operation_types import OBJECT_AUDIT_TASK
-from .facts import _current_field_fact_pairs, _write_human_field_fact
-from .shared import REVIEW_DECISION_LABELS, _task_field_definitions, _task_manifest
-from .state import _task_field_value_of_current_upload
-from ...domain.rule_library import active, execution_container_of
-from decimal import InvalidOperation
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
 from typing import Any
 
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
+from ...constants.execution import (
+    FACT_KIND_DERIVED,
+    FACT_KIND_EXTRACTED,
+    NODE_RULE_EXECUTION,
+    ORIGIN_DOCUMENT_EXTRACTION,
+)
+from ...constants.status import FIELD_STATUS_REVIEWED
+from ...domain.manifest import enabled_extraction_field_keys
+from ...domain.rule_library import active, execution_container_of
+from ...entity.operations import BackgroundOperation
+from ...entity.tasks import AuditTask, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
+from ..system.operation_types import OBJECT_AUDIT_TASK
+from .execution_history import invalidate_executions
+from .shared import _task_manifest
 
 
 def _decision_command_no(db: Session, task: AuditTask) -> str | None:
@@ -154,7 +155,7 @@ def _field_change_affected_node_codes(manifest: dict[str, Any], changed_field_ke
             continue
         referenced = {i["field_key"] for i in rule.get("inputs") or []} | set(rule.get("outputs") or [])
         if referenced & changed_field_keys or rule.get("kind") == "REPORT":
-            return {"RULE_EXECUTION"}
+            return {NODE_RULE_EXECUTION}
     return set()
 
 
@@ -162,8 +163,8 @@ def _next_node_for_recalculation(db: Session, task: AuditTask, manifest: dict[st
     """重新执行失效的规则批次，不寻找业务阶段或人工复核节点。"""
     db.flush()
     completed = db.scalar(select(NodeExecution.id).where(NodeExecution.audit_task_id == task.id,
-                          NodeExecution.node_code == "RULE_EXECUTION", NodeExecution.status == "SUCCEEDED"))
-    return None if completed is not None else next(item for item in nodes if item["node_code"] == "RULE_EXECUTION")
+                          NodeExecution.node_code == NODE_RULE_EXECUTION, NodeExecution.status == "SUCCEEDED"))
+    return None if completed is not None else next(item for item in nodes if item["node_code"] == NODE_RULE_EXECUTION)
 
 
 def _invalidate_retry_results(
@@ -174,7 +175,7 @@ def _invalidate_retry_results(
 ) -> None:
     """重试失效模型产出，保留人工确认和人工纠错的当前字段版本。"""
     manifest = _task_manifest(task)
-    affected_nodes = {"RULE_EXECUTION"}
+    affected_nodes = {NODE_RULE_EXECUTION}
     execution_ids = list(
         db.scalars(
             select(NodeExecution.id).where(
@@ -199,7 +200,7 @@ def _invalidate_retry_results(
             update(TaskFact)
             .where(
                 TaskFact.audit_task_id == task.id,
-                TaskFact.fact_kind == "DERIVED",
+                TaskFact.fact_kind == FACT_KIND_DERIVED,
                 TaskFact.source_execution_id.in_(execution_ids),
                 TaskFact.is_current.is_(True),
             )
@@ -242,8 +243,8 @@ def _invalidate_retry_results(
                     TaskFieldValue.field_key.in_(affected_field_keys),
                     TaskFieldValue.document_upload_id.in_(current_upload_ids),
                     TaskFieldValue.is_current.is_(True),
-                    TaskFieldValue.origin == "DOCUMENT_EXTRACTION",
-                    TaskFieldValue.status != "REVIEWED",
+                    TaskFieldValue.origin == ORIGIN_DOCUMENT_EXTRACTION,
+                    TaskFieldValue.status != FIELD_STATUS_REVIEWED,
                 )
             ).all()
         )
@@ -276,11 +277,11 @@ def _invalidate_retry_results(
             update(TaskFact)
             .where(
                 TaskFact.audit_task_id == task.id,
-                TaskFact.fact_kind == "EXTRACTED",
+                TaskFact.fact_kind == FACT_KIND_EXTRACTED,
                 TaskFact.fact_code.in_(affected_fact_codes),
                 TaskFact.is_current.is_(True),
                 TaskFact.source_execution_id.is_not(None),
-                TaskFact.status != "REVIEWED",
+                TaskFact.status != FIELD_STATUS_REVIEWED,
             )
             .values(is_current=False)
         )

@@ -2,9 +2,9 @@
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioTemplate, ScenarioVersion
-from ...repositories.scenario import version as scenario_version
+from ...entity.scenarios import ScenarioTemplate, ScenarioVersion
 
 
 def template_or_404(
@@ -46,9 +46,30 @@ def version_or_404(db: Session, scenario_code: str, version_no: int) -> Scenario
     return version
 
 
+def find_published_version(db: Session, scenario_code: str, version_no: int) -> ScenarioVersion | None:
+    return db.scalar(
+        select(ScenarioVersion).where(
+            ScenarioVersion.scenario_code == scenario_code,
+            ScenarioVersion.version_no == version_no,
+            ScenarioVersion.status == "PUBLISHED",
+        )
+    )
+
+
+def find_latest_published_version(db: Session, scenario_code: str) -> ScenarioVersion | None:
+    # 排序只读取 ID，完整 JSON 配置按主键读取，不进入排序缓冲区。
+    version_id = db.scalar(
+        select(ScenarioVersion.id)
+        .where(ScenarioVersion.scenario_code == scenario_code, ScenarioVersion.status == "PUBLISHED")
+        .order_by(ScenarioVersion.version_no.desc())
+        .limit(1)
+    )
+    return db.get(ScenarioVersion, version_id) if version_id is not None else None
+
+
 def scenario_or_404(db: Session, scenario_code: str, version_no: int) -> ScenarioVersion:
     """按场景编码与版本号取已发布版本；不存在时 404。"""
-    scenario = scenario_version.find_published_version(db, scenario_code, version_no)
+    scenario = find_published_version(db, scenario_code, version_no)
     if not scenario:
         raise BusinessError("SCENARIO_VERSION_NOT_FOUND", "已发布场景版本不存在", status_code=404)
     return scenario

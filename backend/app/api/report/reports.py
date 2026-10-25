@@ -1,17 +1,19 @@
 """报告列表、详情、备注、归档与下载接口。"""
 
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from .downloads import report_download_response
-from ...database import get_db
-from ...common.exceptions import BusinessError
-from ...schema.dto import ReportRemarkRequest
-from ...schema.query import validate_page_params
-from ...services.report import lifecycle as report_lifecycle, query as report_query
-from ...schema.vo import PagedResponse
 
+from ...common.exceptions import BusinessError
+from ...core.database import get_db
+from ...schema.dto.reports import ReportRemarkRequest
+from ...schema.query.pagination import validate_page_params
+from ...schema.query.timestamps import FilterDateTime
+from ...schema.vo.common import PagedResponse
+from ...services.report import lifecycle as report_lifecycle
+from ...services.report import query as report_query
+from .downloads import report_download_response
 
 router = APIRouter(prefix="/reports", tags=["审核报告"])
 
@@ -24,8 +26,8 @@ def list_reports(
     scenario_code: str | None = None,
     plan_code: str | None = None,
     archived: bool | None = None,
-    generated_from: datetime | None = None,
-    generated_to: datetime | None = None,
+    generated_from: FilterDateTime | None = None,
+    generated_to: FilterDateTime | None = None,
     page: int = Query(default=1),
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),

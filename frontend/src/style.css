@@ -183,6 +183,11 @@ a {
   line-height: 1.6;
 }
 
+/* 表格里的时间保持单行，列宽不足时不要折成两行 */
+.table-nowrap {
+  white-space: nowrap;
+}
+
 /* ---- 标准管理列表页 ---- */
 /* 白底 4px 圆角 + #EBEEF5 细边框的列表面板 */
 .app-panel {
@@ -242,11 +247,39 @@ a {
   background: transparent;
   color: var(--el-color-primary);
   cursor: pointer;
-  text-align: left;
+  text-align: center;
 }
 
 .table-link:hover {
   text-decoration: underline;
+}
+
+/* 操作列按按钮实际数量留宽，避免默认按钮间距把最后一个按钮挤到下一行。 */
+.el-table .table-actions > .cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.el-table .table-actions .el-button {
+  flex-shrink: 0;
+}
+
+.el-table .table-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.execution-result-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 12px;
+}
+
+.execution-result-summary > span {
+  white-space: nowrap;
 }
 
 /* 详情页阅读宽度（复杂配置/表单）；列表不受此限制 */
@@ -368,6 +401,21 @@ a {
 
 .el-table .cell {
   word-break: break-word;
+}
+
+/* 管理表格的表头与展示内容统一居中，各页面不再按文本类型另设对齐例外。 */
+.el-table th.el-table__cell > .cell {
+  text-align: center;
+}
+
+.el-table td.el-table__cell {
+  text-align: center;
+}
+
+/* 长文本列在列上声明 cell-align-left；表头仍居中，正文左对齐。 */
+.el-table td.el-table__cell.cell-align-left,
+.el-table td.el-table__cell.cell-align-left > .cell {
+  text-align: left;
 }
 
 /* 结果与来源信息较长时，正文行与展开行都允许换行 */
@@ -545,6 +593,29 @@ a {
   color: var(--el-text-color-placeholder);
   font-size: 12px;
   font-weight: 400;
+}
+
+/* 审核结果与场景、方案管理列表统一字号和表头底色。 */
+.audit-result-table,
+.management-table {
+  --el-table-font-size: var(--el-font-size-base);
+  --el-table-header-bg-color: var(--el-color-primary-light-9);
+  --el-table-header-text-color: var(--el-text-color-regular);
+  font-size: var(--el-font-size-base);
+}
+
+.audit-result-table .cell,
+.audit-result-table .table-note,
+.audit-result-table .mono,
+.audit-result-table .el-button,
+.audit-result-table .el-tag,
+.management-table .cell,
+.management-table .table-note,
+.management-table .mono,
+.management-table .text-hint,
+.management-table .el-button,
+.management-table .el-tag {
+  font-size: var(--el-font-size-base);
 }
 
 .table-empty {

@@ -1,16 +1,20 @@
 """审核任务列表、详情、复制与维护接口。"""
 
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.query import validate_page_params
-from ...schema.dto import TaskCopyRequest, TaskUpdateRequest
-from ...services.audit.tasks import lifecycle as tasks_lifecycle, query as tasks_query, copying as task_command_service
-from ...services.audit.tasks.lookup import task_or_404
-from ...services.audit.tasks.detail import task_view
-from ...schema.vo import AuditTaskResponse, PagedResponse
 
+from ...core.database import get_db
+from ...schema.dto.tasks import TaskCopyRequest, TaskUpdateRequest
+from ...schema.query.pagination import validate_page_params
+from ...schema.query.timestamps import FilterDateTime
+from ...schema.vo.common import PagedResponse
+from ...schema.vo.tasks import AuditTaskResponse
+from ...services.audit.tasks import copying as task_command_service
+from ...services.audit.tasks import lifecycle as tasks_lifecycle
+from ...services.audit.tasks import query as tasks_query
+from ...services.audit.tasks.detail import task_view
+from ...services.audit.tasks.lookup import task_or_404
 
 router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
 
@@ -23,8 +27,8 @@ def list_tasks(
     plan_code: str | None = None,
     status: str | None = None,
     current_node: str | None = None,
-    created_from: datetime | None = None,
-    created_to: datetime | None = None,
+    created_from: FilterDateTime | None = None,
+    created_to: FilterDateTime | None = None,
     page: int = Query(default=1),
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),

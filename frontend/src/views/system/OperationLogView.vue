@@ -7,7 +7,7 @@ import { listOperations } from "@/api/system";
 import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { usePagedList } from "@/composables/usePagedList";
-import { objectTypeLabel, operationTypeLabel } from "@/constants/labels";
+import { formatDate, objectTypeLabel, operationTypeLabel } from "@/constants/labels";
 
 /**
  * 操作日志：业务写操作与后台命令并列展示。
@@ -139,8 +139,8 @@ onMounted(() => {
     </el-alert>
 
     <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="时间" width="180">
-        <template #default="{ row }">{{ String(row.created_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="时间" width="190">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
       <el-table-column label="来源" width="100">
         <template #default="{ row }">
@@ -209,7 +209,7 @@ onMounted(() => {
         </el-descriptions-item>
         <el-descriptions-item label="操作">{{ operationTypeLabel(detail.operation_type) }}</el-descriptions-item>
         <el-descriptions-item label="结果"><StatusBadge :status="detail.result" /></el-descriptions-item>
-        <el-descriptions-item label="时间">{{ String(detail.created_at).replace("T", " ").slice(0, 19) }}</el-descriptions-item>
+        <el-descriptions-item label="时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
         <el-descriptions-item label="耗时">{{ durationText(detail.duration_ms) }}</el-descriptions-item>
         <el-descriptions-item v-if="detail.failure_code" label="失败码">{{ detail.failure_code }}</el-descriptions-item>
         <el-descriptions-item v-if="detail.failure_message" label="失败原因">{{ detail.failure_message }}</el-descriptions-item>

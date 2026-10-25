@@ -2,15 +2,18 @@
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.query import validate_page_params
-from ...schema.dto import ExecuteNodeRequest
-from ...services.audit import executions as audit_executions
-from ...services.system.background import operation_view
-from ...services.audit.operations import submit_node_execution
-from ...services.audit.tasks.lookup import task_or_404
-from ...schema.vo import OperationAcceptedResponse, PagedResponse
 
+from ...common.exceptions import BusinessError
+from ...core.database import get_db
+from ...schema.dto.tasks import ExecuteNodeRequest, ResumeExecutionRequest
+from ...schema.query.pagination import validate_page_params
+from ...schema.vo.common import PagedResponse
+from ...schema.vo.operations import OperationAcceptedResponse
+from ...services.audit import executions as audit_executions
+from ...services.audit import resume as audit_resume
+from ...services.audit.operations import submit_node_execution, submit_node_resume
+from ...services.audit.tasks.lookup import task_or_404
+from ...services.system.background import operation_view
 
 router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
 
@@ -51,6 +54,34 @@ def execute(task_no: str, payload: ExecuteNodeRequest, request: Request, db: Ses
         db,
         task,
         node_code=payload.node_code,
+        idempotency_key=payload.idempotency_key,
+        input_revision=payload.input_revision,
+    )
+    return OperationAcceptedResponse.model_validate(
+        {**operation_view(operation, reused=reused), "request_id": request.state.request_id}
+    )
+
+
+@router.post("/{task_no}/resume", response_model=OperationAcceptedResponse, status_code=202)
+def resume(task_no: str, payload: ResumeExecutionRequest, request: Request, db: Session = Depends(get_db)) -> OperationAcceptedResponse:
+    """从未完成的执行批次继续，只重跑未完成规则及其下游。
+
+    与 ``/execute`` 的区别：这里复用原批次，不受影响的已提交结果不重跑；
+    批次没有可继续的未完成项时明确 409，并提示改用重新执行。
+    """
+    task = task_or_404(db, task_no, lock=True)
+    execution = audit_resume.resumable_execution_of_task(db, task)
+    if execution is None:
+        raise BusinessError(
+            "AUDIT_EXECUTION_NOT_RESUMABLE",
+            "当前没有可继续的未完成批次，请使用「重新尝试」重新执行",
+            status_code=409,
+            details={"task_no": task_no, "status": task.status},
+        )
+    operation, reused = submit_node_resume(
+        db,
+        task,
+        execution_id=execution.id,
         idempotency_key=payload.idempotency_key,
         input_revision=payload.input_revision,
     )

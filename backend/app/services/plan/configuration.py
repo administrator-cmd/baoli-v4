@@ -2,27 +2,29 @@
 
 from copy import deepcopy
 from typing import Any
+
 from sqlalchemy.orm import Session
+
+from ...common.exceptions import BusinessError
+from ...constants.status import SCOPE_NOT_APPLICABLE
+from ...domain import field_strategy
+from ...domain import manifest as manifest_module
 from ...domain.calculation_config import (
     calculation_store,
     calculations_referencing_field,
     remap_calculation_field_codes,
 )
-from ...repositories.shared import configuration as config_store
-from ...domain import field_strategy, manifest as manifest_module
+from ...domain.manifest import FORM_VALUE_TYPES
 from ...domain.plan_calculations import plan_calculation_config
-from ...domain.audit_vocab import SCOPE_NOT_APPLICABLE
 from ...domain.report_data import report_data_refs
 from ...domain.rule_library import active
-from ...domain.manifest import FORM_VALUE_TYPES
-from ...common.exceptions import BusinessError
-from ...entity import PlanField, PlanMaterial, PlanRule, PlanSection
+from ...entity.plans import PlanField, PlanMaterial, PlanRule, PlanSection
+from ..shared import configuration as config_store
 from ..system.operation_log import record_operation
 from ..system.operation_types import OBJECT_PLAN
-from ...repositories.plan.configuration import plan_config_rows
 from .compilation import _recompile_plan
 from .lookup import plan_or_404
-from .views import plan_config_view
+from .views import plan_config_rows, plan_config_view
 
 
 def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> dict[str, Any]:

@@ -5,7 +5,7 @@ import { isOperationFinished, watchOperation, type OperationView, type Operation
 /**
  * 后台操作的页面侧查询状态。
  *
- * 只做三件事：按 operation_no 查询真实状态、结束后回调一次、组件卸载时停止轮询。
+ * 按 operation_no 查询真实状态，执行中通知可选更新回调，结束后回调一次；卸载时停止轮询。
  * 查询失败只回调给页面并停止轮询，绝不在这里重新提交执行请求；再次查询用 requery()。
  */
 export interface OperationTracker {
@@ -16,6 +16,7 @@ export interface OperationTracker {
     operation: OperationView,
     handlers: {
       onFinished: (operation: OperationView) => void | Promise<void>;
+      onUpdate?: (operation: OperationView) => void | Promise<void>;
       onError: (error: unknown) => void;
     },
   ) => void;
@@ -36,6 +37,7 @@ export function useOperationTracker(): OperationTracker {
   let operationNo: string | null = null;
   let handle: OperationWatch | null = null;
   let onFinished: ((operation: OperationView) => void | Promise<void>) | null = null;
+  let onUpdate: ((operation: OperationView) => void | Promise<void>) | null = null;
   let onError: ((error: unknown) => void) | null = null;
 
   function stop(): void {
@@ -52,6 +54,8 @@ export function useOperationTracker(): OperationTracker {
       if (handler) {
         await handler(value);
       }
+    } else if (onUpdate) {
+      await onUpdate(value);
     }
   }
 
@@ -78,10 +82,12 @@ export function useOperationTracker(): OperationTracker {
     value: OperationView,
     handlers: {
       onFinished: (operation: OperationView) => void | Promise<void>;
+      onUpdate?: (operation: OperationView) => void | Promise<void>;
       onError: (error: unknown) => void;
     },
   ): void {
     onFinished = handlers.onFinished;
+    onUpdate = handlers.onUpdate ?? null;
     onError = handlers.onError;
     operationNo = value.operation_no;
     operation.value = value;
@@ -98,6 +104,7 @@ export function useOperationTracker(): OperationTracker {
     operationNo = null;
     operation.value = null;
     onFinished = null;
+    onUpdate = null;
     onError = null;
   }
 

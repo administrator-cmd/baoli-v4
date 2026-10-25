@@ -1,25 +1,52 @@
 """场景草稿的初始化、锁定、配置写入与事务提交。"""
 
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...repositories.shared import configuration as config_store
-from ...repositories.scenario.version import find_latest_published_version
-from ...domain import field_strategy, manifest as manifest_module, scenario_schema
+
+from ...constants.execution import NODE_RULE_EXECUTION
+from ...domain import field_strategy, scenario_schema
+from ...domain import manifest as manifest_module
 from ...domain.rule_library import active
-from ...entity import (
+from ...entity.scenario_drafts import (
     ScenarioDraft,
     ScenarioDraftField,
-    ScenarioDraftNode,
     ScenarioDraftMaterial,
+    ScenarioDraftNode,
     ScenarioDraftRule,
     ScenarioDraftSection,
-    ScenarioTemplate,
 )
+from ...entity.scenarios import ScenarioTemplate
+from ..shared import configuration as config_store
 from ..system.operation_log import record_operation
 from ..system.operation_types import OBJECT_SCENARIO
-from ...repositories.scenario.draft import draft_rows
-from .lookup import template_or_404
+from .lookup import find_latest_published_version, template_or_404
+
+
+def draft_rows(
+    db: Session, draft_id: int
+) -> tuple[
+    list[ScenarioDraftNode],
+    list[ScenarioDraftMaterial],
+    list[ScenarioDraftField],
+    list[ScenarioDraftRule],
+    list[ScenarioDraftSection],
+]:
+    """草稿的全部业务行：节点实例、材料、字段、规则、报告章节。
+
+    技术容器只用于持久化关联；规则的显式引用决定执行顺序。
+    """
+    nodes = sorted(config_store.rows(db, ScenarioDraftNode, draft_id), key=lambda item: (item.sequence_no, item.id,))
+    materials = sorted(config_store.rows(db, ScenarioDraftMaterial, draft_id), key=lambda item: (item.sort_no, item.id,))
+    fields = sorted(config_store.rows(db, ScenarioDraftField, draft_id), key=lambda item: (item.sort_no, item.id,))
+    rules = sorted(config_store.rows(db, ScenarioDraftRule, draft_id), key=lambda item: (item.sort_no, item.id,))
+    sections = sorted(config_store.rows(db, ScenarioDraftSection, draft_id), key=lambda item: (item.sort_no, item.id,))
+    return list(nodes), list(materials), list(fields), list(rules), list(sections)
+
+
+def next_sort_no(db: Session, model: type, draft_id: int) -> int:
+    return config_store.next_sort_no(db, model, draft_id)
 
 
 def ensure_draft(db: Session, template: ScenarioTemplate) -> ScenarioDraft:
@@ -94,7 +121,7 @@ def load_import_config_into_draft(
         item["extraction_strategy"] = extraction_strategy
         item["structure_schema_json"] = structure_schema
     draft.profile_version = profile_version
-    config["node_instances"] = [{"node_code": "RULE_EXECUTION", "node_type": "RULE_EXECUTION", "name": "执行生效规则", "sequence_no": 1, "depends_on": [], "config_json": {}, "enabled": True}]
+    config["node_instances"] = [{"node_code": NODE_RULE_EXECUTION, "node_type": NODE_RULE_EXECUTION, "name": "执行生效规则", "sequence_no": 1, "depends_on": [], "config_json": {}, "enabled": True}]
     _write_config_into_draft(db, draft, config, replace_nodes=True)
 
 
@@ -132,7 +159,7 @@ def _bump_draft(draft: ScenarioDraft) -> None:
 
 def _default_draft_nodes(draft_id: int) -> list[ScenarioDraftNode]:
     """只建立执行记录所需的技术容器，不预置业务阶段。"""
-    return [ScenarioDraftNode(draft_id=draft_id, node_code="RULE_EXECUTION", node_type="RULE_EXECUTION", name="执行生效规则", sequence_no=1, depends_on=[], enabled=True, sort_no=1)]
+    return [ScenarioDraftNode(draft_id=draft_id, node_code=NODE_RULE_EXECUTION, node_type=NODE_RULE_EXECUTION, name="执行生效规则", sequence_no=1, depends_on=[], enabled=True, sort_no=1)]
 
 
 def _locked_draft(db: Session, scenario_code: str) -> tuple[ScenarioTemplate, ScenarioDraft]:

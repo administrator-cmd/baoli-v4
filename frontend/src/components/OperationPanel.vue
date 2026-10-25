@@ -2,7 +2,7 @@
 import { computed } from "vue";
 
 import { isOperationFinished, operationToneClass, type OperationView } from "@/api/http";
-import { operationPhaseLabel, operationTypeLabel, statusLabel } from "@/constants/labels";
+import { operationPhaseLabel, operationTypeLabel, parseServerTime, statusLabel } from "@/constants/labels";
 import StatusBadge from "./StatusBadge.vue";
 
 /**
@@ -24,6 +24,11 @@ const props = withDefaults(
     /** 是否显示「重新尝试」按钮（操作失败或被中断时由页面决定）。 */
     canRetry?: boolean;
     /**
+     * 是否显示「继续执行」按钮：只对服务重启中断、可原地继续的批次提供。
+     * 继续执行复用原批次与已完成的规则结果；重新尝试另建批次重跑全部规则。
+     */
+    canResume?: boolean;
+    /**
      * 是否显示「中止」按钮；由页面按「是否有尚未结束的后台操作」决定。
      * 中止只释放服务端的活跃占用，不改写业务状态。
      */
@@ -37,13 +42,15 @@ const props = withDefaults(
     /** 业务页面使用简洁布局，内部操作信息默认折叠。 */
     compact?: boolean;
   }>(),
-  { label: null, pollSeconds: 2, canRetry: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false },
+  { label: null, pollSeconds: 2, canRetry: false, canResume: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false },
 );
 
 defineEmits<{
   requery: [];
   /** 重试必须带上原操作类型，页面据此按原操作入口重试（例如复核失败仍走复核接口）。 */
   retry: [operationType: string];
+  /** 继续执行：复用中断批次，只跑没有结果的规则。 */
+  resume: [];
   abort: [];
 }>();
 
@@ -55,6 +62,23 @@ const queryStopped = computed(
   () => Boolean(props.operation) && !props.watching && !isOperationFinished(props.operation?.status),
 );
 const hasPercent = computed(() => typeof props.percent === "number" && props.percent >= 0);
+
+/**
+ * 已运行时长：由服务端给出的开始时间计算。
+ * 服务端时间不带时区后缀，必须按 UTC 解析；轮询每 2 秒触发一次重新渲染，
+ * 因此不需要额外定时器。
+ */
+const elapsedText = computed(() => {
+  const startedAt = props.operation?.started_at;
+  if (!startedAt || tone.value !== "running") return null;
+  const started = parseServerTime(startedAt);
+  if (started === null) return null;
+  const seconds = Math.max(0, Math.floor((Date.now() - started.getTime()) / 1000));
+  if (seconds < 60) return `已运行 ${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `已运行 ${minutes} 分钟`;
+  return `已运行 ${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
+});
 </script>
 
 <template>
@@ -67,7 +91,8 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
         </div>
         <div class="card-actions">
           <StatusBadge :status="operation.status" />
-          <el-button size="small" :loading="watching" @click="$emit('requery')">再次查询</el-button>
+          <!-- 终态记录不会变化，重读只会得到同一份状态；只在轮询仍在进行或已中断时提供查询。 -->
+          <el-button v-if="watching || queryStopped" size="small" :loading="watching" @click="$emit('requery')">再次查询</el-button>
           <el-button
             v-if="canAbort"
             size="small"
@@ -78,9 +103,17 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
             中止
           </el-button>
           <el-button
-            v-if="canRetry"
+            v-if="canResume"
             size="small"
             type="primary"
+            @click="$emit('resume')"
+          >
+            继续执行
+          </el-button>
+          <el-button
+            v-if="canRetry"
+            size="small"
+            :type="canResume ? 'default' : 'primary'"
             @click="$emit('retry', operation.operation_type)"
           >
             重新尝试
@@ -115,6 +148,7 @@ const hasPercent = computed(() => typeof props.percent === "number" && props.per
 
     <!-- 有真实总量才画进度条；否则只说明「处理中」，不编百分比 -->
     <div v-if="tone === 'running'" class="block-gap">
+      <p v-if="elapsedText" class="operation-message">{{ elapsedText }}</p>
       <el-progress
         v-if="hasPercent"
         :percentage="percent as number"

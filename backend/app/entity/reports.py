@@ -2,23 +2,22 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..database import Base
-from .base import TimestampMixin
+from ..core.database import Base
+from .base import TimestampMixin, UTCDateTime
 
 
 class AuditReport(Base, TimestampMixin):
@@ -54,6 +53,6 @@ class AuditReport(Base, TimestampMixin):
     # 生成报告时的任务输入修订，用于对账。
     input_revision: Mapped[int | None] = mapped_column(Integer)
     remark: Mapped[str | None] = mapped_column(Text)
-    archived_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
-    generated_at: Mapped[datetime] = mapped_column(MySQLDateTime(fsp=6), nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 

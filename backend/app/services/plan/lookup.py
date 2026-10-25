@@ -2,9 +2,11 @@
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...repositories.scenario.version import find_latest_published_version
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditPlan, ScenarioTemplate, ScenarioVersion
+from ...entity.plans import AuditPlan
+from ...entity.scenarios import ScenarioTemplate, ScenarioVersion
+from ..scenario.lookup import find_latest_published_version
 
 
 def plan_or_404(db: Session, plan_code: str, *, lock: bool = False, include_deleted: bool = False) -> AuditPlan:

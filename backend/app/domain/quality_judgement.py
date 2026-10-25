@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import file_quality
-from ..common.exceptions import BusinessError
+
 
 def summarize_per_material(per_material: list[dict[str, Any]]) -> dict[str, Any]:
     """把逐份材料的判定汇总成一个结论。

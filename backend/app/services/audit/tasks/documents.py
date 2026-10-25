@@ -3,14 +3,19 @@
 import logging
 from pathlib import Path
 from typing import Any
+
 from fastapi import UploadFile
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
-from ....config import get_settings
+
 from ....common.exceptions import BusinessError
-from ....entity import (
+from ....constants.status import TASK_PHASE_AWAITING_CONFIRMATION, TASK_STATUS_READY
+from ....core.config import get_settings
+from ....domain.identity import public_no
+from ....domain.rule_library import execution_container_of
+from ....entity.operations import BackgroundOperation
+from ....entity.tasks import (
     AuditTask,
-    BackgroundOperation,
     DocumentUpload,
     ManualReview,
     NodeExecution,
@@ -20,15 +25,12 @@ from ....entity import (
     TaskFact,
     TaskFieldValue,
 )
-from ...system.background import assert_no_active_operation
-from ....domain.identity import public_no
-from ....domain.rule_library import execution_container_of
-from ....integrations.http_services import list_material_types
-from ...system.operation_types import OBJECT_AUDIT_TASK
-from .lookup import task_or_404
-from ..execution_history import invalidate_executions
+from ....integrations.documents.material_classify import list_material_types
 from ...shared.storage import DOCUMENT_EXTENSIONS, resolve_storage_path, save_upload_sync
-
+from ...system.background import assert_no_active_operation
+from ...system.operation_types import OBJECT_AUDIT_TASK
+from ..execution_history import invalidate_executions
+from .lookup import task_or_404
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +143,9 @@ def _invalidate_for_input_change(
         .values(is_current=False)
     )
     first_node_code = execution_container_of(manifest)["node_code"]
-    first_node_index = 0
     task.current_node = first_node_code
-    task.status = "READY"
-    task.checkpoint_json = {
-        "node_index": first_node_index,
-        "current_node": first_node_code,
-        "phase": "AWAITING_CONFIRMATION",
-    }
+    task.status = TASK_STATUS_READY
+    task.current_phase = TASK_PHASE_AWAITING_CONFIRMATION
     # 当前有效事实与结果已失效：必须递增输入修订号，使携带旧修订的命令被明确拒绝。
     task.input_revision = (task.input_revision or 0) + 1
     logger.info(
@@ -177,7 +174,7 @@ def _invalidate_for_input_change(
             f"{superseded_field_values} 条旧版本字段事实不再进入当前结果，"
             f"{invalidated_task_facts} 条统一事实已失效，"
             f"{affected_rule_results} 条规则结果与 {affected_executions} 个节点执行已失效，"
-            f"任务回到起始节点等待确认。历史事实仍可追溯。"
+            "任务回到起始节点等待确认。历史事实仍可追溯。"
         ),
     }
 

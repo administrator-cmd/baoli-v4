@@ -1,14 +1,16 @@
 """方案相对场景发布版本的定制差异展示。"""
 
 from typing import Any, Callable
-from sqlalchemy.orm import Session
-from ...domain.calculation_config import calculation_store
-from ...domain import manifest as manifest_module
-from ...domain.rule_library import active
-from ...common.exceptions import BusinessError
-from ...entity import AuditPlan, ScenarioVersion
-from .views import plan_config_view
 
+from sqlalchemy.orm import Session
+
+from ...common.exceptions import BusinessError
+from ...domain import manifest as manifest_module
+from ...domain.calculation_config import calculation_store
+from ...domain.rule_library import active
+from ...entity.plans import AuditPlan
+from ...entity.scenarios import ScenarioVersion
+from .views import plan_config_view
 
 _ADJUSTMENT_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "材料位": (("name", "名称"), ("required", "是否必传"), ("description", "业务说明"), ("source_ref", "来源编号")),

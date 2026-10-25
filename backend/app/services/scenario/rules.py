@@ -1,14 +1,16 @@
 """场景草稿规则配置、引用检查与启停。"""
 
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ...repositories.shared import configuration as config_store
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioDraft, ScenarioDraftRule
+from ...constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
 from ...domain.identity import stable_key
-from ...repositories.scenario.draft import next_sort_no
+from ...entity.scenario_drafts import ScenarioDraft, ScenarioDraftRule
+from ..shared import configuration as config_store
 from .common import _item_ref, _normalized_source_ref
-from .draft import _locked_draft, _save_draft
+from .draft import _locked_draft, _save_draft, next_sort_no
 
 
 def _normalize_rule_payload(db: Session, draft: ScenarioDraft, payload: dict[str, Any], *, existing_key: str | None, previous: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -16,8 +18,8 @@ def _normalize_rule_payload(db: Session, draft: ScenarioDraft, payload: dict[str
     name = str(payload.get("name") or "").strip()
     if not name:
         raise BusinessError("RULE_NAME_REQUIRED", "规则名称不能为空", status_code=400)
-    definition = {**(previous or {}), **payload, "name": name, "node": "RULE_EXECUTION", "node_type": "RULE_EXECUTION",
-                  "operator": payload.get("operator") or (previous or {}).get("operator") or "LLM_EXECUTE",
+    definition = {**(previous or {}), **payload, "name": name, "node": NODE_RULE_EXECUTION, "node_type": NODE_RULE_EXECUTION,
+                  "operator": payload.get("operator") or (previous or {}).get("operator") or OPERATOR_LLM_EXECUTE,
                   "source_ref": _normalized_source_ref(payload.get("source_ref")), "enabled": bool(payload.get("enabled", True))}
     if payload.get("enabled") is True and definition.get("config_status") in {"PENDING", "DISABLED"}:
         definition["config_status"] = "CLEAR"

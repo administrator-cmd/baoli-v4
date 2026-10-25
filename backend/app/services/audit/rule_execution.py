@@ -1,30 +1,50 @@
 """通用规则循环的真实输入与产出持久化，不按业务节点类型分发。"""
 from datetime import UTC, datetime
-import json
 from typing import Any
 
 from sqlalchemy import or_, select
 
 from ...common.exceptions import BusinessError
-from ...domain.audit_vocab import COMPLETED_RESULT_STATUSES, CONCLUSIVE_RESULT_STATUSES, PRODUCED_RESULT_STATUSES
-from ...domain.identity import public_no
+from ...constants.execution import (
+    ENTITY_SCOPE_SELF,
+    FACT_KIND_DERIVED,
+    FACT_KIND_EXTRACTED,
+    ORIGIN_DOCUMENT_EXTRACTION,
+    ORIGIN_HUMAN_CORRECTION,
+)
+from ...constants.status import (
+    COMPLETED_RESULT_STATUSES,
+    CONCLUSIVE_RESULT_STATUSES,
+    FIELD_STATUS_NOT_PRESENT,
+    FIELD_STATUS_PRESENT,
+    FIELD_STATUS_REVIEWED,
+    MODEL_FIELD_STATUSES,
+    PRODUCED_RESULT_STATUSES,
+)
 from ...domain import fact_projection
+from ...domain.identity import public_no
 from ...domain.report_data import report_data_refs, report_format_support
 from ...domain.rule_library import is_risk_rule
-from ...entity import AuditReport, DocumentUpload, NodeExecution, TaskDocument, TaskFact, TaskFieldValue, RuleResult
+from ...entity.reports import AuditReport
+from ...entity.tasks import DocumentUpload, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
 from . import value_store as task_value_service
+from .agent import _upstream_result_view
 
 
 def evaluation_context(db, task, rule) -> dict[str, Any]:
+    from ...domain.execution_mode import MODE_MATERIAL_CHECK, MODE_UNKNOWN, SOURCE_ONLY_MODES
     from .fact_context import extracted_identity_filter, project_task_facts
+    mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
+    source_only = mode in SOURCE_ONLY_MODES or mode == MODE_MATERIAL_CHECK
     codes = set(rule.get("source_rule_codes") or [])
     calculation = rule.get("calculation_definition") or {}
     codes.update(calculation.get("depends_on_result_codes") or [])
     codes.update(p["source_code"] for p in calculation.get("parameters") or [] if p.get("source_type") == "CALC_RESULT" and p.get("source_code"))
     # 引用声明来自完整冻结配置；未选中/停用字段仍可说明身份，不能当成整批程序异常。
     fields = {f["field_key"]: f for f in task.manifest_json["fields"]}
-    field_keys = {item["field_key"] for item in rule.get("inputs") or []}
-    field_keys.update(f["field_key"] for f in rule.get("output_definitions") or [])
+    field_keys = set() if source_only else {item["field_key"] for item in rule.get("inputs") or []}
+    if not source_only:
+        field_keys.update(f["field_key"] for f in rule.get("output_definitions") or [])
     # 计算 FIELD 参数已由编译器解析到 inputs，不把原始业务编号再次当成内部字段键。
     if field_keys - fields.keys():
         raise BusinessError("RULE_INPUT_FIELD_UNDECLARED", "规则引用的字段不属于任务冻结的字段身份", status_code=500,
@@ -42,7 +62,7 @@ def evaluation_context(db, task, rule) -> dict[str, Any]:
                                          RuleResult.rule_key.in_(selected), RuleResult.node_execution_id == current_execution)
     if not report:
         fact_query = fact_query.where(or_(extracted_identity_filter(definitions),
-                                         (TaskFact.fact_kind == "DERIVED") & TaskFact.fact_code.in_(codes)))
+                                         (TaskFact.fact_kind == FACT_KIND_DERIVED) & TaskFact.fact_code.in_(codes)))
         result_query = result_query.where(or_(RuleResult.rule_key.in_(sources), RuleResult.rule_code.in_(codes)))
     facts = list(db.scalars(fact_query.order_by(TaskFact.id)))
     results = list({r.rule_key: r for r in db.scalars(result_query.order_by(RuleResult.id))}.values())
@@ -52,9 +72,13 @@ def evaluation_context(db, task, rule) -> dict[str, Any]:
         {**fact, "value": task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FACT, fact["fact_id"]).get("value")}
         for fact in projected
     ], "upstream_results": [
-        {"rule_result_id": r.id, "node_code": "RULE_EXECUTION", "rule_key": r.rule_key, "rule_code": r.rule_code, "rule_name": r.rule_name, "status": r.status, "message": r.message,
-         # 模型原始响应和格式修正日志属于本条诊断，不作为另一条规则的业务输入反复传递。
-         "result": result_values[r.id]}
+        # 只把身份与业务结论传给下游：evidence、tool_findings、report、risk_context 等
+        # 属于本条结果的诊断与展示，不作为另一条规则的业务输入反复传递。
+        _upstream_result_view({
+            "rule_result_id": r.id, "rule_key": r.rule_key, "rule_code": r.rule_code,
+            "rule_name": r.rule_name, "status": r.status, "message": r.message,
+            "result": result_values[r.id],
+        })
         for r in results
     ], "available_materials": task.manifest_json.get("materials") or []}
     if report:
@@ -99,7 +123,9 @@ def report_section_data(
                                   if result["rule_key"] in producer_keys or result["rule_code"] == ref]
                 name = (calculation.get("rule_name") or calculation["rule_code"]) if calculation else ref
             sources.append({
-                "reference": ref, "name": name, "facts": source_facts, "results": source_results,
+                "reference": ref, "name": name, "facts": source_facts,
+                # 报告数据只带上游结果的业务结论，避免 report_data 再复制一份完整负载。
+                "results": [_upstream_result_view(result) for result in source_results],
                 "missing_data": not source_facts and not source_results,
                 "note": "没有对应的当前字段事实或本批次生效规则结果" if not source_facts and not source_results else "",
             })
@@ -126,9 +152,9 @@ def validate_outputs(rule, verdict):
         field_output = item["code"] in {f["field_key"] for f in rule.get("output_definitions") or []}
         if field_output:
             state = item.get("field_status")
-            if state not in {"PRESENT", "NOT_PRESENT", "EVIDENCE_INSUFFICIENT"}:
+            if state not in MODEL_FIELD_STATUSES:
                 raise BusinessError("RULE_OUTPUT_STATUS_INVALID", "字段输出必须明确标注已取到值、确认未载明或证据不足", details={"output": item["code"]})
-            if (state == "PRESENT" and (item["value"] is None or item["value"] == "")) or (state != "PRESENT" and item["value"] is not None):
+            if (state == FIELD_STATUS_PRESENT and (item["value"] is None or item["value"] == "")) or (state != FIELD_STATUS_PRESENT and item["value"] is not None):
                 raise BusinessError("RULE_OUTPUT_STATUS_INVALID", "字段输出值与抽取状态不一致", details={"output": item["code"], "status": state})
         if not field_output and item["value"] is None and verdict["status"] in PRODUCED_RESULT_STATUSES:
             raise BusinessError("RULE_OUTPUT_MISSING", "模型声明已执行，但实际输出值为空")
@@ -159,7 +185,7 @@ def save_outputs(db, task, execution, rule, verdict):
         fact_code = str(field.get("source_ref") or code) if field is not None else code
         period = definition.get("period_scope") or definition.get("period_policy") or "NOT_APPLICABLE"
         statement = definition.get("statement_scope") or "NOT_APPLICABLE"
-        entity = str(definition.get("entity_scope") or "SELF")
+        entity = str(definition.get("entity_scope") or ENTITY_SCOPE_SELF)
         if field is not None:
             fact_code, material, period, statement, entity = fact_projection.field_fact_identity(field)
         current = list(db.scalars(select(TaskFact).where(TaskFact.audit_task_id == task.id, TaskFact.fact_code == fact_code,
@@ -168,21 +194,21 @@ def save_outputs(db, task, execution, rule, verdict):
         manual = db.scalar(select(TaskFieldValue).where(
             TaskFieldValue.audit_task_id == task.id, TaskFieldValue.field_key == code,
             TaskFieldValue.material_key == material, TaskFieldValue.is_current.is_(True),
-            TaskFieldValue.origin == "HUMAN_CORRECTION",
+            TaskFieldValue.origin == ORIGIN_HUMAN_CORRECTION,
         )) if field is not None else None
         if manual is not None:
             reviewed = [fact for fact in current if fact.is_current and fact.source_execution_id is None and fact.status == manual.status]
-            if len(reviewed) != 1 or manual.status not in {"REVIEWED", "NOT_PRESENT"}:
+            if len(reviewed) != 1 or manual.status not in {FIELD_STATUS_REVIEWED, FIELD_STATUS_NOT_PRESENT}:
                 raise BusinessError("TASK_MANUAL_FACT_INCONSISTENT", "人工结论与当前字段事实不一致，无法继续保存模型产出", status_code=500,
                                     details={"output": code})
             from ...domain.fact_projection import canonical_field_value
             saved_value = task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FACT, reviewed[0].id).get("value")
-            expected_status = "PRESENT" if manual.status == "REVIEWED" else "NOT_PRESENT"
+            expected_status = FIELD_STATUS_PRESENT if manual.status == FIELD_STATUS_REVIEWED else FIELD_STATUS_NOT_PRESENT
             if field_status != expected_status or canonical_field_value(value, field) != canonical_field_value(saved_value, field):
                 raise BusinessError("RULE_OUTPUT_MANUAL_VALUE_CONFLICT", "模型产出与当前人工结论不同，人工结论未被覆盖", details={"output": code, "manual_status": manual.status})
             continue
-        if any(f.source_execution_id == execution.id and f.is_current for f in current):
-            continue
+        # 同一批次可以重跑（继续执行只重跑未完成项及其下游），重跑得到的新值必须写成新版本；
+        # 不能因为「本批次已经写过当前事实」就跳过，否则规则结论更新而字段事实仍是旧的。
         revision = max((f.revision_no for f in current), default=0) + 1
         for old in current:
             old.is_current = False
@@ -200,14 +226,14 @@ def save_outputs(db, task, execution, rule, verdict):
             field_value = TaskFieldValue(audit_task_id=task.id, scenario_version_id=task.scenario_version_id,
                                          field_key=code, material_key=material, document_upload_id=upload.id,
                                          revision_no=value_revision, is_current=True, status=field_status,
-                                         extraction_execution_id=execution.id, origin="DOCUMENT_EXTRACTION")
+                                         extraction_execution_id=execution.id, origin=ORIGIN_DOCUMENT_EXTRACTION)
             db.add(field_value)
             db.flush()
             written.append((task_value_service.RECORD_TASK_FIELD_VALUE, field_value.id,
                             {"raw_value": item.get("raw_value"), "normalized_value_json": value,
                              "unit": field.get("unit"), "currency": field.get("currency")}))
         task_fact = TaskFact(audit_task_id=task.id, scenario_version_id=task.scenario_version_id,
-                             fact_code=fact_code, fact_kind="EXTRACTED" if field is not None else "DERIVED",
+                             fact_code=fact_code, fact_kind=FACT_KIND_EXTRACTED if field is not None else FACT_KIND_DERIVED,
                              material_key=material, entity_scope=entity, period_scope=period, statement_scope=statement,
                              value_type=definition.get("value_type") or definition.get("result_type") or "STRING",
                              source_execution_id=execution.id, revision_no=revision, is_current=True,
@@ -218,7 +244,7 @@ def save_outputs(db, task, execution, rule, verdict):
         written.append((task_value_service.RECORD_TASK_FACT, task_fact.id,
                         {"value": fact_projection.canonical_fact_value(value, definition),
                          "unit": definition.get("unit"), "currency": definition.get("currency")}))
-    # 先建立数据库索引；证据核对完成后，与规则结论一起写入六表。
+    # 先建立数据库索引；证据核对完成后，与规则结论一起写入四表。
     report = verdict.get("report")
     if rule.get("kind") == "REPORT" and report:
         scope = set(task.task_schema_json["enabled_rule_keys"])
@@ -235,14 +261,31 @@ def save_outputs(db, task, execution, rule, verdict):
                           for item in formats if not item["supported"])
         existing = next((report for report in db.scalars(select(AuditReport).where(AuditReport.audit_task_id == task.id,
                         AuditReport.node_execution_id == execution.id)) if (report.snapshot_json or {}).get("rule_key") == rule["rule_key"]), None)
+        risk_keys = {r["rule_key"] for r in task.manifest_json["rules"] if r["rule_key"] in scope and is_risk_rule(r)}
+        risk_available = bool(risk_keys) and risk_keys <= result_by_key.keys() and all(result_by_key[k].status in CONCLUSIVE_RESULT_STATUSES for k in risk_keys)
+        snapshot = {"rule_key": rule["rule_key"], "task_input_revision": task.input_revision,
+                    "rule_result_ids": [r.id for r in result_by_key.values()]}
+        generated_at = datetime.now(UTC)
         if existing is None:
-            risk_keys = {r["rule_key"] for r in task.manifest_json["rules"] if r["rule_key"] in scope and is_risk_rule(r)}
-            risk_available = bool(risk_keys) and risk_keys <= result_by_key.keys() and all(result_by_key[k].status in CONCLUSIVE_RESULT_STATUSES for k in risk_keys)
             db.add(AuditReport(report_no=public_no("REP"), audit_task_id=task.id, node_execution_id=execution.id,
                                report_name=rule["name"], status="GENERATED", content_type=report["content_type"], content_md=report["content"],
                                report_generated=True, scope_execution_complete=complete, risk_conclusion_available=risk_available,
-                               reasons_json={"unresolved": unresolved, "format_support": formats}, snapshot_json={"rule_key": rule["rule_key"], "task_input_revision": task.input_revision, "rule_result_ids": [r.id for r in result_by_key.values()]},
-                               input_revision=task.input_revision, generated_at=datetime.now(UTC)))
+                               reasons_json={"unresolved": unresolved, "format_support": formats}, snapshot_json=snapshot,
+                               input_revision=task.input_revision, generated_at=generated_at))
+        else:
+            # 同一批次可以重跑（继续执行只重跑未完成项及其下游）；重跑生成的正文与依据必须写回，
+            # 否则 report_view 会继续把上一轮的正文当成当前报告返回。
+            existing.report_name = rule["name"]
+            existing.status = "GENERATED"
+            existing.content_type = report["content_type"]
+            existing.content_md = report["content"]
+            existing.report_generated = True
+            existing.scope_execution_complete = complete
+            existing.risk_conclusion_available = risk_available
+            existing.reasons_json = {"unresolved": unresolved, "format_support": formats}
+            existing.snapshot_json = snapshot
+            existing.input_revision = task.input_revision
+            existing.generated_at = generated_at
     return written
 
 

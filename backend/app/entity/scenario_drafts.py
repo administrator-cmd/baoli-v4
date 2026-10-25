@@ -1,13 +1,13 @@
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -15,8 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..database import Base
-from ..domain.configuration import empty_config, config_property
+from ..core.database import Base
+from ..domain.configuration import config_property, empty_config
 from .base import ConfigurationShape, TimestampMixin
 
 

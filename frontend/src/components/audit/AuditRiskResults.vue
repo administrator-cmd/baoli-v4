@@ -1,22 +1,20 @@
 <script setup lang="ts">
-import { computed, shallowRef } from "vue";
+import { computed, ref, shallowRef } from "vue";
 
 import type { RiskList } from "@/api/contracts";
 import StateBlock from "@/components/StateBlock.vue";
-import StatGrid, { type StatItem } from "@/components/StatGrid.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import AuditBusinessDetails from "@/components/audit/AuditBusinessDetails.vue";
-import ReportBody from "@/components/audit/ReportBody.vue";
-import { statusLabel, statusTone } from "@/constants/labels";
-import { auditResultSummary, UNDECIDED_RESULT_STATUSES } from "@/constants/auditStatus";
+import QuoteBlock from "@/components/audit/QuoteBlock.vue";
+import { statusTone } from "@/constants/labels";
+import { auditResultSummary, riskResultLabel } from "@/constants/auditStatus";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /**
  * 风险结果。
  *
- * 「没有风险记录」不能写成「无风险」。首屏先给统计，把这几件事分开说清：
- *   已成立风险数（只统计 ABNORMAL）/ 未命中规则数 / 无法判断数 /
- *   是否已执行 / 是否配置风险规则。
+ * 首屏直接展示逐条风险结果，原文与引用保留在详情中。
  *
  * 读取失败、未配置、未执行、已执行但未命中、结果已失效是五种不同的状态，
  * 页面必须分开显示；把读取失败显示成「未命中」会让人以为系统查过了。
@@ -33,8 +31,58 @@ const props = defineProps<{
   error?: string | null;
 }>();
 
-const riskItems = computed(() => props.risks?.items ?? []);
+const riskItems = computed(() => [...(props.risks?.items ?? [])]
+  .sort((left, right) => compareNaturalLabels(left.rule_code, right.rule_code)));
 type RiskItem = RiskList["items"][number];
+const search = ref("");
+const statusFilter = ref("ALL");
+const levelFilter = ref<string | null>(null);
+const sheetFilter = ref<string | null>(null);
+const statusOptions = computed(() => {
+  const counts = new Map<string, number>();
+  for (const item of riskItems.value) {
+    counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
+  }
+  return Array.from(counts, ([status, count]) => ({
+    value: status,
+    label: `${riskResultLabel(status) ?? status}（${count}）`,
+  }));
+});
+function countedOptions(valueOf: (item: RiskItem) => string, emptyLabel: string) {
+  const counts = new Map<string, number>();
+  for (const item of riskItems.value) {
+    const value = valueOf(item);
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Array.from(counts, ([value, count]) => ({
+    value,
+    label: `${value || emptyLabel}（${count}）`,
+  })).sort((left, right) => compareNaturalLabels(left.value, right.value));
+}
+const levelOptions = computed(() => countedOptions((item) => item.risk_level ?? "", "未标注等级"));
+const sheetOptions = computed(() => countedOptions((item) => item.source_sheet ?? "", "未记录工作表"));
+const hasFilters = computed(() => Boolean(search.value) || statusFilter.value !== "ALL"
+  || levelFilter.value !== null || sheetFilter.value !== null);
+const filteredItems = computed(() => {
+  const query = search.value.trim().toLocaleLowerCase();
+  return riskItems.value.filter((item) => {
+    if (statusFilter.value !== "ALL" && item.status !== statusFilter.value) return false;
+    if (levelFilter.value !== null && (item.risk_level ?? "") !== levelFilter.value) return false;
+    if (sheetFilter.value !== null && (item.source_sheet ?? "") !== sheetFilter.value) return false;
+    if (!query) return true;
+    return [
+      item.rule_code, item.name, item.risk_level, item.source_sheet,
+      riskResultLabel(item.status), riskSummary(item), item.message,
+      ...item.evidence.flatMap((source) => [source.material_name, source.document_name, source.quote_text]),
+    ].join(" ").toLocaleLowerCase().includes(query);
+  });
+});
+function clearFilters(): void {
+  search.value = "";
+  statusFilter.value = "ALL";
+  levelFilter.value = null;
+  sheetFilter.value = null;
+}
 const detailRisk = shallowRef<RiskItem | null>(null);
 function hasBusinessResult(item: RiskItem): boolean { return item.details?.presentation_version === 2; }
 function riskSummary(item: RiskItem): string {
@@ -43,90 +91,51 @@ function riskSummary(item: RiskItem): string {
   if (item.status === "ABNORMAL") return "已命中风险条件";
   return auditResultSummary(item.status, item.message, item.details);
 }
+/** 原文在本次风险判断中的角色，决定标题和说明。 */
+function quoteTitle(item: RiskItem): string {
+  if (item.status === "ABNORMAL") return "风险依据原文";
+  if (item.status === "PASSED") return "检查到的原文";
+  if (item.status === "NOT_APPLICABLE") return "检查片段";
+  return "已读取的原文";
+}
+
+function quoteNote(item: RiskItem): string {
+  if (item.status === "PASSED") return "以下为判断风险未触发时检查到的原文，不构成风险结论。";
+  if (item.status === "NOT_APPLICABLE") return "风险条件不成立，以下片段仅说明检查范围，不作为风险依据。";
+  if (item.status === "EVIDENCE_INSUFFICIENT" || item.status === "PENDING_REVIEW") {
+    return "以下为系统读取到的原文，但不足以判定风险。";
+  }
+  return "";
+}
+
+function noQuoteText(item: RiskItem): string {
+  return item.status === "NOT_APPLICABLE" ? "条件不成立，无风险原文" : "未记录引用原文";
+}
 const sourceRules = computed(() => (detailRisk.value?.details?.source_rules ?? []) as Array<{ rule_name: string; status: string }>);
 
-/** 命中数只取服务端给定的 hit_count（只算 ABNORMAL），不用 items 长度顶替。 */
-const hitCount = computed(() => props.risks?.hit_count ?? 0);
-
-/** 未命中：本次执行过、结果是合格的风险规则条数。 */
-const passedCount = computed(() => props.risks?.status_counts?.PASSED ?? 0);
-
-/**
- * 无法判断数：规则执行了但没有形成结论的条数。
- * 它不等于「没有风险」，也不等于「命中」。
- */
-const undecidedCount = computed(() =>
-  Object.entries(props.risks?.status_counts ?? {})
-    .filter(([status]) => UNDECIDED_RESULT_STATUSES.has(status))
-    .reduce((sum, [, count]) => sum + count, 0),
-);
-
-/** 不适用数：来源检查不成立时该风险本次就不该判，单独一档。 */
-const notApplicableCount = computed(() => props.risks?.status_counts?.NOT_APPLICABLE ?? 0);
-
-const executing = computed(() => props.risks?.risk_executed ?? props.riskNodeExecuted);
-
-/** 结果已失效：节点执行过、但当前有效批次里没有风险结果。 */
-const resultsStale = computed(() => props.riskNodeExecuted && props.risks !== null && !props.risks.risk_executed);
-
-const stats = computed<StatItem[]>(() => [
-  {
-    label: "已成立风险",
-    value: hitCount.value,
-    hint: "只统计判定为异常的规则",
-    tone: hitCount.value > 0 ? "danger" : "neutral",
-  },
-  {
-    label: "未命中风险规则",
-    value: passedCount.value,
-    hint: "已执行且合格的规则",
-    tone: "neutral",
-  },
-  {
-    label: "无法判断",
-    value: undecidedCount.value,
-    hint: "证据不足 / 待人工复核 / 未执行",
-    tone: undecidedCount.value > 0 ? "warning" : "neutral",
-  },
-  {
-    label: "不适用",
-    value: notApplicableCount.value,
-    hint: "来源检查不成立，本次不判",
-    tone: "neutral",
-  },
-]);
-
-const statusCountEntries = computed(() =>
-  Object.entries(props.risks?.status_counts ?? {}).filter(([, count]) => count > 0),
-);
-
-/** 风险结论是否可用；不可用时必须说明是「未配置」「未执行」还是「结论尚未闭合」。 */
-const conclusionState = computed(() => {
+/** 无结果时说明实际状态，避免空列表被误读为没有风险。 */
+const emptyState = computed(() => {
   if (!props.riskConfigured) {
     return {
-      tone: "info" as const,
-      title: "当前场景未配置风险评级",
-      description: "模板没有配置风险规则，本次审核不会形成风险结论。这不等于没有风险，也不等于审核通过。",
+      title: "当前场景未配置风险规则",
+      description: "本次审核没有风险判断项。",
     };
   }
-  if (!executing.value) {
+  if (props.riskNodeExecuted && props.risks && !props.risks.risk_executed) {
     return {
-      tone: "info" as const,
+      title: "风险结果已失效",
+      description: "当前没有有效的风险结果，需要重新执行审核。",
+    };
+  }
+  if (!props.risks?.risk_executed) {
+    return {
       title: "风险评定尚未执行",
-      description: "风险评定节点执行后，这里会显示命中风险规则的真实结果。当前不能据此认为没有风险。",
-    };
-  }
-  if (props.risks && !props.risks.risk_conclusion_available) {
-    return {
-      tone: "warning" as const,
-      title: "部分风险规则尚无法判断",
-      description: `已确认 ${hitCount.value} 项风险；另有 ${undecidedCount.value} 项规则缺少结论，请查看对应缺项。`,
+      description: "执行后显示各条风险规则的判断结果。",
     };
   }
   return {
-    tone: "success" as const,
-    title: hitCount.value ? `已确认 ${hitCount.value} 项风险` : "未命中已配置的风险规则",
-    description: "结论仅覆盖本次方案中已配置并执行的风险规则。",
+    title: "暂无风险结果",
+    description: "当前未返回风险规则的判断结果。",
   };
 });
 </script>
@@ -146,73 +155,37 @@ const conclusionState = computed(() => {
     description="还没有取得服务端返回的风险结果；请刷新后重试。这不代表没有风险。"
   />
   <div v-else class="stack">
-    <!-- 首屏统计：把「命中 / 未命中 / 无法判断 / 不适用」分开，数量全部来自服务端 -->
-    <StatGrid :items="stats" />
-
-    <el-descriptions :column="1" size="small" border>
-      <el-descriptions-item label="风险评定是否执行">
-        <StatusBadge
-          :status="executing ? 'SUCCEEDED' : 'NOT_EXECUTED'"
-          :label="executing ? '已执行' : '未执行'"
-          :tone="executing ? 'success' : 'neutral'"
-        />
-      </el-descriptions-item>
-      <el-descriptions-item label="是否配置风险规则">
-        <StatusBadge
-          :status="riskConfigured ? 'CONFIGURED' : 'NOT_CONFIGURED'"
-          :label="riskConfigured ? '已配置' : '未配置'"
-          :tone="riskConfigured ? 'success' : 'neutral'"
-        />
-      </el-descriptions-item>
-      <el-descriptions-item label="风险规则结论">
-        <StatusBadge
-          :status="risks.risk_conclusion_available ? 'CONFIRMED' : 'NOT_APPLICABLE'"
-          :label="risks.risk_conclusion_available ? '结论齐全' : executing ? '部分缺少结论' : '尚未执行'"
-          :tone="risks.risk_conclusion_available ? 'success' : 'warning'"
-        />
-      </el-descriptions-item>
-      <el-descriptions-item label="规则结果分布">
-        <template v-if="statusCountEntries.length">
-          <StatusBadge
-            v-for="[status, count] in statusCountEntries"
-            :key="status"
-            class="tag-gap"
-            :status="status"
-            :label="`${statusLabel(status)} ${count}`"
-          />
-        </template>
-        <span v-else class="text-muted">服务端没有返回规则结果分布。</span>
-      </el-descriptions-item>
-    </el-descriptions>
-
-    <el-alert :type="conclusionState.tone" show-icon :closable="false" :title="conclusionState.title">
-      {{ conclusionState.description }}
-    </el-alert>
-
-    <el-alert
-      v-if="resultsStale"
-      type="warning"
-      show-icon
-      :closable="false"
-      title="风险结果已失效"
-    >
-      风险评定节点执行过，但当前有效执行批次里没有它的结果（结果随材料或人工有效值变化被失效）。
-      请重新执行风险评定节点；当前不能据此认为没有风险。
-    </el-alert>
-
-    <el-table v-if="riskItems.length" :data="riskItems" border stripe size="small" @row-click="(row: RiskItem) => detailRisk = row">
-      <el-table-column label="风险" min-width="200" show-overflow-tooltip>
+    <div v-if="riskItems.length" class="risk-toolbar">
+      <el-input v-model="search" clearable placeholder="搜索编号、风险、理由或原文" aria-label="搜索风险结果" class="risk-search" />
+      <el-select v-model="statusFilter" aria-label="按风险结论筛选" class="risk-status-filter">
+        <el-option value="ALL" :label="`全部结论（${riskItems.length}）`" />
+        <el-option v-for="option in statusOptions" :key="option.value" :value="option.value" :label="option.label" />
+      </el-select>
+      <el-select v-model="levelFilter" placeholder="全部等级" aria-label="按风险等级筛选" clearable :empty-values="[null, undefined]" :value-on-clear="null" class="risk-level-filter">
+        <el-option v-for="option in levelOptions" :key="option.value" :value="option.value" :label="option.label" />
+      </el-select>
+      <el-select v-model="sheetFilter" placeholder="全部工作表" aria-label="按来源工作表筛选" clearable filterable :empty-values="[null, undefined]" :value-on-clear="null" class="risk-sheet-filter">
+        <el-option v-for="option in sheetOptions" :key="option.value" :value="option.value" :label="option.label" />
+      </el-select>
+      <el-button v-if="hasFilters" @click="clearFilters">清除筛选</el-button>
+      <span class="text-hint risk-count">显示 {{ filteredItems.length }} / {{ riskItems.length }} 项</span>
+    </div>
+    <el-table v-if="filteredItems.length" :data="filteredItems" border stripe class="audit-result-table" @row-click="(row: RiskItem) => detailRisk = row">
+      <el-table-column label="风险编号" width="120" align="center">
+        <template #default="{ row }">{{ row.rule_code || "—" }}</template>
+      </el-table-column>
+      <el-table-column label="风险" width="180">
         <template #default="{ row }">
           <span class="cell-strong">{{ row.name }}</span>
           <div v-if="row.risk_level" class="table-note">风险等级：{{ row.risk_level }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="判断" width="120">
+      <el-table-column label="风险结论" width="120">
         <template #default="{ row }">
-          <StatusBadge :status="row.status" :tone="statusTone(row.status)" />
+          <StatusBadge :status="row.status" :label="riskResultLabel(row.status)" :tone="statusTone(row.status)" />
         </template>
       </el-table-column>
-      <el-table-column label="判断理由" min-width="360">
+      <el-table-column label="判断理由" min-width="340">
         <template #default="{ row }">
           <div class="risk-message">{{ riskSummary(row) }}</div>
         </template>
@@ -223,10 +196,15 @@ const conclusionState = computed(() => {
         </template>
       </el-table-column>
     </el-table>
+    <el-empty v-else-if="riskItems.length" description="没有符合筛选条件的风险结果">
+      <el-button @click="clearFilters">清除筛选</el-button>
+    </el-empty>
+    <StateBlock v-else kind="empty" :title="emptyState.title" :description="emptyState.description" />
   </div>
   <DrawerPanel :open="Boolean(detailRisk)" :title="detailRisk?.name ?? '风险详情'" size="min(900px, 100%)" @close="detailRisk = null">
     <template v-if="detailRisk">
-      <StatusBadge :status="detailRisk.status" />
+      <StatusBadge :status="detailRisk.status" :label="riskResultLabel(detailRisk.status)" />
+      <span v-if="detailRisk.rule_code" class="risk-code">{{ detailRisk.rule_code }}</span>
       <span v-if="detailRisk.risk_level" class="risk-level">规则等级：{{ detailRisk.risk_level }}</span>
       <p>{{ riskSummary(detailRisk) }}</p>
       <AuditBusinessDetails :result="detailRisk.details" />
@@ -237,14 +215,20 @@ const conclusionState = computed(() => {
           <el-table-column label="结论" width="130"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column>
         </el-table>
       </template>
-      <template v-if="detailRisk.evidence?.length">
-        <h4 class="app-section-title">原文依据</h4>
-        <div v-for="source in detailRisk.evidence" :key="source.evidence_no" class="risk-source">
-          <div class="text-muted">{{ source.material_name || '来源材料未记录' }}</div>
-          <ReportBody v-if="source.quote_text" :content="source.quote_text" content-type="text/markdown" />
+      <template v-if="detailRisk.evidence.length && detailRisk.status !== 'NOT_APPLICABLE'">
+        <h4 class="app-section-title">{{ quoteTitle(detailRisk) }}</h4>
+        <p v-if="quoteNote(detailRisk)" class="risk-quote-note">{{ quoteNote(detailRisk) }}</p>
+        <div v-for="(source, index) in detailRisk.evidence" :key="index" class="risk-source">
+          <div class="text-muted">
+            {{ source.material_name || '来源材料未记录' }}
+            <template v-if="source.document_name"> · {{ source.document_name }}</template>
+            <template v-if="source.field_path"> · {{ source.field_path }}</template>
+          </div>
+          <QuoteBlock v-if="source.quote_text" :text="source.quote_text" />
           <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>
         </div>
       </template>
+      <p v-else class="text-muted">{{ noQuoteText(detailRisk) }}</p>
       <el-collapse class="block-gap">
         <el-collapse-item title="原执行说明与技术详情" name="technical">
           <div v-if="!hasBusinessResult(detailRisk)" class="original-message">{{ detailRisk.message || "未记录" }}</div>
@@ -256,19 +240,35 @@ const conclusionState = computed(() => {
 </template>
 
 <style scoped>
+.risk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.risk-search {
+  width: min(100%, 300px);
+}
+.risk-status-filter, .risk-level-filter {
+  width: 180px;
+}
+.risk-sheet-filter {
+  width: 220px;
+}
+.risk-count {
+  margin-left: auto;
+  font-size: var(--el-font-size-base);
+}
 .cell-strong {
   font-weight: 600;
 }
-.stack :deep(.el-descriptions__cell) {
-  padding: 7px 10px;
-}
 .stack :deep(.el-table__cell) {
-  padding: 8px 0;
+  padding: 6px 0;
 }
 .stack :deep(.el-table .cell) {
   line-height: 1.45;
 }
-.risk-level { margin-left: 12px; color: var(--el-text-color-secondary); }
+.risk-code, .risk-level { margin-left: 12px; color: var(--el-text-color-secondary); }
 .risk-source { margin: 12px 0; padding: 12px; background: var(--el-fill-color-light); }
 .technical-json, .original-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 .risk-message {
@@ -280,4 +280,12 @@ const conclusionState = computed(() => {
   overflow-wrap: anywhere;
   line-height: 1.45;
 }
+
+.risk-quote-note {
+  margin: 0 0 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 </style>

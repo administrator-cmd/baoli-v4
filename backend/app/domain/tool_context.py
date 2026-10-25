@@ -1,7 +1,9 @@
 """工具运行上下文：任务、规则、材料范围和数据库会话。"""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any
+
 
 @dataclass(frozen=True)
 class ToolExecutionContext:

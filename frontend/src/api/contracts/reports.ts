@@ -114,6 +114,7 @@ export interface RiskResultRow {
   scenario_version_no: number | null;
   plan_name: string | null;
   rule_key: string;
+  rule_code: string | null;
   name: string;
   risk_level: string | null;
   status: string;

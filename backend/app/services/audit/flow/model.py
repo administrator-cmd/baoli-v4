@@ -2,13 +2,14 @@
 
 import logging
 from typing import Any
-from sqlalchemy.orm import Session
-from ....common.exceptions import BusinessError
-from ....domain.audit_vocab import LOOP_BLOCKED, LOOP_RUNNING
-from ..tasks.lookup import task_or_404
-from .shared import agent_module, openai_tools
-from .errors import agent_step
 
+from sqlalchemy.orm import Session
+
+from ....common.exceptions import BusinessError
+from ....constants.status import LOOP_BLOCKED, LOOP_RUNNING
+from ..tasks.lookup import task_or_404
+from .errors import agent_step
+from .shared import agent_module, openai_tools
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ def _loop_limit_reached(loop_count: int) -> int | None:
     `settings.llm_tool_max_rounds` 为 0 表示不设上限（由调用方自行控制终止），
     这是配置事实，不在这里改成某个默认值。
     """
-    from ....config import get_settings
+    from ....core.config import get_settings
 
     max_rounds = get_settings().llm_tool_max_rounds
     if max_rounds and loop_count >= max_rounds:
@@ -77,7 +78,8 @@ def graph_call_model(
     with agent_step(db, task_no):
         from ....integrations.llm.gateway import TURN_CONTENT, TURN_REFUSAL, TURN_TOOL_CALLS
 
-        task = task_or_404(db, task_no, lock=True)
+        # 只用于锁定任务行；本步不直接读写 task 字段。
+        task_or_404(db, task_no, lock=True)
         agent = agent_module()
         executed = [
             str(item.get("tool_call_id"))
@@ -165,7 +167,7 @@ def graph_call_model(
             return {
                 **base,
                 "messages": [*list(messages or []), agent.assistant_message_of(turn)],
-                "pending_tool_calls": agent.pending_calls_of(turn, state_evaluation_id or ""),
+                "pending_tool_calls": agent.pending_calls_of(turn),
                 "loop_status": LOOP_RUNNING,
             }
         if turn.kind == TURN_CONTENT:

@@ -5,6 +5,7 @@ import { ElMessage } from "element-plus";
 import type { DraftFieldItem, DraftMaterialItem, DraftRuleItem, JsonValue } from "@/api/contracts";
 import { createDraftRule, getSceneConfiguration, updateDraftRule, type DraftRulePayload } from "@/api/scenes";
 import BackButton from "@/components/BackButton.vue";
+import { EXECUTION_MODE_OPTIONS, executionModeLabel, type ExecutionMode } from "@/constants/executionModes";
 
 const route = useRoute();
 const router = useRouter();
@@ -19,6 +20,7 @@ const loading = ref(false);
 const saving = ref(false);
 const errorMessage = ref("");
 const form = reactive({ name: "", source_ref: "", requirement: "", enabled: true,
+  execution_mode: "UNKNOWN" as ExecutionMode,
   rule_role: "CHECK" as "CHECK" | "RISK", field_keys: [] as string[], output_keys: [] as string[], material_keys: [] as string[], source_rule_keys: [] as string[] });
 
 function applyRule(rule: DraftRuleItem) {
@@ -27,6 +29,7 @@ function applyRule(rule: DraftRuleItem) {
   form.source_ref = rule.source_ref ?? "";
   form.requirement = rule.requirement;
   form.enabled = rule.enabled;
+  form.execution_mode = (rule.execution_mode || "UNKNOWN") as ExecutionMode;
   form.rule_role = rule.rule_role ?? "CHECK";
   form.field_keys = rule.inputs.flatMap((i) => i.field_key ? [i.field_key] : []);
   form.output_keys = rule.outputs.flatMap((i) => i.field_key ? [i.field_key] : []);
@@ -46,12 +49,6 @@ async function load() {
       const rule = draft.rules.find((r) => r.rule_key === ruleKey.value);
       if (!rule) throw new Error("规则不存在或已删除");
       applyRule(rule);
-    } else if (typeof route.query.from === "string") {
-      const rule = draft.rules.find((r) => r.rule_key === route.query.from);
-      if (!rule) throw new Error("复制来源规则不存在");
-      applyRule(rule);
-      form.name += " 副本";
-      form.source_ref = "";
     }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "读取规则失败";
@@ -70,7 +67,7 @@ async function submit() {
   const parameters: Record<string, JsonValue> = { ...(existing.value?.parameters ?? {}) };
   const payload: DraftRulePayload = {
     name: form.name.trim(), source_ref: form.source_ref.trim() || null,
-    node: "RULE_EXECUTION", operator: existing.value?.operator ?? "LLM_EXECUTE", rule_role: form.rule_role, enabled: form.enabled,
+    node: "RULE_EXECUTION", operator: existing.value?.operator ?? "LLM_EXECUTE", execution_mode: form.execution_mode, rule_role: form.rule_role, enabled: form.enabled,
     inputs: form.field_keys.map((key) => {
       const field = fields.value.find((f) => f.field_key === key);
       if (!field) throw new Error("所选字段不存在");
@@ -99,7 +96,16 @@ onMounted(load);
     <el-form v-else v-loading="loading" label-width="110px">
       <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
       <el-form-item label="业务编号"><el-input v-model="form.source_ref" placeholder="原规则库未提供编号时可留空" /></el-form-item>
-      <el-form-item label="生效"><el-switch v-model="form.enabled" /></el-form-item>
+      <el-form-item label="启用状态"><el-switch v-model="form.enabled" inline-prompt active-text="启用" inactive-text="停用" /></el-form-item>
+      <el-form-item label="执行方式" required>
+        <el-select v-model="form.execution_mode" style="width: 260px">
+          <el-option v-for="item in EXECUTION_MODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
+        </el-select>
+        <div v-if="form.execution_mode === 'UNKNOWN'" class="text-hint execution-mode-warning">
+          未判定执行方式时不能发布；请按原规则行选择材料检查、字段比较、跨范围比较、组合汇总或风险推导。
+        </div>
+        <div v-else class="text-hint">{{ executionModeLabel(form.execution_mode) }}</div>
+      </el-form-item>
       <el-form-item label="规则角色"><el-select v-model="form.rule_role"><el-option value="CHECK" label="普通核查" /><el-option value="RISK" label="风险结论" /></el-select></el-form-item>
       <el-form-item label="执行要求"><el-input v-model="form.requirement" type="textarea" :rows="8" placeholder="填写完整业务规则、方法、公式、条件和输出要求" /></el-form-item>
       <el-form-item label="适用材料"><el-select v-model="form.material_keys" multiple style="width:100%">
@@ -118,3 +124,10 @@ onMounted(load);
     </el-form>
   </div>
 </template>
+
+<style scoped>
+.execution-mode-warning {
+  margin-top: 4px;
+  color: var(--el-color-warning);
+}
+</style>

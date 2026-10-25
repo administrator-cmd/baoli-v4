@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from ..common.exceptions import BusinessError
-from .audit_vocab import OPERATOR_RESULT_STATUSES
 
+from ..common.exceptions import BusinessError
+from ..constants.status import OPERATOR_RESULT_STATUSES
 from . import file_quality
 from .parameter_contract import (
     DATE_COMPARE_OPERATORS,
@@ -519,7 +519,7 @@ class ToolSpec:
 def _output_schema_of(metadata: _ToolMetadata) -> dict[str, Any]:
     """工具输出的 Schema，从能力目录的 `statuses` 与 `output_keys` 派生。
 
-    `status` 与输出键取自本工具的元数据，规则结果状态另由 audit_vocab 说明。
+    `status` 与输出键取自本工具的元数据，规则结果状态另由 `constants/status.py` 说明。
     `required` 只含每条返回路径都会给出的键（`status`、`message`，以及能力目录用
     `required_output_keys` 确认过的）。把「可能出现」写成「必填」会放行缺字段的结果，
     把「保证出现」漏掉又会拒绝合法结果，两者必须以同一个来源为准。
@@ -725,7 +725,7 @@ def _build_rule_library_query_tool() -> ToolSpec:
         tool_id="RULE_LIBRARY_QUERY",
         version="1",
         label="查询规则库",
-        description="只读查询本次审核任务冻结的生效规则及计算规则，返回完整配置和来源原文。query 在完整配置中匹配关键词，rule_codes 精确匹配规则或结果编号，rule_keys 精确匹配内部或候选身份。多个条件取交集，无条件返回全部生效项；查询成功不代表审核通过。",
+        description="只读查询本次审核任务冻结的生效规则及计算规则。不填 rule_codes/rule_keys 时返回目录（编号、名称、执行方式、业务要求），不返回完整配置；按 rule_codes 或 rule_keys 精确查询时返回完整配置和来源原文。query 在完整配置中匹配关键词；多个条件取交集，查询成功不代表审核通过。",
         input_schema={
             "type": "object",
             "properties": {"inputs": _inputs_schema(min_items=0, max_items=0), "parameters": parameters},
@@ -767,7 +767,7 @@ def _build_task_data_tool(process: bool = False) -> ToolSpec:
         tool_id="DOCUMENT_PROCESS" if process else "TASK_DATA_READ", version="1",
         label="材料前置处理" if process else "读取材料内容",
         description=("文件处理/OCR/印章/材料识别由程序在业务审核前执行，模型不负责触发。"
-                     if process else "读取已经完成前置处理的材料产物。正文使用artifact_type=OCR，返回去章文件的完整Markdown；印章检验使用SEAL，返回原文件的印章主体等信息；材料类型校验使用MATERIAL_CLASSIFY。未指定类型时读取OCR正文。"),
+                     if process else "读取已经完成前置处理的材料产物。正文使用artifact_type=OCR，返回去章文件的逐页正文（带页码）；印章检验使用SEAL，返回原文件的印章主体等信息；材料类型识别结论使用MATERIAL_CLASSIFY，仅供参考。未指定类型时读取OCR正文。"),
         input_schema={"type": "object", "properties": {"inputs": _inputs_schema(min_items=0, max_items=0),
                       "parameters": {"type": "object", "properties": properties,
                                      "required": ["material_keys", "service"] if process else ["material_keys"], "additionalProperties": False}},

@@ -1,10 +1,14 @@
-"""任务取值的业务表结构与无损单元格编码，不把对象序列化进单元格。"""
+"""任务取值的业务表结构与无损单元格编码。
 
+业务证据是少量有明确结构的引用对象，保存在主记录的 JSON 单元格中；
+其它结构化业务值仍按既有类型规则处理，不能借用证据列逃避校验。
+"""
+
+import json
+import math
 from datetime import date, datetime
 from decimal import Decimal
-import math
 from typing import Any
-
 
 IDENTITY_COLUMNS = ("记录类型", "记录ID", "写入批次")
 CONTEXT_COLUMNS = (
@@ -17,17 +21,24 @@ VALUE_COLUMNS = {
     "raw_value": "原文", "normalized_value_json": "候选值", "value": "有效值",
     "unit": "单位", "currency": "币种", "status": "结论状态", "message": "结论原因",
     "risk_level": "风险等级", "action": "风险处置", "next_action": "处理建议",
+    "evidence": "原文依据",
     "presentation_version": "展示协议版本",
 }
 MAIN_TABLES = {
-    "values.csv": {key: VALUE_COLUMNS[key] for key in ("raw_value", "normalized_value_json", "value", "unit", "currency")},
-    "rule_results.csv": {key: VALUE_COLUMNS[key] for key in ("status", "message", "risk_level", "action", "next_action", "presentation_version")},
+    "values.csv": {key: VALUE_COLUMNS[key] for key in ("raw_value", "normalized_value_json", "value", "unit", "currency", "evidence")},
+    "rule_results.csv": {key: VALUE_COLUMNS[key] for key in ("status", "message", "risk_level", "action", "next_action", "evidence", "presentation_version")},
 }
-# 多值业务项各用一张明细表，不把多条依据/产出合并成一段文本。
+
+# 证据引用有固定的业务形状，作为一个 JSON 单元格保存，避免为每个引用、属性和
+# 数组节点生成明细行。其它 object/array 仍使用 value_details.csv 的严格树编码。
+JSON_COLUMNS = frozenset({"evidence"})
+# 一条规则的多值业务项写在同一张明细表，用“明细类别”区分。
+ITEM_FILE = "rule_items.csv"
+ITEM_CATEGORY = "明细类别"
 ITEM_TABLES = {
-    "basis": ("rule_basis.csv", {"label": "核查项", "value": "实际取值", "explanation": "依据说明"}),
-    "outputs": ("rule_outputs.csv", {"code": "产出编号", "raw_value": "原文", "value": "产出值", "field_status": "字段状态"}),
-    "missing_items": ("rule_missing_items.csv", {"item": "缺失事项"}),
+    "basis": {"label": "核查项", "value": "实际取值", "explanation": "依据说明"},
+    "outputs": {"code": "产出编号", "raw_value": "原文", "value": "产出值", "field_status": "字段状态"},
+    "missing_items": {"item": "缺失事项"},
 }
 ITEM_CONTEXT_COLUMNS = ("业务编号", "名称", "材料名称")
 DETAIL_COLUMNS = (*ITEM_CONTEXT_COLUMNS, "业务项目", "属性名", "数组序号", "值类型", "值", "所属项目", "节点编号", "上级节点", *IDENTITY_COLUMNS)
@@ -42,6 +53,19 @@ def typed_columns(mapping: dict[str, str]) -> tuple[str, ...]:
     return tuple(column for label in mapping.values() for column in (label, f"{label}类型"))
 
 
+def _union_item_columns() -> tuple[str, ...]:
+    """明细类别共用的类型列并集；同名不同义的列按各自标签分别保留。"""
+    columns: list[str] = []
+    for mapping in ITEM_TABLES.values():
+        for column in typed_columns(mapping):
+            if column not in columns:
+                columns.append(column)
+    return tuple(columns)
+
+
+_TYPED_ITEM_COLUMNS = _union_item_columns()
+
+
 TABLE_COLUMNS = {
     "values.csv": (
         *CONTEXT_COLUMNS[:-4], *typed_columns(MAIN_TABLES["values.csv"]),
@@ -52,16 +76,11 @@ TABLE_COLUMNS = {
         "执行批次ID", "任务编号",
         "判断依据数", "实际产出数", "缺失事项数", "补充属性数", *IDENTITY_COLUMNS,
     ),
-    **{
-        filename: (
-            *ITEM_CONTEXT_COLUMNS,
-            *(("字段名称", "产出材料名称", "产出单位", "产出币种") if key == "outputs" else ()),
-            "明细序号", *typed_columns(mapping), "补充属性数",
-            *(("字段键", "产出材料键") if key == "outputs" else ()),
-            *IDENTITY_COLUMNS,
-        )
-        for key, (filename, mapping) in ITEM_TABLES.items()
-    },
+    "rule_items.csv": (
+        *ITEM_CONTEXT_COLUMNS, "明细序号", ITEM_CATEGORY,
+        "字段名称", "产出材料名称", "产出单位", "产出币种",
+        *_TYPED_ITEM_COLUMNS, "补充属性数", "字段键", "产出材料键", *IDENTITY_COLUMNS,
+    ),
     "value_details.csv": DETAIL_COLUMNS,
 }
 COUNT_COLUMNS = {"basis": "判断依据数", "outputs": "实际产出数", "missing_items": "缺失事项数"}
@@ -113,6 +132,15 @@ class RecordWriter:
         self.tables = tables
 
     def cell(self, row: dict[str, Any], label: str, value: Any, slot: str) -> None:
+        if label == VALUE_COLUMNS["evidence"]:
+            if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                raise TypeError("原文依据必须是对象列表")
+            try:
+                encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("原文依据不是可保存的 JSON 结构") from exc
+            row[label], row[f"{label}类型"] = encoded, "json"
+            return
         kind, text = _scalar(value)
         row[label], row[f"{label}类型"] = text, kind
         if kind in {"object", "array"}:
@@ -158,7 +186,7 @@ class RecordWriter:
         row.update(self.identity)
         scalars = {key: value for key, value in payload.items() if key not in ITEM_TABLES}
         self.attributes(row, scalars, MAIN_TABLES[main_filename], "")
-        for key, (filename, mapping) in ITEM_TABLES.items():
+        for key, mapping in ITEM_TABLES.items():
             if key not in payload:
                 continue
             items = payload[key]
@@ -167,7 +195,8 @@ class RecordWriter:
                 raise TypeError(f"{key} 必须是列表")
             row[COUNT_COLUMNS[key]] = len(items)
             for index, item in enumerate(items):
-                detail = {**self.identity, **{name: self.context.get(name) for name in ITEM_CONTEXT_COLUMNS}, "明细序号": index}
+                detail = {**self.identity, **{name: self.context.get(name) for name in ITEM_CONTEXT_COLUMNS},
+                          "明细序号": index, ITEM_CATEGORY: key}
                 values = {"item": item} if key == "missing_items" else item
                 self.attributes(detail, values, mapping, f"{key}/{index}/")
                 if key == "outputs":
@@ -175,7 +204,7 @@ class RecordWriter:
                     detail.update({"字段名称": definition.get("name"), "产出材料名称": definition.get("material_name"),
                                    "产出单位": definition.get("unit"), "产出币种": definition.get("currency"),
                                    "字段键": definition.get("field_key"), "产出材料键": definition.get("material_key")})
-                self.tables[filename].append(detail)
+                self.tables[ITEM_FILE].append(detail)
         # 主记录最后追加，只有写完所有明细的批次才会被读取。
         self.tables[main_filename].append(row)
 
@@ -232,7 +261,17 @@ class RecordReader:
             if not kind and row[label]:
                 raise ValueError(f"单元格有值但缺少类型：{prefix}{label}")
             if kind:
-                if kind in {"object", "array"}:
+                if key in JSON_COLUMNS:
+                    if kind != "json":
+                        raise ValueError(f"{prefix}{label} 必须使用 json 类型")
+                    try:
+                        value = json.loads(row[label])
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(f"{prefix}{label} 不是有效 JSON") from exc
+                    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                        raise ValueError(f"{prefix}{label} 的结构必须是对象列表")
+                    output[key] = value
+                elif kind in {"object", "array"}:
                     if row[label]:
                         raise ValueError(f"结构化单元格的值须在明细表维护：{prefix}{label}")
                     value = self.tree(f"{prefix}{label}")

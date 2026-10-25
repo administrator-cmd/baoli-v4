@@ -1,6 +1,7 @@
 import { computed, ref } from "vue";
 
 import type { ConfigOrigin } from "@/api/contracts";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 
 interface SourcedRule {
   origin?: ConfigOrigin | null;
@@ -34,7 +35,10 @@ export function useRuleSourceFilter(items: () => readonly SourcedRule[]) {
     return Array.from(counts, ([value, count]) => ({
       value,
       label: `${value === MISSING_SOURCE ? MISSING_SOURCE_LABEL : value.slice(SHEET_PREFIX.length)}（${count}）`,
-    }));
+    })).sort((left, right) => compareNaturalLabels(
+      left.value === MISSING_SOURCE ? null : left.value.slice(SHEET_PREFIX.length),
+      right.value === MISSING_SOURCE ? null : right.value.slice(SHEET_PREFIX.length),
+    ));
   });
 
   function matchesSourceSheet(item: SourcedRule): boolean {

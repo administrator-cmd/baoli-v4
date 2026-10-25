@@ -15,10 +15,11 @@ class ExecuteNodeRequest(BaseModel):
     # 提交者看到的任务输入修订号；与任务当前修订不一致时明确冲突，不执行旧输入。
     input_revision: int | None = Field(default=None, ge=0)
 
-class OperationRequest(BaseModel):
-    """可能触发长处理的操作入口共用请求体。"""
+class ResumeExecutionRequest(BaseModel):
+    """从中断的执行批次继续；目标批次由服务端按任务当前节点解析。"""
 
     idempotency_key: str | None = Field(default=None, max_length=120)
+    input_revision: int | None = Field(default=None, ge=0)
 
 class DocumentOcrRetryRequest(BaseModel):
     """只续查或重试当前材料的 OCR，绑定页面看到的输入和作业身份。"""
@@ -35,21 +36,6 @@ class DocumentArtifactRetryRequest(BaseModel):
     input_revision: int = Field(ge=0)
     artifact_no: str = Field(min_length=1, max_length=40)
     resubmit_unknown: bool = False
-
-class ManualReviewItem(BaseModel):
-    review_no: str
-    decision: Literal["CONFIRM_ABNORMAL", "MARK_NORMAL", "EVIDENCE_INSUFFICIENT", "CONFIRM_FIELD", "MODIFY_FIELD", "MARK_NOT_PRESENT"]
-    business_note: str = Field(min_length=1, max_length=2000)
-    field_value: str | None = None
-    # 这条人工结论的依据类型。默认人工业务判断；不得把旧引文当成新值的文档证明。
-    basis_type: Literal["HUMAN_STATEMENT", "DOCUMENT_EVIDENCE", "UPLOAD_RECORD"] = "HUMAN_STATEMENT"
-
-class ManualReviewRequest(BaseModel):
-    reviews: list[ManualReviewItem] = Field(min_length=1)
-    # 与本次复核集合绑定；重复提交同一集合时复用同一条后台操作。
-    idempotency_key: str | None = Field(default=None, max_length=120)
-    # 提交者看到的任务输入修订号；与任务当前修订不一致时明确冲突。
-    input_revision: int | None = Field(default=None, ge=0)
 
 class FieldCorrectionRequest(BaseModel):
     """对 PRESENT 错值 / NOT_PRESENT 漏值的主动纠错。
@@ -87,11 +73,8 @@ class TaskCopyRequest(BaseModel):
 __all__ = [
     "TaskSchemaPreviewRequest",
     "ExecuteNodeRequest",
-    "OperationRequest",
     "DocumentOcrRetryRequest",
     "DocumentArtifactRetryRequest",
-    "ManualReviewItem",
-    "ManualReviewRequest",
     "FieldCorrectionRequest",
     "TaskUpdateRequest",
     "TaskCopyRequest",

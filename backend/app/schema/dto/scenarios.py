@@ -1,7 +1,9 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from ...constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
+from ...domain.execution_mode import ExecutionMode
 from ...domain.parameter_contract import ReportContentType, ReportResultSort
 
 
@@ -89,8 +91,9 @@ class DraftRuleApplicability(BaseModel):
 
 class DraftRuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    node: str = "RULE_EXECUTION"
-    operator: str = "LLM_EXECUTE"
+    node: str = NODE_RULE_EXECUTION
+    operator: str = OPERATOR_LLM_EXECUTE
+    execution_mode: ExecutionMode = "UNKNOWN"
     rule_role: Literal["CHECK", "RISK"] = "CHECK"
     enabled: bool = True
     inputs: list[DraftRuleInput] = Field(default_factory=list)
@@ -109,6 +112,34 @@ class DraftRuleRequest(BaseModel):
 
 class DraftRuleEnabledRequest(BaseModel):
     enabled: bool
+
+
+class DraftCalculationParameter(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    parameter_code: str = Field(min_length=1)
+    source_type: str = Field(min_length=1)
+    source_code: str | None = None
+    constant_value: Any = None
+
+
+class DraftCalculationRequest(BaseModel):
+    rule_code: str = Field(min_length=1, max_length=80)
+    rule_name: str = Field(min_length=1, max_length=255)
+    result_code: str = Field(min_length=1, max_length=80)
+    source_id: str | None = None
+    formula: str = ""
+    requirement: str = ""
+    result_type: str
+    unit: str | None = None
+    currency: str | None = None
+    period_policy: str | None = None
+    statement_scope: str | None = None
+    status: Literal["CLEAR", "PENDING", "DISABLED"]
+    parameters: list[DraftCalculationParameter] = Field(default_factory=list)
+    depends_on_result_codes: list[str] = Field(default_factory=list)
+    business_context: dict[str, Any] = Field(default_factory=dict)
+    remark: str = ""
 
 
 class DraftSectionRequest(BaseModel):

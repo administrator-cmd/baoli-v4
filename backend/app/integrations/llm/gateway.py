@@ -25,9 +25,8 @@ from typing import Any
 
 import httpx
 
-from ...config import get_settings
 from ...common.exceptions import BusinessError
-
+from ...core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +292,32 @@ def _read_stream(
     return envelope
 
 
+def _log_token_usage(
+    *, call: str, idempotency_key: str | None, requested_model: str, envelope: dict[str, Any],
+) -> None:
+    """记录一次模型调用的供应商 token 用量；未返回时明确记 usage=absent，不估算。"""
+    model = envelope.get("model") or requested_model
+    usage = envelope.get("usage")
+    if usage is None:
+        logger.info(
+            "远程大模型 token 用量 call=%s idempotency_key=%s model=%s usage=absent",
+            call, idempotency_key or "-", model,
+        )
+        return
+    if not isinstance(usage, dict):
+        logger.info(
+            "远程大模型 token 用量 call=%s idempotency_key=%s model=%s usage=invalid type=%s",
+            call, idempotency_key or "-", model, type(usage).__name__,
+        )
+        return
+    logger.info(
+        "远程大模型 token 用量 call=%s idempotency_key=%s model=%s "
+        "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+        call, idempotency_key or "-", model,
+        usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
+    )
+
+
 def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
     """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。
 
@@ -329,7 +354,12 @@ def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[s
                     "POST",
                     _endpoint(baseurl),
                     headers=headers,
-                    json={**body, "stream": True},
+                    json={
+                        **body,
+                        "stream": True,
+                        # 要求供应商在流末尾返回 usage，用于核对单次输入 token 规模。
+                        "stream_options": {**(body.get("stream_options") or {}), "include_usage": True},
+                    },
                     timeout=remaining,
                 ) as response:
                     response.raise_for_status()
@@ -455,6 +485,9 @@ def call_json(
     if reasoning_effort is not None:
         request_body["reasoning_effort"] = reasoning_effort
     envelope = _post(request_body, idempotency_key=idempotency_key)
+    _log_token_usage(
+        call="call_json", idempotency_key=idempotency_key, requested_model=model, envelope=envelope,
+    )
     try:
         content = envelope["choices"][0]["message"]["content"]
         if not isinstance(content, str):
@@ -582,6 +615,9 @@ def call_chat(
     requested_at = datetime.now(UTC).isoformat()
     envelope = _post(body, idempotency_key=idempotency_key)
     responded_at = datetime.now(UTC).isoformat()
+    _log_token_usage(
+        call="call_chat", idempotency_key=idempotency_key, requested_model=model, envelope=envelope,
+    )
     try:
         choice = envelope["choices"][0]
         message = choice["message"]

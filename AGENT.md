@@ -33,11 +33,11 @@ cd frontend
 npm run dev
 ```
 
-数据库初始化与清库工具 `script/reset_database.py` 的用法见根目录 `README.md`。结构变更直接修改 `backend/database/schema.sql`；结构校验实现在 `backend/app/runtime/schema_check.py`。
+数据库初始化与清库工具 `script/reset_database.py` 的用法见根目录 `README.md`。结构变更直接修改 `backend/resource/schema.sql`；结构校验实现在 `backend/app/runtime/schema_check.py`。
 
 仅在用户明确要求时运行测试、类型检查、构建、浏览器、服务、数据库、模型或外部接口；未授权时只做静态核对。
 
-后端保留 `api`、`services`、`repositories` 三层，各层内部按场景、方案、审核、材料、报告、导入、系统分业务文件夹，文件再按职责拆分。共用服务与配置持久化分别归入 `services/shared/`、`repositories/shared/`，不在三层根目录新增混合业务模块，不增加旧模块兼容导出。目录导航见 `docs/后端分层约定.md`。
+后端保留 `api`、`services` 两层，各层内部按场景、方案、审核、材料、报告、导入、系统分业务文件夹，文件再按职责拆分。共用服务归入 `services/shared/`，不在层根目录新增混合业务模块。配置与数据库引擎放在 `app/core/`，SQL 结构文件放在 `backend/resource/`。包目录不写 `__init__.py`，调用方从具体模块导入，不做包的符号重导出，不增加旧模块兼容导出。目录导航见 `docs/后端分层约定.md`。
 
 
 数据库：
@@ -59,6 +59,6 @@ D:\29550\OneDrive\桌面\Agent\baoli_material\baoli-v4 下面的pdf excel 等都
 
 Excel → LLM 规则库 JSON → 用户方案中的生效规则。LLM 直接抽取、计算和判断，按需调用真实工具；单条无法执行时保存原因，其余继续。不要添加业务合理性校验、预置业务阶段、历史业务协议兼容或模拟成功路径。
 
-RULE_EXECUTION 仅为执行记录技术容器，不是可编排业务节点。rule_key 是当前内部唯一身份，rule_code 是原始业务编号；任务版本、文件版本、规则结果身份、证据来源属于当前执行功能。执行期不维护独立事实快照、工具调用账本或检索索引，也没有 LangGraph checkpoint。业务取值（字段值、计算结果、规则结论）的读取来源是本次任务的 CSV；数据库保留索引、状态、执行诊断、证据和报告。当前诊断仍包含模型原始响应和输入取值，不能称为业务值完全不落库，具体问题见状态台账。工具按当前真实目录提供，不存逐规则授权矩阵。
+RULE_EXECUTION 仅为执行记录技术容器，不是可编排业务节点。rule_key 是当前内部唯一身份，rule_code 保留来源业务编号；任务版本、文件版本、规则结果身份、原文来源属于当前执行功能。执行期不维护独立事实快照、工具调用账本或检索索引，也没有 LangGraph checkpoint；中断恢复基于已提交的规则结果，不恢复模型消息。业务取值和原文依据保存在任务 CSV，数据库保留索引、状态、结论摘要、执行诊断和报告，不再维护独立 Evidence 表或证据编号；审核原始模型响应当前不落盘，新输入摘要只保留引用信息。工具按当前真实目录提供，不存逐规则授权矩阵。
 
-以 docs/规则库与审核执行契约.md 和 docs/当前状态与问题台账.md 为当前设计与实现依据。
+按 docs/README.md 选择与任务相关的文档；执行语义以 docs/规则库与审核执行契约.md 为依据，未解决问题和验证边界见 docs/当前状态与问题台账.md。文档维护当前结论，不追加逐轮操作日志，也不把讨论中的方案写成已实现能力。

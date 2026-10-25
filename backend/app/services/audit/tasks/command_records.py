@@ -2,14 +2,17 @@
 
 from datetime import UTC, datetime
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....entity import AuditTask, BackgroundOperation, OperationLog
 from ....domain.identity import public_no
-from ...system.operation_types import OBJECT_AUDIT_TASK
+from ....entity.operations import BackgroundOperation, OperationLog
+from ....entity.tasks import AuditTask
 from ...system.operation_log import record_operation
+from ...system.operation_types import OBJECT_AUDIT_TASK
 
 
 def claim_task_command(
@@ -81,7 +84,7 @@ def task_of_command(db: Session, command: BackgroundOperation) -> AuditTask:
             OperationLog.object_type == OBJECT_AUDIT_TASK,
             OperationLog.object_no == task_no,
             OperationLog.operation_type == "DELETE",
-            OperationLog.detail_json["permanent"].as_boolean().is_(True),
+            OperationLog.permanent.is_(True),
         ).limit(1)) if task_no else None
         if deletion is not None:
             raise BusinessError(

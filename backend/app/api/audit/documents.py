@@ -2,17 +2,18 @@
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy.orm import Session
-from ...database import SessionLocal, get_db
-from ...schema.dto import DocumentOcrRetryRequest
-from ...schema.dto.tasks import DocumentArtifactRetryRequest
+
+from ...core.database import SessionLocal, get_db
+from ...schema.dto.tasks import DocumentArtifactRetryRequest, DocumentOcrRetryRequest
+from ...schema.vo.audits import OcrArtifactStatusResponse
+from ...schema.vo.operations import OperationAcceptedResponse
+from ...schema.vo.tasks import DocumentRemoveResponse, DocumentUploadResponse, ExternalArtifactStatusResponse
 from ...services.audit.material_retry import submit_document_artifact_retry
-from ...services.system.background import operation_view
 from ...services.audit.operations import submit_document_ocr_retry
+from ...services.audit.tasks.documents import remove_current_document_file, upload_document
 from ...services.audit.tasks.lookup import task_or_404
 from ...services.audit.tasks.processing import external_artifact_status_view, ocr_status_view
-from ...services.audit.tasks.documents import remove_current_document_file, upload_document
-from ...schema.vo import DocumentRemoveResponse, DocumentUploadResponse, ExternalArtifactStatusResponse, OcrArtifactStatusResponse, OperationAcceptedResponse
-
+from ...services.system.background import operation_view
 
 router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
 

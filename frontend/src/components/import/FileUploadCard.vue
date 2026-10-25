@@ -21,8 +21,6 @@ const props = defineProps<{
   jobFilename: string | null;
   jobCreatedAt: string | null;
   jobStatus: string | null;
-  /** 解析失败的真实原因（来自作业的 failure 字段）。 */
-  failureMessage: string | null;
   /** 本次浏览器选择的文件大小；刷新后浏览器不再保留该信息。 */
   selectedFileSize: number | null;
   /** 后端上传策略中的规则库一项；未取得前不展示大小与格式提示，也不做前端预检。 */
@@ -128,18 +126,6 @@ function onFileChange(file: { raw?: File; name: string }): void {
         </div>
       </template>
     </el-upload>
-
-    <el-alert
-      v-if="failureMessage"
-      class="block-gap"
-      type="error"
-      show-icon
-      :closable="false"
-      title="规则解析失败"
-    >
-      <div>{{ failureMessage }}</div>
-      <div>确认参与解析的工作表后可以重新提交解析；已识别的文件与工作表不会丢失。</div>
-    </el-alert>
   </div>
 </template>
 

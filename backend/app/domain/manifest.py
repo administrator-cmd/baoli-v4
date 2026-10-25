@@ -4,14 +4,14 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
-
-from . import tool_catalog, field_strategy
-from .audit_vocab import SCOPE_NOT_APPLICABLE
 from ..common.exceptions import BusinessError
+from ..constants.execution import NODE_RULE_EXECUTION
+from ..constants.status import SCOPE_NOT_APPLICABLE
+from . import field_strategy, tool_catalog
 from .identity import stable_key
+from .proposals import FieldProposal, MaterialProposal, ReportSectionProposal, RuleProposal
 from .report_data import report_data_refs
 from .rule_library import active, is_risk_rule
-from .proposals import MaterialProposal, FieldProposal, RuleProposal, ReportSectionProposal
 
 
 def _proposal_context(item: dict[str, Any], model: type) -> dict[str, Any]:
@@ -277,7 +277,7 @@ def draft_config_of_import(
             "material_key": material_key,
             "name": item["name"],
             "value_type": item["value_type"],
-            "node_code": "RULE_EXECUTION",
+            "node_code": NODE_RULE_EXECUTION,
             "unit": item.get("unit"),
             "currency": item.get("currency"),
             "artifact_source": item.get("artifact_source"),
@@ -314,8 +314,9 @@ def draft_config_of_import(
             "business_context": _proposal_context(item, RuleProposal),
             "rule_code": item.get("rule_code") or item.get("source_id"),
             "name": item["name"],
-            "node": "RULE_EXECUTION",
+            "node": NODE_RULE_EXECUTION,
             "operator": item["operator"],
+            "execution_mode": item.get("execution_mode") or "UNKNOWN",
             "rule_role": "RISK" if is_risk_rule(item) else "CHECK",
             "enabled": active(item),
             "inputs": inputs,
@@ -412,8 +413,13 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
     """
     from .rule_library import execution_container_of
     execution_container_of(manifest)
-    applicability_of = lambda rule: rule.get("applicability") if isinstance(rule.get("applicability"), dict) else {}
-    optional = lambda key, value: {key: value} if value is not None else {}
+
+    def applicability_of(rule: dict[str, Any]) -> dict[str, Any]:
+        value = rule.get("applicability")
+        return value if isinstance(value, dict) else {}
+
+    def optional(key: str, value: Any) -> dict[str, Any]:
+        return {key: value} if value is not None else {}
 
     nodes = [
         {
@@ -510,6 +516,7 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
                     # 以下业务配置事实是人工维护的审核口径，页面表单不一定每一项都能编辑，
                     # 整块覆盖 rule_json 时不能丢：检查等级与「合格要求」原文、风险等级原文与
                     # 成立条件、风险的多来源、业务配置状态与能力缺口标记。
+                    **optional("execution_mode", rule.get("execution_mode")),
                     **optional("check_level", rule.get("check_level")),
                     **optional("check_operator", rule.get("check_operator")),
                     **optional("risk_level_value", rule.get("risk_level_value")),

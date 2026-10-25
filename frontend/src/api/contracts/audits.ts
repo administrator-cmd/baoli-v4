@@ -15,6 +15,8 @@ export interface AuditNode {
   status: string;
   failure_message: string | null;
   skip_reason: string | null;
+  /** 服务重启中断、可原地继续的执行批次；为 null 表示只能重新执行。 */
+  resumable_execution_id?: number | null;
 }
 /**
  * 任务的展示结构：由后端按当前任务的场景配置返回。
@@ -54,18 +56,41 @@ export interface AuditDocument {
     matched_keywords?: JsonValue[] | null;
     matches_declared_material?: boolean | null;
   } | null;
+  /**
+   * 当前上传的四项处理产物状态；尚未产生某项时该键不存在。
+   * 由任务详情一次返回，用于显示识别进度与定位失败项。
+   */
+  artifacts?: Record<string, MaterialArtifactStatus>;
+}
+
+export interface MaterialArtifactStatus {
+  status: string;
+  artifact_no: string | null;
+  message: string;
+  deadline_at: string | null;
+  job_id?: string | null;
+  /** OCR 供应商侧的作业状态（running/pending/done），仅 OCR 返回。 */
+  provider_state?: string | null;
+  extract_progress?: { totalPages?: number; extractedPages?: number; [key: string]: unknown } | null;
+  progress_updated_at?: string | null;
 }
 
 export interface AuditField {
+  /** 规则库中的字段业务编号。 */
+  source_ref?: string | null;
   name: string;
   material_name: string;
   status: string;
   raw_value: string | null;
   normalized_value: JsonValue;
-  evidence_no: string | null;
-  evidences?: Array<{
-    evidence_no: string;
-    field_path: string | null;
+  /** 随业务结果返回的引用原文，不单独查询证据记录。 */
+  evidence: Array<{
+    document_name: string | null;
+    material_name?: string | null;
+    document_upload_id: number;
+    artifact_id: number | null;
+    field_path?: string | null;
+    quote_text: string;
   }>;
 }
 
@@ -113,6 +138,8 @@ export interface RuleCheckComparison {
 }
 
 export interface RuleStandard {
+  /** 规则业务编号；系统生成的抽取/报告规则为 SYS- 前缀。 */
+  rule_code?: string | null;
   operator_label?: string | null;
   requirement?: string | null;
   check_level?: string | null;
@@ -133,19 +160,23 @@ export interface RuleStandard {
 
 export interface AuditRule {
   rule_key?: string;
+  /** 冻结配置中的真实业务编号；抽取、报告规则继承各自来源编号。 */
+  source_ref?: string | null;
   name: string;
   kind?: string | null;
+  /** 规则执行方式：材料检查/字段比较/跨范围比较/汇总/风险推导等，由场景配置冻结。 */
+  execution_mode?: string | null;
+  /** 由后端按冻结配置中的风险角色或风险算子识别，与执行方式独立。 */
+  is_risk_rule?: boolean;
+  /** 规则来源工作表；页面按它分组，不同场景的 Sheet 名不同。 */
+  source_sheet?: string | null;
   material_names?: string[];
   status: string;
   message: string;
   result: Record<string, JsonValue> | null;
+  turn_count?: number;
   configured_requirement?: string | null;
-  evidence?: Array<{
-    evidence_no: string;
-    material_name: string | null;
-    filename: string | null;
-    quote_text: string;
-  }>;
+  evidence: AuditField["evidence"];
 }
 
 export interface AuditTask extends ApiResponse {
@@ -196,31 +227,18 @@ export interface RiskList extends ApiResponse {
   hit_count: number;
   status_counts: Record<string, number>;
   items: Array<{
+    /** 风险规则的业务编号，与规则结果中的编号一致。 */
+    rule_code: string | null;
     name: string;
     status: string;
     message: string;
     risk_level?: string | null;
+    source_sheet?: string | null;
     details: Record<string, JsonValue> | null;
-    evidence: Array<{ evidence_no: string; material_name: string | null; quote_text: string }>;
+    evidence: AuditField["evidence"];
   }>;
 }
 
-
-export interface Evidence extends ApiResponse {
-  evidence_no: string;
-  document_name: string | null;
-  /** 结构化字段的顶层属性名；普通字段与规则证据为空。 */
-  field_path: string | null;
-  quote_text: string;
-  /** 内容依据的核对结论：引文或字段值能否在所属材料里找到原文。 */
-  quote_check?: "FOUND" | "NOT_FOUND" | "NOT_CHECKABLE" | "PENDING" | null;
-  quote_check_label?: string | null;
-  /** 该证据所属的上传版本与产物；旧上传的证据按历史身份查看。 */
-  document_upload_no: string | null;
-  artifact_type: string | null;
-  is_current_upload: boolean;
-  historical: boolean;
-}
 
 export interface FieldCorrectionRequest {
   field_key: string;

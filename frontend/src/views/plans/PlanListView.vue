@@ -13,6 +13,7 @@ import {
   setPlanEnabled,
 } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
+import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 
@@ -258,47 +259,44 @@ async function loadSceneOptions(): Promise<void> {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
+    <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
       <el-table-column type="selection" width="50" />
-      <el-table-column type="index" label="序号" width="60" />
-      <el-table-column label="方案编码" width="170">
-        <template #default="{ row }"><span class="mono">{{ row.plan_code }}</span></template>
-      </el-table-column>
-      <el-table-column label="方案名称" min-width="200" show-overflow-tooltip>
+      <el-table-column type="index" label="序号" width="56" />
+      <el-table-column label="方案名称" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="openDetail(row)">{{ row.plan_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column prop="scenario_name" label="所属场景" min-width="180" show-overflow-tooltip />
-      <el-table-column label="场景版本" width="110">
+      <el-table-column prop="scenario_name" label="所属场景" min-width="140" show-overflow-tooltip />
+      <el-table-column label="场景版本" width="88">
         <template #default="{ row }">
           <span v-if="row.base_scenario_version_no">第 {{ row.base_scenario_version_no }} 版</span>
           <span v-else class="text-hint">未绑定</span>
         </template>
       </el-table-column>
-      <el-table-column label="范围状态" width="110">
+      <el-table-column label="范围状态" width="96">
         <template #default="{ row }">
           <el-tag :type="row.effective ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
             {{ row.effective ? "已生效" : "待核对" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="启用规则数" width="120">
+      <el-table-column label="启用规则数" width="100">
         <template #default="{ row }">
           <span>{{ row.enabled_rule_count }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="启用状态" width="100">
+      <el-table-column label="启用状态" width="88">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
             {{ row.enabled ? "启用" : "停用" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="更新时间" width="170">
-        <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="更新时间" width="184">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="250" fixed="right">
+      <el-table-column label="操作" width="232" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <template v-if="!filters.deleted">
             <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
@@ -333,9 +331,9 @@ async function loadSceneOptions(): Promise<void> {
         <template v-if="detail">
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="方案名称">{{ detail.plan_name }}</el-descriptions-item>
-            <el-descriptions-item label="所属场景">{{ detail.scenario_code }}</el-descriptions-item>
+            <el-descriptions-item label="所属场景">{{ detail.base_scenario_version?.scenario_name || "未记录场景名称" }}</el-descriptions-item>
             <el-descriptions-item label="绑定场景版本">
-              <span v-if="detail.base_scenario_version">第 {{ detail.base_scenario_version.version_no }} 版（{{ detail.base_scenario_version.scenario_name }}）</span>
+              <span v-if="detail.base_scenario_version">第 {{ detail.base_scenario_version.version_no }} 版</span>
               <span v-else class="text-hint">未绑定（范围不能生效）</span>
             </el-descriptions-item>
             <el-descriptions-item label="范围状态">

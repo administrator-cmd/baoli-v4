@@ -1,24 +1,26 @@
 """方案管理列表及可用方案选项的只读查询。"""
 
 from typing import Any
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
 from ...common.pagination import PageResult, page_result
 from ...domain.plan_calculations import plan_calculation_config
 from ...domain.rule_library import active
-from ...entity import AuditPlan, PlanRule, PlanMaterial, ScenarioTemplate, ScenarioVersion
-from ...repositories.shared import configuration as config_store
+from ...entity.plans import AuditPlan, PlanMaterial, PlanRule
+from ...entity.scenarios import ScenarioTemplate, ScenarioVersion
+from ..shared import configuration as config_store
 
 
 def _effective_predicate():
-    """「范围已生效」的 SQL 判据：sync_error 为空且有 scope_json。
+    """「范围已生效」的 SQL 判据：sync_error 为空且有 scope_hash。
 
     注意：sync_error 是 JSON 列，Python 的 None 会存成 JSON 字面量 null，
     MySQL 里 `sync_error IS NULL` 对它返回假（只有 SQL NULL 才为真），
     用它做过滤会把全部生效方案都排除掉。必须按 JSON 类型判断。
-    scope_json 同理，用 JSON_TYPE 而不是 IS NOT NULL。
     """
-    return (func.json_type(AuditPlan.sync_error) == "NULL") & (func.json_type(AuditPlan.scope_json) != "NULL")
+    return (func.json_type(AuditPlan.sync_error) == "NULL") & AuditPlan.scope_hash.is_not(None)
 
 
 def list_plans_page(
@@ -82,7 +84,9 @@ def list_plans_page(
 
     items = []
     for plan in plans:
-        scope = plan.scope_json if isinstance(plan.scope_json, dict) else {}
+        # 列表只用一个计数，不必为每个方案重建整套 task schema。
+        rules = plan.manifest_json.get("rules") if isinstance(plan.manifest_json, dict) else None
+        enabled_rule_count = sum(1 for item in rules if active(item)) if isinstance(rules, list) else 0
         context = plan.context_json if isinstance(plan.context_json, dict) else {}
         _, calculation_enabled = plan_calculation_config(context)
         base_version = db.get(ScenarioVersion, plan.scenario_version_id) if plan.scenario_version_id else None
@@ -99,9 +103,9 @@ def list_plans_page(
                 "enabled": plan.enabled,
                 "deleted": plan.deleted_at is not None,
                 "base_scenario_version_no": base_version.version_no if base_version else None,
-                "effective": plan.sync_error is None and plan.scope_json is not None,
+                "effective": plan.sync_error is None and plan.scope_hash is not None,
                 "sync_error": plan.sync_error,
-                "enabled_rule_count": len(scope.get("enabled_rule_keys", [])),
+                "enabled_rule_count": enabled_rule_count,
                 "explicit_rule_count": rule_counts.get(plan.id, 0) + sum(calculation_enabled.values()),
                 "updated_at": plan.updated_at,
             }
@@ -165,7 +169,7 @@ def plan_selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
         "deleted": plan.deleted_at is not None,
         # 范围是否已生效：sync_error 非空表示最近一次保存没有算出可用范围，
         # 页面据此显示「待核对 + 原因」，不把不完整配置说成已生效。
-        "effective": plan.sync_error is None and plan.scope_json is not None,
+        "effective": plan.sync_error is None and plan.scope_hash is not None,
         "sync_error": plan.sync_error,
         "scope_hash": plan.scope_hash,
         "base_scenario_version": (

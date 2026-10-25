@@ -2,11 +2,11 @@
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.query import validate_page_params
-from ...services.material import documents as material_documents
-from ...schema.vo import PagedResponse
 
+from ...core.database import get_db
+from ...schema.query.pagination import validate_page_params
+from ...schema.vo.common import PagedResponse
+from ...services.material import documents as material_documents
 
 router = APIRouter(prefix="/documents", tags=["审核材料"])
 

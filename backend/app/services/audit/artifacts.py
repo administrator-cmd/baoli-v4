@@ -12,20 +12,22 @@ OCR 是异步作业：
 
 本模块不判断业务结论，只回答「产物是否存在、是否可读、内容哈希是什么」。"""
 
-import hashlib, json
-from ...domain.identity import public_no
-from ...common.exceptions import BusinessError, exception_summary
-from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult, ReadyOcrArtifact, ready_artifact_payload
-from .document_ports import document_service
-from ...entity import AuditTask, DocumentUpload, StoredArtifact
-from ..shared.storage import resolve_storage_path
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Callable
+
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from typing import Any, Callable
 
+from ...common.exceptions import BusinessError, exception_summary
+from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult
+from ...domain.identity import public_no
+from ...entity.tasks import AuditTask, DocumentUpload, StoredArtifact
+from ..shared.storage import resolve_storage_path
+from .document_ports import document_service
 
 PRE_CONTACT_ERROR_CODES = {
     "EXTERNAL_CONFIG_MISSING",
@@ -46,13 +48,28 @@ def _artifact_for_upload(db: Session, upload: DocumentUpload, service_code: str)
         )
     )
 
+def _artifact_content_path(artifact: StoredArtifact) -> Path:
+    """产物信封的落盘位置：与 relative_path 同目录、按产物类型命名的 JSON。"""
+    return Path(artifact.relative_path).parent / f"{artifact.artifact_type.lower()}.json"
+
+
 def _artifact_payload(artifact: StoredArtifact) -> ExternalArtifact:
+    """读取磁盘上的产物信封；文件缺失或结构不符时明确报错。"""
+    path = resolve_storage_path(str(_artifact_content_path(artifact)))
+    if not path.is_file():
+        raise BusinessError(
+            "ARTIFACT_CONTENT_MISSING",
+            "文件处理产物的内容文件不存在，需要重新执行该材料的处理",
+            status_code=500,
+            details={"artifact_no": artifact.artifact_no, "relative_path": str(path)},
+        )
     try:
-        payload = ready_artifact_payload(artifact.metadata_json, artifact_type=artifact.artifact_type)
-    except ValidationError as exc:
+        with path.open(encoding="utf-8") as content:
+            payload = ExternalArtifact.model_validate(json.load(content))
+    except (OSError, ValueError, ValidationError) as exc:
         raise BusinessError(
             "ARTIFACT_METADATA_INVALID",
-            "文件处理产物元数据不符合内部契约",
+            "文件处理产物内容不符合内部契约",
             status_code=500,
             details={"artifact_no": artifact.artifact_no},
         ) from exc
@@ -82,24 +99,27 @@ def _persist_external_artifact(
     service_code: str,
     result: ExternalServiceResult,
 ) -> tuple[str, ExternalArtifact]:
-    artifact = result.artifact
-    if result.binary_content is None:
-        relative = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/{service_code.lower()}.json"
-        target = resolve_storage_path(relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("w", encoding="utf-8") as output:
-            json.dump(artifact.model_dump(mode="json"), output, ensure_ascii=False)
-        return relative, artifact
+    """写产物信封；二进制产物（8010）另写二进制文件，relative_path 指向二进制。
 
+    信封与二进制同目录，`_artifact_payload` 按产物类型定位信封，不依赖数据库 JSON。
+    """
+    artifact = result.artifact
+    directory = resolve_storage_path(f"tasks/{task.task_no}/artifacts/{upload.upload_no}")
+    directory.mkdir(parents=True, exist_ok=True)
+    envelope = directory / f"{service_code.lower()}.json"
+    with envelope.open("w", encoding="utf-8") as output:
+        json.dump(artifact.model_dump(mode="json"), output, ensure_ascii=False)
+    if result.binary_content is None:
+        if service_code == "DOCUMENT_PARSE":
+            raise BusinessError("ARTIFACT_BINARY_MISSING", "文件处理服务未返回可用的去章文件", status_code=500)
+        return envelope.relative_to(resolve_storage_path(".")).as_posix(), artifact
     if service_code != "DOCUMENT_PARSE":
         raise BusinessError("ARTIFACT_BINARY_TYPE_INVALID", "非文件处理服务不能保存二进制产物", status_code=500)
     suffix = Path(result.filename or upload.original_filename).suffix.lower() or ".bin"
-    relative = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/document_parse{suffix}"
-    target = resolve_storage_path(relative)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as output:
+    binary = directory / f"document_parse{suffix}"
+    with binary.open("wb") as output:
         output.write(result.binary_content)
-    return relative, artifact
+    return str(binary.relative_to(resolve_storage_path(".")).as_posix()), artifact
 
 def _ensure_external_artifact(
     db: Session,
@@ -121,7 +141,7 @@ def _ensure_external_artifact(
         if existing.status == "FAILED":
             raise BusinessError("ARTIFACT_PROCESSING_FAILED", "此前该项处理失败，请在材料处理状态中重试此项", status_code=409,
                                 details={"artifact_no": existing.artifact_no, "artifact_type": service_code,
-                                         "failure_message": (existing.metadata_json or {}).get("failure_message")})
+                                         "failure_message": existing.failure_message})
         raise BusinessError(
             "ARTIFACT_PROCESSING_UNKNOWN",
             f"此前对当前文件的 {service_code} 调用结果未能确认，系统不会自动重复提交外部服务，请在材料处理状态中确认后重试此项",
@@ -152,6 +172,8 @@ def execute_external_artifact_call(db, task, upload, record, call, *, operation_
                "previous_status": record.status, "state": "PROCESSING", "resubmit_unknown": resubmit_unknown}
     attempts.append(attempt)
     record.status = "PROCESSING"
+    record.failure_code = None
+    record.failure_message = None
     record.metadata_json = {**metadata, "processing_attempts": attempts}
     db.commit()
     try:
@@ -161,8 +183,10 @@ def execute_external_artifact_call(db, task, upload, record, call, *, operation_
         record.relative_path = relative
         record.content_sha256 = _artifact_content_digest(content, result.binary_content)
         record.status = "READY"
+        record.failure_code = None
+        record.failure_message = None
         attempts[-1] = {**attempt, "state": "READY", "finished_at": datetime.now(UTC).isoformat()}
-        record.metadata_json = {**content, "processing_attempts": attempts}
+        record.metadata_json = {**metadata, "processing_attempts": attempts}
         db.flush()
     except Exception as exc:
         db.rollback()
@@ -173,8 +197,9 @@ def execute_external_artifact_call(db, task, upload, record, call, *, operation_
                         "finished_at": datetime.now(UTC).isoformat(),
                         "failure_code": exc.code if isinstance(exc, BusinessError) else type(exc).__name__,
                         "failure_message": exc.message if isinstance(exc, BusinessError) else exception_summary(exc)}
-        record.metadata_json = {**metadata, "processing_attempts": attempts,
-                                "failure_code": attempts[-1]["failure_code"], "failure_message": attempts[-1]["failure_message"]}
+        record.failure_code = attempts[-1]["failure_code"]
+        record.failure_message = attempts[-1]["failure_message"]
+        record.metadata_json = {**metadata, "processing_attempts": attempts}
         db.commit()
         raise
     return record
@@ -184,13 +209,12 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
     existing = _artifact_for_upload(db, upload, "OCR")
     if existing:
         if existing.status == "FAILED":
-            metadata = existing.metadata_json or {}
             raise BusinessError(
                 "OCR_JOB_FAILED",
                 "当前 OCR 作业已失败，请在材料处理状态中使用单份重试后再执行审核",
                 status_code=409,
-                details={"artifact_no": existing.artifact_no, "job_id": metadata.get("job_id"),
-                         "failure_message": metadata.get("failure_message")},
+                details={"artifact_no": existing.artifact_no, "job_id": existing.external_job_id,
+                         "failure_message": existing.failure_message},
             )
         if existing.status == "SUBMITTING":
             raise BusinessError(
@@ -232,13 +256,18 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
         if exc.code in {"EXTERNAL_CONFIG_MISSING", "PROCESSED_ARTIFACT_MISSING", "OCR_MULTIPART_INVALID"}:
             db.delete(record)
             db.commit()
+        else:
+            record.failure_code = exc.code
+            record.failure_message = exc.message
+            db.commit()
         raise
     record.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.pending"
     record.status = "PENDING"
-    record.metadata_json = {
-        "job_id": submission.job_id,
-        "deadline_at": submission.deadline_at.isoformat(),
-    }
+    record.external_job_id = submission.job_id
+    record.deadline_at = submission.deadline_at
+    record.failure_code = None
+    record.failure_message = None
+    record.metadata_json = {"submission_state": "PENDING"}
     db.commit()
     return record
 
@@ -273,6 +302,8 @@ def _submit_authorized_ocr_retry(
         }
         record.status = attempt["previous_status"]
         record.relative_path = attempt["previous_relative_path"]
+        # 未联系供应商就失败：产物恢复为原状态与原失败信息，本次失败只记在提交历史里。
+        _restore_job_columns(record, attempt)
         record.metadata_json = {
             **attempt["previous_metadata"],
             "submit_attempts": [*attempts[:-1], attempt],
@@ -289,12 +320,16 @@ def _submit_authorized_ocr_retry(
             attempt["state"] = "PRE_CONTACT_FAILED"
             record.status = attempt["previous_status"]
             record.relative_path = attempt["previous_relative_path"]
+            _restore_job_columns(record, attempt)
             record.metadata_json = {
                 **attempt["previous_metadata"],
                 "submit_attempts": [*attempts[:-1], attempt],
             }
         else:
+            # 已联系供应商但结果未知：保留本次失败信息，状态位 SUBMITTING。
             attempt["state"] = "UNKNOWN"
+            record.failure_code = exc.code
+            record.failure_message = exc.message
             record.metadata_json = {**metadata, "submit_attempts": [*attempts[:-1], attempt]}
         db.flush()
         raise
@@ -305,6 +340,8 @@ def _submit_authorized_ocr_retry(
             "failure_code": "OCR_RETRY_UNEXPECTED_ERROR",
             "failure_message": exception_summary(exc),
         }
+        record.failure_code = attempt["failure_code"]
+        record.failure_message = attempt["failure_message"]
         record.metadata_json = {**metadata, "submit_attempts": [*attempts[:-1], attempt]}
         db.flush()
         raise
@@ -317,30 +354,40 @@ def _submit_authorized_ocr_retry(
     }
     record.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.pending"
     record.status = "PENDING"
-    record.metadata_json = {
-        "job_id": submission.job_id,
-        "deadline_at": submission.deadline_at.isoformat(),
-        "submit_attempts": [*attempts[:-1], attempt],
-    }
+    record.external_job_id = submission.job_id
+    record.deadline_at = submission.deadline_at
+    record.failure_code = None
+    record.failure_message = None
+    record.metadata_json = {"submit_attempts": [*attempts[:-1], attempt]}
     # 供应商已返回作业号时先持久化；结果日志中断也不能丢失可续查的作业身份。
     db.commit()
     return record
 
 
+def _restore_job_columns(record: StoredArtifact, attempt: dict[str, Any]) -> None:
+    """提交前失败时恢复原作业号、截止时间与失败信息。"""
+    record.external_job_id = attempt.get("previous_external_job_id")
+    previous_deadline = attempt.get("previous_deadline_at")
+    if isinstance(previous_deadline, str):
+        parsed = datetime.fromisoformat(previous_deadline)
+        # 历史 metadata 里可能是不带时区的 UTC 文本；数据库列统一按 UTC 存储。
+        record.deadline_at = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    else:
+        record.deadline_at = None
+    record.failure_code = attempt.get("previous_failure_code")
+    record.failure_message = attempt.get("previous_failure_message")
+
+
 def _ocr_job_metadata(artifact: StoredArtifact) -> tuple[str, datetime]:
-    if artifact.status != "PENDING" or not isinstance(artifact.metadata_json, dict):
-        raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 作业记录无效", status_code=500)
-    job_id = artifact.metadata_json.get("job_id")
-    deadline_at = artifact.metadata_json.get("deadline_at")
-    if not isinstance(job_id, str) or not job_id.strip() or not isinstance(deadline_at, str):
+    if artifact.status != "PENDING":
+        raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 作业状态无效", status_code=500)
+    job_id = artifact.external_job_id
+    deadline_at = artifact.deadline_at
+    if not isinstance(job_id, str) or not job_id.strip() or deadline_at is None:
         raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 作业记录不完整", status_code=500)
-    try:
-        parsed_deadline = datetime.fromisoformat(deadline_at)
-    except ValueError as exc:
-        raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 作业截止时间无效", status_code=500) from exc
-    if parsed_deadline.tzinfo is None:
+    if deadline_at.tzinfo is None:
         raise BusinessError("OCR_JOB_METADATA_INVALID", "当前上传文件的 OCR 作业截止时间缺少时区", status_code=500)
-    return job_id.strip(), parsed_deadline
+    return job_id.strip(), deadline_at
 
 def _complete_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, artifact: StoredArtifact) -> StoredArtifact:
     if artifact.status == "READY":
@@ -360,11 +407,11 @@ def _complete_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, arti
         if exc.code == "OCR_JOB_FAILED":
             # 供应商明确的失败终态必须保存；网络错误或本地超时仍保留可续查作业。
             artifact.status = "FAILED"
+            artifact.failure_code = exc.code
+            artifact.failure_message = exc.message
             artifact.metadata_json = {
                 **(artifact.metadata_json or {}),
                 "provider_state": "failed",
-                "failure_code": exc.code,
-                "failure_message": exc.message,
                 "provider_code": exc.details.get("provider_code"),
                 "provider_error": exc.details.get("provider_error"),
                 "provider_trace_id": exc.details.get("provider_trace_id"),
@@ -375,16 +422,15 @@ def _complete_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, arti
     relative, payload = _persist_external_artifact(task, upload, "OCR", result)
     artifact.relative_path = relative
     artifact.status = "READY"
+    artifact.failure_code = None
+    artifact.failure_message = None
     current_metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-    artifact.metadata_json = ReadyOcrArtifact(
-        artifact=payload,
-        job_id=job_id,
-        deadline_at=deadline_at,
-        submit_attempts=list(current_metadata.get("submit_attempts") or []),
-        provider_state=current_metadata.get("provider_state"),
-        extract_progress=current_metadata.get("extract_progress"),
-        progress_updated_at=current_metadata.get("progress_updated_at"),
-    ).model_dump(mode="json")
+    artifact.metadata_json = {
+        "submit_attempts": list(current_metadata.get("submit_attempts") or []),
+        "provider_state": current_metadata.get("provider_state"),
+        "extract_progress": current_metadata.get("extract_progress"),
+        "progress_updated_at": current_metadata.get("progress_updated_at"),
+    }
     artifact.content_sha256 = _artifact_content_digest(payload.model_dump(mode="json"), result.binary_content)
     db.flush()
     return artifact
@@ -421,23 +467,3 @@ def _material_classify_content(db: Session, upload: DocumentUpload) -> dict[str,
     if not isinstance(payload.content.get("matches_declared_material"), bool):
         raise BusinessError("MATERIAL_CLASSIFY_CONTRACT_INVALID", "材料识别服务未返回类型匹配结论")
     return payload.content
-
-def _artifact_page_text(artifact: StoredArtifact) -> dict[int, str] | None:
-    """产物内每页可定位的文本；产物只提供结构化摘要（没有页文本）时返回 None。"""
-    content = _artifact_payload(artifact).content
-    pages = content.get("pages")
-    if not isinstance(pages, list) or not pages:
-        return None
-    index: dict[int, str] = {}
-    for item in pages:
-        if not isinstance(item, dict):
-            return None
-        page_no = item.get("page_no")
-        if isinstance(page_no, bool) or not isinstance(page_no, int):
-            return None
-        text = item.get("text")
-        index[page_no] = text if isinstance(text, str) else ""
-    if not any(text.strip() for text in index.values()):
-        # 例如印章识别只返回数量与坐标，没有页文本：没有可核对的引文依据。
-        return None
-    return index

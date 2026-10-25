@@ -1,5 +1,4 @@
 import type {
-  ToolCatalog,
   MaterialTypeItem,
   OperationLogRow,
   Paged,
@@ -31,11 +30,6 @@ export function getUploadPolicy(): Promise<UploadPolicy> {
 /** 服务状态：配置状态与连接状态分开；只有真实探测过的连接才显示已连接。 */
 export function getSystemServices(): Promise<SystemServices> {
   return request<SystemServices>("/system/services");
-}
-
-/** 模型按需调用的工具目录，不限制规则执行路径。 */
-export function getToolCatalog(): Promise<ToolCatalog> {
-  return request<ToolCatalog>("/system/tools");
 }
 
 /**

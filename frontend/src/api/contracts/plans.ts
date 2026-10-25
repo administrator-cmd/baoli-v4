@@ -1,6 +1,7 @@
 /** 审核方案与任务创建：方案选择、范围预览与任务创建结果。 */
 
 import type { ApiResponse, JsonValue } from "./common";
+import type { ConfigOrigin } from "./scenes";
 
 export interface PlanListItem {
   plan_code: string;
@@ -107,6 +108,7 @@ export interface PlanRuleItem {
   enabled: boolean;
   rule_json: Record<string, unknown>;
   source_ref?: string | null;
+  origin?: ConfigOrigin | null;
   sort_no?: number;
 }
 
@@ -129,6 +131,7 @@ export interface PlanCalculationRuleItem {
   depends_on_result_codes: string[];
   node_code: string | null;
   enabled: boolean;
+  origin?: ConfigOrigin | null;
 }
 
 export interface PlanCalculationParameter {

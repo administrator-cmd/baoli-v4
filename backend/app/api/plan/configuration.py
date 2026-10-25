@@ -1,18 +1,19 @@
 """方案配置与定制差异接口；任务反向生成方案的入口明确拒绝。"""
 
 from typing import Any
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.dto.plans import PlanConfigUpdateRequest, PlanFromTaskRequest
-from ...services.plan.query import plan_selection_view
-from ...services.plan.adjustments import plan_adjustments_view
-from ...services.plan.views import plan_config_view
-from ...services.plan.lookup import plan_or_404
-from ...services.plan.lifecycle import save_task_range_as_plan
-from ...services.plan.configuration import update_plan_config
-from ...schema.vo import PlanSelectionResponse
 
+from ...core.database import get_db
+from ...schema.dto.plans import PlanConfigUpdateRequest, PlanFromTaskRequest
+from ...schema.vo.plans import PlanSelectionResponse
+from ...services.plan.adjustments import plan_adjustments_view
+from ...services.plan.configuration import update_plan_config
+from ...services.plan.lifecycle import save_task_range_as_plan
+from ...services.plan.lookup import plan_or_404
+from ...services.plan.query import plan_selection_view
+from ...services.plan.views import plan_config_view
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])
 

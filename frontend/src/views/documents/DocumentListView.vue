@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DocumentDetail, DocumentRow } from "@/api/contracts";
 import { uploadTaskDocument } from "@/api/audits";
+import { isOperationActive } from "@/api/http";
 import { getDocument, listDocuments } from "@/api/materials";
 import { usePagedList } from "@/composables/usePagedList";
 import { useOperationTracker } from "@/composables/useOperationTracker";
 import OperationPanel from "@/components/OperationPanel.vue";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import PageHeader from "@/components/PageHeader.vue";
-import { formatFileSize, statusLabel } from "@/constants/labels";
+import { formatDate, formatFileSize, statusLabel } from "@/constants/labels";
 import StatusBadge from "@/components/StatusBadge.vue";
 
 /**
@@ -21,12 +22,11 @@ import StatusBadge from "@/components/StatusBadge.vue";
  */
 const router = useRouter();
 
-const list = usePagedList<DocumentRow, { task_no: string; keyword: string; material_name: string; has_file: string }>({
+const list = usePagedList<DocumentRow, { keyword: string; material_name: string; has_file: string }>({
   key: "documents",
-  initialFilters: { task_no: "", keyword: "", material_name: "", has_file: "" },
+  initialFilters: { keyword: "", material_name: "", has_file: "" },
   fetch: (params) =>
     listDocuments({
-      task_no: params.task_no || undefined,
       keyword: params.keyword || undefined,
       material_name: params.material_name || undefined,
       has_file: params.has_file === "" ? undefined : params.has_file === "true",
@@ -57,6 +57,27 @@ const { operation: classificationOperation, watching: classificationWatching, tr
   requery: requeryClassification, reset: resetClassification } = useOperationTracker();
 let uploadGeneration = 0;
 
+/**
+ * 分类校验进行中时，同一任务不能再发起第二次上传：后端按任务互斥，
+ * 这里提前禁用，避免用户传完整个文件才收到 409。
+ */
+const classificationActive = computed(
+  () => classificationWatching.value || isOperationActive(classificationOperation.value?.status),
+);
+
+/**
+ * 校验状态查询失败后，操作是否仍在运行无法确认：按钮保持禁用以免重复提交，
+ * 但必须在列表页提供重新查询入口，否则用户只能刷新整页才能恢复上传。
+ */
+const classificationQueryFailed = computed(
+  () => classificationError.value !== null && classificationActive.value,
+);
+
+function requeryClassificationStatus(): void {
+  classificationError.value = null;
+  requeryClassification();
+}
+
 function openUpload(row: DocumentRow): void {
   uploadGeneration += 1;
   uploadSaving.value = false;
@@ -80,6 +101,10 @@ function onFileChange(file: { raw?: File }): void {
 async function submitUpload(): Promise<void> {
   if (!uploadRow.value || !uploadFile.value) {
     ElMessage.warning("请选择文件");
+    return;
+  }
+  if (classificationActive.value) {
+    ElMessage.warning("上一份文件仍在自动校验，完成后再上传其他材料");
     return;
   }
   // 材料类型必填：8018 的 doc_type 是严格枚举，没有类型就无法执行材料校验。
@@ -177,9 +202,6 @@ onMounted(() => {
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
-      <el-form-item label="任务编号">
-        <el-input v-model="filters.task_no" clearable placeholder="任务编号" style="width: 190px" @keyup.enter="list.search()" />
-      </el-form-item>
       <el-form-item label="材料位">
         <el-input v-model="filters.material_name" clearable placeholder="材料位名称" style="width: 160px" @keyup.enter="list.search()" />
       </el-form-item>
@@ -200,50 +222,57 @@ onMounted(() => {
     </el-form>
 
 
+    <el-alert v-if="classificationQueryFailed" type="warning" show-icon :closable="false"
+      :title="`文件已保存，但校验状态查询失败：${classificationError}`">
+      <div>上传入口保持禁用，避免同一任务重复提交；请重新查询校验状态。</div>
+      <el-button size="small" @click="requeryClassificationStatus()">重新查询校验状态</el-button>
+    </el-alert>
+
     <el-alert v-if="error" type="error" show-icon :closable="false" :title="`读取失败：${error}`">
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="任务" min-width="190" show-overflow-tooltip>
+    <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据">
+      <el-table-column label="任务" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">
-          <el-button link type="primary" class="table-link mono" @click="openTask(row)">{{ row.task_no }}</el-button>
-          <div class="text-hint">{{ row.task_name }}</div>
+          <el-button link type="primary" class="table-link" @click="openTask(row)">{{ row.task_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="材料位" width="180" show-overflow-tooltip>
+      <el-table-column label="材料位" width="120" show-overflow-tooltip>
         <template #default="{ row }">
           {{ row.material_name }}
           <el-tag v-if="row.required" type="warning" size="small" effect="plain" disable-transitions>必传</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="文件名" min-width="220" show-overflow-tooltip>
+      <el-table-column label="文件名" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">{{ row.filename || "—（未上传）" }}</template>
       </el-table-column>
-      <el-table-column label="文件版本" width="100">
+      <el-table-column label="文件版本" width="88">
         <template #default="{ row }">
           <span v-if="row.version_no">第 {{ row.version_no }} 版</span>
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="100">
+      <el-table-column label="大小" width="88">
         <template #default="{ row }">{{ row.size_bytes === null ? "—" : formatFileSize(row.size_bytes) }}</template>
       </el-table-column>
-      <el-table-column label="上传时间" width="170">
-        <template #default="{ row }">{{ row.uploaded_at ? String(row.uploaded_at).replace("T", " ").slice(0, 19) : "—" }}</template>
+      <el-table-column label="上传时间" width="184">
+        <template #default="{ row }"><span class="table-nowrap">{{ row.uploaded_at ? formatDate(String(row.uploaded_at)) : "—" }}</span></template>
       </el-table-column>
       <el-table-column label="处理状态" width="130">
         <template #default="{ row }"><StatusBadge :status="row.status" /></template>
       </el-table-column>
-      <el-table-column label="上传版本数" width="110">
+      <el-table-column label="上传版本数" width="100">
         <template #default="{ row }">
           <span v-if="row.version_count">{{ row.version_count }} 个</span>
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="230" fixed="right">
+      <el-table-column label="操作" width="128" class-name="table-actions" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="openUpload(row)">{{ row.filename ? "替换" : "上传" }}</el-button>
+          <el-button link type="primary" size="small" :disabled="classificationActive"
+            :title="classificationActive ? '上一份文件仍在自动校验，完成后再上传其他材料' : ''"
+            @click="openUpload(row)">{{ row.filename ? "替换" : "上传" }}</el-button>
           <el-button link type="primary" size="small" @click="openHistory(row)">历史版本</el-button>
         </template>
       </el-table-column>
@@ -269,10 +298,13 @@ onMounted(() => {
         <el-descriptions-item label="当前文件">{{ uploadRow.filename || "未上传" }}</el-descriptions-item>
       </el-descriptions>
       <div class="block-gap-sm">
+        <el-alert v-if="classificationActive" type="info" show-icon :closable="false"
+          title="上一份文件仍在自动校验；本任务校验完成前不能上传或替换其他材料。" />
         <!-- 材料类型随本次上传声明：系统据此让 8018 校验文件是否放对材料位。 -->
         <MaterialTypeSelect v-model="uploadMaterialType" :disabled="uploadSaving" />
       </div>
-      <el-upload class="block-gap-sm" drag :auto-upload="false" :limit="1" :on-change="onFileChange" :on-remove="() => (uploadFile = null)">
+      <el-upload class="block-gap-sm" drag :auto-upload="false" :limit="1" :disabled="classificationActive"
+        :on-change="onFileChange" :on-remove="() => (uploadFile = null)">
         <div class="upload-block__icon">⬆</div>
         <div class="el-upload__text">拖拽文件到此处，或<em>点击选择文件</em></div>
       </el-upload>
@@ -291,7 +323,7 @@ onMounted(() => {
         :title="`文件已保存；校验状态查询失败：${classificationError}`" />
       <template #footer>
         <el-button @click="uploadVisible = false">关闭</el-button>
-        <el-button type="primary" :loading="uploadSaving" @click="submitUpload">
+        <el-button type="primary" :loading="uploadSaving" :disabled="classificationActive" @click="submitUpload">
           {{ uploadRow?.filename ? "确认替换" : "上传" }}
         </el-button>
       </template>
@@ -315,7 +347,7 @@ onMounted(() => {
               <template #default="{ row }">第 {{ row.version_no }} 版</template>
             </el-table-column>
             <el-table-column prop="filename" label="文件名" min-width="200" show-overflow-tooltip />
-            <el-table-column label="大小" width="100">
+            <el-table-column label="大小" width="88">
               <template #default="{ row }">{{ formatFileSize(row.size_bytes) }}</template>
             </el-table-column>
             <el-table-column label="状态" width="110">
@@ -323,8 +355,8 @@ onMounted(() => {
                 <StatusBadge :status="row.status" :label="row.is_current ? '当前' : statusLabel(row.status)" />
               </template>
             </el-table-column>
-            <el-table-column label="上传时间" width="160">
-              <template #default="{ row }">{{ String(row.created_at).replace("T", " ").slice(0, 19) }}</template>
+            <el-table-column label="上传时间" width="184">
+              <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
             </el-table-column>
           </el-table>
         </template>

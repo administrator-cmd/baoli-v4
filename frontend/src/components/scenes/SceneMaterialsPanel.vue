@@ -10,6 +10,8 @@ import {
   getSceneConfiguration,
   updateDraftMaterial,
 } from "@/api/scenes";
+import { formatDate } from "@/constants/labels";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /**
  * 当前场景草稿的材料配置面板。可新增、编辑、删除；
@@ -27,6 +29,8 @@ const emit = defineEmits<{
 }>();
 
 const materials = ref<DraftMaterialItem[]>([]);
+const sortedMaterials = computed(() => [...materials.value]
+  .sort((left, right) => compareNaturalLabels(left.source_ref, right.source_ref)));
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
@@ -197,19 +201,24 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         <el-button size="small" @click="load">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="materials" border stripe v-loading="loading" empty-text="暂无材料配置">
-        <el-table-column type="index" label="序号" width="60" />
-        <el-table-column label="材料编码" width="190">
-          <template #default="{ row }"><span class="mono">{{ row.material_key }}</span></template>
-        </el-table-column>
+      <el-table
+        v-else
+        class="management-table scene-materials-table"
+        :data="sortedMaterials"
+        border
+        stripe
+        v-loading="loading"
+        empty-text="暂无材料配置"
+        :cell-style="{ textAlign: 'center' }"
+      >
         <el-table-column prop="source_ref" label="材料编号" width="120">
           <template #default="{ row }">
             <span v-if="row.source_ref" class="mono">{{ row.source_ref }}</span>
             <span v-else class="text-hint">未填写</span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="材料名称" min-width="180" show-overflow-tooltip />
-        <el-table-column label="是否必需" width="100">
+        <el-table-column prop="name" label="材料名称" width="170" show-overflow-tooltip />
+        <el-table-column label="是否必需" width="88">
           <template #default="{ row }">
             <el-tag :type="row.required ? 'warning' : 'info'" size="small" effect="plain" disable-transitions>
               {{ row.required ? "必需" : "按需" }}
@@ -219,10 +228,10 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         <el-table-column prop="description" label="业务说明" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">{{ row.description || "—" }}</template>
         </el-table-column>
-        <el-table-column label="更新时间" width="170">
-          <template #default="{ row }">{{ row.updated_at ? String(row.updated_at).replace('T', ' ').slice(0, 19) : "—" }}</template>
+        <el-table-column label="更新时间" width="190">
+          <template #default="{ row }"><span class="table-nowrap">{{ row.updated_at ? formatDate(String(row.updated_at)) : "—" }}</span></template>
         </el-table-column>
-        <el-table-column v-if="canEdit" label="操作" width="220" fixed="right">
+        <el-table-column v-if="canEdit" label="操作" width="168" class-name="table-actions" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link type="primary" size="small" @click="toggleRequired(row)">
@@ -271,3 +280,14 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
     </template>
   </div>
 </template>
+
+<style scoped>
+/* 材料配置都是短值，正文居中；统一左右留白，避免列内大片空白。 */
+.scene-materials-table :deep(.el-table__cell) {
+  padding: 8px 0;
+}
+
+.scene-materials-table :deep(.cell) {
+  padding: 0 10px;
+}
+</style>

@@ -2,10 +2,14 @@
 
 from datetime import datetime
 from typing import Any
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
+
 from ....common.pagination import PageResult, page_result
-from ....entity import AuditPlan, AuditTask, ScenarioNode, ScenarioVersion
+from ....entity.plans import AuditPlan
+from ....entity.scenarios import ScenarioNode, ScenarioVersion
+from ....entity.tasks import AuditTask
 
 
 def list_tasks_page(

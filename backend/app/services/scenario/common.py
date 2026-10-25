@@ -1,11 +1,12 @@
 """场景配置的类型常量、引用与作用域转换。"""
 
 from typing import Any
-from ...domain import manifest as manifest_module, node_profile
-from ...domain.audit_vocab import SCOPE_NOT_APPLICABLE
-from ...domain.manifest import FORM_VALUE_TYPES
-from ...domain.identity import public_no
 
+from ...constants.status import SCOPE_NOT_APPLICABLE
+from ...domain import manifest as manifest_module
+from ...domain import node_profile
+from ...domain.identity import public_no
+from ...domain.manifest import FORM_VALUE_TYPES
 
 SYSTEM_OPERATORS = manifest_module.SYSTEM_OPERATORS
 

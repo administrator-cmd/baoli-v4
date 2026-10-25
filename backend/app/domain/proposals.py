@@ -2,7 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .parameter_contract import ReportContentType, ReportResultSort
+from ..constants.execution import OPERATOR_LLM_EXECUTE
+from .execution_mode import ExecutionMode
 
 # 普通数值 DECIMAL 不带财务假设；AMOUNT 与大写金额 DECIMAL_CN 保留单位、币种口径。
 ValueType = Literal["STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"]
@@ -151,7 +152,18 @@ class RuleProposal(SourcedProposal):
     # 不按同表或跨表区分；候选引用只在本次导入内部有效。
     source_rule_codes: list[str] = Field(default_factory=list)
     # 业务动作名称仅作说明，不按固定节点或算子决定执行路径。
-    operator: str = "LLM_EXECUTE"
+    operator: str = OPERATOR_LLM_EXECUTE
+    # 执行方式决定执行器给模型哪些上下文、允许做什么；它只描述动作，不描述业务。
+    # 由解析模型按原行语义填写；无法判定时为 UNKNOWN，不能用 CHECK 顶替。
+    execution_mode: ExecutionMode = Field(
+        default="UNKNOWN",
+        description=(
+            "MATERIAL_CHECK=检查材料/文件本身；VALUE_COMPARE=检查同一范围内的字段值；"
+            "CROSS_SCOPE_COMPARE=跨材料/期间/口径比较；AGGREGATE=只汇总其他规则结果；"
+            "DERIVE_RISK=只根据其他规则结果推导风险；EXTRACT=抽取字段；"
+            "CALCULATE=计算公式；REPORT=生成报告；UNKNOWN=无法判定。"
+        ),
+    )
     # 业务角色由 LLM 按原文明确声明，判断条件非空不能代表风险规则。
     rule_role: Literal["CHECK", "RISK"] = "CHECK"
     inputs: list[RuleInputProposal] = Field(default_factory=list)

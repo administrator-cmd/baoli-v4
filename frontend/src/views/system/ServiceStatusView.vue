@@ -4,7 +4,7 @@ import { onMounted, ref } from "vue";
 import type { SystemServices } from "@/api/contracts";
 import { getSystemServices } from "@/api/system";
 import PageHeader from "@/components/PageHeader.vue";
-import { statusLabel, statusTagType } from "@/constants/labels";
+import { formatDate as formatDateTime, statusLabel, statusTagType } from "@/constants/labels";
 
 /**
  * 服务状态：能力、配置状态、连接状态分开显示。
@@ -43,7 +43,7 @@ function connectionTone(status: string): "success" | "danger" | "warning" | "inf
 }
 
 function formatTime(value: string | null): string {
-  return value ? String(value).replace("T", " ").slice(0, 19) : "—";
+  return value ? formatDateTime(value) : "—";
 }
 
 onMounted(() => {

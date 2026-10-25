@@ -3,8 +3,16 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ...domain.execution_mode import ExecutionMode
 
 ImportProposalGroup = Literal["materials", "fields", "rules", "calculations", "report_sections"]
+
+
+class ImportConversionRequest(BaseModel):
+    """提交规则库转换；可选择复用第一轮结果只重跑第二轮。"""
+
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    mode: Literal["FULL", "RESUME_REFINEMENT"] = "FULL"
 
 
 class ImportProposalChanges(BaseModel):
@@ -15,6 +23,7 @@ class ImportProposalChanges(BaseModel):
     required: bool = False
     instruction: str = ""
     requirement: str = ""
+    execution_mode: ExecutionMode = "UNKNOWN"
     rule_role: Literal["CHECK", "RISK"] = "CHECK"
     rule_name: str = Field(default="", min_length=1)
     formula: str = ""

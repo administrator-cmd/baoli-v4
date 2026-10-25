@@ -11,14 +11,24 @@ adapter 把 `ToolExecutionContext` 中的真实任务数据与模型给出的工
 越权或产物未准备好时明确报错，不把缺失内容当成成功结果。"""
 
 from __future__ import annotations
+
 import json
 from typing import Annotated, Any
+
 from langchain_core.tools import InjectedToolArg, tool
+from sqlalchemy import select
+
+from ....common.exceptions import BusinessError
 from ....domain import file_quality, quality_judgement
 from ....domain.rule_library import active
-from ....common.exceptions import BusinessError
-from ....entity import DocumentUpload, TaskDocument
-from sqlalchemy import select
+from ....entity.tasks import DocumentUpload, TaskDocument
+
+
+def _scenario_version_no(db: Any, task: Any) -> int | None:
+    """任务冻结的场景版本号；场景版本发布后不可变。"""
+    from ....entity.scenarios import ScenarioVersion
+    version = db.get(ScenarioVersion, task.scenario_version_id)
+    return version.version_no if version is not None else None
 
 
 @tool("RULE_LIBRARY_QUERY")
@@ -35,7 +45,7 @@ def query_rule_library_tool(
     """
     if context is None or context.database_session is None or context.task_id is None:
         raise BusinessError("TOOL_CONTEXT_MISSING", "规则库查询需要审核任务上下文", status_code=500)
-    from ....entity import AuditTask
+    from ....entity.tasks import AuditTask
 
     task = context.database_session.get(AuditTask, context.task_id)
     if task is None:
@@ -76,20 +86,44 @@ def query_rule_library_tool(
             return False
         return not query or query in json.dumps(item, ensure_ascii=False).casefold()
 
-    items = [{"kind": item.get("kind") or "RULE", "rule_code": item.get("rule_code"),
-              "name": item.get("name"), "config": item} for item in rules if matches(item)]
+    detailed = bool(requested_codes or requested_keys)
+    if detailed:
+        # 按明确身份查询：返回完整配置，供汇总/风险规则核对来源规则配置。
+        items = [{"kind": item.get("kind") or "RULE", "rule_code": item.get("rule_code"),
+                  "name": item.get("name"), "config": item} for item in rules if matches(item)]
+        message = f"已从本次任务冻结规则库查询到 {len(items)} 条生效规则"
+    else:
+        # 目录查询：不返回完整配置，避免整库规则配置撑大工具结果。
+        items = []
+        for item in rules:
+            if not matches(item):
+                continue
+            entry = {
+                "kind": item.get("kind") or "RULE",
+                "rule_code": item.get("rule_code"),
+                "name": item.get("name"),
+                "execution_mode": item.get("execution_mode"),
+                "rule_role": item.get("rule_role"),
+                "requirement": item.get("requirement") or "",
+            }
+            # 没有业务编号的规则只能靠内部键定位；只在缺少编号时补充，避免目录重新变长。
+            if not entry["rule_code"]:
+                entry["rule_key"] = item.get("rule_key")
+            items.append(entry)
+        message = (f"已从本次任务冻结规则库查询到 {len(items)} 条生效规则；"
+                   "目录结果省略完整配置，需要完整配置请按 rule_codes 或 rule_keys 查询")
     return {
         "status": "SUCCEEDED",
-        "message": f"已从本次任务冻结规则库查询到 {len(items)} 条生效规则",
+        "message": message,
         "items": items,
         "source": "TASK_FROZEN_MANIFEST",
-        "scenario_version_no": schema.get("scenario_version_no"),
+        "scenario_version_no": _scenario_version_no(context.database_session, task),
         "plan_scope_hash": schema.get("plan_scope_hash"),
     }
 
 
 def _requested_uploads(context: Any, material_keys: list[str]):
-    from ....entity import AuditTask
+    from ....entity.tasks import AuditTask
     task = context.database_session.get(AuditTask, context.task_id)
     if task is None:
         raise BusinessError("TOOL_TASK_MISSING", "工具关联的任务不存在")
@@ -105,17 +139,23 @@ def _requested_uploads(context: Any, material_keys: list[str]):
 
 @tool("TASK_DATA_READ")
 def read_task_data_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]], *, context: Annotated[Any, InjectedToolArg]) -> dict[str, Any]:
-    """读取前置处理产物：OCR 正文 Markdown 或原文件印章信息。"""
+    """读取前置处理产物：OCR 正文、原文件印章信息或材料类型识别结论。"""
     from ..artifacts import _artifact_for_upload, _artifact_payload
     items = []
     kind = parameters.get("artifact_type") or "OCR"
-    for task, key, upload in _requested_uploads(context, parameters["material_keys"]):
+    for _, key, upload in _requested_uploads(context, parameters["material_keys"]):
         artifact = _artifact_for_upload(context.database_session, upload, kind)
         if artifact is None or artifact.status != "READY":
             raise BusinessError("TOOL_ARTIFACT_NOT_READY", "请求的材料产物尚未生成", details={"material_key": key, "artifact_type": kind})
         content = _artifact_payload(artifact).content
         if kind == "OCR":
-            content = {**content, "markdown": "\n\n".join(page["text"] for page in content["pages"]), "content_type": "text/markdown"}
+            # 每页 text 即唯一正文；blocks 是同一段正文的副本，不再返回。
+            content = {
+                **content,
+                "pages": [{key: value for key, value in page.items() if key != "blocks"}
+                          for page in content["pages"]],
+                "content_type": "text/markdown",
+            }
         items.append({"material_key": key, "upload_id": upload.id, "artifact_id": artifact.id, "artifact_type": kind, "content": content})
     return {"status": "SUCCEEDED", "message": "已读取实际材料内容", "items": items}
 
@@ -124,14 +164,14 @@ def read_task_data_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]]
 def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, Any]], *, context: Annotated[Any, InjectedToolArg]) -> dict[str, Any]:
     """指定服务的实际调用入口；业务模型不再选择此工具，前置流程直接调用服务。"""
     from ...shared.storage import resolve_storage_path
-    from ..document_ports import document_service
     from ..artifacts import (
-        _ensure_external_artifact,
         _artifact_for_upload,
         _artifact_payload,
-        _submit_ocr_job,
         _complete_ocr_job,
+        _ensure_external_artifact,
+        _submit_ocr_job,
     )
+    from ..document_ports import document_service
     service = parameters["service"]
     db = context.database_session
     items = []
@@ -152,7 +192,7 @@ def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, An
 
 
 def _current_materials(context: Any) -> list[dict[str, Any]]:
-    from ....entity import AuditTask
+    from ....entity.tasks import AuditTask
     from ..agent import _task_materials
     if context is None or context.database_session is None or context.task_id is None:
         raise BusinessError("TOOL_CONTEXT_MISSING", "工具调用需要任务与数据库会话")

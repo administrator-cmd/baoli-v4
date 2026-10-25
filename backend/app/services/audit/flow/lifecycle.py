@@ -1,28 +1,35 @@
 """任务与节点执行的建立、收尾、进度推进。"""
 
 import logging
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from ....common.exceptions import BusinessError
-from ....domain.audit_vocab import LOOP_BLOCKED
-from ....entity import AuditTask, NodeExecution
-from ..tasks.lookup import task_or_404
-from ..reviews import _invalidate_retry_results
-from ..execution_history import invalidate_executions
-from ..shared import _task_manifest
-from ..state import _scenario_nodes, _set_task_checkpoint, _task_checkpoint
-from .execution import running_execution, execution_in_progress
-from .errors import graph_error_state
 
+from ....common.exceptions import BusinessError
+from ....constants.status import (
+    LOOP_BLOCKED,
+    TASK_STATUS_BLOCKED,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_READY,
+    TASK_STATUS_RUNNING,
+)
+from ....entity.tasks import AuditTask, NodeExecution
+from ..execution_history import invalidate_executions
+from ..reviews import _invalidate_retry_results
+from ..shared import _task_manifest
+from ..state import _scenario_nodes, _set_task_phase, _task_phase
+from ..tasks.lookup import task_or_404
+from .errors import graph_error_state
+from .execution import execution_in_progress, running_execution
 
 logger = logging.getLogger(__name__)
 
 MODE_AGENT = "AGENT"
 
 # 服务重启导致的中断失败允许被后续真实执行结果覆盖，原失败信息保留。
-_INTERRUPTED_FAILURE_CODE = "AUDIT_EXECUTION_INTERRUPTED"
 
 
 def graph_load_task(db: Session, task_no: str) -> dict[str, Any]:
@@ -31,10 +38,7 @@ def graph_load_task(db: Session, task_no: str) -> dict[str, Any]:
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
     _, _, current_index = _scenario_nodes(db, task)
-    progress = _task_checkpoint(task)
-    if progress.get("current_node") != task.current_node or progress.get("node_index") != current_index:
-        raise BusinessError("AUDIT_PROGRESS_INVALID", "任务进度与当前节点不一致，不能继续执行", status_code=409)
-    phase = progress.get("phase")
+    phase = _task_phase(task)
     if phase != "AWAITING_CONFIRMATION":
         raise BusinessError("AUDIT_PROGRESS_INVALID", "任务当前不处于可执行状态", status_code=409)
     return {
@@ -133,8 +137,36 @@ def _begin_node_execution(
     )
     db.add(execution)
     db.flush()
-    task.status = "RUNNING"
+    task.status = TASK_STATUS_RUNNING
     return execution
+
+
+def _incomplete_reason_counts(failed: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """按每条规则的第一条未解决原因归类，保留模型/服务返回的原始原因。"""
+    counts: Counter[str] = Counter()
+    for item in failed:
+        reasons = [
+            str(reason.get("message") or reason.get("kind") or "")
+            for reason in item.get("unresolved_items") or []
+        ]
+        counts[next((reason for reason in reasons if reason), "未提供原因")] += 1
+    return counts.most_common()
+
+
+def incomplete_failure_message(result_json: dict[str, Any] | None) -> str | None:
+    """按逐条结果汇总未完成原因；供执行收尾和读取旧记录共用。"""
+    result = result_json if isinstance(result_json, dict) else {}
+    failed = [
+        item for item in result.get("rule_outcomes") or []
+        if item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED"
+    ]
+    if result.get("loop_status") != LOOP_BLOCKED and not failed:
+        return None
+    count = len(failed) + len(result.get("missing_rule_keys") or [])
+    reasons = "；".join(
+        f"{number} 项为「{reason}」" for reason, number in _incomplete_reason_counts(failed)[:3]
+    )
+    return f"本批次有 {count} 项未完成执行" + (f"：{reasons}" if reasons else "") + "；可处理后重新执行"
 
 
 def graph_finalize_node_execution(
@@ -148,18 +180,15 @@ def graph_finalize_node_execution(
     """收尾规则执行批次，保存真实逐条结果的汇总。"""
     task = task_or_404(db, task_no, lock=True)
     execution = execution_in_progress(db, task, execution_id)
-    interrupted = execution.status == "FAILED" and execution.failure_code == _INTERRUPTED_FAILURE_CODE
-    if execution.status in {"SUCCEEDED", "SKIPPED", "BLOCKED", "FAILED", "INVALIDATED"} and not interrupted:
+    if execution.status in {"SUCCEEDED", "SKIPPED", "BLOCKED", "FAILED", "INVALIDATED"}:
         return {
             "execution_status": execution.status,
             "execution_failure_code": execution.failure_code,
             "node_result": execution.result_json,
             "last_error": None,
         }
-    # 服务重启把执行记录标成 FAILED 时，节点其实已经重新跑完（Agent 复核期间进程被杀）：
-    # 这里写真实结果，但把原失败信息一并保留，不让一次中断在记录上消失。
-    recovered_from = execution.failure_code if interrupted else None
-    recovered_message = execution.failure_message if interrupted else None
+    # 服务重启留下的中断记录由继续执行自己保留（写进 result_json 的
+    # recovered_from_interrupted_execution）：批次在这里已经是 RUNNING，看不到原失败码。
     execution.finished_at = datetime.now(UTC)
     execution.result_json = {**(execution.result_json or {}), **(agent_summary or {})}
     # 遍历结束不等于执行成功。格式/产出失败在所有规则尝试完后汇总，允许重跑。
@@ -169,25 +198,14 @@ def graph_finalize_node_execution(
         execution.status = "BLOCKED"
         execution.failure_code = "AUDIT_RULE_EXECUTION_INCOMPLETE"
         incomplete_count = len(failed) + len(execution.result_json.get("missing_rule_keys", []))
-        execution.failure_message = f"本批次有 {incomplete_count} 项未完成执行；具体原因见规则结果，可处理后重新执行"
-        task.status = "BLOCKED"
-        _set_task_checkpoint(task, node_index=_scenario_nodes(db, task)[2], phase="AWAITING_CONFIRMATION")
+        execution.failure_message = incomplete_failure_message(execution.result_json) or (
+            f"本批次有 {incomplete_count} 项未完成执行；可处理后重新执行"
+        )
+        task.status = TASK_STATUS_BLOCKED
+        _set_task_phase(task, "AWAITING_CONFIRMATION")
         db.flush()
     else:
         execution.status = "SUCCEEDED"
-    if recovered_from is not None:
-        execution.result_json = {
-            **(execution.result_json or {}),
-            "recovered_from_interrupted_execution": {
-                "failure_code": recovered_from,
-                "failure_message": recovered_message,
-            },
-        }
-        # 覆盖被中断的 FAILED 只在本次执行确实成功时做：本次又阻断/失败时，
-        # 当前失败码是真实结论，不能被「上次是中断」擦掉。
-        if execution.status not in {"BLOCKED", "FAILED"}:
-            execution.failure_code = None
-            execution.failure_message = None
     db.commit()
     return {
         "execution_status": execution.status,
@@ -204,7 +222,7 @@ def graph_advance_workflow(
 ) -> dict[str, Any]:
     """规则批次收尾；失败保持阻断，成功结束任务。"""
     task = task_or_404(db, task_no, lock=True)
-    progress = _task_checkpoint(task)
+    phase = _task_phase(task)
     manifest = _task_manifest(task)
     nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
     _, _, current_index = _scenario_nodes(db, task)
@@ -214,7 +232,7 @@ def graph_advance_workflow(
         return {
             "current_node": task.current_node,
             "node_index": current_index,
-            "phase": progress.get("phase"),
+            "phase": phase,
             "last_execution": {
                 "task_no": task.task_no,
                 "node_name": nodes[current_index]["name"],
@@ -233,13 +251,13 @@ def graph_advance_workflow(
         execution.status = "BLOCKED"
         execution.failure_code = exc.code
         execution.failure_message = exc.message
-        task.status = "BLOCKED"
+        task.status = TASK_STATUS_BLOCKED
         db.flush()
         db.commit()
         return {
             "current_node": task.current_node,
             "node_index": current_index,
-            "phase": progress.get("phase"),
+            "phase": phase,
             "last_execution": {
                 "task_no": task.task_no,
                 "node_name": nodes[current_index]["name"],
@@ -254,11 +272,11 @@ def graph_advance_workflow(
         }
     if next_node:
         task.current_node = next_node["node_code"]
-        task.status = "READY"
-        _set_task_checkpoint(task, node_index=_index_of(nodes, next_node["node_code"]), phase="AWAITING_CONFIRMATION")
+        task.status = TASK_STATUS_READY
+        _set_task_phase(task, "AWAITING_CONFIRMATION")
     else:
-        task.status = "COMPLETED"
-        _set_task_checkpoint(task, node_index=current_index, phase="COMPLETED")
+        task.status = TASK_STATUS_COMPLETED
+        _set_task_phase(task, "COMPLETED")
     db.flush()
     db.commit()
     return {
@@ -292,12 +310,12 @@ def _next_node_after(db: Session, task: AuditTask, manifest: dict[str, Any], nod
 def graph_save_node_result(db: Session, task_no: str) -> dict[str, Any]:
     """落库并提交本次节点结果与流程进度。"""
     task = task_or_404(db, task_no, lock=True)
-    progress = _task_checkpoint(task)
+    phase = _task_phase(task)
     db.flush()
     db.commit()
     _, _, current_index = _scenario_nodes(db, task)
     return {
         "current_node": task.current_node,
         "node_index": current_index,
-        "phase": progress.get("phase"),
+        "phase": phase,
     }

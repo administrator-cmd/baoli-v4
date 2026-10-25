@@ -1,12 +1,11 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CHAR, Index, Integer, JSON, String, Text, UniqueConstraint, text
-from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
+from sqlalchemy import CHAR, JSON, BigInteger, Boolean, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..database import Base
-from .base import TimestampMixin
+from ..core.database import Base
+from .base import TimestampMixin, UTCDateTime
 
 
 class BackgroundOperation(Base, TimestampMixin):
@@ -47,8 +46,8 @@ class BackgroundOperation(Base, TimestampMixin):
     raw_response_path: Mapped[str | None] = mapped_column(String(500))
     failure_code: Mapped[str | None] = mapped_column(String(80))
     failure_message: Mapped[str | None] = mapped_column(Text)
-    started_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
-    finished_at: Mapped[datetime | None] = mapped_column(MySQLDateTime(fsp=6))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class OperationLog(Base, TimestampMixin):
@@ -69,6 +68,7 @@ class OperationLog(Base, TimestampMixin):
         UniqueConstraint("object_type", "operation_type", "idempotency_key"),
         Index("idx_operation_log_object", "object_type", "object_no", "created_at"),
         Index("idx_operation_log_created", "created_at"),
+        Index("idx_operation_log_delete", "object_type", "object_no", "operation_type", "permanent"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -83,6 +83,8 @@ class OperationLog(Base, TimestampMixin):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     # 关联的后台命令编号（若该操作受理了后台执行）。
     command_no: Mapped[str | None] = mapped_column(String(40))
+    # 是否为永久删除；用于删除命令的幂等识别。
+    permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
     detail_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     failure_code: Mapped[str | None] = mapped_column(String(80))
     failure_message: Mapped[str | None] = mapped_column(Text)

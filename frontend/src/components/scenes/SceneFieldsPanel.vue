@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftFieldItem, DraftMaterialItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 import {
   createDraftField,
   deleteDraftField,
@@ -49,18 +50,13 @@ const saving = ref(false);
 let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
-function fieldExecutionLabel(item: DraftFieldItem): string {
-  const producers = (draft.value?.rules ?? []).filter(rule => rule.outputs.some(output => output.field_key === item.field_key));
-  return producers.some(rule => rule.enabled) ? "已启用" : "已停用";
-}
-
 const query = reactive({ material_key: "", name: "" });
 const filteredFields = computed(() =>
   fields.value.filter(
     (item) =>
       (!query.material_key || item.material_key === query.material_key) &&
-      (!query.name.trim() || item.name.includes(query.name.trim())),
-  ),
+      (!query.name.trim() || `${item.name}\n${item.source_ref ?? ""}`.toLocaleLowerCase().includes(query.name.trim().toLocaleLowerCase())),
+  ).sort((left, right) => compareNaturalLabels(left.source_ref, right.source_ref)),
 );
 
 /**
@@ -300,8 +296,8 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <el-option v-for="item in materials" :key="item.material_key" :value="item.material_key" :label="item.name" />
           </el-select>
         </el-form-item>
-        <el-form-item label="字段名称">
-          <el-input v-model="query.name" clearable placeholder="请输入字段名称" style="width: 200px" />
+        <el-form-item label="字段搜索">
+          <el-input v-model="query.name" clearable placeholder="字段名称或编号" style="width: 200px" />
         </el-form-item>
       </el-form>
 
@@ -319,47 +315,43 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-button size="small" @click="load">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="filteredFields" border stripe v-loading="loading" empty-text="暂无字段配置">
-        <el-table-column type="index" label="序号" width="60" />
-        <el-table-column label="自动取数" min-width="150" show-overflow-tooltip>
-          <template #default="{ row }">{{ fieldExecutionLabel(row) }}</template>
-        </el-table-column>
-        <el-table-column prop="source_ref" label="字段编号" width="120">
+      <el-table v-else :data="filteredFields" border stripe class="management-table" v-loading="loading" :empty-text="fields.length ? '未找到匹配的字段' : '暂无字段配置'">
+        <el-table-column prop="source_ref" label="字段编号" width="120" align="center">
           <template #default="{ row }">
             <span v-if="row.source_ref" class="mono">{{ row.source_ref }}</span>
             <span v-else class="text-hint">未填写</span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="字段名称" min-width="170" show-overflow-tooltip />
-        <el-table-column prop="material_name" label="来源材料" width="170" show-overflow-tooltip />
-        <el-table-column label="数据类型" width="100">
+        <el-table-column prop="name" label="字段名称" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="material_name" label="来源材料" width="112" show-overflow-tooltip />
+        <el-table-column label="数据类型" width="88" align="center">
           <template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template>
         </el-table-column>
-        <el-table-column label="抽取策略" width="120">
+        <el-table-column label="抽取策略" width="108" align="center">
           <template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template>
         </el-table-column>
-        <el-table-column label="单位" width="80">
+        <el-table-column label="单位" width="64" align="center">
           <template #default="{ row }">{{ row.unit || "—" }}</template>
         </el-table-column>
-        <el-table-column label="币种" width="80">
+        <el-table-column label="币种" width="64" align="center">
           <template #default="{ row }">{{ row.currency || "—" }}</template>
         </el-table-column>
-        <el-table-column label="取数期间" width="120">
+        <el-table-column label="取数期间" width="96" align="center">
           <template #default="{ row }">{{ periodScopeLabel(row.period_scope) }}</template>
         </el-table-column>
-        <el-table-column label="报表口径" width="120">
+        <el-table-column label="报表口径" width="96" align="center">
           <template #default="{ row }">{{ statementScopeLabel(row.statement_scope) }}</template>
         </el-table-column>
-        <el-table-column label="产物来源" width="110">
+        <el-table-column label="产物来源" width="100" align="center">
           <template #default="{ row }">{{ artifactSourceLabel(row.artifact_source) }}</template>
         </el-table-column>
-        <el-table-column label="是否必填" width="100">
+        <el-table-column label="是否必填" width="88" align="center">
           <template #default="{ row }">{{ row.required ? "是" : "否" }}</template>
         </el-table-column>
         <el-table-column label="抽取要求" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">{{ row.instruction || "—" }}</template>
         </el-table-column>
-        <el-table-column label="是否被规则引用" width="140">
+        <el-table-column label="规则引用" width="100" align="center">
           <template #default="{ row }">
             <el-tag v-if="referencedFieldKeys.has(row.field_key)" type="info" size="small" effect="plain" disable-transitions>
               已被引用
@@ -367,7 +359,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <span v-else class="text-hint">未引用</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="canEdit" label="操作" width="140" fixed="right">
+        <el-table-column v-if="canEdit" label="操作" width="104" class-name="table-actions" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="removeItem(row)">删除</el-button>
@@ -400,7 +392,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
                 :key="item.value"
                 :value="item.value"
                 :label="item.label"
-                :disabled="!extractionStrategySupports(item.value, form.value_type)"
+                :disabled="!extractionStrategySupports(item.value)"
               />
             </el-select>
           </el-form-item>

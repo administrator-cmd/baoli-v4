@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Literal, get_args
 
-
 ReportContentType = Literal["FIELD_DETAIL", "AUDIT_RESULT", "FIELD_AND_RESULT", "RISK_LIST", "CONCLUSION"]
 ReportResultSort = Literal["RISK_LEVEL_DESC", "MATERIAL_ORDER", "MATERIAL_ORDER_RISK_LEVEL_DESC"]
 REPORT_CONTENT_TYPES = frozenset(get_args(ReportContentType))
@@ -20,11 +19,6 @@ DOCUMENT_ARTIFACT_TYPES = {"MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL"}
 DATE_COMPARE_OPERATORS = {"EQ", "GTE", "LTE", "GT", "LT"}
 # 日期差值只以天为单位：填写规范规定「日期差值以天为单位」，不接受月、年这类不等长单位。
 DATE_THRESHOLD_UNIT = "天"
-
-# 业务配置状态：暂停和待确认定义不参与执行，不阻止保存或发布其他已启用定义。
-CONFIG_STATUS_DISABLED = "DISABLED"
-# 待确认：完整保留配置，管理员确认启用前暂不执行。
-CONFIG_STATUS_PENDING = "PENDING"
 
 # 数值比较方式。ABS_DIFF_LTE 的语义是「等于且绝对差不超过阈值」。
 DECIMAL_COMPARE_OPERATORS = {"EQ", "GTE", "LTE", "ABS_DIFF_LTE"}

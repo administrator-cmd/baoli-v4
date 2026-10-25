@@ -11,6 +11,7 @@ import {
   setSceneEnabled,
   updateScene,
 } from "@/api/scenes";
+import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 
@@ -209,6 +210,7 @@ onMounted(() => {
 
     <el-table
       v-else
+      class="management-table"
       :data="items"
       border
       stripe
@@ -217,21 +219,16 @@ onMounted(() => {
       v-loading="loading"
       empty-text="暂无数据"
     >
-      <el-table-column type="index" label="序号" width="60" />
-      <el-table-column label="场景编码" width="170">
-        <template #default="{ row }">
-          <span class="mono">{{ row.scenario_code }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="场景名称" min-width="200" show-overflow-tooltip>
+      <el-table-column type="index" label="序号" width="56" />
+      <el-table-column label="场景名称" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="goDetail(row)">{{ row.scenario_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="业务类型" width="130" show-overflow-tooltip>
+      <el-table-column label="业务类型" width="110" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category || "—" }}</template>
       </el-table-column>
-      <el-table-column label="配置状态" width="150">
+      <el-table-column label="配置状态" width="120">
         <template #default="{ row }">
           <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>配置待完善</el-tag>
           <el-tag v-else-if="row.configuration_kind === 'DRAFT'" type="warning" size="small" effect="light" disable-transitions>{{ row.published_version_no ? '有未发布修改' : '尚未发布' }}</el-tag>
@@ -239,23 +236,23 @@ onMounted(() => {
           <div v-if="row.sync_error" class="text-hint">{{ row.sync_error.message }}</div>
         </template>
       </el-table-column>
-      <el-table-column prop="material_count" label="材料数" width="90" />
-      <el-table-column prop="field_count" label="字段数" width="90" />
-      <el-table-column prop="rule_count" label="业务规则数" width="110" />
-      <el-table-column label="已发布版本" width="120">
+      <el-table-column prop="material_count" label="材料数" width="72" />
+      <el-table-column prop="field_count" label="字段数" width="72" />
+      <el-table-column prop="rule_count" label="业务规则数" width="100" />
+      <el-table-column label="已发布版本" width="100">
         <template #default="{ row }">{{ row.published_version_no ?? "未发布" }}</template>
       </el-table-column>
-      <el-table-column label="场景状态" width="100">
+      <el-table-column label="场景状态" width="88">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
             {{ row.enabled ? "启用" : "停用" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="更新时间" width="170">
-        <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="更新时间" width="184">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="200" align="center" fixed="right">
+      <el-table-column label="操作" width="168" class-name="table-actions" align="center" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
@@ -297,9 +294,6 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="启用状态">
           <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" />
-        </el-form-item>
-        <el-form-item v-if="!creating" label="场景编码">
-          <span class="text-hint mono">{{ editing?.scenario_code }}</span>
         </el-form-item>
       </el-form>
       <template #footer>

@@ -2,12 +2,24 @@
 
 from datetime import datetime
 from typing import Any
+
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
-from ...common.pagination import PageResult, page_result
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditTask, BackgroundOperation, NodeExecution, ScenarioNode, ScenarioVersion
+from ...common.pagination import PageResult, page_result
+from ...entity.operations import BackgroundOperation
+from ...entity.scenarios import ScenarioNode, ScenarioVersion
+from ...entity.tasks import AuditTask, NodeExecution
 from .execution_history import execution_status_view
+from .flow.lifecycle import incomplete_failure_message
+
+
+def _failure_message(failure_code: str | None, result_json: dict[str, Any] | None, stored: str | None) -> str | None:
+    """未完成批次按逐条结果重新汇总原因，旧记录也能显示清楚。"""
+    if failure_code == "AUDIT_RULE_EXECUTION_INCOMPLETE":
+        return incomplete_failure_message(result_json) or stored
+    return stored
 
 
 def list_executions_page(
@@ -32,7 +44,7 @@ def list_executions_page(
             conditions.append(NodeExecution.status == status)
         else:
             displayed_status = case((NodeExecution.status == "INVALIDATED", func.coalesce(
-                NodeExecution.result_json["superseded_execution_status"].as_string(), NodeExecution.status,
+                NodeExecution.invalidated_from, NodeExecution.status,
             )), else_=NodeExecution.status)
             conditions.append(displayed_status == status)
     if started_from:
@@ -47,7 +59,7 @@ def list_executions_page(
         .where(*conditions)
     ) or 0
     # 只取列表真正用到的列：scenario_version 带 200KB+ 的 manifest_json、audit_task 带
-    # task_schema_json / checkpoint_json。整行 SELECT * 会让 ORDER BY 的 filesort 把整行
+    # manifest_json / task_schema_json。整行 SELECT * 会让 ORDER BY 的 filesort 把整行
     # 塞进排序缓冲（MySQL 默认 256KB），少量执行记录就报 1038 Out of sort memory；
     # 列表页从不读这些大列。
     rows = db.execute(
@@ -61,6 +73,9 @@ def list_executions_page(
             NodeExecution.finished_at,
             NodeExecution.failure_code,
             NodeExecution.failure_message,
+            NodeExecution.invalidated_from,
+            NodeExecution.invalidated_at,
+            NodeExecution.invalidation_reason,
             NodeExecution.result_json,
             AuditTask.task_no,
             AuditTask.task_name,
@@ -95,12 +110,14 @@ def list_executions_page(
                 "node_code": row.node_code,
                 "node_name": row.node_name or row.node_code,
                 "sequence_no": row.sequence_no,
-                **execution_status_view(row.status, row.result_json),
+                **execution_status_view(row.status, row.invalidated_from),
+                "invalidated_at": row.invalidated_at,
+                "invalidation_reason": row.invalidation_reason,
                 "started_at": row.started_at,
                 "finished_at": row.finished_at,
                 "duration_ms": duration_ms,
                 "failure_code": row.failure_code,
-                "failure_message": row.failure_message,
+                "failure_message": _failure_message(row.failure_code, row.result_json, row.failure_message),
                 "result_summary": row.result_json if isinstance(row.result_json, dict) else None,
             }
         )
@@ -150,12 +167,14 @@ def execution_detail(db: Session, execution_id: int) -> dict[str, Any]:
         "node_code": execution.node_code,
         "node_name": node.name if node else execution.node_code,
         "sequence_no": execution.sequence_no,
-        **execution_status_view(execution.status, execution.result_json),
+        **execution_status_view(execution.status, execution.invalidated_from),
+        "invalidated_at": execution.invalidated_at,
+        "invalidation_reason": execution.invalidation_reason,
         "started_at": execution.started_at,
         "finished_at": execution.finished_at,
         "duration_ms": duration_ms,
         "failure_code": execution.failure_code,
-        "failure_message": execution.failure_message,
+        "failure_message": _failure_message(execution.failure_code, execution.result_json, execution.failure_message),
         "result_summary": execution.result_json if isinstance(execution.result_json, dict) else None,
         "operation_no": related_operation.operation_no if related_operation else None,
         "created_at": execution.created_at,

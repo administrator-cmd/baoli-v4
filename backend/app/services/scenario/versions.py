@@ -4,14 +4,17 @@
 版本号由 scenario_template.latest_version_no 在同一事务内原子递增分配，
 不依赖无保护的 max(version_no)+1；scenario_version 上的唯一约束仍是最终兜底。"""
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioTemplate
-from ...repositories.scenario import template as scenario_template
+from ...entity.scenarios import ScenarioTemplate
 
 
 def _lock_template(db: Session, scenario_code: str) -> ScenarioTemplate | None:
-    return scenario_template.lock_template_by_code(db, scenario_code)
+    return db.scalar(
+        select(ScenarioTemplate).where(ScenarioTemplate.scenario_code == scenario_code).with_for_update()
+    )
 
 
 def allocate_version(db: Session, scenario_code: str, scenario_name: str) -> int:

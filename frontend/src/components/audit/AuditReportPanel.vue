@@ -29,11 +29,12 @@ const props = defineProps<{
   loading: boolean;
   /** 报告读取失败的中文原因；非空时不能显示成「尚未生成」。 */
   error?: string | null;
+  /** 场景是否配置了风险规则；null 表示尚未读到风险结果。 */
+  riskConfigured?: boolean | null;
+  /** 当前风险结果中无法判断的条数。 */
+  riskUndecidedCount?: number;
 }>();
 const emit = defineEmits<{ "select-report": [reportNo: string] }>();
-
-/** 服务端结构化结论；旧报告可能没有。 */
-const conclusion = computed(() => props.report?.conclusion ?? null);
 
 /** 报告对应的输入修订已过期：报告仍可查看，但不能当作当前结论，也不能下载。 */
 const stale = computed(() => props.report?.current === false);
@@ -51,24 +52,6 @@ const scopeComplete = computed(() => Boolean(props.report?.scope_execution_compl
 
 /** 风险是否可判定；未配置风险评级时为 false，但不代表执行故障。 */
 const riskAvailable = computed(() => Boolean(props.report?.risk_conclusion_available));
-
-const scopeSummary = computed(() => {
-  if (conclusion.value) {
-    return conclusion.value.scope_execution_note;
-  }
-  return scopeComplete.value
-    ? "服务端标记已配置审核范围已完整执行。"
-    : "服务端标记已配置审核范围未完整执行，具体原因见下方「未完整执行或证据不足的说明」。";
-});
-
-const riskSummary = computed(() => {
-  if (conclusion.value) {
-    return conclusion.value.risk_note;
-  }
-  return riskAvailable.value
-    ? "服务端标记风险可判定。"
-    : "服务端标记风险不可判定，原因见下方执行说明。";
-});
 
 /**
  * 用户在报告页的下一步动作。
@@ -88,9 +71,28 @@ const nextAction = computed(() => {
     };
   }
   if (!riskAvailable.value) {
+    if (props.riskConfigured === false) {
+      return {
+        title: "下一步：配置风险规则",
+        description: "当前场景未配置风险评级，报告不给出「无风险」的判断。如需风险结论，请先配置风险规则。",
+      };
+    }
+    if (props.riskConfigured === null || props.riskConfigured === undefined) {
+      return {
+        title: "下一步：确认风险结论",
+        description: "报告没有可用的风险结论；请到风险页确认风险规则是否配置、是否已完成评定。",
+      };
+    }
+    const undecided = props.riskUndecidedCount ?? 0;
+    if (undecided > 0) {
+      return {
+        title: "下一步：处理无法判断的风险项",
+        description: `已配置风险规则，但仍有 ${undecided} 项证据不足、待复核或未执行；报告不给出「无风险」的判断。请到风险页点击「只看这 ${undecided} 项」查看具体缺项。`,
+      };
+    }
     return {
-      title: "下一步：确认风险结论是否需要在系统外判断",
-      description: "当前场景未配置风险评级，或风险结论尚未闭合；报告不给出「无风险」的判断。如需风险结论，请先配置风险规则。",
+      title: "下一步：执行风险评定",
+      description: "已配置风险规则，但本次没有形成可用的风险结论；请先执行风险评定节点，再生成报告。",
     };
   }
   return {
@@ -147,9 +149,9 @@ const businessSectionCount = computed(() => props.report?.business_section_count
       请重新执行报告输出节点生成新报告；下方正文只作为历史内容查看。
     </el-alert>
 
-    <el-alert v-else type="success" show-icon :closable="false" title="报告当前有效，对应当前任务输入修订">
-      报告已生成且仍对应当前输入。这只是「报告可读」，不代表审核通过。
-    </el-alert>
+    <div v-else class="report-valid-note">
+      报告当前有效，对应当前任务输入修订。报告可读不代表审核通过。
+    </div>
 
     <el-descriptions :column="3" border>
       <el-descriptions-item label="报告是否生成">
@@ -171,17 +173,7 @@ const businessSectionCount = computed(() => props.report?.business_section_count
       </el-descriptions-item>
     </el-descriptions>
 
-    <!-- 2. 服务端结构化审核结论（没有就不猜，列为接口缺口） -->
-    <el-alert v-if="generated" type="info" show-icon :closable="false" title="审核结论（服务端返回）">
-      <div>审核范围：{{ scopeSummary }}</div>
-      <div>风险结论：{{ riskSummary }}</div>
-    </el-alert>
-
-    <el-alert v-if="generated && !conclusion" type="info" show-icon :closable="false" title="本报告没有单独的总体结论字段">
-      请结合报告正文、逐条规则和风险页查看审核结果。
-    </el-alert>
-
-    <!-- 3. 下一步动作 -->
+    <!-- 2. 下一步动作 -->
     <el-alert type="info" show-icon :closable="false" :title="nextAction.title">
       {{ nextAction.description }}
     </el-alert>
@@ -282,5 +274,14 @@ const businessSectionCount = computed(() => props.report?.business_section_count
   gap: 12px;
 }
 .report-picker { width: min(100%, 360px); }
+
+.report-valid-note {
+  padding: 8px 12px;
+  border-left: 3px solid var(--el-color-success);
+  background: var(--el-color-success-light-9);
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
 
 </style>

@@ -1,17 +1,14 @@
-from contextlib import asynccontextmanager
 import logging
+from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import audit, imports, material, plan, report, scenario, system
-from .config import PROJECT_DIR, get_settings
-from .integrations import http_services
-from .services.audit import document_ports
-from .database import SessionLocal, check_database_connection
+from .api import routes
 from .common.exceptions import (
     BusinessError,
     business_error_handler,
@@ -19,8 +16,14 @@ from .common.exceptions import (
     request_validation_error_handler,
     unhandled_error_handler,
 )
-from .runtime.schema_check import verify_schema
+from .core.config import PROJECT_DIR, get_settings
+from .core.database import SessionLocal, check_database_connection
+from .integrations.documents.material_classify import list_material_types, validate_material_type
+from .integrations.documents.ocr import poll_ocr_job, submit_processed_document
+from .integrations.documents.parsing import detect_seals, process_document
 from .middleware.request_context import RequestContextMiddleware
+from .runtime.schema_check import verify_schema
+from .services.audit import document_ports
 from .services.audit.commands import recover_interrupted_executions
 from .services.system.background import recover_interrupted_operations
 
@@ -62,9 +65,26 @@ def _configure_logging(level_name: str) -> None:
 
 
 settings = get_settings()
+
+
+class _DocumentService:
+    """把供应商模块的函数绑成端口实现；审核层只认端口签名。"""
+
+    detect_seals = staticmethod(detect_seals)
+    list_material_types = staticmethod(list_material_types)
+    poll_ocr_job = staticmethod(poll_ocr_job)
+    process_document = staticmethod(process_document)
+    submit_processed_document = staticmethod(submit_processed_document)
+    validate_material_type = staticmethod(validate_material_type)
+
+
+def _document_service() -> _DocumentService:
+    return _DocumentService()
+
+
 # 执行契约目录路径从配置注入，domain 不直接读取全局配置。
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
-document_ports.register_document_service(http_services)
+document_ports.register_document_service(_document_service())
 _configure_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
@@ -76,7 +96,7 @@ async def lifespan(_: FastAPI):
     except (OSError, SQLAlchemyError):
         logger.error("数据库连接检查失败")
         raise RuntimeError("数据库连接失败，请检查 BAOLI_DATABASE_URL、网络和账号权限") from None
-    # 只读校验实际表、列、唯一键、外键及触发器，不依赖迁移记录。
+    # 只读校验必需业务表及实体声明的列，不依赖迁移记录。
     # 应用绝不执行 DDL、不调用 create_all()；结构变更由用户从空库执行 schema.sql。
     try:
         verify_schema()
@@ -99,15 +119,7 @@ api_app.add_exception_handler(RequestValidationError, request_validation_error_h
 api_app.add_exception_handler(StarletteHTTPException, http_error_handler)
 api_app.add_exception_handler(Exception, unhandled_error_handler)
 
-for router in (
-    system.router,
-    imports.router,
-    scenario.router,
-    plan.router,
-    audit.router,
-    material.router,
-    report.router,
-):
+for router in routes.ROUTERS:
     api_app.include_router(router, prefix=settings.api_prefix)
 
 # 请求上下文和 CORS 包在 FastAPI 的 ServerErrorMiddleware 外层，覆盖未处理异常的 500。

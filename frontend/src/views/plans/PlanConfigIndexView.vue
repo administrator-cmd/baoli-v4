@@ -45,7 +45,7 @@ onMounted(() => void load());
 
 <template>
   <div class="app-panel">
-    <PageHeader eyebrow="方案管理" title="方案编辑" :show-refresh="false">
+    <PageHeader eyebrow="方案管理" title="方案配置" :show-refresh="false">
       <template #actions>
         <BackButton label="返回方案列表" @click="router.push({ name: 'plans' })" />
       </template>
@@ -62,7 +62,7 @@ onMounted(() => void load());
             v-for="plan in plans"
             :key="plan.plan_code"
             :value="plan.plan_code"
-            :label="`${plan.plan_name} · ${plan.scenario_name}`"
+            :label="plan.plan_name"
           />
         </el-select>
       </div>

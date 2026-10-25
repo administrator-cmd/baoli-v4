@@ -1,21 +1,22 @@
 """上传策略、材料类型、工具与规则状态目录接口。"""
 
 from fastapi import APIRouter, Request
-from ...config import get_settings
+
+from ...constants.status import RULE_STATUSES, STATUS_CATEGORY_LABELS
+from ...core.config import get_settings
 from ...domain import audit_vocab, tool_catalog
-from ...schema.vo import (
+from ...integrations.documents.material_classify import list_material_types
+from ...schema.vo.system import (
     MaterialTypeCatalogResponse,
     MaterialTypeItem,
     RuleCapabilityStatusResponse,
     RuleStatusCatalogResponse,
     ToolCatalogItem,
+    ToolCatalogResponse,
     UploadKindPolicy,
     UploadPolicyResponse,
-    ToolCatalogResponse,
 )
-from ...integrations.http_services import list_material_types
 from ...services.shared.storage import DOCUMENT_EXTENSIONS, RULEBOOK_EXTENSIONS
-
 
 router = APIRouter(prefix="/system", tags=["系统"])
 
@@ -88,11 +89,11 @@ def rule_status_catalog(request: Request) -> RuleStatusCatalogResponse:
     return RuleStatusCatalogResponse(
         statuses=[
             RuleCapabilityStatusResponse(**audit_vocab.status_view(status))
-            for status in audit_vocab.RULE_STATUSES
+            for status in RULE_STATUSES
         ],
         categories=[
             {"category": category, "label": label}
-            for category, label in audit_vocab.STATUS_CATEGORY_LABELS.items()
+            for category, label in STATUS_CATEGORY_LABELS.items()
         ],
         request_id=request.state.request_id,
     )

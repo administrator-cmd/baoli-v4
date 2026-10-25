@@ -1,13 +1,15 @@
 """审核链路共享读取辅助与引文排版处理，不执行金额、日期或值与引文的业务核对。"""
 
 import re
-from ...domain import fact_projection
-from ...common.exceptions import BusinessError
-from ...entity import AuditTask, DocumentUpload, ScenarioVersion, TaskDocument
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ...common.exceptions import BusinessError
+from ...domain import fact_projection
+from ...entity.scenarios import ScenarioVersion
+from ...entity.tasks import AuditTask, DocumentUpload, TaskDocument
 
 REVIEW_DECISION_LABELS = {
     "CONFIRM_ABNORMAL": "确认异常",
@@ -22,13 +24,6 @@ BASIS_TYPE_LABELS = {
     "HUMAN_STATEMENT": "人工业务判断",
     "DOCUMENT_EVIDENCE": "文档证据",
     "UPLOAD_RECORD": "上传记录",
-}
-
-QUOTE_CHECK_LABELS = {
-    "FOUND": "已在所属材料中找到该原文",
-    "NOT_FOUND": "未在所属产物中找到完整引文",
-    "NOT_CHECKABLE": "该产物没有可核对的原文文本，未能核对内容依据",
-    "PENDING": "该证据写入时尚未按当前口径核对内容依据",
 }
 
 _OCR_LATEX_WRAP = re.compile(

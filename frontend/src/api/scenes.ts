@@ -109,16 +109,12 @@ export function createScene(payload: {
 
 /* 配置修改只保存草稿并返回发布就绪状态；场景版本必须由管理员显式发布。 */
 
-export function getSceneDraft(scenarioCode: string): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft`);
-}
-
 /** 查看当前配置不创建草稿；有草稿时读取草稿，否则读取发布内容。 */
 export function getSceneConfiguration(scenarioCode: string, view?: "DRAFT" | "PUBLISHED"): Promise<ScenarioConfigurationView> {
   return request<ScenarioConfigurationView>(`/scenarios/${encodeURIComponent(scenarioCode)}/configuration${toQuery({ view })}`);
 }
 
-/** 草稿内的每次写入都返回最新的完整草稿视图，页面据服务端结果刷新。 */
+/** 材料、字段、审核规则与报告写入返回完整草稿视图；计算写入返回已提交的草稿修订号。 */
 export interface DraftMaterialPayload {
   name: string;
   required: boolean;
@@ -205,6 +201,7 @@ export interface DraftRulePayload {
   source_ref: string | null;
   node: string;
   operator: string;
+  execution_mode: string;
   rule_role: "CHECK" | "RISK";
   enabled: boolean;
   inputs: Array<{ field_key: string; material_key: string }>;
@@ -251,6 +248,56 @@ export function deleteDraftRule(scenarioCode: string, ruleKey: string): Promise<
     `/scenarios/${encodeURIComponent(scenarioCode)}/draft/rules/${encodeURIComponent(ruleKey)}`,
     { method: "DELETE" },
   );
+}
+
+export interface DraftCalculationPayload {
+  rule_code: string;
+  rule_name: string;
+  result_code: string;
+  source_id: string | null;
+  formula: string;
+  requirement: string;
+  result_type: string;
+  unit: string | null;
+  currency: string | null;
+  period_policy: string | null;
+  statement_scope: string | null;
+  status: "CLEAR" | "PENDING" | "DISABLED";
+  parameters: Array<{
+    parameter_code: string;
+    source_type: string;
+    source_code: string | null;
+    constant_value?: JsonValue;
+    [key: string]: unknown;
+  }>;
+  depends_on_result_codes: string[];
+  business_context: Record<string, JsonValue>;
+  remark: string;
+}
+
+/** 新增或编辑计算只更新场景草稿，发布后供新方案使用。 */
+export interface DraftCalculationMutation {
+  request_id: string;
+  scenario_code: string;
+  revision_no: number;
+}
+
+export function createDraftCalculation(scenarioCode: string, payload: DraftCalculationPayload): Promise<DraftCalculationMutation> {
+  return request<DraftCalculationMutation>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/calculations`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+}
+
+export function updateDraftCalculation(scenarioCode: string, ruleCode: string, payload: DraftCalculationPayload): Promise<DraftCalculationMutation> {
+  return request<DraftCalculationMutation>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/calculations/${encodeURIComponent(ruleCode)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+}
+
+export function deleteDraftCalculation(scenarioCode: string, ruleCode: string): Promise<DraftCalculationMutation> {
+  return request<DraftCalculationMutation>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/calculations/${encodeURIComponent(ruleCode)}`, {
+    method: "DELETE",
+  });
 }
 
 export interface DraftSectionPayload {

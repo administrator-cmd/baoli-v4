@@ -15,47 +15,113 @@ withDefaults(defineProps<{ items: StatItem[] }>(), {});
 
 const TONE_CLASS: Record<string, string> = {
   neutral: "",
-  primary: "stat-card--primary",
-  success: "stat-card--success",
-  warning: "stat-card--warning",
-  danger: "stat-card--danger",
+  primary: "stat-item--primary",
+  success: "stat-item--success",
+  warning: "stat-item--warning",
+  danger: "stat-item--danger",
 };
 </script>
 
 <template>
-  <el-row :gutter="12">
-    <el-col v-for="item in items" :key="item.label" :xs="12" :sm="12" :md="6" :lg="6">
-      <el-card shadow="never" class="stat-card" :class="TONE_CLASS[item.tone ?? 'neutral']">
-        <el-statistic :title="item.label" :value="item.value" />
-        <div v-if="item.hint" class="text-hint">{{ item.hint }}</div>
-      </el-card>
-    </el-col>
-  </el-row>
+  <div class="stat-strip">
+    <div v-for="item in items" :key="item.label" class="stat-item" :class="TONE_CLASS[item.tone ?? 'neutral']">
+      <span class="stat-value">{{ item.value }}</span>
+      <div class="stat-text">
+        <span class="stat-label">{{ item.label }}</span>
+        <span v-if="item.hint" class="stat-hint">{{ item.hint }}</span>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.stat-card {
-  margin-bottom: 12px;
+.stat-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: var(--el-bg-color);
 }
 
-.stat-card :deep(.el-statistic__content) {
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-right: 1px solid var(--el-border-color-lighter);
+}
+
+.stat-item:last-child {
+  border-right: 0;
+}
+
+.stat-value {
   font-size: 24px;
   font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
-.stat-card--warning :deep(.el-statistic__content) {
+.stat-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  line-height: 1.2;
+}
+
+.stat-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.2;
+}
+
+.stat-item--warning .stat-value {
   color: var(--el-color-warning);
 }
 
-.stat-card--danger :deep(.el-statistic__content) {
+.stat-item--danger .stat-value {
   color: var(--el-color-danger);
 }
 
-.stat-card--success :deep(.el-statistic__content) {
+.stat-item--success .stat-value {
   color: var(--el-color-success);
 }
 
-.stat-card--primary :deep(.el-statistic__content) {
+.stat-item--primary .stat-value {
   color: var(--el-color-primary);
+}
+
+@media (max-width: 900px) {
+  .stat-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stat-item:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .stat-item:nth-child(n + 3) {
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
+}
+
+@media (max-width: 560px) {
+  .stat-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat-item {
+    border-right: 0;
+  }
+
+  .stat-item + .stat-item {
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
 }
 </style>

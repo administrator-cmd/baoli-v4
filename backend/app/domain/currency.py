@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 _ALIASES: dict[str, str] = {
     "人民币": "CNY",
     "CNY": "CNY",

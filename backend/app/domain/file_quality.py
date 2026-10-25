@@ -12,11 +12,11 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..common.exceptions import BusinessError
-
 
 # 已有文件处理能力的检查项目码，由场景配置选择，不依赖 Excel 下拉或固定列。
 CHECK_FILE_FORMAT = "FILE_FORMAT"
@@ -167,25 +167,31 @@ def _failed(code: str, message: str, details: dict[str, Any] | None = None) -> B
 def parse_size_limit(standard_value: str | None, unit: str | None) -> Decimal:
     """把「标准值 + 单位」换算成字节数上限。
 
+    标准值可以写成 `50`（单位另填）或 `50MB`（单位随标准值给出）；导入的原文常见后一种。
     缺少标准值、单位不受支持或标准值不是非负数值都明确报错：宁可让配置问题暴露，
     也不用默认上限放行文件。导入期与运行期共用这一个换算口径。
     """
     if standard_value is None or not str(standard_value).strip():
         raise _failed("RULE_QUALITY_STANDARD_VALUE_REQUIRED", "文件大小检查缺少「标准值」，无法判定")
     raw = str(standard_value).strip()
+    matched = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)?", raw)
+    if matched is None:
+        raise _failed("RULE_QUALITY_STANDARD_VALUE_INVALID", f"文件大小检查的「标准值」“{raw}”不是有效数值")
     try:
-        number = Decimal(raw)
+        number = Decimal(matched.group(1))
     except (InvalidOperation, ValueError) as exc:
         raise _failed("RULE_QUALITY_STANDARD_VALUE_INVALID", f"文件大小检查的「标准值」“{raw}”不是有效数值") from exc
     if not number.is_finite() or number < 0:
         raise _failed("RULE_QUALITY_STANDARD_VALUE_INVALID", f"文件大小检查的「标准值」“{raw}”必须是不小于 0 的数值")
-    if unit is None or not str(unit).strip():
+    # 标准值自带单位时以它为准；否则使用显式单位。两者都没有才报错。
+    resolved_unit = (matched.group(2) or str(unit or "")).strip().upper()
+    if not resolved_unit:
         raise _failed("RULE_QUALITY_UNIT_REQUIRED", "文件大小检查缺少「单位」，无法把标准值换算成字节数")
-    factor = SIZE_UNITS.get(str(unit).strip().upper())
+    factor = SIZE_UNITS.get(resolved_unit)
     if factor is None:
         raise _failed(
             "RULE_QUALITY_UNIT_UNSUPPORTED",
-            f"文件大小检查的「单位」“{unit}”无法识别，只支持 {'、'.join(sorted(SIZE_UNITS))}",
+            f"文件大小检查的「单位」“{resolved_unit}”无法识别，只支持 {'、'.join(sorted(SIZE_UNITS))}",
         )
     return number * factor
 

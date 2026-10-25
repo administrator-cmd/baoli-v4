@@ -1,15 +1,16 @@
 """场景草稿报告章节及分组字段配置。"""
 
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ...repositories.shared import configuration as config_store
-from ...domain.report_data import report_data_refs
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioDraft, ScenarioDraftField, ScenarioDraftMaterial, ScenarioDraftSection
 from ...domain.identity import stable_key
-from ...repositories.scenario.draft import next_sort_no
+from ...domain.report_data import report_data_refs
+from ...entity.scenario_drafts import ScenarioDraft, ScenarioDraftField, ScenarioDraftMaterial, ScenarioDraftSection
+from ..shared import configuration as config_store
 from .common import _item_ref
-from .draft import _locked_draft, _save_draft
+from .draft import _locked_draft, _save_draft, next_sort_no
 
 
 def _section_group_fields(db: Session, draft_id: int, payload: dict[str, Any]) -> dict[str, Any]:

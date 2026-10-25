@@ -2,10 +2,10 @@
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.vo import OperationAcceptedResponse
-from ...services.system.background import operation_by_no, operation_view
 
+from ...core.database import get_db
+from ...schema.vo.operations import OperationAcceptedResponse
+from ...services.system.background import operation_by_no, operation_view
 
 router = APIRouter(prefix="/operations", tags=["后台操作"])
 

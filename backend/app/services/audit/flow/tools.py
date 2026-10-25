@@ -1,11 +1,13 @@
 """真实工具调用与工具消息回填。"""
 
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ..tasks.lookup import task_or_404
+
 from ..shared import _scenario, _task_manifest
-from .shared import agent_module, rule_of_instance
+from ..tasks.lookup import task_or_404
 from .errors import agent_step
+from .shared import agent_module, rule_of_instance
 
 
 def graph_execute_tool_calls(

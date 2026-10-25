@@ -3,10 +3,34 @@
 import logging
 from typing import Any, Protocol
 
-from ..domain.audit_vocab import LOOP_BLOCKED, LOOP_RUNNING
-
+from ..constants.status import LOOP_BLOCKED, LOOP_DONE, LOOP_RUNNING
+from ..domain.execution_mode import MODE_AGGREGATE, MODE_CALCULATE, MODE_CROSS_SCOPE_COMPARE, MODE_VALUE_COMPARE
 
 logger = logging.getLogger(__name__)
+
+# 这些执行方式必须由声明输入支撑；输入未形成取值时不能交给模型自行读材料补位。
+_INPUT_REQUIRED_MODES = {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE, MODE_CALCULATE}
+
+
+def _input_block_reason(rule: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any] | None:
+    """声明输入未形成取值时，规则应明确未执行，而不是让模型改用其它材料来源。"""
+    if str(rule.get("execution_mode") or "") not in _INPUT_REQUIRED_MODES:
+        return None
+    missing = [item for item in instance.get("inputs") or [] if item.get("status") == "NOT_EXECUTED"]
+    if not missing:
+        return None
+    names = instance.get("field_names") or {}
+    labels = list(dict.fromkeys(
+        str(names.get(item.get("field_key")) or item.get("field_key")) for item in missing
+    ))
+    return {
+        "kind": "RULE_INPUT_NOT_EXECUTED",
+        "message": f"输入字段「{'、'.join(labels)}」未形成取值，无法执行本规则",
+        "details": {
+            "field_keys": [item.get("field_key") for item in missing],
+            "material_keys": [item.get("material_key") for item in missing],
+        },
+    }
 
 
 class RuleEvaluationRunner(Protocol):
@@ -20,6 +44,11 @@ class RuleEvaluationRunner(Protocol):
     def graph_prepare_agent_context(
         self, db: Any, task_no: str, node_code: str, planned_rule: dict[str, Any],
         rule_instance: dict[str, Any] | None, messages: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]: ...
+
+    def graph_build_aggregate_verdict(
+        self, db: Any, task_no: str, node_code: str, execution_id: int | None,
+        rule_instance: dict[str, Any] | None, planned_rule: dict[str, Any],
     ) -> dict[str, Any]: ...
 
     def graph_call_model(
@@ -59,6 +88,42 @@ class RuleEvaluationRunner(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def _batch_key(rule: dict[str, Any]) -> tuple[str, str | None] | None:
+    """可批量抽取的标识：无输入、单字段的抽取规则，键为（材料，产物来源）。
+
+    同批规则必须在同一份材料、同一种产物上抽取，否则一次读取覆盖不了全部字段。
+    """
+    if rule.get("kind") != "EXTRACTION" or rule.get("inputs"):
+        return None
+    if any(rule.get(key) for key in (
+        "dependency_error", "unavailable_dependencies", "source_rule_key",
+        "source_rule_keys", "source_rule_codes",
+    )):
+        return None
+    definitions = rule.get("output_definitions") or []
+    if len(definitions) != 1 or not definitions[0].get("material_key"):
+        return None
+    return definitions[0]["material_key"], definitions[0].get("artifact_source")
+
+
+def extraction_group(plan: list[dict[str, Any]], start: int) -> list[dict[str, Any]]:
+    """从 start 起连续同键的抽取项；第一个不是可批量项时只返回它自己。
+
+    抽取项之间没有依赖，因此同键的抽取在计划里总是相邻的；不跨过其他规则合并，
+    避免把有依赖的检查项夹带进同一个模型调用。
+    """
+    entry = plan[start]
+    key = _batch_key(entry["rule"])
+    group = [entry]
+    if key is None:
+        return group
+    cursor = start + 1
+    while cursor < len(plan) and _batch_key(plan[cursor]["rule"]) == key:
+        group.append(plan[cursor])
+        cursor += 1
+    return group
+
+
 def run_rule_evaluation(
     db: Any, nodes: RuleEvaluationRunner, *, task_no: str, node_code: str,
     execution_id: int | None, rule_cursor: int, planned_rule: dict[str, Any],
@@ -70,11 +135,34 @@ def run_rule_evaluation(
     单条业务失败由服务层明确记录；存储及程序异常原样向任务调用方传播。
     """
     state = nodes.graph_load_rule_instance(db, task_no, node_code, rule_cursor, execution_id, planned_rule)
+    rule_key = state["rule_instance"]["rule_key"]
+    logger.info("开始执行审核规则 task_no=%s rule_key=%s cursor=%s", task_no, rule_key, rule_cursor)
+
+    if str(planned_rule.get("execution_mode") or "") == MODE_AGGREGATE:
+        built = nodes.graph_build_aggregate_verdict(
+            db, task_no, node_code, execution_id, state["rule_instance"], planned_rule,
+        )
+        saved = nodes.graph_save_evaluation_result(
+            db, task_no, node_code, execution_id, state["rule_instance"],
+            built["candidate_verdict"], LOOP_DONE, built.get("unresolved_items"),
+            state["evaluation_id"], 0,
+        )
+        logger.info("组合汇总执行结束 task_no=%s rule_key=%s status=%s",
+                    task_no, rule_key, saved["rule_outcome"]["status"])
+        return saved["rule_outcome"]
+
+    blocked_input = _input_block_reason(planned_rule, state["rule_instance"])
+    if blocked_input is not None:
+        saved = nodes.graph_save_evaluation_result(
+            db, task_no, node_code, execution_id, state["rule_instance"],
+            None, LOOP_BLOCKED, [blocked_input], state["evaluation_id"], 0,
+        )
+        logger.info("规则输入未形成取值 task_no=%s rule_key=%s", task_no, rule_key)
+        return saved["rule_outcome"]
+
     state.update(nodes.graph_prepare_agent_context(
         db, task_no, node_code, planned_rule, state["rule_instance"], state["messages"],
     ))
-    rule_key = state["rule_instance"]["rule_key"]
-    logger.info("开始执行审核规则 task_no=%s rule_key=%s cursor=%s", task_no, rule_key, rule_cursor)
 
     while True:
         turn = nodes.graph_call_model(

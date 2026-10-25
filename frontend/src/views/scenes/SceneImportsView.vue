@@ -14,7 +14,7 @@ import {
 } from "@/api/imports";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
-import { statusLabel } from "@/constants/labels";
+import { formatDate, statusLabel } from "@/constants/labels";
 
 /**
  * 规则库导入（入口列表）：文件名、所属场景、状态与待处理数来自真实作业。
@@ -137,7 +137,7 @@ async function removeJob(row: ImportJobRow): Promise<void> {
  */
 function sceneText(row: ImportJobRow): string {
   // 作业所属场景在上传时指定。
-  return row.scenario_name || row.scenario_code || "未记录场景";
+  return row.scenario_name || "未记录场景名称";
 }
 
 /**
@@ -273,8 +273,8 @@ watch(scopedScenarioCode, () => {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="170">
-        <template #default="{ row }">{{ String(row.created_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="创建时间" width="190">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
       <el-table-column label="操作" width="220" fixed="right">
         <template #default="{ row }">

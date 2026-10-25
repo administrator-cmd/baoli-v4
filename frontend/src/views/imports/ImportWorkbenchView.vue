@@ -101,6 +101,19 @@ const importMutable = computed(() => Boolean(job.value?.proposals) === false && 
 /** 解析失败或成功后都允许再次提交；提交期间和查询期间不允许重复提交。 */
 const canSubmitConversion = computed(() => importMutable.value && !pending.value && !operationRunning.value);
 
+/**
+ * 第一轮目录已保存且尚未形成最终结果：可以只重跑第二轮。
+ * 场景已发布、已写入草稿或已有解析结果时不提供该选项。
+ */
+const canResumeRefinement = computed(
+  () => Boolean(job.value?.can_resume_refinement) && importMutable.value,
+);
+
+const conversionActionLabel = computed(() => {
+  if (parsing.value) return "正在解析";
+  return canResumeRefinement.value ? "重试第二轮" : "开始解析";
+});
+
 const conversionDisabledReason = computed(() => {
   if (!job.value) {
     return "请先上传规则 Excel 文件。";
@@ -331,8 +344,11 @@ async function uploadRulebook(file: File): Promise<void> {
   });
 }
 
-/** 提交后台解析。长处理只受理，随后查询真实状态。 */
-async function submitConversion(): Promise<void> {
+/**
+ * 提交后台解析。长处理只受理，随后查询真实状态。
+ * 默认复用已保存的第一轮目录，只重跑第二轮；显式选择 FULL 时从头解析。
+ */
+async function submitConversion(mode?: "FULL" | "RESUME_REFINEMENT"): Promise<void> {
   if (!job.value) {
     return;
   }
@@ -340,26 +356,49 @@ async function submitConversion(): Promise<void> {
     formMessage.value = conversionDisabledReason.value;
     return;
   }
+  const selected = mode ?? (canResumeRefinement.value ? "RESUME_REFINEMENT" : "FULL");
   const jobNo = job.value.job_no;
   await run(async () => {
     const attemptKey = conversionAttemptKey ?? operationIdempotencyKey("IMPORT_CONVERT", jobNo);
     conversionAttemptKey = attemptKey;
     try {
-      const accepted = await startImportConversion(jobNo, attemptKey);
+      const accepted = await startImportConversion(jobNo, attemptKey, selected);
       trackOperation(accepted);
       activeStep.value = 1;
       // 把操作编号写进 URL：刷新后仍能凭它继续查询同一个操作。
       await router.replace({ name: "scene-import-detail", params: { jobNo }, query: { operation: accepted.operation_no } });
     } catch (error) {
       setFailure(error);
-      // 同一作业已有活跃操作时，明确切换到查询该操作的真实状态，不重复提交。
-      if (error instanceof Error && "code" in error && (error as ApiError).code === "OPERATION_ALREADY_ACTIVE") {
+      const code = error instanceof Error && "code" in error ? (error as ApiError).code : null;
+      // 服务端明确返回错误码说明本次请求未被受理，幂等键只在结果未知（网络中断）时才保留；
+      // 否则用户换一个模式提交时会用同一键发出不同内容，持续命中幂等冲突。
+      if (code) conversionAttemptKey = null;
+      if (code === "OPERATION_ALREADY_ACTIVE") {
+        // 同一作业已有活跃操作时，明确切换到查询该操作的真实状态，不重复提交。
         const reloaded = await getImportJob(jobNo);
         await receiveJob(reloaded, true);
         resumeLatestOperation();
+      } else if (code === "IMPORT_INITIAL_STAGE_UNAVAILABLE") {
+        // 第一轮检查点已失效：刷新作业详情，页面按钮随之回到「开始解析」。
+        const reloaded = await getImportJob(jobNo);
+        await receiveJob(reloaded, true);
       }
     }
   });
+}
+
+/** 从头重新解析：两轮都重跑，已保存的第一轮目录会被新的结果覆盖。 */
+async function reparseFromStart(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      "将从第一轮重新理解整份 Excel，耗时更长；已保存的第一轮结果会被新的结果覆盖。确认从头解析？",
+      "从头重新解析",
+      { type: "warning", confirmButtonText: "从头解析", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await submitConversion("FULL");
 }
 
 /** 用导入结果替换 Excel 管理的草稿内容；流程节点保留，场景不会自动发布。 */
@@ -480,7 +519,6 @@ watch(
           :job-filename="null"
           :job-created-at="null"
           :job-status="null"
-          :failure-message="null"
           :selected-file-size="null"
           :policy="uploadPolicy?.rulebook ?? null"
           :pending="pending"
@@ -519,6 +557,7 @@ watch(
         :title="jobFailure.message"
       >
         <div>{{ failureNextStep(jobFailure.code) }}</div>
+        <div v-if="canResumeRefinement">第一轮解析结果已保存，可只重试第二轮；如需重新理解整份 Excel，选择「从头重新解析」。</div>
       </el-alert>
 
       <!-- 第一步：上传文件 -->
@@ -528,7 +567,6 @@ watch(
           :job-filename="job.source_filename"
           :job-created-at="job.created_at"
           :job-status="job.status"
-          :failure-message="job.failure?.message ?? null"
           :selected-file-size="selectedFileSize"
           :policy="uploadPolicy?.rulebook ?? null"
           :pending="pending"
@@ -539,6 +577,7 @@ watch(
           <div class="sticky-actions__bar">
             <div class="card-actions">
               <el-button @click="startNewImport">重新上传规则库</el-button>
+              <el-button v-if="canResumeRefinement" :disabled="!canSubmitConversion" @click="reparseFromStart">从头重新解析</el-button>
               <el-button
                 type="primary"
                 :loading="pending || parsing"
@@ -546,7 +585,7 @@ watch(
                 :title="conversionDisabledReason ?? ''"
                 @click="submitConversion()"
               >
-                {{ parsing ? "正在解析" : "开始解析" }}
+                {{ conversionActionLabel }}
               </el-button>
             </div>
           </div>
@@ -599,7 +638,7 @@ watch(
         <template v-else>
           <el-descriptions :column="2" border>
             <el-descriptions-item label="目标场景" :span="2">
-              {{ job.profile?.scenario_name || job.profile?.scenario_code || "未记录场景" }}
+              {{ job.profile?.scenario_name || "未记录场景名称" }}
             </el-descriptions-item>
             <el-descriptions-item label="材料">{{ proposalTotals.materials }}</el-descriptions-item>
             <el-descriptions-item label="字段">{{ proposalTotals.fields }}</el-descriptions-item>

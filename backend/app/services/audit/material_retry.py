@@ -1,9 +1,11 @@
 """只重试当前上传的一项外部处理，保留其他已成功产物。"""
 
+from functools import partial
+
 from sqlalchemy import select
 
 from ...common.exceptions import BusinessError
-from ...entity import AuditTask, DocumentUpload, TaskDocument
+from ...entity.tasks import AuditTask, DocumentUpload, TaskDocument
 from ..shared.storage import resolve_storage_path
 from ..system import background
 from ..system.operation_types import OBJECT_AUDIT_TASK
@@ -51,11 +53,11 @@ def submit_document_artifact_retry(db, task, *, document_no, artifact_type, payl
         kwargs = {"file_path": resolve_storage_path(upload.relative_path), "filename": upload.original_filename,
                   "content_type": upload.content_type}
         if content["artifact_type"] == "MATERIAL_CLASSIFY":
-            call = lambda: port.validate_material_type(**kwargs, material_type=upload.declared_material_type)
+            call = partial(port.validate_material_type, **kwargs, material_type=upload.declared_material_type)
         elif content["artifact_type"] == "DOCUMENT_PARSE":
-            call = lambda: port.process_document(**kwargs)
+            call = partial(port.process_document, **kwargs)
         else:
-            call = lambda: port.detect_seals(**kwargs)
+            call = partial(port.detect_seals, **kwargs)
         execute_external_artifact_call(session, current, upload, artifact, call,
                                        operation_no=command.operation_no, resubmit_unknown=content["resubmit_unknown"])
         session.commit()

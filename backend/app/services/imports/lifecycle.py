@@ -1,15 +1,17 @@
 """规则库导入作业删除与后台转换中止。"""
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import ImportJob
-from ..system.operation_log import record_operation
-from datetime import UTC, datetime
-from ...entity import BackgroundOperation
-from ..system.background import ACTIVE_STATUSES
-from ..system.operation_types import OBJECT_IMPORT_JOB
+from ...entity.imports import ImportJob
+from ...entity.operations import BackgroundOperation
 from ..shared.import_cleanup import delete_import_job_entities
+from ..system.background import ACTIVE_STATUSES
+from ..system.operation_log import record_operation
+from ..system.operation_types import OBJECT_IMPORT_JOB
 from .lookup import _job_or_404
 
 
@@ -28,6 +30,7 @@ def delete_import_job(db: Session, job_no: str) -> None:
         object_no=job_no,
         object_name=job.source_filename,
         operation_type="DELETE",
+        permanent=True,
         detail={"job_no": job_no},
     )
     delete_import_job_entities(db, [job])

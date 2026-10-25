@@ -16,6 +16,7 @@ import {
   setSceneEnabled,
   updateScene,
 } from "@/api/scenes";
+import { formatDate as formatDateTime } from "@/constants/labels";
 import SceneFieldsPanel from "@/components/scenes/SceneFieldsPanel.vue";
 import SceneCalculationsPanel from "@/components/scenes/SceneCalculationsPanel.vue";
 import SceneMaterialsPanel from "@/components/scenes/SceneMaterialsPanel.vue";
@@ -218,7 +219,7 @@ async function removeScenario(): Promise<void> {
 }
 
 function formatDate(value: string | null): string {
-  return value ? String(value).replace("T", " ").slice(0, 19) : "—";
+  return value ? formatDateTime(value) : "—";
 }
 
 function openImports(): void {
@@ -318,9 +319,6 @@ function openPlanCreation(): void {
               <el-form-item label="启用状态">
                 <el-switch v-model="basicForm.enabled" :disabled="!canEditBasic" active-text="启用" inactive-text="停用" />
               </el-form-item>
-              <el-form-item label="场景编码">
-                <span class="mono">{{ detail.scenario_code }}</span>
-              </el-form-item>
               <el-form-item label="草稿修订">
                 <span>{{ detail.draft ? `未发布草稿 · 第 ${detail.draft.revision_no} 次修订` : "无未发布草稿" }}</span>
               </el-form-item>
@@ -359,7 +357,8 @@ function openPlanCreation(): void {
           </el-tab-pane>
           <el-tab-pane label="计算规则" name="calculations">
             <el-alert v-if="configError" type="error" show-icon :closable="false" :title="configError" />
-            <SceneCalculationsPanel v-else :key="detail.scenario_code" :items="calculations" />
+            <SceneCalculationsPanel v-else :key="detail.scenario_code" :scenario-code="detail.scenario_code"
+              :items="calculations" :fields="configuration?.fields ?? []" @changed="onChildChanged" />
           </el-tab-pane>
           <el-tab-pane label="报告" name="sections">
             <SceneSectionsPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />

@@ -1,18 +1,25 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { Upload } from "lucide-vue-next";
 import type { AuditDocument } from "@/api/contracts";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { MaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
 import type { StatusTone } from "@/constants/labels";
+import {
+  processingArtifactLabel,
+  processingStatusLabel,
+  type ProcessingArtifact,
+} from "@/constants/materialProcessing";
 
 const props = defineProps<{
   document: AuditDocument;
   catalog: MaterialTypeCatalog;
   busy: boolean;
   disabled: boolean;
+  /** 同一任务已有后台操作在跑：只读的处理状态仍可查看，处理中的产物不算失败。 */
+  operationActive?: boolean;
   replacementImpact?: {
     stale_field_values: number;
     invalidated_rule_results: number;
@@ -32,10 +39,6 @@ const uploadRef = ref<{ clearFiles: () => void } | null>(null);
 const selectedType = ref("");
 const missingRequired = computed(() => props.document.required && !props.document.filename);
 const materialClassify = computed(() => props.document.material_classify ?? null);
-const matchedKeywords = computed(() => {
-  const raw = materialClassify.value?.matched_keywords;
-  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
-});
 const confidenceLabel = computed(() => {
   const confidence = materialClassify.value?.confidence;
   return typeof confidence === "number" ? `${(confidence * 100).toFixed(1)}%` : "—";
@@ -63,7 +66,56 @@ const impactText = computed(() => {
   return `字段 ${impact.stale_field_values} 项、规则 ${impact.invalidated_rule_results} 条、节点 ${impact.invalidated_node_executions} 次、复核 ${impact.invalidated_reviews} 项需更新`;
 });
 
-function onFileChange(file: { raw?: File }): void {
+/** 四项处理产物状态（任务详情一次返回）；按处理顺序展示当前进度与失败项。 */
+const ARTIFACT_ORDER = ["MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL"] as const;
+
+function artifactOf(type: (typeof ARTIFACT_ORDER)[number]): ProcessingArtifact | null {
+  const item = props.document.artifacts?.[type];
+  if (!item) return null;
+  return {
+    artifact_type: type,
+    artifact_no: item.artifact_no,
+    status: item.status,
+    message: item.message,
+    job_id: item.job_id ?? null,
+    deadline_at: item.deadline_at ?? null,
+    provider_state: item.provider_state ?? null,
+    extract_progress: item.extract_progress ?? null,
+    progress_updated_at: item.progress_updated_at ?? null,
+  };
+}
+
+/** OCR 识别进度：只显示供应商真实返回的页数，没有页数时不编百分比。 */
+const ocrProgressText = computed(() => {
+  const ocr = artifactOf("OCR");
+  if (!ocr || ocr.status !== "PENDING") return null;
+  const extracted = ocr.extract_progress?.extractedPages;
+  const total = ocr.extract_progress?.totalPages;
+  if (typeof extracted !== "number") {
+    return processingStatusLabel(ocr);
+  }
+  return typeof total === "number"
+    ? `${processingStatusLabel(ocr)} ${extracted} / ${total} 页`
+    : `${processingStatusLabel(ocr)} ${extracted} 页`;
+});
+
+/** 当前需要用户处理的处理项：确定失败，或操作结束后仍结果未知的第一项。 */
+const artifactAttention = computed(() => {
+  for (const type of ARTIFACT_ORDER) {
+    const artifact = artifactOf(type);
+    if (!artifact) continue;
+    if (artifact.status === "FAILED") {
+      return { label: processingArtifactLabel(type), artifact };
+    }
+    // 后台操作进行中时，PROCESSING/SUBMITTING 表示仍在处理，不是失败。
+    if (!props.operationActive && ["PROCESSING", "SUBMITTING"].includes(artifact.status)) {
+      return { label: processingArtifactLabel(type), artifact };
+    }
+  }
+  return null;
+});
+
+async function onFileChange(file: { raw?: File }): Promise<void> {
   uploadRef.value?.clearFiles();
   if (!file.raw) return;
   if (!props.catalog.state.available) {
@@ -74,9 +126,17 @@ function onFileChange(file: { raw?: File }): void {
     ElMessage.warning("请先选择材料类型，再上传文件");
     return;
   }
-  if (props.document.filename && !window.confirm(
-    `替换「${props.document.material_name}」当前文件后，已有的处理产物、字段结果、规则结果与报告会按服务端规则失效，需要重新执行相关节点。是否继续？`,
-  )) return;
+  if (props.document.filename) {
+    try {
+      await ElMessageBox.confirm(
+        `替换「${props.document.material_name}」的当前文件后，已有的处理产物、字段结果、规则结果与报告会按服务端规则失效，需要重新处理并执行审核。旧文件保留为历史版本。`,
+        "替换材料文件",
+        { type: "warning", confirmButtonText: "替换", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
+  }
   emit("pick", file.raw, selectedType.value);
 }
 </script>
@@ -96,16 +156,10 @@ function onFileChange(file: { raw?: File }): void {
       <div class="material-row__status">
         <StatusBadge :status="document.status" :label="statusLabelOverride" :tone="materialStatusTone(document.status)" />
         <span v-if="materialClassify" class="material-row__confidence">置信度 {{ confidenceLabel }}</span>
-        <el-popover v-if="materialClassify" trigger="click" width="340">
-          <template #reference><el-button link type="primary" size="small">识别详情</el-button></template>
-          <div class="material-row__classification">
-            <strong>自动识别（仅供参考）</strong>
-            <div>判定类型：{{ materialClassify.detected_material_type || "未识别" }}</div>
-            <div v-if="materialClassify.declared_material_type">上传声明：{{ materialClassify.declared_material_type }}</div>
-            <div>置信度：{{ confidenceLabel }}</div>
-            <div>命中关键词：{{ matchedKeywords.length ? matchedKeywords.join("、") : "无" }}</div>
-          </div>
-        </el-popover>
+      </div>
+      <div v-if="ocrProgressText" class="material-row__note">{{ ocrProgressText }}</div>
+      <div v-if="artifactAttention" class="material-row__note" :class="artifactAttention.artifact.status === 'FAILED' ? 'text-danger' : ''">
+        {{ artifactAttention.label }}：{{ artifactAttention.artifact.message }}
       </div>
       <div v-if="document.status === 'TYPE_REJECTED'" class="text-danger material-row__note">相关检查将记为无法判断</div>
       <div v-if="replacementImpact" class="material-row__note">
@@ -122,7 +176,7 @@ function onFileChange(file: { raw?: File }): void {
           </el-button>
         </el-upload>
         <template v-if="document.filename">
-          <el-button link type="primary" size="small" :disabled="disabled || busy" @click="emit('inspectProcessing', document)">处理状态</el-button>
+          <el-button link type="primary" size="small" :disabled="busy" @click="emit('inspectProcessing', document)">处理状态</el-button>
           <el-button link type="danger" size="small" :disabled="disabled || busy" @click="emit('remove', document)">移除</el-button>
         </template>
       </div>
@@ -137,12 +191,12 @@ function onFileChange(file: { raw?: File }): void {
 .material-row__actions {
   display: flex;
   align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
   gap: 6px;
 }
 .material-row__file { overflow-wrap: anywhere; }
 .material-row__note { margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
 .material-row__actions { gap: 4px 8px; }
-.material-row__classification { line-height: 1.7; overflow-wrap: anywhere; }
 .material-row__confidence { color: var(--el-text-color-secondary); font-size: 12px; }
 </style>

@@ -1,13 +1,14 @@
 """业务操作日志查询接口。"""
 
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.query import validate_page_params
-from ...schema.vo import OperationLogPageResponse
-from ...services.system import operation_log as operation_log_service
 
+from ...core.database import get_db
+from ...schema.query.pagination import validate_page_params
+from ...schema.query.timestamps import FilterDateTime
+from ...schema.vo.common import OperationLogPageResponse
+from ...services.system import operation_log as operation_log_service
 
 router = APIRouter(prefix="/system", tags=["系统"])
 
@@ -19,8 +20,8 @@ def list_operations(
     operation_type: str | None = None,
     result: str | None = None,
     keyword: str | None = None,
-    created_from: datetime | None = None,
-    created_to: datetime | None = None,
+    created_from: FilterDateTime | None = None,
+    created_to: FilterDateTime | None = None,
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),

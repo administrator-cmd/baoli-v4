@@ -1,14 +1,15 @@
 """场景草稿材料配置及依赖检查。"""
 
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ...repositories.shared import configuration as config_store
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioDraft, ScenarioDraftField, ScenarioDraftMaterial, ScenarioDraftRule
 from ...domain.identity import stable_key
-from ...repositories.scenario.draft import next_sort_no
+from ...entity.scenario_drafts import ScenarioDraft, ScenarioDraftField, ScenarioDraftMaterial, ScenarioDraftRule
+from ..shared import configuration as config_store
 from .common import _item_ref, _normalized_source_ref
-from .draft import _locked_draft, _save_draft
+from .draft import _locked_draft, _save_draft, next_sort_no
 
 
 def create_draft_material(db: Session, scenario_code: str, payload: dict[str, Any]) -> ScenarioDraft:

@@ -7,16 +7,23 @@
 规则模型产出由 rule_execution 保存；本模块负责实际事实读取、人工纠错与版本失效。
 人工确认值不被模型产出覆盖。"""
 
-from ...domain import fact_projection, field_strategy
-from ...domain.identity import public_no
-from ...domain.manifest import normalize_field_scope
-from ...common.exceptions import BusinessError
-from ...entity import AuditTask, DocumentUpload, Evidence, ManualReview, TaskDocument, TaskFact, TaskFieldValue
-from . import value_store as task_value_service
-from .shared import _task_field_definitions
+from typing import Any
+
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
-from typing import Any
+
+from ...common.exceptions import BusinessError
+from ...constants.execution import (
+    ENTITY_SCOPE_SELF,
+    FACT_KIND_EXTRACTED,
+    ORIGIN_HUMAN_CORRECTION,
+)
+from ...constants.status import EXECUTABLE_FIELD_STATUSES, FIELD_STATUS_REVIEWED
+from ...domain import fact_projection
+from ...domain.manifest import normalize_field_scope
+from ...entity.tasks import AuditTask, DocumentUpload, ManualReview, TaskDocument, TaskFact, TaskFieldValue
+from . import value_store as task_value_service
+from .shared import _task_field_definitions
 
 
 def _task_field_facts(
@@ -90,7 +97,7 @@ def _current_field_fact_pairs(
             select(TaskFact).where(
                 TaskFact.audit_task_id == task.id,
                 TaskFact.scenario_version_id == task.scenario_version_id,
-                TaskFact.fact_kind == "EXTRACTED",
+                TaskFact.fact_kind == FACT_KIND_EXTRACTED,
                 TaskFact.is_current.is_(True),
             )
         ).all()
@@ -133,7 +140,7 @@ def _current_field_fact_pairs(
             normalize_field_scope(
                 field, "statement_scope", status_code=500
             ),
-            str(field.get("entity_scope") or "SELF"),
+            str(field.get("entity_scope") or ENTITY_SCOPE_SELF),
         )
         expected_identities.add(identity)
         candidate = candidates.get(key)
@@ -177,8 +184,8 @@ def _write_human_field_fact(
     """人工裁决产生的字段事实新版本。
 
     旧当前事实先退出当前位（唯一键 (任务, current_fact_scope) 要求同一时刻只有一个当前事实，
-    且该范围不含上传版本），新行不带抽取执行批次。确认原值或判为证据不足时可复制
-    原证据到新版本；人工改写取值时不自动沿用旧引文。旧行、旧复核与旧证据保持可追溯。
+    且该范围不含上传版本），新行不带抽取执行批次。确认原值时可引用旧版本原文；
+    人工改写取值时不自动沿用旧引文。旧行、旧复核与旧依据保持可追溯。
     返回 (新事实, 上一版版本号, 本次失效的旧待办数量)。正在本事务里裁决的待办
     通过 preserved_review_ids 排除；Session 关闭了 autoflush，不能依赖内存里已改成
     RESOLVED 的状态让 SQL 自动避开它。
@@ -217,9 +224,8 @@ def _write_human_field_fact(
         revision_no=_next_field_revision(facts, document_upload_id),
         is_current=True,
         status=status,
-        evidence_id=None,
         extraction_execution_id=None,
-        origin="HUMAN_CORRECTION",
+        origin=ORIGIN_HUMAN_CORRECTION,
     )
     db.add(fact)
     db.flush()
@@ -230,44 +236,25 @@ def _write_human_field_fact(
             status_code=500, details={"field_key": field_key, "material_key": material_key},
         )
     # 候选与有效事实都明确保存声明的单位、币种。
+    evidence = []
+    if inherit_evidence_from_id is not None:
+        from .evidence import field_evidence
+        source = next((item for item in facts if item.id == inherit_evidence_from_id), None)
+        if source is None or source.document_upload_id != document_upload_id or status != FIELD_STATUS_REVIEWED:
+            raise BusinessError("TASK_FIELD_EVIDENCE_INHERIT_INVALID", "只能在确认同一上传版本原值时保留原文依据")
+        previous_value = task_value_service.value_of(
+            db, task, task_value_service.RECORD_TASK_FIELD_VALUE, source.id,
+        ).get("normalized_value_json")
+        if (fact_projection.canonical_field_value(previous_value, field)
+                != fact_projection.canonical_field_value(normalized_value, field)):
+            raise BusinessError("TASK_FIELD_EVIDENCE_INHERIT_INVALID", "人工改写取值不能沿用旧原文依据")
+        field_evidence(db, task, inherit_evidence_from_id)
+        evidence = [{"source_field_value_id": inherit_evidence_from_id}]
     task_value_service.append_values(
         db, task, [(task_value_service.RECORD_TASK_FIELD_VALUE, fact.id,
                     {"raw_value": raw_value, "normalized_value_json": normalized_value,
-                     "unit": field.get("unit"), "currency": field.get("currency")})]
+                     "unit": field.get("unit"), "currency": field.get("currency"), "evidence": evidence})]
     )
-    if inherit_evidence_from_id is not None:
-        inherited_evidence_id: int | None = None
-        first_inherited_evidence_id: int | None = None
-        source_primary_evidence_id = next(
-            (item.evidence_id for item in facts if item.id == inherit_evidence_from_id),
-            None,
-        )
-        source_evidences = db.scalars(
-            select(Evidence)
-            .where(
-                Evidence.audit_task_id == task.id,
-                Evidence.field_value_id == inherit_evidence_from_id,
-                Evidence.rule_result_id.is_(None),
-            )
-            .order_by(Evidence.id)
-        ).all()
-        for source in source_evidences:
-            inherited = Evidence(
-                evidence_no=public_no("EVD"),
-                audit_task_id=task.id,
-                document_upload_id=source.document_upload_id,
-                field_value_id=fact.id,
-                field_path=source.field_path,
-                quote_text=source.quote_text,
-                artifact_id=source.artifact_id,
-            )
-            db.add(inherited)
-            db.flush()
-            if first_inherited_evidence_id is None:
-                first_inherited_evidence_id = inherited.id
-            if source.id == source_primary_evidence_id:
-                inherited_evidence_id = inherited.id
-        fact.evidence_id = inherited_evidence_id or first_inherited_evidence_id
     _write_field_task_fact(
         db,
         task,
@@ -275,7 +262,7 @@ def _write_human_field_fact(
         field=field,
         material_key=material_key,
         status=status,
-        normalized_value=normalized_value if status == "REVIEWED" else None,
+        normalized_value=normalized_value if status == FIELD_STATUS_REVIEWED else None,
     )
     return fact, previous_revision_no, int(invalidated_reviews)
 
@@ -305,15 +292,15 @@ def _write_field_task_fact(
     statement_scope = normalize_field_scope(
         field, "statement_scope", status_code=500
     )
-    entity_scope = str(field.get("entity_scope") or "SELF")
+    entity_scope = str(field.get("entity_scope") or ENTITY_SCOPE_SELF)
     value_type = str(field.get("value_type") or "DECIMAL")
     # task_field_value 保存抽取候选，供人工复核；task_fact 是计算与 Agent 使用的
     # 统一事实。证据或标准化尚未通过的候选不能在统一事实中携带可执行值。
-    executable_value = normalized_value if status in {"PRESENT", "REVIEWED"} else None
+    executable_value = normalized_value if status in EXECUTABLE_FIELD_STATUSES else None
     executable_fact_value = None
     if executable_value is not None:
         executable_fact_value = fact_projection.canonical_fact_value(executable_value, field)
-    elif status in {"PRESENT", "REVIEWED"}:
+    elif status in EXECUTABLE_FIELD_STATUSES:
         raise BusinessError(
             "TASK_FACT_VALUE_MISSING",
             "字段已标记为有效，但没有可写入统一事实的规范值",
@@ -347,7 +334,7 @@ def _write_field_task_fact(
         # 事实编号用业务字段编号（FEX-xxx）：计算参数按它引用，
         # 与字段身份（field_key）是两回事，转换在编译期完成。
         fact_code=str(field.get("source_ref") or field["field_key"]),
-        fact_kind="EXTRACTED",
+        fact_kind=FACT_KIND_EXTRACTED,
         material_key=material_key,
         entity_scope=entity_scope,
         period_scope=period_scope,

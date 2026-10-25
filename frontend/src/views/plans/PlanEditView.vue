@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { PlanAdjustments, PlanConfig, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
+import type { PlanAdjustments, PlanCalculationRuleItem, PlanConfig, PlanFieldItem, PlanMaterialItem, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
 import { createPlan, getPlan, getPlanAdjustments, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { operationIdempotencyKey } from "@/api/http";
@@ -11,6 +11,9 @@ import BackButton from "@/components/BackButton.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import PlanBusinessEditor from "@/components/plans/PlanBusinessEditor.vue";
 import PlanExtractionEditor from "@/components/plans/PlanExtractionEditor.vue";
+import PlanConfigList from "@/components/plans/PlanConfigList.vue";
+import { sourceSheetLabel } from "@/composables/useRuleSourceFilter";
+import { executionModeLabel } from "@/constants/executionModes";
 import {
   extractionStrategyLabel,
   reportContentTypeOptions,
@@ -388,6 +391,29 @@ const businessRules = computed(() => (config.value?.rules ?? []).filter((item) =
 const enabledRules = computed(() => businessRules.value.filter((item) => item.enabled));
 const disabledRules = computed(() => businessRules.value.filter((item) => !item.enabled));
 
+function materialSearchText(item: PlanMaterialItem): string {
+  return [item.name, item.source_ref, item.description].join("\n");
+}
+function fieldSearchText(item: PlanFieldItem): string {
+  return [item.name, item.source_ref, materialNames([item.material_key]), item.instruction].join("\n");
+}
+function ruleSearchText(item: PlanRuleItem): string {
+  return [item.name, item.rule_code, item.source_ref, sourceSheetLabel(item.origin), ruleMaterialNames(item), item.rule_json.requirement].join("\n");
+}
+function calculationSearchText(item: PlanCalculationRuleItem): string {
+  return [item.rule_name, item.rule_code, item.result_code, item.formula, item.requirement, sourceSheetLabel(item.origin)].join("\n");
+}
+function sectionSearchText(item: PlanSectionItem): string {
+  return [item.title, item.report_code, item.report_name, item.content_instruction, dataNames(item.data_refs)].join("\n");
+}
+function ruleMaterialKeys(item: PlanRuleItem): string[] {
+  const keys = item.rule_json.materials;
+  return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [];
+}
+function sectionStatusLabel(item: PlanSectionItem): string {
+  return item.config_status === "PENDING" ? "待确认·不生成" : item.config_status === "DISABLED" ? "不生成" : "生成";
+}
+
 function openSectionEditor(item?: PlanSectionItem): void {
   editingSectionKey.value = item?.section_key ?? null;
   sectionForm.title = item?.title ?? "";
@@ -445,8 +471,7 @@ function materialNames(keys: string[] | null | undefined): string {
 }
 
 function ruleMaterialNames(rule: PlanRuleItem): string {
-  const keys = rule.rule_json.materials;
-  return materialNames(Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : []);
+  return materialNames(ruleMaterialKeys(rule));
 }
 
 async function removeSection(item: PlanSectionItem): Promise<void> {
@@ -471,10 +496,10 @@ function adjustmentValue(value: unknown): string {
 </script>
 
 <template>
-  <div class="app-panel" :class="{ 'plan-editor': !isCreate }">
+  <div class="app-panel">
     <PageHeader
       eyebrow="方案管理"
-      :title="isCreate ? '新增方案' : `方案编辑：${basicForm.plan_name || planCode}`"
+      :title="isCreate ? '新增方案' : (basicForm.plan_name ? `方案配置：${basicForm.plan_name}` : '方案配置')"
       :show-refresh="false"
     >
       <template #actions>
@@ -565,7 +590,7 @@ function adjustmentValue(value: unknown): string {
             {{ reference.plan_name }} 基于场景第 {{ reference.base_scenario_version_no }} 版；
             新方案将基于当前第 {{ selectedScene?.latest_version_no ?? "—" }} 版创建。旧调整仅供参考，不会自动套用。
           </p>
-          <el-table :data="reference.items" border stripe size="small" max-height="320" empty-text="旧方案没有相对来源场景的调整">
+          <el-table :data="reference.items" border stripe empty-text="旧方案没有相对来源场景的调整">
             <el-table-column prop="category" label="类别" width="100" />
             <el-table-column prop="name" label="配置项" min-width="170" show-overflow-tooltip />
             <el-table-column label="调整" width="75">
@@ -597,14 +622,14 @@ function adjustmentValue(value: unknown): string {
             <span v-if="plan?.sync_error?.message" class="text-hint">{{ plan.sync_error.message }}</span>
             <span v-if="hasUnsavedBasic || hasUnsavedConfig" class="text-hint">有未保存修改</span>
           </div>
-          <el-tabs v-model="activeTab" type="card" class="plan-tabs">
+          <el-tabs v-model="activeTab" class="plan-tabs">
             <el-tab-pane label="基本信息" name="basic">
               <el-form label-width="100px" class="plan-basic-form">
                 <el-form-item label="方案名称" required>
                   <el-input v-model="basicForm.plan_name" maxlength="255" placeholder="请输入方案名称" />
                 </el-form-item>
                 <el-form-item label="所属场景">
-                  <span>{{ plan?.base_scenario_version?.scenario_name ?? plan?.scenario_code }}（第 {{ plan?.base_scenario_version?.version_no ?? "—" }} 版）</span>
+                  <span>{{ plan?.base_scenario_version?.scenario_name || "未记录场景名称" }}（第 {{ plan?.base_scenario_version?.version_no ?? "—" }} 版）</span>
                 </el-form-item>
                 <el-form-item label="方案说明">
                   <el-input v-model="basicForm.description" type="textarea" :rows="3" maxlength="4000" />
@@ -615,81 +640,118 @@ function adjustmentValue(value: unknown): string {
               </el-form>
             </el-tab-pane>
 
-            <el-tab-pane :label="`材料（${config.materials.length}）`" name="materials">
-              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ config.materials.length }} 项材料</span></div>
-              <div class="plan-table-wrap">
-                <el-table :data="config.materials" row-key="material_key" border stripe size="small" height="100%" empty-text="当前方案没有材料">
-                  <el-table-column type="index" label="序号" width="60" />
-                  <el-table-column prop="name" label="材料名称" min-width="200" show-overflow-tooltip />
+            <el-tab-pane :label="`材料（${config.materials.length}）`" name="materials" lazy>
+              <PlanConfigList
+                :items="config.materials" row-key="material_key"
+                :number-of="(item: PlanMaterialItem) => item.source_ref"
+                :search-text="materialSearchText"
+                :status-text="(item: PlanMaterialItem) => statusLabel(item.config_status)"
+                keyword-placeholder="材料名称、编号或说明" empty-text="当前方案没有材料"
+              >
+                  <el-table-column label="材料编号" width="120" show-overflow-tooltip>
+                    <template #default="{ row }"><span class="mono">{{ row.source_ref || "未填写" }}</span></template>
+                  </el-table-column>
+                  <el-table-column prop="name" label="材料名称" width="170" show-overflow-tooltip />
                   <el-table-column prop="description" label="业务说明" min-width="300" show-overflow-tooltip />
-                  <el-table-column label="必传" width="80"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('material', row.material_key)">编辑</el-button></template></el-table-column>
-                </el-table>
-              </div>
+                  <el-table-column label="必传" width="64"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('material', row.material_key)">编辑</el-button></template></el-table-column>
+              </PlanConfigList>
             </el-tab-pane>
 
-            <el-tab-pane :label="`字段（${config.fields.length}）`" name="fields">
-              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ config.fields.length }} 个字段</span></div>
-              <div class="plan-table-wrap">
-                <el-table :data="config.fields" row-key="field_key" border stripe size="small" height="100%" empty-text="当前方案没有字段">
-                  <el-table-column type="index" label="序号" width="60" />
-                  <el-table-column prop="name" label="字段名称" min-width="180" show-overflow-tooltip />
-                  <el-table-column label="所属材料" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
-                  <el-table-column label="数据类型" width="100"><template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template></el-table-column>
-                  <el-table-column label="抽取策略" width="120"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
-                  <el-table-column label="必抽" width="70"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
+            <el-tab-pane :label="`字段（${config.fields.length}）`" name="fields" lazy>
+              <PlanConfigList
+                :items="config.fields" row-key="field_key"
+                :number-of="(item: PlanFieldItem) => item.source_ref"
+                :search-text="fieldSearchText"
+                :status-text="(item: PlanFieldItem) => statusLabel(item.config_status, item.enabled)"
+                :materials="config.materials" :material-keys="(item: PlanFieldItem) => [item.material_key]"
+                group-label="数据类型" :group-text="(item: PlanFieldItem) => valueTypeLabel(item.value_type)"
+                keyword-placeholder="字段名称、编号或提取要求" empty-text="当前方案没有字段"
+              >
+                  <el-table-column label="字段编号" width="120" show-overflow-tooltip>
+                    <template #default="{ row }"><span class="mono">{{ row.source_ref || "未填写" }}</span></template>
+                  </el-table-column>
+                  <el-table-column prop="name" label="字段名称" width="160" show-overflow-tooltip />
+                  <el-table-column label="所属材料" width="112" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
+                  <el-table-column label="数据类型" width="88"><template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template></el-table-column>
+                  <el-table-column label="抽取策略" width="108"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
+                  <el-table-column label="必抽" width="64"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
                   <el-table-column prop="instruction" label="提取要求" min-width="240" show-overflow-tooltip />
-                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('field', row.field_key)">编辑</el-button></template></el-table-column>
-                </el-table>
-              </div>
+                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('field', row.field_key)">编辑</el-button></template></el-table-column>
+              </PlanConfigList>
             </el-tab-pane>
 
-            <el-tab-pane :label="`审核规则（${enabledRules.length} 启用）`" name="rules">
-              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ businessRules.length }} 条规则，已启用 {{ enabledRules.length }} 条，未启用 {{ disabledRules.length }} 条</span></div>
-              <div class="plan-table-wrap">
-                <el-table :data="businessRules" row-key="rule_key" border stripe size="small" height="100%" empty-text="当前方案没有审核规则">
-                  <el-table-column type="index" label="序号" width="60" />
-                  <el-table-column prop="name" label="规则名称" min-width="220" show-overflow-tooltip />
-                  <el-table-column label="适用材料" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
-                  <el-table-column label="审核要求" min-width="300" show-overflow-tooltip><template #default="{ row }">{{ row.rule_json.requirement || "—" }}</template></el-table-column>
-                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('rule', row.rule_key)">编辑</el-button></template></el-table-column>
-                </el-table>
-              </div>
+            <el-tab-pane :label="`审核规则（${businessRules.length}）`" name="rules" lazy>
+              <PlanConfigList
+                :items="businessRules" row-key="rule_key"
+                :number-of="(item: PlanRuleItem) => item.rule_code || item.source_ref"
+                :search-text="ruleSearchText"
+                :status-text="(item: PlanRuleItem) => statusLabel(item.rule_json.config_status, item.enabled)"
+                :materials="config.materials" :material-keys="ruleMaterialKeys"
+                group-label="来源工作表" :group-text="(item: PlanRuleItem) => sourceSheetLabel(item.origin)"
+                :summary="`已启用 ${enabledRules.length} 条，未启用 ${disabledRules.length} 条`"
+                keyword-placeholder="规则名称、业务编号或审核要求" empty-text="当前方案没有审核规则"
+              >
+                  <el-table-column label="业务编号" width="120" show-overflow-tooltip>
+                    <template #default="{ row }"><span class="mono">{{ row.rule_code || row.source_ref || "未填写" }}</span></template>
+                  </el-table-column>
+                  <el-table-column prop="name" label="规则名称" min-width="180" show-overflow-tooltip align="center" />
+                  <el-table-column label="执行方式" width="112" align="center">
+                    <template #default="{ row }">{{ executionModeLabel(typeof row.rule_json?.execution_mode === "string" ? row.rule_json.execution_mode : null) }}</template>
+                  </el-table-column>
+                  <el-table-column label="来源工作表" width="168" show-overflow-tooltip align="center">
+                    <template #default="{ row }">{{ sourceSheetLabel(row.origin) }}</template>
+                  </el-table-column>
+                  <el-table-column label="适用材料" width="112" show-overflow-tooltip align="center"><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
+                  <el-table-column label="审核要求" min-width="280" show-overflow-tooltip align="center"><template #default="{ row }">{{ row.rule_json.requirement || "—" }}</template></el-table-column>
+                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('rule', row.rule_key)">编辑</el-button></template></el-table-column>
+              </PlanConfigList>
             </el-tab-pane>
 
-            <el-tab-pane :label="`计算规则（${config.calculation_rules.length}）`" name="calculations">
-              <div class="plan-tab-toolbar"><span class="text-muted">共 {{ config.calculation_rules.length }} 条计算规则</span></div>
-              <div class="plan-table-wrap">
-                <el-table :data="config.calculation_rules" row-key="rule_code" border stripe size="small" height="100%" empty-text="当前方案没有计算规则">
-                  <el-table-column type="index" label="序号" width="60" />
-                  <el-table-column prop="rule_name" label="指标名称" min-width="220" show-overflow-tooltip />
+            <el-tab-pane :label="`计算规则（${config.calculation_rules.length}）`" name="calculations" lazy>
+              <PlanConfigList
+                :items="config.calculation_rules" row-key="rule_code"
+                :number-of="(item: PlanCalculationRuleItem) => item.rule_code"
+                :search-text="calculationSearchText"
+                :status-text="(item: PlanCalculationRuleItem) => statusLabel(item.status, item.enabled)"
+                group-label="来源工作表" :group-text="(item: PlanCalculationRuleItem) => sourceSheetLabel(item.origin)"
+                keyword-placeholder="指标名称、规则编号或计算方法" empty-text="当前方案没有计算规则"
+              >
+                  <el-table-column prop="rule_code" label="规则编号" width="120" show-overflow-tooltip />
+                  <el-table-column prop="rule_name" label="指标名称" min-width="180" show-overflow-tooltip />
+                  <el-table-column label="来源工作表" width="168" show-overflow-tooltip align="center">
+                    <template #default="{ row }">{{ sourceSheetLabel(row.origin) }}</template>
+                  </el-table-column>
                   <el-table-column prop="formula" label="计算方法" min-width="240" show-overflow-tooltip />
                   <el-table-column prop="requirement" label="业务要求" min-width="240" show-overflow-tooltip />
-                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('calculation', row.rule_code)">编辑</el-button></template></el-table-column>
-                </el-table>
-              </div>
+                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('calculation', row.rule_code)">编辑</el-button></template></el-table-column>
+              </PlanConfigList>
             </el-tab-pane>
 
-            <el-tab-pane :label="`报告章节（${config.sections.length}）`" name="sections">
-              <div class="plan-tab-toolbar">
-                <span class="text-muted">共 {{ config.sections.length }} 个报告章节</span>
-                <el-button type="primary" plain size="small" @click="openSectionEditor()">新增章节</el-button>
-              </div>
-              <div class="plan-table-wrap">
-                <el-table :data="config.sections" row-key="section_key" border stripe size="small" height="100%" empty-text="当前方案没有报告章节">
-                  <el-table-column type="index" label="序号" width="60" />
-                  <el-table-column prop="title" label="章节名称" min-width="180" show-overflow-tooltip />
-                  <el-table-column prop="report_name" label="所属报告" min-width="150" show-overflow-tooltip />
-                  <el-table-column label="材料范围" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
+            <el-tab-pane :label="`报告章节（${config.sections.length}）`" name="sections" lazy>
+              <PlanConfigList
+                :items="config.sections" row-key="section_key"
+                :number-of="(item: PlanSectionItem) => item.report_code"
+                :search-text="sectionSearchText" :status-text="sectionStatusLabel"
+                :materials="config.materials" :material-keys="(item: PlanSectionItem) => item.material_keys ?? []"
+                group-label="所属报告" :group-text="(item: PlanSectionItem) => item.report_name || item.report_code || '未填写报告归属'"
+                keyword-placeholder="章节名称、报告编号或内容要求" empty-text="当前方案没有报告章节"
+              >
+                <template #actions><el-button type="primary" @click="openSectionEditor()">新增章节</el-button></template>
+                  <el-table-column label="报告编号" width="120" show-overflow-tooltip>
+                    <template #default="{ row }"><span class="mono">{{ row.report_code || "未填写" }}</span></template>
+                  </el-table-column>
+                  <el-table-column prop="title" label="章节名称" min-width="160" show-overflow-tooltip />
+                  <el-table-column prop="report_name" label="所属报告" width="160" show-overflow-tooltip />
+                  <el-table-column label="材料范围" width="120" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
                   <el-table-column label="业务数据引用" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ dataNames(row.data_refs) }}</template></el-table-column>
-                  <el-table-column label="章节处理" width="130"><template #default="{ row }"><el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'" size="small">{{ row.config_status === "PENDING" ? "待确认·不生成" : row.config_status === "DISABLED" ? "不生成" : "生成" }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="120" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
-                </el-table>
-              </div>
+                  <el-table-column label="章节处理" width="96"><template #default="{ row }"><el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'" size="small">{{ sectionStatusLabel(row) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="104" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
+              </PlanConfigList>
             </el-tab-pane>
 
           </el-tabs>
@@ -775,77 +837,12 @@ function adjustmentValue(value: unknown): string {
 </template>
 
 <style scoped>
-.plan-editor {
-  display: flex;
-  flex-direction: column;
-  height: calc(100dvh - var(--app-header-height) - var(--app-main-padding-y) - var(--app-main-padding-y));
-}
-
-.plan-editor > * {
-  flex-shrink: 0;
-}
-
-.plan-editor > .plan-config-workspace {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-height: 0;
-}
-
 .adjustment-line {
   overflow-wrap: anywhere;
 }
 
 .plan-tabs {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-height: 0;
-  margin-top: 8px;
-}
-
-.plan-tabs :deep(.el-tabs__header) {
-  flex-shrink: 0;
-  margin-bottom: 12px;
-}
-
-.plan-tabs :deep(.el-tabs__content) {
-  flex: 1;
-  min-height: 0;
-}
-
-.plan-tabs :deep(.el-tab-pane) {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.plan-tab-toolbar {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-height: 32px;
-  margin-bottom: 12px;
-}
-
-.plan-table-wrap {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-}
-
-.plan-table-wrap > .el-table {
-  position: absolute;
-  inset: 0;
-}
-
-.plan-tabs :deep(.el-table__cell) {
-  padding: 8px 0;
+  margin-top: 12px;
 }
 
 .plan-status-line {

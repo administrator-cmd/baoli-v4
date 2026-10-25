@@ -12,14 +12,16 @@ import json
 import logging
 from datetime import datetime
 from typing import Any
+
 from sqlalchemy import and_, case, func, literal, or_, select, text, union_all
 from sqlalchemy.orm import Session
-from ...common.pagination import PageResult, page_result
-from ...common.exceptions import BusinessError
-from ...entity import ImportJob
-from ...entity import AuditTask, BackgroundOperation, OperationLog
-from ...domain.identity import public_no
 
+from ...common.exceptions import BusinessError
+from ...common.pagination import PageResult, page_result
+from ...domain.identity import public_no
+from ...entity.imports import ImportJob
+from ...entity.operations import BackgroundOperation, OperationLog
+from ...entity.tasks import AuditTask
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,7 @@ def record_operation(
     idempotency_key: str | None = None,
     request_hash: str | None = None,
     command_no: str | None = None,
+    permanent: bool = False,
     duration_ms: int | None = None,
     result: str = "SUCCEEDED",
     failure_code: str | None = None,
@@ -114,6 +117,7 @@ def record_operation(
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         command_no=command_no,
+        permanent=permanent,
         duration_ms=duration_ms,
         detail_json=detail,
         failure_code=failure_code,

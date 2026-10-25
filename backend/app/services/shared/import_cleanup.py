@@ -6,10 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
-from ...entity import BackgroundOperation, ImportJob, ScenarioVersion
+from ...entity.imports import ImportJob
+from ...entity.operations import BackgroundOperation
+from ...entity.scenarios import ScenarioVersion
 from ..system.operation_types import OBJECT_IMPORT_JOB
 from .storage import remove_storage_tree
-
 
 ACTIVE_OPERATION_STATUSES = ("PENDING", "RUNNING")
 

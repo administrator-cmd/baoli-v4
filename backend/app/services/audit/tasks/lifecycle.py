@@ -2,17 +2,19 @@
 
 import logging
 import shutil
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....entity import (
-    AuditReport,
+from ....entity.operations import BackgroundOperation
+from ....entity.reports import AuditReport
+from ....entity.tasks import (
     AuditTask,
-    BackgroundOperation,
     DocumentUpload,
-    Evidence,
     ManualReview,
     NodeExecution,
     RuleResult,
@@ -21,12 +23,11 @@ from ....entity import (
     TaskFact,
     TaskFieldValue,
 )
-from ...system.background import assert_no_active_operation
-from ...system.operation_types import OBJECT_AUDIT_TASK
-from ...system.operation_log import record_operation
 from ...shared.storage import resolve_storage_path
+from ...system.background import assert_no_active_operation
+from ...system.operation_log import record_operation
+from ...system.operation_types import OBJECT_AUDIT_TASK
 from ..value_files import lock_task_files
-
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +80,18 @@ def delete_task(db: Session, task_no: str) -> None:
     task_root = resolve_storage_path("tasks")
     if task_directory.parent != task_root:
         raise BusinessError("STORAGE_PATH_INVALID", "任务文件目录不安全", status_code=500)
-    staged_directory = None
+    staged_directories: list[tuple[Path, Path]] = []
     try:
-        if task_directory.exists():
-            deletion_directory = resolve_storage_path(f"tasks/.deleting-{task.task_no}-{uuid4().hex}")
-            task_directory.rename(deletion_directory)
-            staged_directory = deletion_directory
+        for source, prefix in ((task_directory, f"tasks/.deleting-{task.task_no}-{uuid4().hex}"),):
+            if source.exists():
+                staged = resolve_storage_path(prefix)
+                source.rename(staged)
+                staged_directories.append((source, staged))
 
-        # 材料位与上传、字段与证据存在双向外键，先解除当前引用再按依赖顺序删除。
+        # 材料位与上传存在双向外键，先解除当前引用再按依赖顺序删除。
         db.execute(update(TaskDocument).where(TaskDocument.audit_task_id == task.id).values(current_upload_id=None))
-        db.execute(update(TaskFieldValue).where(TaskFieldValue.audit_task_id == task.id).values(evidence_id=None))
         for entity in (
-            ManualReview, Evidence, TaskFieldValue, TaskFact, AuditReport,
+            ManualReview, TaskFieldValue, TaskFact, AuditReport,
             RuleResult, StoredArtifact, DocumentUpload, TaskDocument, NodeExecution,
         ):
             db.execute(delete(entity).where(entity.audit_task_id == task.id))
@@ -105,24 +106,29 @@ def delete_task(db: Session, task_no: str) -> None:
             object_no=task.task_no,
             object_name=task.task_name,
             operation_type="DELETE",
-            detail={"task_no": task.task_no, "permanent": True},
+            permanent=True,
+            detail={"task_no": task.task_no},
         )
         db.delete(task)
         db.commit()
     except Exception:
-        db.rollback()
-        if staged_directory is not None:
-            staged_directory.rename(task_directory)
+        # 先恢复目录再回滚事务：回滚会释放任务文件锁，若此时目录仍在 .deleting-*，
+        # 并发读取会看到已恢复的任务行却没有文件。
+        try:
+            for original, staged in reversed(staged_directories):
+                staged.rename(original)
+        finally:
+            db.rollback()
         raise
 
-    if staged_directory is not None:
+    for _original, staged in staged_directories:
         try:
-            shutil.rmtree(staged_directory)
+            shutil.rmtree(staged)
         except OSError as exc:
-            logger.exception("任务数据已删除，但文件清理失败 task_no=%s path=%s", task_no, staged_directory)
+            logger.exception("任务数据已删除，但文件清理失败 task_no=%s path=%s", task_no, staged)
             raise BusinessError(
                 "TASK_FILE_CLEANUP_FAILED",
                 "任务数据已永久删除，但文件清理失败，请根据剩余目录排查",
                 status_code=500,
-                details={"task_no": task_no, "task_deleted": True, "remaining_directory": str(staged_directory)},
+                details={"task_no": task_no, "task_deleted": True, "remaining_directory": str(staged)},
             ) from exc

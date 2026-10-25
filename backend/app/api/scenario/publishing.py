@@ -2,15 +2,15 @@
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
+
+from ...core.database import get_db
 from ...domain.manifest import build_task_schema
 from ...schema.dto.scenarios import ScenarioPublishRequest
-from ...schema.dto import TaskSchemaPreviewRequest
+from ...schema.dto.tasks import TaskSchemaPreviewRequest
 from ...schema.vo.scenarios import ScenarioPublishResponse
-from ...schema.vo import TaskSchemaPreviewResponse
-from ...services.scenario.publishing import publish_draft
+from ...schema.vo.tasks import TaskSchemaPreviewResponse
 from ...services.scenario.lookup import scenario_or_404
-
+from ...services.scenario.publishing import publish_draft
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 

@@ -5,14 +5,13 @@ import traceback
 from typing import Any, Mapping
 
 from fastapi import Request
-from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
-from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..middleware.request_context import request_id_of
-
 
 logger = logging.getLogger(__name__)
 

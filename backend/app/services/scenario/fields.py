@@ -1,17 +1,19 @@
 """场景草稿字段配置、来源引用及删除检查。"""
 
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ...domain.calculation_config import calculations_referencing_field, remap_calculation_field_codes
-from ...repositories.shared import configuration as config_store
-from ...domain import field_strategy
-from ...domain.rule_library import active
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule, ScenarioDraftSection
+from ...constants.execution import NODE_RULE_EXECUTION
+from ...domain import field_strategy
+from ...domain.calculation_config import calculations_referencing_field, remap_calculation_field_codes
 from ...domain.identity import stable_key
-from ...repositories.scenario.draft import next_sort_no
+from ...domain.rule_library import active
+from ...entity.scenario_drafts import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule, ScenarioDraftSection
+from ..shared import configuration as config_store
 from .common import DRAFT_VALUE_TYPES, FIELD_ARTIFACT_SOURCES, _field_scope, _item_ref, _normalized_source_ref
-from .draft import _locked_draft, _save_draft
+from .draft import _locked_draft, _save_draft, next_sort_no
 from .materials import _draft_material_or_404
 
 
@@ -82,7 +84,7 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
             sort_no=next_sort_no(db, ScenarioDraftField, draft.id),
         )
     )
-    field.node_code = "RULE_EXECUTION"
+    field.node_code = NODE_RULE_EXECUTION
     _save_draft(
         db,
         template,

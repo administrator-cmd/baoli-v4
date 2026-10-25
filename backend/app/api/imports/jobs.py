@@ -6,27 +6,42 @@
 - POST /{job_no}/abort 中止未结束的后台转换操作，释放活跃占用；
   它不是删除，也不改写作业状态与草稿数据。"""
 
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from ...database import SessionLocal, get_db
-from ...schema.dto.imports import ImportProposalGroup, UpdateImportProposalRequest
-from ...schema.dto import ApplyImportDraftRequest, OperationRequest
-from ...schema.query import validate_page_params
-from ...schema.vo import OperationAcceptedResponse
+
+from ...common.exceptions import BusinessError
+from ...core.database import SessionLocal, get_db
+from ...schema.dto.imports import (
+    ApplyImportDraftRequest,
+    ImportConversionRequest,
+    ImportProposalGroup,
+    UpdateImportProposalRequest,
+)
+from ...schema.query.pagination import validate_page_params
+from ...schema.query.timestamps import FilterDateTime
+from ...schema.vo.common import PagedResponse
+from ...schema.vo.imports import ImportJobResponse, ImportJobSummaryResponse
+from ...schema.vo.operations import OperationAcceptedResponse
 from ...services.imports import (
     lifecycle as imports_lifecycle,
-    query as imports_query,
+)
+from ...services.imports import (
     lookup as imports_lookup,
+)
+from ...services.imports import (
     proposals as imports_proposals,
 )
-from ...services.system.background import operation_view
-from ...services.imports.upload import create_import_job
-from ...services.imports.query import get_import_job, import_job_summaries, import_job_view
+from ...services.imports import (
+    query as imports_query,
+)
 from ...services.imports.draft import apply_import_to_draft
 from ...services.imports.operations import submit_conversion
-from ...schema.vo import ImportJobResponse, ImportJobSummaryResponse, PagedResponse
-
+from ...services.imports.query import get_import_job, import_job_summaries, import_job_view
+from ...services.imports.upload import create_import_job
+from ...services.shared.storage import resolve_storage_path
+from ...services.system.background import operation_view
 
 router = APIRouter(prefix="/import-jobs", tags=["规则库导入"])
 
@@ -46,8 +61,8 @@ def list_jobs_page(
     scenario_code: str | None = None,
     filename: str | None = None,
     status: str | None = None,
-    created_from: datetime | None = None,
-    created_to: datetime | None = None,
+    created_from: FilterDateTime | None = None,
+    created_to: FilterDateTime | None = None,
     page: int = Query(default=1),
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),
@@ -104,6 +119,34 @@ def create_job(
         return ImportJobResponse.model_validate({**import_job_view(db, job), "request_id": request.state.request_id})
 
 
+# 规则库文件只接受 Excel；按扩展名给出真实的下载类型，未知扩展名按二进制流返回。
+_RULEBOOK_MEDIA_TYPES = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".xls": "application/vnd.ms-excel",
+}
+
+
+@router.get("/{job_no}/file")
+def download_job_file(job_no: str, db: Session = Depends(get_db)) -> FileResponse:
+    """下载该导入作业当时上传的原始规则库 Excel。
+
+    返回的是磁盘上保存的原件，不从候选配置重新生成；文件缺失时明确 404，不返回空文件。
+    """
+    job = get_import_job(db, job_no)
+    path = resolve_storage_path(job.source_path)
+    if not path.is_file():
+        raise BusinessError(
+            "IMPORT_SOURCE_FILE_MISSING", "该作业的规则库原文件已不在存储目录中，无法下载",
+            status_code=404, details={"job_no": job_no},
+        )
+    return FileResponse(
+        path,
+        media_type=_RULEBOOK_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+        filename=job.source_filename,
+    )
+
+
 @router.get("/{job_no}", response_model=ImportJobResponse)
 def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> ImportJobResponse:
     """导入作业详情：二轮整理结果与修订号。"""
@@ -114,19 +157,21 @@ def get_job(job_no: str, request: Request, db: Session = Depends(get_db)) -> Imp
 def retry_job(
     job_no: str,
     request: Request,
-    payload: OperationRequest | None = None,
+    payload: ImportConversionRequest | None = None,
     db: Session = Depends(get_db),
 ) -> OperationAcceptedResponse:
     """提交规则转换为后台操作。
 
     返回 202 只代表操作已受理，不代表转换成功；真实状态用 operation_no 查询
     GET /api/operations/{operation_no}，或刷新作业详情查看。
+    `mode=RESUME_REFINEMENT` 只重跑第二轮，需存在可复用的第一轮结果。
     """
     job = imports_lookup._job_or_404(db, job_no, lock=True)
     operation, reused = submit_conversion(
         db,
         job,
         idempotency_key=payload.idempotency_key if payload else None,
+        mode=payload.mode if payload else "FULL",
     )
     return OperationAcceptedResponse.model_validate(
         {**operation_view(operation, reused=reused), "request_id": request.state.request_id}

@@ -1,15 +1,26 @@
 """规则库 Excel 读取与工作簿结构整理。"""
 
+import hashlib
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
+
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
-from ...config import get_settings
-from ...domain.workbook import WorkbookIR, WorkbookRow, WorkbookSheet
+
 from ...common.exceptions import BusinessError
+from ...core.config import get_settings
 from ...domain.identity import stable_key
+from ...domain.workbook import WorkbookIR, WorkbookRow, WorkbookSheet
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _cell_value(value: Any, max_chars: int | None = None) -> tuple[str | int | float | bool | None, bool]:
@@ -56,6 +67,18 @@ def read_workbook_ir(
     动态导入由 LLM 识别业务定义，字段和规则分别引用当前场景节点。
     """
     settings = get_settings()
+    # 文件身份必须与数据库记录一致：解析和重试都按上传时的哈希生成工作表键，
+    # 磁盘文件被替换或损坏时不能沿用旧身份继续解析。
+    try:
+        actual_sha256 = _file_sha256(path)
+    except OSError as exc:
+        raise BusinessError("WORKBOOK_UNREADABLE", "规则库文件无法读取，请重新上传", status_code=409) from exc
+    if actual_sha256 != source_sha256:
+        raise BusinessError(
+            "WORKBOOK_CONTENT_MISMATCH", "规则库文件内容与上传时的哈希不一致，不能按旧身份解析",
+            status_code=409,
+            details={"expected_sha256": source_sha256, "actual_sha256": actual_sha256},
+        )
     try:
         workbook = load_workbook(path, read_only=False, data_only=False, keep_vba=path.suffix.lower() == ".xlsm")
     except (BadZipFile, InvalidFileException, OSError, ValueError, KeyError) as exc:

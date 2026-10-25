@@ -1,9 +1,10 @@
 """审核任务的存在性查询。"""
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....entity import AuditTask
-from ....repositories.audit import task as audit_task
+from ....entity.tasks import AuditTask
 from ..value_files import lock_task_files
 
 
@@ -18,7 +19,12 @@ def task_or_404(db: Session, task_no: str, *, lock: bool = False, values: bool =
     if values:
         # 先锁文件、再读取数据库清单；只读查询不申请数据库排他锁。
         lock_task_files(db, task_no)
-    task = audit_task.find_by_no(db, task_no, lock=lock, refresh=values)
+    statement = select(AuditTask).where(AuditTask.task_no == task_no)
+    if lock:
+        statement = statement.with_for_update()
+    if values:
+        statement = statement.execution_options(populate_existing=True)
+    task = db.scalar(statement)
     if not task:
         raise BusinessError("AUDIT_TASK_NOT_FOUND", "审核任务不存在", status_code=404, details={"task_no": task_no})
     return task

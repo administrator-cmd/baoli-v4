@@ -1,14 +1,17 @@
 """规则库转换的后台命令提交与当前性检查。"""
 
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import ImportJob
-from ..system import background as background_service
-from ..system.background import PHASE_LLM_REQUEST, PHASE_GRAPH_ADVANCED
-from ..system.operation_types import OBJECT_IMPORT_JOB
+from ...entity.imports import ImportJob
 from ..shared.commands import _idempotency_key, _reject_unsupported_resume
+from ..system import background as background_service
+from ..system.background import PHASE_GRAPH_ADVANCED, PHASE_LLM_REQUEST
+from ..system.operation_types import OBJECT_IMPORT_JOB
+from .llm import CONVERSION_MODE_FULL, CONVERSION_MODE_RESUME, can_resume_initial
 
 
 def _assert_import_command_current(db: Session, job: ImportJob, content: dict[str, Any]) -> None:
@@ -29,18 +32,36 @@ def submit_conversion(
     job: ImportJob,
     *,
     idempotency_key: str | None,
+    mode: str = CONVERSION_MODE_FULL,
 ) -> tuple[Any, bool]:
-    """提交规则转换为后台操作。"""
+    """提交规则转换为后台操作。
+
+    `mode=RESUME_REFINEMENT` 只重跑第二轮；没有可复用的第一轮结果时同步拒绝，
+    不在后台静默退回整份重跑。
+    """
     from . import lookup as imports_lookup
 
+    if mode not in {CONVERSION_MODE_FULL, CONVERSION_MODE_RESUME}:
+        raise BusinessError("IMPORT_CONVERSION_MODE_INVALID", "不支持的规则库解析方式", status_code=400)
     request = {
         "job_no": job.job_no,
         "source_sha256": job.source_sha256,
         "draft_revision": job.draft_revision,
+        "mode": mode,
     }
 
     def validate() -> None:
         imports_lookup._ensure_import_mutable(db, job)
+        if mode == CONVERSION_MODE_RESUME and not can_resume_initial(
+            job.job_no, job.profile_version, job.schema_key, job.schema_version, job.source_sha256,
+            job.scenario_code,
+        ):
+            raise BusinessError(
+                "IMPORT_INITIAL_STAGE_UNAVAILABLE",
+                "第一轮解析结果不可用（缺失、损坏或解析契约已变化），请整份重新解析",
+                status_code=409,
+                details={"job_no": job.job_no},
+            )
 
     def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
         from . import conversion as imports_conversion
@@ -55,6 +76,7 @@ def submit_conversion(
         command.phase(PHASE_LLM_REQUEST)
         converted = imports_conversion.retry_conversion(
             session, content["job_no"], operation_no=command.operation_no,
+            mode=content.get("mode", CONVERSION_MODE_FULL),
         )
         # 导入解析完成后图直接结束，没有业务裁决等待点。
         command.phase(PHASE_GRAPH_ADVANCED)
@@ -63,6 +85,7 @@ def submit_conversion(
             "status": converted.status,
             "failure_code": converted.failure_code,
             "failure_message": converted.failure_message,
+            "mode": content.get("mode", CONVERSION_MODE_FULL),
         }
 
     return background_service.submit_operation(

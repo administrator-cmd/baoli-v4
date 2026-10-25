@@ -2,6 +2,7 @@
 import { computed } from "vue";
 
 import type { RuleCheckComparison } from "@/api/contracts";
+import { quoteInlineText } from "@/utils/quoteText";
 
 /**
  * 交叉校验的实际比较过程。
@@ -89,8 +90,8 @@ function rawDiffers(side: SideValue): boolean {
           <dd>{{ left.label || "服务端未返回左右双方的来源" }}</dd>
           <dt>原文内容</dt>
           <dd class="cross-side__quote">
-            <template v-if="rawDiffers(left)">{{ left.rawValue }}</template>
-            <template v-else-if="left.rawValue">{{ left.rawValue }}</template>
+            <template v-if="rawDiffers(left)">{{ quoteInlineText(left.rawValue) }}</template>
+            <template v-else-if="left.rawValue">{{ quoteInlineText(left.rawValue) }}</template>
             <span v-else class="text-muted">服务端未返回原文内容</span>
           </dd>
           <dt>标准化结果</dt>
@@ -134,8 +135,8 @@ function rawDiffers(side: SideValue): boolean {
           <dd>{{ right.label || "服务端未返回左右双方的来源" }}</dd>
           <dt>原文内容</dt>
           <dd class="cross-side__quote">
-            <template v-if="rawDiffers(right)">{{ right.rawValue }}</template>
-            <template v-else-if="right.rawValue">{{ right.rawValue }}</template>
+            <template v-if="rawDiffers(right)">{{ quoteInlineText(right.rawValue) }}</template>
+            <template v-else-if="right.rawValue">{{ quoteInlineText(right.rawValue) }}</template>
             <span v-else class="text-muted">服务端未返回原文内容</span>
           </dd>
           <dt>标准化结果</dt>

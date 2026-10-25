@@ -3,19 +3,20 @@
 import json
 import logging
 from typing import Any
-from sqlalchemy import select
+from uuid import uuid4
+
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....domain.audit_vocab import LOOP_BLOCKED, LOOP_DONE, LOOP_NEEDS_HUMAN, LOOP_RUNNING
+from ....constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING
 from ....domain.rule_library import is_risk_rule
-from ....entity import RuleResult
-from ..tasks.lookup import task_or_404
+from ...shared.storage import resolve_storage_path
 from ..rule_results import save_rule_result
 from ..shared import _task_manifest
+from ..tasks.lookup import task_or_404
+from .errors import agent_step
 from .execution import execution_in_progress
 from .shared import agent_module, openai_tools, rule_of_instance
-from .errors import agent_step
-
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,31 @@ def graph_produce_candidate_verdict(
         }
 
 
+def _save_verdict_diagnostics(task, execution, rule: dict[str, Any], errors: list[dict[str, Any]]) -> str | None:
+    """保存失败时的原始模型响应，供事后判断是截断、代码块还是散文。
+
+    只保存失败响应，不把每次成功响应都落盘；写入失败只记录日志，不影响业务结论保存。
+    """
+    relative = (
+        f"tasks/{task.task_no}/diagnostics/rule_verdict_errors/"
+        f"{execution.id}_{rule.get('rule_key')}_{uuid4().hex}.json"
+    )
+    try:
+        path = resolve_storage_path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "task_no": task.task_no,
+            "execution_id": execution.id,
+            "rule_key": rule.get("rule_key"),
+            "rule_code": rule.get("rule_code"),
+            "errors": errors,
+        }, ensure_ascii=False, default=str), encoding="utf-8")
+        return relative
+    except OSError:
+        logger.exception("规则失败响应诊断未能保存 task_no=%s rule_key=%s", task.task_no, rule.get("rule_key"))
+        return None
+
+
 def graph_save_evaluation_result(
     db: Session,
     task_no: str,
@@ -137,8 +163,8 @@ def graph_save_evaluation_result(
     """保存这一条规则实例的评估结果。
 
     保存是确定性生命周期的一部分：Agent 不能跳过或改写。按
-    (节点执行记录, 规则编号) 唯一写一条结果——人工复核已经改写过它时是更新而非新增，
-    因此「人工结论」不会被随后的保存覆盖成模型候选结论。
+    (节点执行记录, 规则编号) 唯一写一条结果，重复保存是更新而非新增。
+    人工结论来自字段纠错后的当前事实版本，由规则输入沿用，不在这里改写。
 
     BLOCKED 时不写「通过」类结果：没有结论就如实记录未解决原因。
     """
@@ -163,41 +189,39 @@ def graph_save_evaluation_result(
             "loop_count": loop_count,
             "unresolved_items": list(unresolved_items or []),
         }
-        saved = db.scalar(select(RuleResult).where(
-            RuleResult.node_execution_id == execution.id,
-            RuleResult.rule_key == rules[0]["rule_key"],
-        ))
-        saved_value = saved
-        reviewed = saved_value is not None and bool((saved_value.result_json or {}).get("manual_review_no"))
-        if reviewed:
-            # 人工裁决已写入真实结果，继续执行不能再次保存旧模型候选及其产出。
-            outcome.update(status=saved_value.status, loop_status=LOOP_DONE, unresolved_items=[])
-        else:
-            try:
-                with db.begin_nested():
-                    from ..rule_execution import save_outputs
-                    output_values = save_outputs(db, task, execution, rules[0], candidate_verdict)
-                    saved_result = save_rule_result(db, task=task, execution=execution, rule=rules[0], verdict=candidate_verdict,
-                                                   loop_status=loop_status, unresolved_items=unresolved_items,
-                                                   evaluation_id=evaluation_id, inputs=list(instance.get("inputs") or []),
-                                                   output_values=output_values)
-            except BusinessError as exc:
-                if exc.code not in _RULE_SAVE_ERRORS:
-                    raise
-                logger.warning("规则产出未保存 task_no=%s rule_key=%s code=%s message=%s", task_no, rules[0]["rule_key"], exc.code, exc.message)
-                candidate_verdict = None
-                loop_status = LOOP_BLOCKED
-                unresolved_items = [*(unresolved_items or []), {"kind": exc.code, "message": exc.message, "details": exc.details}]
-                outcome.update(loop_status=loop_status, unresolved_items=unresolved_items)
-                with db.begin_nested():
-                    saved_result = save_rule_result(db, task=task, execution=execution, rule=rules[0], verdict=None,
-                                                   loop_status=loop_status, unresolved_items=unresolved_items,
-                                                   evaluation_id=evaluation_id, inputs=list(instance.get("inputs") or []))
-            saved_result.result_json = {**saved_result.result_json,
-                                        "loop_count": loop_count,
-                                        "model_response": last_model_response,
-                                        "verdict_errors": list(verdict_errors or [])}
-            outcome["status"] = saved_result.status
+        try:
+            with db.begin_nested():
+                from ..rule_execution import save_outputs
+                output_values = save_outputs(db, task, execution, rules[0], candidate_verdict)
+                saved_result = save_rule_result(db, task=task, execution=execution, rule=rules[0], verdict=candidate_verdict,
+                                               loop_status=loop_status, unresolved_items=unresolved_items,
+                                               evaluation_id=evaluation_id, inputs=list(instance.get("inputs") or []),
+                                               output_values=output_values, turn_count=loop_count)
+        except BusinessError as exc:
+            if exc.code not in _RULE_SAVE_ERRORS:
+                raise
+            logger.warning("规则产出未保存 task_no=%s rule_key=%s code=%s message=%s", task_no, rules[0]["rule_key"], exc.code, exc.message)
+            candidate_verdict = None
+            loop_status = LOOP_BLOCKED
+            unresolved_items = [*(unresolved_items or []), {"kind": exc.code, "message": exc.message, "details": exc.details}]
+            outcome.update(loop_status=loop_status, unresolved_items=unresolved_items)
+            with db.begin_nested():
+                saved_result = save_rule_result(db, task=task, execution=execution, rule=rules[0], verdict=None,
+                                               loop_status=loop_status, unresolved_items=unresolved_items,
+                                               evaluation_id=evaluation_id, inputs=list(instance.get("inputs") or []),
+                                               turn_count=loop_count)
+        diagnostic_path = _save_verdict_diagnostics(
+            task, execution, rules[0], list(verdict_errors or []),
+        ) if verdict_errors else None
+        cleaned_errors = []
+        for error in verdict_errors or []:
+            cleaned = {key: value for key, value in error.items() if key != "model_response"}
+            if diagnostic_path is not None:
+                cleaned["diagnostics_path"] = diagnostic_path
+            cleaned_errors.append(cleaned)
+        saved_result.result_json = {**saved_result.result_json,
+                                    "verdict_errors": cleaned_errors}
+        outcome["status"] = saved_result.status
         db.commit()
         return {
             "rule_outcome": outcome,

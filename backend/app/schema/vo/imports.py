@@ -17,6 +17,8 @@ class ImportJobResponse(ApiResponse):
     profile: dict[str, Any] = Field(default_factory=dict)
     proposals: dict[str, Any] | None = None
     draft_revision: int = 0
+    # 第一轮目录可复用：为 True 时可以只重跑第二轮。
+    can_resume_refinement: bool = False
     failure: dict[str, str] | None = None
     latest_operation: dict[str, Any] | None = None
     created_at: datetime

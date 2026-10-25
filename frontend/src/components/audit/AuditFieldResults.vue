@@ -1,19 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef } from "vue";
-import { FileSearch } from "lucide-vue-next";
 
 import type { AuditFieldView } from "@/api/audits";
-import DrawerPanel from "@/components/DrawerPanel.vue";
+import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import {
-  factOriginLabel,
-  fieldStatusTone,
-  formatBusinessValue,
-  statusLabel,
-} from "@/constants/labels";
+import { fieldStatusTone, statusLabel } from "@/constants/labels";
+import { evidenceIsValue, fieldMode, fieldReason, formatFieldValue } from "@/utils/fieldPresentation";
+import { quoteInlineText } from "@/utils/quoteText";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 
-/** 字段列表展示名称、抽取结果和状态；完整取值、来源和纠错入口在详情中。 */
+/** 字段列表展示业务编号、名称、关联材料、抽取结果和状态；原文、说明和纠错入口在详情抽屉中。 */
 const props = defineProps<{
   fields: AuditFieldView[];
   /** 字段抽取节点是否已经执行过；未执行时说明原因，而不是显示成空值。 */
@@ -23,89 +20,41 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "open-evidence": [field: AuditFieldView];
   correct: [field: AuditFieldView];
 }>();
-
-function evidenceItems(field: AuditFieldView): Array<{ evidence_no: string; field_path: string | null }> {
-  if (field.evidences?.length) return field.evidences;
-  return field.evidence_no
-    ? [{ evidence_no: field.evidence_no, field_path: null }]
-    : [];
-}
-
-function openEvidence(field: AuditFieldView, evidenceNo: string): void {
-  emit("open-evidence", { ...field, evidence_no: evidenceNo });
-}
-
-/** 原文内容。没有原文时说明属于哪一种缺失，不留空白。 */
-function rawText(field: AuditFieldView): string {
-  if (field.raw_value !== null && field.raw_value !== undefined && field.raw_value !== "") {
-    return field.raw_value;
-  }
-  if (field.extraction_enabled === false) {
-    return "本方案未启用该字段的自动抽取";
-  }
-  if (field.material_uploaded === false) {
-    return "材料未上传，没有可抽取的原文";
-  }
-  if (field.status === "PENDING" || field.status === "NOT_EXECUTED") {
-    return "本次未执行抽取，没有原文";
-  }
-  if (field.status === "EXTRACTION_FAILED") {
-    return "抽取失败，未取得原文";
-  }
-  if (field.status === "NOT_PRESENT") {
-    return "材料中未找到该字段的原文";
-  }
-  if (field.status === "EVIDENCE_UNCLEAR") {
-    return "抽取结果没有给出原文，未能形成可核对的事实";
-  }
-  return "服务端没有返回该字段的原文";
-}
-
-/** 标准化结果。它是按字段类型对原文确定性算出的可比对值，不代表审核通过。 */
-function normalizedText(field: AuditFieldView): string {
-  const normalized = field.normalized_value;
-  if (normalized !== null && normalized !== undefined && normalized !== "") {
-    return formatBusinessValue(normalized);
-  }
-  if (field.status === "NORMALIZATION_FAILED") {
-    return "原文无法按字段类型标准化，未形成可比对的值";
-  }
-  if (field.raw_value !== null && field.raw_value !== undefined && field.raw_value !== "") {
-    return "服务端没有返回标准化结果";
-  }
-  return "没有可标准化的原文";
-}
-
-/**
- * 人工已确认的有效值。
- *
- * 只认服务端返回的事实：事实来源为人工纠错，或状态已复核。服务端没有给出人工
- * 确认标志时不做前端推断——那会把系统抽取值说成人工确认过的值。
- */
-function humanConfirmedText(field: AuditFieldView): string | null {
-  if (field.origin !== "HUMAN_CORRECTION" && field.status !== "REVIEWED") {
-    return null;
-  }
-  const raw = field.raw_value;
-  if (raw !== null && raw !== undefined && raw !== "") {
-    return raw;
-  }
-  return "人工已确认该字段在材料中不存在";
-}
 
 const detailField = shallowRef<AuditFieldView | null>(null);
 
 function extractedText(field: AuditFieldView): string {
   const value = field.normalized_value;
-  if (value !== null && value !== undefined && value !== "") return formatBusinessValue(value);
+  if (value !== null && value !== undefined && value !== "") return formatFieldValue(field);
   if (field.status === "NOT_PRESENT") return "材料未载明";
   if (field.status === "NOT_APPLICABLE") return "本次不适用";
   if (field.extraction_enabled === false) return "未启用抽取";
   if (field.material_uploaded === false) return "材料未上传";
   return "未取到有效值";
+}
+
+function searchText(field: AuditFieldView): string {
+  const mode = fieldMode(field);
+  return [
+    field.source_ref,
+    field.name,
+    field.material_name,
+    field.raw_value,
+    String(field.normalized_value ?? ""),
+    formatFieldValue(field),
+    field.status,
+    ...(evidenceIsValue(mode)
+      ? field.evidence.map((item) => quoteInlineText(item.quote_text))
+      : [fieldReason(field)]),
+  ]
+    .join(" ")
+    .toLocaleLowerCase();
+}
+
+function forwardCorrect(field: AuditFieldView): void {
+  emit("correct", field);
 }
 
 const search = ref("");
@@ -149,11 +98,8 @@ const rows = computed(() => {
   const selected = filters.find((item) => item.value === statusFilter.value)!;
   const query = search.value.trim().toLocaleLowerCase();
   return props.fields.filter((field) => {
-    const text = [field.name, field.material_name, field.raw_value, String(field.normalized_value ?? ""), field.status]
-      .join(" ")
-      .toLocaleLowerCase();
-    return matchesFilter(field, selected) && (!query || text.includes(query));
-  });
+    return matchesFilter(field, selected) && (!query || searchText(field).includes(query));
+  }).sort((left, right) => compareNaturalLabels(left.source_ref, right.source_ref));
 });
 
 /** 未执行时说明是「节点还没跑」还是「跑了但这一项没结果」，两者不能混。 */
@@ -169,7 +115,7 @@ const emptyDescription = computed(() => {
   <StateBlock v-if="!fields.length" kind="empty" title="当前还没有字段结果" :description="emptyDescription" />
   <div v-else class="stack">
     <div class="field-toolbar">
-      <el-input v-model="search" clearable placeholder="搜索字段、材料或原文" aria-label="搜索字段结果" class="field-search" />
+      <el-input v-model="search" clearable placeholder="搜索编号、字段、材料或原文" aria-label="搜索字段结果" class="field-search" />
       <el-select v-model="statusFilter" aria-label="按字段状态筛选" class="field-status-filter">
         <el-option v-for="filter in filters" :key="filter.value" :value="filter.value"
           :label="`${filter.label}（${fields.filter((field) => matchesFilter(field, filter)).length}）`" />
@@ -189,60 +135,41 @@ const emptyDescription = computed(() => {
       <el-button @click="search = ''; statusFilter = 'ALL'">清除筛选</el-button>
     </el-empty>
 
-    <el-table v-else :data="rows" class="field-table" @row-click="(field: AuditFieldView) => detailField = field">
-      <el-table-column label="字段" min-width="240">
+    <el-table v-else :data="rows" border stripe class="audit-result-table field-table" @row-click="(field: AuditFieldView) => detailField = field">
+      <el-table-column label="字段编号" width="120">
+        <template #default="{ row }">{{ row.source_ref || "—" }}</template>
+      </el-table-column>
+      <el-table-column label="字段" width="180">
         <template #default="{ row }">
           <span class="cell-strong">{{ row.name }}</span>
-          <div class="table-note">{{ row.material_name }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="抽取结果" min-width="360">
+      <el-table-column prop="material_name" label="关联材料" width="220" show-overflow-tooltip />
+      <el-table-column label="抽取结果" min-width="260">
         <template #default="{ row }">
-          <div class="field-value">{{ extractedText(row) }}</div>
+          <div class="field-value" :class="{ 'field-value--empty': row.normalized_value === null || row.normalized_value === undefined || row.normalized_value === '' }">{{ extractedText(row) }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="132">
+      <el-table-column label="状态" width="112">
         <template #default="{ row }">
           <StatusBadge :status="row.status" :tone="fieldStatusTone(row.status)" />
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="100" fixed="right" align="center">
+      <el-table-column label="操作" width="88" fixed="right" align="center">
         <template #default="{ row }">
           <el-button link type="primary" @click.stop="detailField = row">详情</el-button>
         </template>
       </el-table-column>
     </el-table>
   </div>
-  <DrawerPanel :open="Boolean(detailField)" :title="detailField?.name ?? '字段详情'" size="min(680px, 100%)" @close="detailField = null">
-    <template v-if="detailField">
-      <div class="field-detail-head">
-        <StatusBadge :status="detailField.status" :tone="fieldStatusTone(detailField.status)" />
-        <span class="text-muted">{{ detailField.material_name }}</span>
-      </div>
-      <h4 class="app-section-title">抽取原始值</h4>
-      <div class="detail-value">{{ rawText(detailField) }}</div>
-      <h4 class="app-section-title">标准化结果</h4>
-      <div class="detail-value">{{ normalizedText(detailField) }}</div>
-      <el-descriptions :column="1" class="block-gap">
-        <el-descriptions-item v-if="detailField.origin" label="事实来源">{{ factOriginLabel(detailField.origin) }}</el-descriptions-item>
-        <el-descriptions-item v-if="humanConfirmedText(detailField)" label="人工确认值">{{ humanConfirmedText(detailField) }}</el-descriptions-item>
-        <el-descriptions-item v-if="detailField.extraction_message && detailField.extraction_presentation_version === 2" label="抽取说明">{{ detailField.extraction_message }}</el-descriptions-item>
-      </el-descriptions>
-      <el-collapse v-if="detailField.extraction_message && detailField.extraction_presentation_version !== 2" class="block-gap">
-        <el-collapse-item title="原执行说明（该结果尚未保存结构化说明）" name="original">
-          <div class="detail-value">{{ detailField.extraction_message }}</div>
-        </el-collapse-item>
-      </el-collapse>
-      <div class="field-detail-actions">
-        <el-button v-for="(item, index) in evidenceItems(detailField)" :key="item.evidence_no" @click="openEvidence(detailField, item.evidence_no)">
-          <template #icon><FileSearch :size="15" /></template>
-          {{ item.field_path || (evidenceItems(detailField).length > 1 ? `原文证据 ${index + 1}` : "原文证据") }}
-        </el-button>
-        <span v-if="!evidenceItems(detailField).length" class="text-hint">未记录原文证据</span>
-        <el-button v-if="correctionEnabled" type="primary" plain @click="$emit('correct', detailField)">纠正字段</el-button>
-      </div>
-    </template>
-  </DrawerPanel>
+
+  <AuditFieldDetailDrawer
+    :open="Boolean(detailField)"
+    :field="detailField"
+    :correction-enabled="correctionEnabled"
+    @close="detailField = null"
+    @correct="forwardCorrect"
+  />
 </template>
 
 <style scoped>
@@ -263,11 +190,12 @@ const emptyDescription = computed(() => {
 
 .field-count {
   margin-left: auto;
+  font-size: var(--el-font-size-base);
 }
 
 .field-table :deep(.el-table__cell) {
-  padding: 6px 0;
-  vertical-align: top;
+  padding: 8px 0;
+  vertical-align: middle;
 }
 
 .field-table :deep(.cell) {
@@ -285,27 +213,17 @@ const emptyDescription = computed(() => {
   -webkit-box-orient: vertical;
   overflow: hidden;
   white-space: pre-wrap;
+  color: var(--el-text-color-primary);
+  font-weight: 500;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
-.field-detail-head,
-.field-detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-
-.field-detail-actions {
-  margin-top: 20px;
+.field-value--empty {
+  color: var(--el-text-color-secondary);
+  font-weight: 400;
 }
 
 .cell-strong {
   font-weight: 600;
-}
-
-.detail-value {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.55;
 }
 </style>

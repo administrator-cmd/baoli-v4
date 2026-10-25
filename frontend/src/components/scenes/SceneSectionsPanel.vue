@@ -15,6 +15,7 @@ import {
   updateDraftSection,
 } from "@/api/scenes";
 import { reportContentTypeOptions, reportFormatOptions, reportResultSortOptions } from "@/constants/labels";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /** 场景章节控制报告正文，材料范围与排序由配置确定。 */
 const props = defineProps<{
@@ -28,6 +29,8 @@ const emit = defineEmits<{
 }>();
 
 const sections = ref<DraftSectionItem[]>([]);
+const sortedSections = computed(() => [...sections.value]
+  .sort((left, right) => compareNaturalLabels(left.report_code, right.report_code)));
 const fields = ref<DraftFieldItem[]>([]);
 const materials = ref<DraftMaterialItem[]>([]);
 const draft = ref<ScenarioConfigurationView | null>(null);
@@ -223,21 +226,21 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
         <el-button size="small" @click="load">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="sections" border stripe v-loading="loading" empty-text="暂无报告章节（系统执行摘要仍会生成）">
-        <el-table-column label="报告编号" width="120">
+      <el-table v-else :data="sortedSections" border stripe class="management-table" v-loading="loading" empty-text="暂无报告章节（系统执行摘要仍会生成）">
+        <el-table-column label="报告编号" width="120" align="center">
           <template #default="{ row }">{{ row.report_code || "—" }}</template>
         </el-table-column>
         <el-table-column prop="title" label="章节名称" min-width="160" show-overflow-tooltip />
-        <el-table-column label="章节顺序" width="90">
+        <el-table-column label="章节顺序" width="88" align="center">
           <template #default="{ row }">{{ row.section_order ?? "—" }}</template>
         </el-table-column>
-        <el-table-column label="材料范围" min-width="150" show-overflow-tooltip>
+        <el-table-column label="材料范围" width="120" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="(row.material_names || []).length">{{ (row.material_names || []).join("、") }}</span>
             <span v-else class="text-hint">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="业务数据引用" min-width="260">
+        <el-table-column label="业务数据引用" min-width="260" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.data_names.length">{{ row.data_names.join("、") }}</span>
             <span v-else class="text-hint">按章节要求选择业务数据</span>
@@ -246,14 +249,14 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
         <el-table-column prop="content_instruction" label="内容要求" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">{{ row.content_instruction || "—" }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="95">
+        <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
             <el-tag size="small" :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'">
               {{ row.config_status === 'PENDING' ? '待确认' : row.config_status === 'DISABLED' ? '暂停' : '启用' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="canEdit" label="操作" width="140" fixed="right">
+        <el-table-column v-if="canEdit" label="操作" width="104" class-name="table-actions" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="removeItem(row)">删除</el-button>

@@ -4,17 +4,29 @@ RULE_EXECUTION 是现有数据库执行记录的关联容器，没有业务阶�
 执行顺序只取自输入字段、上游结果与规则显式引用，不使用工作表或旧节点类型。
 """
 from copy import deepcopy
-import json
 from typing import Any
 
 from ..common.exceptions import BusinessError
+from ..constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
+from ..constants.status import CONFIG_STATUS_DISABLED, CONFIG_STATUS_PENDING
 from . import scenario_schema
+from .execution_mode import (
+    EXECUTION_MODE_ORDER,
+    EXECUTION_MODES,
+    MODE_AGGREGATE,
+    MODE_CALCULATE,
+    MODE_CROSS_SCOPE_COMPARE,
+    MODE_DERIVE_RISK,
+    MODE_EXTRACT,
+    MODE_REPORT,
+    MODE_UNKNOWN,
+    MODE_VALUE_COMPARE,
+)
 from .identity import stable_key
 from .node_profile import NODE_PROFILE_VERSION
-from .parameter_contract import CONFIG_STATUS_DISABLED, CONFIG_STATUS_PENDING
 from .report_data import report_data_refs
 
-EXECUTION_CODE = "RULE_EXECUTION"
+EXECUTION_CODE = NODE_RULE_EXECUTION
 EXECUTION_VERSION = NODE_PROFILE_VERSION
 
 
@@ -42,6 +54,47 @@ def is_risk_rule(rule: dict[str, Any]) -> bool:
     return rule.get("rule_role") == "RISK" or rule.get("operator") == "RISK_TRIGGER"
 
 
+def _validate_execution_modes(rules: list[dict[str, Any]]) -> None:
+    """执行方式是执行器选择上下文的唯一依据；缺失时拒绝发布，不默认成 CHECK。"""
+    missing: list[dict[str, str]] = []
+    problems: list[str] = []
+    for rule in rules:
+        name = str(rule.get("name") or rule.get("rule_key") or "")
+        mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
+        if mode == MODE_UNKNOWN or mode not in EXECUTION_MODES:
+            missing.append({"rule_key": str(rule.get("rule_key") or ""), "name": name})
+            continue
+        if not rule.get("enabled") or rule.get("kind") != "RULE":
+            continue
+        if mode in {MODE_AGGREGATE, MODE_DERIVE_RISK} and not (
+            rule.get("source_rule_keys") or rule.get("source_rule_codes")
+        ):
+            problems.append(f"{name}（{mode}）没有来源规则引用")
+        if mode == MODE_DERIVE_RISK and not (rule.get("risk_condition") or rule.get("requirement")):
+            problems.append(f"{name}（{mode}）没有风险成立条件")
+        if mode in {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE} and not (rule.get("inputs") or rule.get("materials")):
+            problems.append(f"{name}（{mode}）没有输入字段或材料范围")
+        if mode == MODE_EXTRACT and not rule.get("outputs"):
+            problems.append(f"{name}（{mode}）没有输出字段")
+        if mode == MODE_REPORT and not rule.get("report_definition"):
+            problems.append(f"{name}（{mode}）没有报告定义")
+    if missing:
+        names = "、".join(item["name"] for item in missing[:8])
+        more = f" 等 {len(missing)} 条" if len(missing) > 8 else ""
+        raise BusinessError(
+            "RULE_EXECUTION_MODE_MISSING",
+            f"以下规则没有确定执行方式：{names}{more}。请在场景规则编辑中补填或重新导入规则库；"
+            "旧配置不会默认按普通核查执行。",
+            details={"rules": missing},
+        )
+    if problems:
+        raise BusinessError(
+            "RULE_EXECUTION_MODE_INVALID",
+            "规则执行方式与配置不匹配：" + "；".join(problems[:8]),
+            details={"problems": problems},
+        )
+
+
 def compile_library(**config: Any) -> dict[str, Any]:
     materials, fields = deepcopy(config["materials"]), deepcopy(config["fields"])
     rules = deepcopy(config["rules"])
@@ -65,7 +118,7 @@ def compile_library(**config: Any) -> dict[str, Any]:
         rule["node"] = rule["node_type"] = EXECUTION_CODE
         rule["enabled"] = active(rule)
         rule["rule_code"] = rule.get("rule_code") or rule.get("source_ref") or rule["rule_key"]
-        rule.setdefault("operator", "LLM_EXECUTE")
+        rule.setdefault("operator", OPERATOR_LLM_EXECUTE)
         rule.setdefault("inputs", [])
         rule.setdefault("outputs", [])
         rule.setdefault("materials", [])
@@ -167,6 +220,15 @@ def compile_library(**config: Any) -> dict[str, Any]:
     # 不检查暂停或待确认项的内容。实际执行项的引用错误在该项执行时明确记录。
     for rule in rules:
         rule.setdefault("kind", "EXTRACTION" if rule["operator"] == "LLM_EXTRACT" else "RULE")
+        system_mode = {
+            "EXTRACTION": MODE_EXTRACT,
+            "CALCULATION": MODE_CALCULATE,
+            "REPORT": MODE_REPORT,
+        }.get(rule["kind"])
+        if system_mode:
+            rule["execution_mode"] = system_mode
+        else:
+            rule.setdefault("execution_mode", MODE_UNKNOWN)
         rule["output_definitions"] = [deepcopy(field_by_key[key]) for key in rule["outputs"] if key in field_by_key]
         if not rule["enabled"]:
             continue
@@ -183,6 +245,7 @@ def compile_library(**config: Any) -> dict[str, Any]:
             rule["dependency_error"] = missing
         else:
             rule.pop("dependency_error", None)
+    _validate_execution_modes(rules)
     container = execution_container()
     container["execution_contract"].update(field_keys=list(field_by_key), rule_keys=[i["rule_key"] for i in rules], calculation_rule_codes=[c["rule_code"] for c in calculations])
     manifest = {"manifest_version": "2.0", "execution_contract_version": EXECUTION_VERSION,
@@ -199,47 +262,89 @@ def compile_library(**config: Any) -> dict[str, Any]:
     return manifest
 
 
+def _dependency_indexes(
+    all_rules: list[dict[str, Any]],
+) -> tuple[dict[str, set[str]], dict[str, list[str]]]:
+    """字段产出规则与业务编号索引；同一次依赖解析内只构建一次。"""
+    producers: dict[str, set[str]] = {}
+    by_code: dict[str, list[str]] = {}
+    for item in all_rules:
+        for field in item.get("outputs") or []:
+            producers.setdefault(field, set()).add(item["rule_key"])
+        for code in {item.get("result_code"), item.get("rule_code")} - {None, ""}:
+            by_code.setdefault(str(code), []).append(item["rule_key"])
+    return producers, by_code
+
+
+def _dependency_refs(
+    rule: dict[str, Any], *, producers: dict[str, set[str]], by_code: dict[str, list[str]],
+) -> tuple[set[str], set[str]]:
+    """本条规则直接引用的规则键与无法唯一解析的引用。
+
+    只按显式引用解析：字段输入的产出规则、`source_rule_key(s)`、唯一命中的
+    `source_rule_codes` / `CALC_RESULT`。找不到或命中多条的业务编号不猜测，
+    作为无法解析的引用交调用方处理。
+    """
+    deps = set(rule.get("source_rule_keys") or [])
+    if rule.get("source_rule_key"):
+        deps.add(rule["source_rule_key"])
+    unresolved: set[str] = set()
+    for item in rule.get("inputs") or []:
+        matches = producers.get(item["field_key"])
+        if matches:
+            deps.update(matches)
+        else:
+            unresolved.add(f"field:{item['field_key']}")
+    calculation = rule.get("calculation_definition") or {}
+    codes = [
+        *(rule.get("source_rule_codes") or []),
+        *(calculation.get("depends_on_result_codes") or []),
+        *(p["source_code"] for p in calculation.get("parameters") or []
+          if p.get("source_type") == "CALC_RESULT"),
+    ]
+    for code in codes:
+        definitions = by_code.get(str(code), [])
+        if len(definitions) == 1:
+            deps.add(definitions[0])
+        else:
+            unresolved.add(str(code))
+    return deps, unresolved
+
+
+def rule_dependencies(rule: dict[str, Any], *, all_rules: list[dict[str, Any]]) -> set[str]:
+    """本条规则直接依赖的规则键；报告与无法解析的引用由调用方补充。"""
+    producers, by_code = _dependency_indexes(all_rules)
+    deps, _ = _dependency_refs(rule, producers=producers, by_code=by_code)
+    if rule.get("kind") == "EXTRACTION":
+        deps.discard(rule["rule_key"])
+    return deps & {item["rule_key"] for item in all_rules}
+
+
 def execution_order(rules: list[dict[str, Any]], *, all_rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """只按显式输入/结果引用排序；无法满足的引用与环在执行项上暴露。"""
     rules = deepcopy(rules)
-    producers: dict[str, set[str]] = {}
-    for rule in all_rules:
-        for field in rule.get("outputs") or []:
-            producers.setdefault(field, set()).add(rule["rule_key"])
     selected = {r["rule_key"] for r in rules}
     known_by_key = {r["rule_key"]: r for r in all_rules}
-    known_by_code: dict[str, list[dict[str, Any]]] = {}
-    for rule in all_rules:
-        for code in {rule.get("result_code"), rule.get("rule_code")} - {None, ""}:
-            known_by_code.setdefault(str(code), []).append(rule)
+    producers, by_code = _dependency_indexes(all_rules)
     dependencies = {}
     for rule in rules:
         rule.pop("unavailable_dependencies", None)
         rule.pop("dependency_details", None)
-        deps = set(rule.get("source_rule_keys") or [])
-        if rule.get("source_rule_key"):
-            deps.add(rule["source_rule_key"])
-        for item in rule.get("inputs") or []:
-            deps.update(producers.get(item["field_key"], {f"field:{item['field_key']}"}))
-        codes = [*(rule.get("source_rule_codes") or []), *(rule.get("calculation_definition", {}).get("depends_on_result_codes") or []),
-                 *(p["source_code"] for p in rule.get("calculation_definition", {}).get("parameters") or [] if p.get("source_type") == "CALC_RESULT")]
-        missing_codes = []
-        for code in codes:
-            definitions = known_by_code.get(str(code), [])
-            if len(definitions) == 1:
-                deps.add(definitions[0]["rule_key"])
-            else:
-                missing_codes.append(str(code))
+        deps, unresolved = _dependency_refs(rule, producers=producers, by_code=by_code)
         # 报告消费任务结果集合，等该任务其他生效项执行完再生成。
         if rule.get("kind") == "REPORT":
             deps.update(r["rule_key"] for r in rules if r.get("kind") != "REPORT")
         if rule.get("kind") == "EXTRACTION":
             deps.discard(rule["rule_key"])
+        missing_codes = sorted(unresolved)
         if deps - selected or missing_codes:
             rule["unavailable_dependencies"] = sorted(set(deps - selected) | set(missing_codes))
             rule["dependency_details"] = []
             for reference in rule["unavailable_dependencies"]:
-                definitions = ([known_by_key[reference]] if reference in known_by_key else known_by_code.get(reference, []))
+                definitions = (
+                    [known_by_key[reference]] if reference in known_by_key
+                    else [known_by_key[key] for key in by_code.get(reference, []) if key in known_by_key]
+                )
                 definition = definitions[0] if len(definitions) == 1 else None
                 rule["dependency_details"].append({
                     "reference": reference,
@@ -252,8 +357,14 @@ def execution_order(rules: list[dict[str, Any]], *, all_rules: list[dict[str, An
                 })
         dependencies[rule["rule_key"]] = deps & selected
     ordered, remaining, done = [], list(rules), set()
+    position = {rule["rule_key"]: index for index, rule in enumerate(rules)}
     while remaining:
         ready = [r for r in remaining if dependencies[r["rule_key"]] <= done]
+        # 依赖是硬约束；同一层内按执行动作排序，避免汇总/风险规则抢在来源规则之前。
+        ready.sort(key=lambda item: (
+            EXECUTION_MODE_ORDER.get(str(item.get("execution_mode") or MODE_UNKNOWN), 99),
+            position.get(item["rule_key"], 0),
+        ))
         if not ready:
             # 报告消费执行集合，存在依赖环也必须等其余项形成结果或失败原因再生成。
             for rule in sorted(remaining, key=lambda item: item.get("kind") == "REPORT"):

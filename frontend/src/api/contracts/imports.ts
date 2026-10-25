@@ -12,6 +12,7 @@ export interface ImportProposalChanges {
   required?: boolean;
   instruction?: string;
   requirement?: string;
+  execution_mode?: string;
   rule_role?: "CHECK" | "RISK";
   rule_name?: string;
   formula?: string;
@@ -104,6 +105,7 @@ export interface ProposalRule {
   operator: string;
   rule_code?: string | null;
   rule_role?: "CHECK" | "RISK";
+  execution_mode?: string | null;
   requirement: string;
   config_status?: string | null;
   comparison: RuleComparison;
@@ -155,6 +157,8 @@ export interface ImportJob extends ApiResponse {
   } | null;
   /** 草稿修订号：解析结果变更时递增。 */
   draft_revision: number;
+  /** 第一轮目录可复用：为 true 时可以只重跑第二轮。 */
+  can_resume_refinement?: boolean;
   failure: { code: string; message: string } | null;
   latest_operation: OperationAccepted | null;
   created_at: string;

@@ -3,7 +3,7 @@
 
 用途：本地反复验证导入/审核流程时，不必逐张手工删表。
 
-安全约束（与后端 database.py 保持一致）：
+安全约束（与后端 core/database.py 保持一致）：
 - 只接受 mysql+pymysql，且库名必须是 baoli_v4 或 baoli_v4_dev；其它连接目标直接拒绝。
 - 默认只列出将要删除的表，不做任何修改；必须显式加 --yes 才会真正执行。
 - 只 DROP 库内的表，绝不 DROP DATABASE，也绝不创建任何表。
@@ -15,7 +15,7 @@
 
 删完之后数据库是空的，需要重新执行唯一建表脚本：
 
-    backend/database/schema.sql
+    backend/resource/schema.sql
 
 注意：本脚本只清数据库。data/ 目录下已经上传的文件不会被删除，
 清库后会变成孤儿文件，需要时请自行清理。
@@ -35,7 +35,7 @@ if str(BACKEND_DIR) not in sys.path:
 import pymysql  # noqa: E402
 from sqlalchemy.engine import URL  # noqa: E402
 
-from app.config import get_settings, validated_database_url  # noqa: E402
+from app.core.config import get_settings, validated_database_url  # noqa: E402
 
 
 def _validated_database_url() -> URL:
@@ -114,7 +114,7 @@ def main() -> int:
         print()
         print(f"已删除 {len(tables)} 张表，库内现在是空的。")
         print("请重新执行唯一的建表脚本：")
-        print("  backend/database/schema.sql")
+        print("  backend/resource/schema.sql")
         return 0
     finally:
         connection.close()

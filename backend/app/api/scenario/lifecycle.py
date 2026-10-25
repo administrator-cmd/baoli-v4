@@ -1,17 +1,22 @@
 """场景列表、详情与生命周期接口。"""
 
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.dto.scenarios import ScenarioCreateRequest, ScenarioEnabledRequest, ScenarioUpdateRequest
-from ...schema.vo.scenarios import ScenarioDetailResponse
-from ...schema.query import validate_page_params
-from ...services.scenario.query import list_scenarios_page, list_admin_scenario_options, list_scenario_options
-from ...services.scenario.lifecycle import create_scenario, delete_scenario, set_scenario_enabled, update_scenario
-from ...services.scenario.query import scenario_detail
-from ...schema.vo import PagedResponse
 
+from ...core.database import get_db
+from ...schema.dto.scenarios import ScenarioCreateRequest, ScenarioEnabledRequest, ScenarioUpdateRequest
+from ...schema.query.pagination import validate_page_params
+from ...schema.query.timestamps import FilterDateTime
+from ...schema.vo.common import PagedResponse
+from ...schema.vo.scenarios import ScenarioDetailResponse
+from ...services.scenario.lifecycle import create_scenario, delete_scenario, set_scenario_enabled, update_scenario
+from ...services.scenario.query import (
+    list_admin_scenario_options,
+    list_scenario_options,
+    list_scenarios_page,
+    scenario_detail,
+)
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 
@@ -22,8 +27,8 @@ def list_scenarios(
     name: str | None = None,
     category: str | None = None,
     enabled: bool | None = None,
-    published_from: datetime | None = None,
-    published_to: datetime | None = None,
+    published_from: FilterDateTime | None = None,
+    published_to: FilterDateTime | None = None,
     page: int = Query(default=1),
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),

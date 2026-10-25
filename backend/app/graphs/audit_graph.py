@@ -7,9 +7,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
 from ..common.exceptions import BusinessError, exception_summary
-from ..database import is_storage_unavailable
-from .audit_rule_runner import RuleEvaluationRunner, run_rule_evaluation
-
+from ..core.database import is_storage_unavailable
+from .audit_rule_runner import RuleEvaluationRunner, extraction_group, run_rule_evaluation
 
 logger = logging.getLogger(__name__)
 STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE"
@@ -52,6 +51,11 @@ class AuditNodeRunner(RuleEvaluationRunner, Protocol):
     def graph_load_evaluation(
         self, db: Any, task_no: str, node_code: str, execution_id: int | None,
     ) -> dict[str, Any]: ...
+
+    def graph_execute_extraction_batch(
+        self, db: Any, task_no: str, node_code: str, execution_id: int | None,
+        entries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]: ...
 
     def graph_finalize_node_execution(
         self, db: Any, task_no: str, execution_id: int | None, execution_mode: str,
@@ -99,23 +103,37 @@ def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]
 
 
 def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
-    """按依赖计划串行执行；每条独立状态，提交后才读下一条的上游结果。"""
+    """按依赖计划串行执行；同一材料上相邻的无输入抽取合并为一次调用。
+
+    合并只发生在连续的、同材料同产物来源的单字段抽取之间：它们互不依赖，逐个执行会把同一份
+    正文重复送进模型。每条字段的结果仍各自保存、各自成败，不因同批其他字段失败而连带阻断。
+    """
     outcomes: list[dict[str, Any]] = []
-    for entry in state["evaluation_plan"]:
-        outcome = run_rule_evaluation(
+    plan = state["evaluation_plan"]
+    index = 0
+    while index < len(plan):
+        group = extraction_group(plan, index)
+        index += len(group)
+        if len(group) > 1:
+            outcomes.extend(runtime.context["nodes"].graph_execute_extraction_batch(
+                runtime.context["db"], state["task_no"], state["current_node"],
+                state["execution_id"], group,
+            ))
+            continue
+        entry = group[0]
+        outcomes.append(run_rule_evaluation(
             runtime.context["db"], runtime.context["nodes"], task_no=state["task_no"],
             node_code=state["current_node"], execution_id=state["execution_id"],
             rule_cursor=entry["cursor"], planned_rule=entry["rule"],
-        )
-        outcomes.append(outcome)
+        ))
     return {"rule_outcomes": outcomes, "loop_count": sum(item["loop_count"] for item in outcomes)}
 
 
-def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
-    """遍历完不等于业务通过，未执行项与阻断原因按真实结果汇总。"""
-    outcomes = state["rule_outcomes"]
-    planned_keys = {item["rule_key"] for item in state["evaluation_plan"]}
-    missing_keys = planned_keys - {item["rule_key"] for item in outcomes}
+def collect_agent_summary(
+    plan_keys: set[str], outcomes: list[dict[str, Any]], loop_count: int,
+) -> dict[str, Any]:
+    """按真实逐条结果汇总批次：遍历完不等于业务通过，未执行项与阻断原因照实记录。"""
+    missing_keys = plan_keys - {item["rule_key"] for item in outcomes}
     statuses = {item["loop_status"] for item in outcomes}
     overall = "DONE"
     for status in ("BLOCKED", "NEEDS_HUMAN"):
@@ -127,9 +145,18 @@ def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
     return {
         "origin": "AGENT", "evaluation_mode": "AGENT", "agent_rule_count": len(outcomes),
         "missing_rule_keys": sorted(missing_keys), "rule_outcomes": outcomes,
-        "loop_status": overall, "loop_count": state["loop_count"],
+        "loop_status": overall, "loop_count": loop_count,
         "unresolved_items": [item for outcome in outcomes for item in outcome["unresolved_items"]],
     }
+
+
+def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
+    """遍历完不等于业务通过，未执行项与阻断原因按真实结果汇总。"""
+    return collect_agent_summary(
+        {item["rule_key"] for item in state["evaluation_plan"]},
+        state["rule_outcomes"],
+        state["loop_count"],
+    )
 
 
 def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:

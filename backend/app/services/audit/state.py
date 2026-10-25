@@ -1,15 +1,15 @@
 """任务材料状态与执行进度；图恢复数据由 LangGraph 保存，不维护重复检查点表。"""
 
-
-from ...domain.audit_vocab import is_type_unavailable
-from ...domain.rule_library import is_risk_rule
-from ...common.exceptions import BusinessError
-from ...entity import AuditTask, DocumentUpload, NodeExecution, ScenarioVersion, TaskDocument, TaskFieldValue
-from .shared import _current_uploads, _scenario, _task_manifest
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ...common.exceptions import BusinessError
+from ...domain.audit_vocab import is_type_unavailable
+from ...entity.scenarios import ScenarioVersion
+from ...entity.tasks import AuditTask, NodeExecution
+from .shared import _current_uploads, _scenario, _task_manifest
 
 
 def _current_node_executions(db: Session, task: AuditTask) -> dict[str, NodeExecution]:
@@ -60,70 +60,6 @@ def _material_states(db: Session, task: AuditTask) -> dict[str, str | None]:
             states[document.material_key] = "ONLY_UPLOADED"
     return states
 
-def _task_field_value_of_current_upload(db: Session, task: AuditTask, field_value_id: int) -> TaskFieldValue | None:
-    """取当前上传版本的当前字段事实。
-
-    待复核项必须绑定当前事实版本。只校验上传版本而不校验 ``is_current``，
-    会让已经被重新抽取或人工纠错替换的旧事实仍可被提交，随后覆盖新事实。
-    历史事实仍保留给审计读取，但不能再作为待办裁决的写入目标。
-    """
-    row = db.scalar(
-        select(TaskFieldValue)
-        .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
-        .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
-        .where(
-            TaskFieldValue.id == field_value_id,
-            TaskFieldValue.audit_task_id == task.id,
-            TaskFieldValue.scenario_version_id == task.scenario_version_id,
-            TaskFieldValue.is_current.is_(True),
-            TaskDocument.audit_task_id == task.id,
-            TaskDocument.material_key == TaskFieldValue.material_key,
-            DocumentUpload.audit_task_id == task.id,
-            DocumentUpload.is_current.is_(True),
-            TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
-        )
-    )
-    return row
-
-
-def _result_material_keys(record: Any) -> set[str]:
-    """一条检查/风险结果实际涉及的材料 key。
-
-    来源是执行时保存的输入摘要（每条输入都带 material_key），而不是规则声明的适用材料：
-    规则可能适用于三种材料，但这次异常只发生在其中一种，报告按实际发生的材料筛选。
-    文件质量检查没有字段输入，它的归属写在同一结构里的 `inputs` 摘要中
-    （由 `_quality_material_inputs` 按逐份材料的判定结果生成）。Agent 工具的逐份判定
-    保存于 tool_calls.per_material；存在性检查显式保存 checked_material_keys。
-    """
-    payload = record.result_json if isinstance(record.result_json, dict) else {}
-    keys = {
-        str(item.get("material_key"))
-        for item in (payload.get("inputs") or [])
-        if isinstance(item, dict) and item.get("material_key")
-    }
-    # 材料工具没有字段事实，不从配置猜归属；只读取执行结果实际检查过的材料。
-    for result in [payload, *(payload.get("tool_calls") or [])]:
-        keys.update(str(key) for key in result.get("checked_material_keys", []))
-        keys.update(
-            str(item["material_key"])
-            for item in result.get("per_material", [])
-            if item.get("material_key") and item.get("status") != "NOT_APPLICABLE"
-        )
-    if not keys:
-        # 风险规则本身没有输入字段：它的材料归属只能来自当前有效的来源检查实例。
-        # 只用规则声明的适用材料会把范围外材料算进来，也说明不了这条风险实际发生在哪份材料。
-        keys = {
-            str(item.get("material_key"))
-            for item in (payload.get("source_instances") or [])
-            if isinstance(item, dict) and item.get("material_key")
-        }
-    return keys
-
-
-
-
-
-
 
 
 def _scenario_nodes(db: Session, task: AuditTask) -> tuple[ScenarioVersion, list[dict[str, Any]], int]:
@@ -134,24 +70,15 @@ def _scenario_nodes(db: Session, task: AuditTask) -> tuple[ScenarioVersion, list
         raise BusinessError("AUDIT_NODE_NOT_IN_SCENARIO", "当前节点不属于任务场景", status_code=500)
     return scenario, nodes, current_index
 
-def _task_checkpoint(task: AuditTask) -> dict[str, Any]:
-    """任务的流程进度标记：当前节点、阶段与节点序号。
-
-    它不承载图状态；执行不再有等待点，也不存在可恢复的图实例。
-    """
-    if not isinstance(task.checkpoint_json, dict):
-        raise BusinessError("AUDIT_PROGRESS_MISSING", "任务缺少流程进度标记", status_code=409)
-    return task.checkpoint_json
+def _task_phase(task: AuditTask) -> str:
+    """任务的当前阶段；节点序号由 current_node 在冻结节点顺序中的位置算出。"""
+    phase = task.current_phase
+    if not isinstance(phase, str) or not phase:
+        raise BusinessError("AUDIT_PROGRESS_MISSING", "任务缺少流程阶段标记", status_code=409)
+    return phase
 
 
-def _set_task_checkpoint(
-    task: AuditTask,
-    *,
-    node_index: int,
-    phase: str,
-) -> None:
-    task.checkpoint_json = {
-        "node_index": node_index,
-        "current_node": task.current_node,
-        "phase": phase,
-    }
+def _set_task_phase(task: AuditTask, phase: str) -> None:
+    if not phase:
+        raise BusinessError("AUDIT_PROGRESS_INVALID", "任务阶段不能为空", status_code=500)
+    task.current_phase = phase

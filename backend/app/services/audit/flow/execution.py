@@ -2,8 +2,9 @@
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....entity import AuditTask, NodeExecution
+from ....entity.tasks import AuditTask, NodeExecution
 
 
 def running_execution(db: Session, task: AuditTask) -> NodeExecution | None:

@@ -10,6 +10,7 @@ import { updateImportProposal } from "@/api/imports";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
 import { useRequestRunner } from "@/composables/useRequestRunner";
+import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
 import { formatBusinessValue, valueTypeLabel } from "@/constants/labels";
 
 const props = defineProps<{ job: ImportJob; readonly: boolean }>();
@@ -21,7 +22,7 @@ const statusFilter = ref("all");
 const savingRef = ref<string | null>(null);
 const editing = ref<ProposalRow | null>(null);
 const editRevision = ref(0);
-const form = reactive({ name: "", text: "", formula: "", required: false, role: "CHECK" as "CHECK" | "RISK", status: "" });
+const form = reactive({ name: "", text: "", formula: "", required: false, role: "CHECK" as "CHECK" | "RISK", mode: "UNKNOWN", status: "" });
 
 interface ProposalRow {
   ref: string;
@@ -33,6 +34,7 @@ interface ProposalRow {
   formula?: string;
   required?: boolean;
   role?: "CHECK" | "RISK";
+  mode?: string;
   status: string | null;
   fieldType?: string;
   unit?: string;
@@ -108,7 +110,7 @@ const rows = computed<ProposalRow[]>(() => {
     case "rules": return proposals.rules.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "rules", name: item.name, text: item.requirement,
       ruleCode: item.rule_code ?? item.source_id ?? null,
-      context: ruleRole(item) === "RISK" ? "风险结论" : "普通核查", role: ruleRole(item), status: item.config_status ?? null,
+      context: ruleRole(item) === "RISK" ? "风险结论" : "普通核查", role: ruleRole(item), mode: item.execution_mode ?? "UNKNOWN", status: item.config_status ?? null,
       materials: ruleMaterialsText(item),
       inputFields: ruleFieldsText(item),
       sourceRules: namesText([...item.comparison.source_rule_names,
@@ -134,6 +136,7 @@ const rows = computed<ProposalRow[]>(() => {
       formats: item.formats.join("、"),
       details: [{ label: "输出格式", value: item.formats.join("、") || "未声明" }],
     }));
+    default: return [];
   }
 });
 
@@ -166,7 +169,7 @@ function openEditor(row: ProposalRow): void {
   editing.value = row;
   editRevision.value = props.job.draft_revision;
   Object.assign(form, { name: row.name, text: row.text, formula: row.formula ?? "", required: row.required ?? false,
-    role: row.role ?? "CHECK", status: row.status ?? "" });
+    role: row.role ?? "CHECK", mode: row.mode ?? "UNKNOWN", status: row.status ?? "" });
 }
 
 async function persist(row: ProposalRow, changes: ImportProposalChanges, revision: number): Promise<boolean> {
@@ -202,7 +205,7 @@ async function saveEditor(): Promise<void> {
   switch (row.group) {
     case "materials": changes = { name, description: form.text, required: form.required }; break;
     case "fields": changes = { name, instruction: form.text, required: form.required }; break;
-    case "rules": changes = { name, requirement: form.text, rule_role: form.role }; break;
+    case "rules": changes = { name, requirement: form.text, rule_role: form.role, execution_mode: form.mode }; break;
     case "calculations": changes = { rule_name: name, formula: form.formula, requirement: form.text }; break;
     case "report_sections": changes = { section_name: name, content_instruction: form.text }; break;
   }
@@ -231,20 +234,24 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
     <FailureNotice v-if="!editing" :error="failure" @dismiss="failure = null" />
     <el-tabs v-model="activeGroup" class="proposal-tabs">
       <el-tab-pane v-for="tab in tabs" :key="tab.group" :name="tab.group">
-        <template #label><span class="proposal-tab">{{ tab.label }}<el-tag size="small" type="info" effect="plain">{{ tab.count }}</el-tag></span></template>
+        <template #label>
+          <span class="proposal-tab" :class="{ 'proposal-tab--empty': tab.count === 0 }">
+            {{ tab.label }}<span class="proposal-tab__count">{{ tab.count }}</span>
+          </span>
+        </template>
       </el-tab-pane>
     </el-tabs>
 
     <div class="proposal-toolbar">
-      <el-input v-model="query" size="small" :prefix-icon="Search" clearable :placeholder="`搜索${groupLabels[activeGroup]}名称或要求`" :aria-label="`搜索${groupLabels[activeGroup]}`" class="proposal-search" />
-      <el-select v-if="supportsStatus" v-model="statusFilter" size="small" aria-label="按配置状态筛选" class="proposal-filter">
-        <el-option value="all" label="全部状态" />
-        <el-option value="enabled" label="已启用" />
-        <el-option value="DISABLED" label="已暂停" />
-        <el-option value="PENDING" label="待确认" />
-      </el-select>
-      <span class="proposal-visible">显示 {{ filteredRows.length }} / {{ rows.length }} 项</span>
-    </div>
+    <el-input v-model="query" size="small" :prefix-icon="Search" clearable :placeholder="`搜索${groupLabels[activeGroup]}名称或要求`" :aria-label="`搜索${groupLabels[activeGroup]}`" class="proposal-search" />
+    <el-select v-if="supportsStatus" v-model="statusFilter" size="small" aria-label="按配置状态筛选" class="proposal-filter">
+      <el-option value="all" label="全部状态" />
+      <el-option value="enabled" label="已启用" />
+      <el-option value="DISABLED" label="已暂停" />
+      <el-option value="PENDING" label="待确认" />
+    </el-select>
+    <span class="proposal-visible">共 {{ filteredRows.length }} 项<template v-if="filteredRows.length !== rows.length">（已筛选，原 {{ rows.length }} 项）</template></span>
+  </div>
 
     <el-table
       :data="filteredRows" row-key="ref" size="small" border stripe
@@ -256,8 +263,11 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
       <el-table-column v-if="activeGroup === 'rules'" prop="ruleCode" label="规则 ID" width="130" show-overflow-tooltip>
         <template #default="{ row }"><span class="mono">{{ row.ruleCode || '未填写' }}</span></template>
       </el-table-column>
-      <el-table-column prop="name" :label="`${groupLabels[activeGroup]}名称`" min-width="180" show-overflow-tooltip>
-        <template #default="{ row }"><el-button link class="proposal-name" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button></template>
+      <el-table-column prop="name" :label="`${groupLabels[activeGroup]}名称`" min-width="180" show-overflow-tooltip class-name="cell-align-left">
+        <template #default="{ row }">
+          <el-button link class="proposal-name" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button>
+          <div v-if="activeGroup === 'rules'" class="table-note">{{ executionModeLabel(row.mode) }}</div>
+        </template>
       </el-table-column>
       <el-table-column v-if="activeGroup === 'rules'" prop="context" label="规则类型" width="94" />
       <el-table-column v-if="activeGroup === 'rules'" prop="materials" label="适用材料" min-width="130" show-overflow-tooltip>
@@ -320,6 +330,11 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
                 <el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认（不执行）" /><el-option value="DISABLED" label="暂停" />
               </el-select>
             </el-form-item>
+            <el-form-item v-if="editing.group === 'rules'" label="执行方式">
+              <el-select v-model="form.mode">
+                <el-option v-for="item in EXECUTION_MODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
+              </el-select>
+            </el-form-item>
             <el-form-item v-if="editing.group === 'rules'" label="规则类型"><el-select v-model="form.role"><el-option value="CHECK" label="普通核查" /><el-option value="RISK" label="风险结论" /></el-select></el-form-item>
             <el-form-item v-if="editing.group === 'materials' || editing.group === 'fields'" :label="editing.group === 'materials' ? '必须上传' : '必需字段'"><el-switch v-model="form.required" /></el-form-item>
           </div>
@@ -340,8 +355,24 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
 .proposal-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .proposal-heading p { margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
 .proposal-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
-.proposal-tabs :deep(.el-tabs__item) { height: 36px; }
+.proposal-tabs :deep(.el-tabs__item) { height: 36px; padding: 0 18px; font-size: 14px; }
 .proposal-tab { display: inline-flex; align-items: center; gap: 6px; }
+/* 数量用轻量徽标显示：不撑高标签栏，也不与状态标签混淆。 */
+.proposal-tab__count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--el-fill-color);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+.proposal-tab--empty .proposal-tab__count { opacity: 0.6; }
+.proposal-tabs :deep(.el-tabs__item.is-active) .proposal-tab__count {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
 .proposal-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .proposal-search { width: min(100%, 300px); }
 .proposal-filter { width: 140px; }

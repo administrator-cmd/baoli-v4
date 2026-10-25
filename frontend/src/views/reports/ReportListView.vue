@@ -12,6 +12,7 @@ import {
   setReportArchived,
   updateReportRemark,
 } from "@/api/reports";
+import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -25,7 +26,6 @@ const router = useRouter();
 
 const list = usePagedList<ReportRow, {
   name: string;
-  task_no: string;
   scenario_code: string;
   plan_code: string;
   archived: string;
@@ -34,11 +34,10 @@ const list = usePagedList<ReportRow, {
 }>(
   {
     key: "reports",
-    initialFilters: { name: "", task_no: "", scenario_code: "", plan_code: "", archived: "", generated_from: "", generated_to: "" },
+    initialFilters: { name: "", scenario_code: "", plan_code: "", archived: "", generated_from: "", generated_to: "" },
     fetch: (params) =>
       listReports({
         name: params.name || undefined,
-        task_no: params.task_no || undefined,
         scenario_code: params.scenario_code || undefined,
         plan_code: params.plan_code || undefined,
         archived: params.archived === "" ? undefined : params.archived === "true",
@@ -167,9 +166,6 @@ onMounted(async () => {
       <el-form-item label="报告名称">
         <el-input v-model="filters.name" clearable placeholder="请输入报告名称" style="width: 200px" @keyup.enter="list.search()" />
       </el-form-item>
-      <el-form-item label="任务编号">
-        <el-input v-model="filters.task_no" clearable placeholder="任务编号" style="width: 190px" @keyup.enter="list.search()" />
-      </el-form-item>
       <el-form-item label="所属方案">
         <el-select v-model="filters.plan_code" clearable filterable placeholder="全部方案" style="width: 200px">
           <el-option v-for="item in planOptions" :key="item.plan_code" :value="item.plan_code" :label="item.plan_name" />
@@ -207,7 +203,6 @@ onMounted(async () => {
     </div>
 
     <el-alert v-if="planOptionsError" type="warning" show-icon :closable="false" :title="`方案选项读取失败：${planOptionsError}`">
-      所属方案下拉为空，可改用任务编号筛选。
       <el-button size="small" @click="loadPlanOptions">重试</el-button>
     </el-alert>
 
@@ -215,53 +210,52 @@ onMounted(async () => {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
-      <el-table-column type="selection" width="50" />
-      <el-table-column label="报告名称" min-width="220" show-overflow-tooltip>
+    <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
+      <el-table-column type="selection" width="42" />
+      <el-table-column label="报告名称" min-width="172" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="openDetail(row)">{{ row.report_name }}</el-button>
           <el-tag v-if="row.stale" type="warning" size="small" effect="plain" disable-transitions>已失效</el-tag>
           <el-tag v-else-if="row.current" type="success" size="small" effect="plain" disable-transitions>当前</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="任务" min-width="180" show-overflow-tooltip>
+      <el-table-column label="任务" min-width="132" show-overflow-tooltip>
         <template #default="{ row }">
-          <span class="mono">{{ row.task_no }}</span>
-          <div class="text-hint">{{ row.task_name }}</div>
+          <el-button link type="primary" class="table-link" @click="openTask(row)">{{ row.task_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="场景版本" width="150">
+      <el-table-column label="场景版本" width="96" show-overflow-tooltip>
         <template #default="{ row }">
-          {{ row.scenario_name }}
-          <span v-if="row.scenario_version_no" class="text-hint"> · 第 {{ row.scenario_version_no }} 版</span>
+          <span>{{ row.scenario_name }}</span>
+          <div v-if="row.scenario_version_no" class="table-note">第 {{ row.scenario_version_no }} 版</div>
         </template>
       </el-table-column>
-      <el-table-column label="方案版本" width="140">
+      <el-table-column label="方案版本" width="112" show-overflow-tooltip>
         <template #default="{ row }">
           <span>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="范围完整性" width="110">
+      <el-table-column label="范围完整性" width="96">
         <template #default="{ row }">
           <el-tag :type="row.scope_execution_complete ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
             {{ row.scope_execution_complete ? "完整" : "未完整" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="风险可判定性" width="130">
+      <el-table-column label="风险可判定性" width="112">
         <template #default="{ row }">
           <el-tag :type="row.risk_conclusion_available ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
             {{ row.risk_conclusion_available ? "可判定" : "不可判定" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="生成时间" width="170">
-        <template #default="{ row }">{{ String(row.generated_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="生成时间" width="184">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.generated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="归档状态" width="100">
+      <el-table-column label="归档状态" width="88">
         <template #default="{ row }"><StatusBadge :status="row.status" /></template>
       </el-table-column>
-      <el-table-column label="操作" width="250" fixed="right">
+      <el-table-column label="操作" width="232" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openDetail(row)">查看</el-button>
           <el-button
@@ -329,11 +323,11 @@ onMounted(async () => {
             </ul>
           </el-alert>
           <el-descriptions :column="2" border size="small" class="block-gap-sm">
-            <el-descriptions-item label="任务">{{ detail.task_name }}（{{ detail.task_no }}）</el-descriptions-item>
+            <el-descriptions-item label="任务">{{ detail.task_name }}</el-descriptions-item>
             <el-descriptions-item label="方案版本">
               {{ detail.plan_name || "方案名称未记录" }}
             </el-descriptions-item>
-            <el-descriptions-item label="生成时间">{{ String(detail.generated_at).replace("T", " ").slice(0, 19) }}</el-descriptions-item>
+            <el-descriptions-item label="生成时间">{{ formatDate(String(detail.generated_at)) }}</el-descriptions-item>
             <el-descriptions-item label="输入修订">
               {{ detail.input_revision ?? "修订未知" }}（任务当前 {{ detail.task_input_revision ?? "—" }}）
             </el-descriptions-item>

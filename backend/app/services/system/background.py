@@ -12,14 +12,15 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...database import SessionLocal
-from ...common.exceptions import BusinessError, exception_summary, safe_error_details
-from ...entity import BackgroundOperation
-from ...domain.identity import public_no
-from .operation_log import normalized_request_hash
 
+from ...common.exceptions import BusinessError, exception_summary, safe_error_details
+from ...core.database import SessionLocal
+from ...domain.identity import public_no
+from ...entity.operations import BackgroundOperation
+from .operation_log import normalized_request_hash
 
 logger = logging.getLogger(__name__)
 

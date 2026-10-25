@@ -5,6 +5,9 @@ import { useRouter } from "vue-router";
 import type { RiskResultRow } from "@/api/contracts";
 import { listPlanOptions, type PlanOption } from "@/api/plans";
 import { listRiskResults, type RiskPage } from "@/api/reports";
+import { listAdminSceneOptions, type ScenarioOption } from "@/api/scenes";
+import { formatDate } from "@/constants/labels";
+import { RISK_RESULT_LABELS, riskResultLabel } from "@/constants/auditStatus";
 import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -16,12 +19,11 @@ import StatusBadge from "@/components/StatusBadge.vue";
  */
 const router = useRouter();
 
-const list = usePagedList<RiskResultRow, { task_no: string; scenario_code: string; plan_code: string; risk_level: string; status: string }>({
+const list = usePagedList<RiskResultRow, { scenario_code: string; plan_code: string; risk_level: string; status: string }>({
   key: "risk-results",
-  initialFilters: { task_no: "", scenario_code: "", plan_code: "", risk_level: "", status: "" },
+  initialFilters: { scenario_code: "", plan_code: "", risk_level: "", status: "" },
   fetch: (params) =>
     listRiskResults({
-      task_no: params.task_no || undefined,
       scenario_code: params.scenario_code || undefined,
       plan_code: params.plan_code || undefined,
       risk_level: params.risk_level || undefined,
@@ -57,12 +59,12 @@ const riskLevels = computed(() => {
 });
 
 const statusOptions = [
-  { value: "ABNORMAL", label: "异常（命中）" },
-  { value: "PASSED", label: "正常（未命中）" },
-  { value: "EVIDENCE_INSUFFICIENT", label: "证据不足" },
-  { value: "NOT_APPLICABLE", label: "不适用" },
-  { value: "NOT_EXECUTED", label: "未执行" },
-  { value: "PENDING_REVIEW", label: "未确认" },
+  { value: "ABNORMAL", label: RISK_RESULT_LABELS.ABNORMAL },
+  { value: "PASSED", label: RISK_RESULT_LABELS.PASSED },
+  { value: "EVIDENCE_INSUFFICIENT", label: RISK_RESULT_LABELS.EVIDENCE_INSUFFICIENT },
+  { value: "NOT_APPLICABLE", label: RISK_RESULT_LABELS.NOT_APPLICABLE },
+  { value: "NOT_EXECUTED", label: RISK_RESULT_LABELS.NOT_EXECUTED },
+  { value: "PENDING_REVIEW", label: RISK_RESULT_LABELS.PENDING_REVIEW },
 ];
 
 
@@ -70,6 +72,18 @@ const statusOptions = [
 /** 方案筛选下拉：与任务、报告页一致，读取失败时提示但不阻塞查询。 */
 const planOptions = ref<PlanOption[]>([]);
 const planOptionsError = ref<string | null>(null);
+const sceneOptions = ref<ScenarioOption[]>([]);
+const sceneOptionsError = ref<string | null>(null);
+
+async function loadSceneOptions(): Promise<void> {
+  sceneOptionsError.value = null;
+  try {
+    sceneOptions.value = (await listAdminSceneOptions()).items;
+  } catch (failure) {
+    sceneOptions.value = [];
+    sceneOptionsError.value = failure instanceof Error ? failure.message : "场景选项读取失败";
+  }
+}
 
 async function loadPlanOptions(): Promise<void> {
   planOptionsError.value = null;
@@ -89,6 +103,7 @@ const detail = ref<RiskResultRow | null>(null);
 
 onMounted(async () => {
   void loadPlanOptions();
+  void loadSceneOptions();
   void list.load();
 });
 </script>
@@ -101,16 +116,15 @@ onMounted(async () => {
       :show-refresh="false"
     />
     <el-form inline class="app-query" @submit.prevent="list.search()">
-      <el-form-item label="任务编号">
-        <el-input v-model="filters.task_no" clearable placeholder="任务编号" style="width: 190px" @keyup.enter="list.search()" />
-      </el-form-item>
       <el-form-item label="所属方案">
         <el-select v-model="filters.plan_code" clearable filterable placeholder="全部方案" style="width: 200px">
           <el-option v-for="item in planOptions" :key="item.plan_code" :value="item.plan_code" :label="item.plan_name" />
         </el-select>
       </el-form-item>
-      <el-form-item label="场景编码">
-        <el-input v-model="filters.scenario_code" clearable placeholder="场景编码" style="width: 170px" @keyup.enter="list.search()" />
+      <el-form-item label="所属场景">
+        <el-select v-model="filters.scenario_code" clearable filterable placeholder="全部场景" style="width: 200px">
+          <el-option v-for="item in sceneOptions" :key="item.scenario_code" :value="item.scenario_code" :label="item.scenario_name" />
+        </el-select>
       </el-form-item>
       <el-form-item label="风险等级">
         <el-select v-model="filters.risk_level" clearable placeholder="全部" style="width: 120px">
@@ -129,8 +143,11 @@ onMounted(async () => {
       </el-form-item>
     </el-form>
 
+    <el-alert v-if="sceneOptionsError" type="error" show-icon :closable="false" :title="`场景选项读取失败：${sceneOptionsError}`">
+      <el-button size="small" @click="loadSceneOptions">重试</el-button>
+    </el-alert>
+
     <el-alert v-if="planOptionsError" type="warning" show-icon :closable="false" :title="`方案选项读取失败：${planOptionsError}`">
-      所属方案下拉为空，可改用任务编号筛选。
       <el-button size="small" @click="loadPlanOptions">重试</el-button>
     </el-alert>
 
@@ -140,7 +157,7 @@ onMounted(async () => {
       type="warning"
       show-icon
       :closable="false"
-      title="当前筛选条件：仅显示命中（异常）的风险结果"
+      title="当前筛选条件：仅显示已确认风险的结果"
     />
 
     <div class="app-toolbar">
@@ -153,20 +170,20 @@ onMounted(async () => {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="风险编号" width="100">
-        <template #default="{ row }"><span class="mono">{{ row.result_id }}</span></template>
+    <el-table v-else :data="items" border stripe class="audit-result-table" v-loading="loading" empty-text="暂无数据">
+      <el-table-column label="风险编号" width="120">
+        <template #default="{ row }"><span class="mono">{{ row.rule_code || "—" }}</span></template>
       </el-table-column>
-      <el-table-column prop="task_name" label="任务" min-width="180" show-overflow-tooltip />
-      <el-table-column label="风险名称" min-width="200" show-overflow-tooltip>
+      <el-table-column prop="task_name" label="任务" min-width="128" show-overflow-tooltip />
+      <el-table-column label="风险名称" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="detail = row">{{ row.name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="来源规则" min-width="180" show-overflow-tooltip>
+      <el-table-column label="来源规则" min-width="112" show-overflow-tooltip>
         <template #default="{ row }">{{ row.source_rule_name || "—" }}</template>
       </el-table-column>
-      <el-table-column label="风险等级" width="100">
+      <el-table-column label="风险等级" width="104">
         <template #default="{ row }">
           <el-tag v-if="row.risk_level" type="info" size="small" effect="light" disable-transitions>
             {{ row.risk_level }}
@@ -174,16 +191,16 @@ onMounted(async () => {
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="当前状态" width="130">
-        <template #default="{ row }"><StatusBadge :status="row.status" /></template>
+      <el-table-column label="当前状态" width="120">
+        <template #default="{ row }"><StatusBadge :status="row.status" :label="riskResultLabel(row.status)" /></template>
       </el-table-column>
-      <el-table-column label="处理建议" min-width="220" show-overflow-tooltip>
+      <el-table-column label="处理建议" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">{{ row.suggestion || "—" }}</template>
       </el-table-column>
-      <el-table-column label="创建时间" width="170">
-        <template #default="{ row }">{{ String(row.created_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="创建时间" width="184">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
+      <el-table-column label="操作" width="136" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="detail = row">详情</el-button>
           <el-button link type="primary" size="small" @click="openTask(row)">查看任务</el-button>
@@ -206,18 +223,17 @@ onMounted(async () => {
 
     <el-drawer :model-value="Boolean(detail)" title="风险结果详情" size="520px" @close="detail = null">
       <el-descriptions v-if="detail" :column="1" border size="small">
-        <el-descriptions-item label="风险编号"><span class="mono">{{ detail.result_id }}</span></el-descriptions-item>
-        <el-descriptions-item label="任务">{{ detail.task_name }}（{{ detail.task_no }}）</el-descriptions-item>
+        <el-descriptions-item label="风险编号"><span class="mono">{{ detail.rule_code || "—" }}</span></el-descriptions-item>
+        <el-descriptions-item label="任务">{{ detail.task_name }}</el-descriptions-item>
         <el-descriptions-item label="风险名称">{{ detail.name }}</el-descriptions-item>
-        <el-descriptions-item label="规则键"><span class="mono">{{ detail.rule_key }}</span></el-descriptions-item>
         <el-descriptions-item label="来源规则">{{ detail.source_rule_name || "未记录来源规则" }}</el-descriptions-item>
         <el-descriptions-item label="风险等级">{{ detail.risk_level || "—" }}</el-descriptions-item>
         <el-descriptions-item label="当前状态">
-          <StatusBadge :status="detail.status" />
+          <StatusBadge :status="detail.status" :label="riskResultLabel(detail.status)" />
           <div class="text-muted block-gap-sm">{{ detail.message }}</div>
         </el-descriptions-item>
         <el-descriptions-item label="处理建议">{{ detail.suggestion || "—" }}</el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ String(detail.created_at).replace("T", " ").slice(0, 19) }}</el-descriptions-item>
+        <el-descriptions-item label="创建时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
       </el-descriptions>
       <div class="app-toolbar">
         <div class="app-toolbar__left">

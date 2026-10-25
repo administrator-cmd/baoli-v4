@@ -1,15 +1,17 @@
-"""真实工具的接口参数检查、输入解析和调用，不维护快照指纹或独立账本。"""
+"""真实工具的接口参数检查、输入解析和调用。"""
 
 from __future__ import annotations
+
 import importlib
 import logging
 from typing import Any
+
+from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from langchain_core.tools import BaseTool
+
+from ....common.exceptions import BusinessError
 from ....domain import tool_catalog
 from ....domain.tool_context import ToolExecutionContext
-from ....common.exceptions import BusinessError
-from jsonschema import Draft202012Validator, SchemaError, ValidationError
-
 
 logger = logging.getLogger(__name__)
 

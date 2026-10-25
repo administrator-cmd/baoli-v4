@@ -1,15 +1,19 @@
 """材料前置处理、依赖计划、规则实例与模型上下文。"""
 
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ....domain.audit_vocab import LOOP_RUNNING
+
+from ....common.exceptions import BusinessError
+from ....constants.status import LOOP_RUNNING
+from ....domain.execution_mode import EXECUTION_MODES, MODE_UNKNOWN
 from ....domain.rule_library import active
-from ....entity import AuditTask
-from ..tasks.lookup import task_or_404
+from ....entity.tasks import AuditTask
 from ..shared import _material_names, _task_manifest
+from ..tasks.lookup import task_or_404
+from .errors import agent_step
 from .execution import execution_in_progress
 from .shared import agent_module, rule_of_instance
-from .errors import agent_step
 
 
 def _enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) -> list[dict[str, Any]]:
@@ -19,6 +23,24 @@ def _enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) ->
         for rule in manifest["rules"]
         if active(rule) and rule.get("node") == node_code and rule.get("rule_key") in enabled_keys
     ]
+
+
+def _assert_execution_modes(rules: list[dict[str, Any]]) -> None:
+    """旧任务快照没有执行方式时明确拒绝，不按普通核查的旧逻辑继续跑。"""
+    missing = [
+        str(rule.get("name") or rule.get("rule_key") or "")
+        for rule in rules
+        if str(rule.get("execution_mode") or MODE_UNKNOWN) not in EXECUTION_MODES
+        or str(rule.get("execution_mode") or MODE_UNKNOWN) == MODE_UNKNOWN
+    ]
+    if missing:
+        names = "、".join(missing[:8])
+        more = f" 等 {len(missing)} 条" if len(missing) > 8 else ""
+        raise BusinessError(
+            "RULE_EXECUTION_MODE_MISSING",
+            f"本次任务快照没有确定执行方式：{names}{more}。请重新发布场景并新建任务；旧任务不会按默认核查方式执行。",
+            details={"rules": missing},
+        )
 
 
 def _plan_entry(node_code: str, cursor: int, rule: dict[str, Any]) -> dict[str, Any]:
@@ -65,7 +87,9 @@ def graph_load_evaluation(
         manifest = _task_manifest(task)
         execution = execution_in_progress(db, task, execution_id)
         from ....domain.rule_library import execution_order
-        agent_rules = execution_order(_enabled_rules(task, manifest, node_code), all_rules=manifest["rules"])
+        enabled_rules = _enabled_rules(task, manifest, node_code)
+        _assert_execution_modes(enabled_rules)
+        agent_rules = execution_order(enabled_rules, all_rules=manifest["rules"])
         return {
             "agent_mode": True,
             "evaluation_plan": [_plan_entry(node_code, index, rule) for index, rule in enumerate(agent_rules)],
@@ -114,6 +138,11 @@ def graph_load_rule_instance(
                 "material_refs": list(rule.get("materials") or []),
                 "materials": data["materials"],
                 "facts": data["facts"],
+                # 输入未形成取值时，未执行原因要用业务字段名而不是内部键。
+                "field_names": {
+                    str(field.get("field_key")): str(field.get("name") or field.get("field_key"))
+                    for field in task.task_schema_json.get("fields") or []
+                },
             },
             "allowed_tools": allowed,
             "messages": None,

@@ -15,7 +15,6 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from ..common.exceptions import BusinessError
 
-
 RAW_TEXT = "RAW_TEXT"
 DETERMINISTIC = "DETERMINISTIC"
 STRUCTURED = "STRUCTURED"

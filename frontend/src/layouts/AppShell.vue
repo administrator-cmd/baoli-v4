@@ -32,15 +32,14 @@ const menuGroups = [
     icon: ClipboardList,
     items: [
       { path: "/plans", title: "方案列表" },
-      { path: "/plans/edit", title: "方案编辑" },
+      { path: "/plans/edit", title: "方案配置" },
     ],
   },
   {
-    name: "审核管理",
+    name: "任务管理",
     icon: ListChecks,
     items: [
       { path: "/audit-tasks", title: "审核任务" },
-      { path: "/executions", title: "执行记录" },
     ],
   },
   {
@@ -48,7 +47,7 @@ const menuGroups = [
     icon: FolderOpen,
     items: [
       { path: "/documents", title: "审核材料" },
-      { path: "/evidence", title: "证据记录" },
+      { path: "/rulebooks", title: "规则库管理" },
     ],
   },
   {

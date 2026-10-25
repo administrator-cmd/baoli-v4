@@ -1,11 +1,12 @@
 """系统状态与外部服务配置接口。"""
 
 from datetime import UTC, datetime
-from fastapi import APIRouter, Request
-from ...config import get_settings
-from ...schema.vo import SystemServiceItem, SystemServicesResponse, SystemStatusResponse
-from ...services.system import status as system_status_service
 
+from fastapi import APIRouter, Request
+
+from ...core.config import get_settings
+from ...schema.vo.system import SystemServiceItem, SystemServicesResponse, SystemStatusResponse
+from ...services.system import status as system_status_service
 
 router = APIRouter(prefix="/system", tags=["系统"])
 

@@ -1,27 +1,17 @@
 """审核执行、材料核对与 OCR 重试的后台命令提交。"""
 
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditTask, NodeExecution
-from ...schema.dto import ExecuteNodeRequest
+from ...entity.tasks import AuditTask, NodeExecution
+from ...schema.dto.tasks import ExecuteNodeRequest
+from ..shared.commands import _idempotency_key, _reject_unsupported_resume
 from ..system import background as background_service
 from ..system.background import PHASE_GRAPH_ADVANCED, PHASE_INTERRUPT_WAITING
 from ..system.operation_types import OBJECT_AUDIT_TASK
-from ..shared.commands import _idempotency_key, _reject_unsupported_resume
-
-
-def _manifest_of_task(task: AuditTask) -> dict[str, Any]:
-    """任务创建时冻结的方案 manifest。
-
-    节点归属必须按它解析：`task.current_node` 是节点实例码（用户配置的），
-    拿它与能力类型比较在用户改了实例码之后恒为假，人工复核等待点会永远判定不成立。
-    """
-    manifest = task.manifest_json
-    if not isinstance(manifest, dict) or not manifest:
-        raise BusinessError("TASK_MANIFEST_MISSING", "任务缺少已冻结的执行配置", status_code=500)
-    return manifest
 
 
 def _reject_stale_input_revision(task: AuditTask, input_revision: int | None) -> None:
@@ -93,15 +83,80 @@ def submit_node_execution(
     )
 
 
+def submit_node_resume(
+    db: Session,
+    task: AuditTask,
+    *,
+    execution_id: int,
+    idempotency_key: str | None,
+    input_revision: int | None = None,
+) -> tuple[Any, bool]:
+    """提交「继续执行」：在同一执行批次里重跑未完成规则及其下游。
+
+    与「重新尝试」不同，继续执行不失效旧批次、不重跑不受影响的已有结果；
+    目标批次在受理时确定，后台执行前再校验一次，避免继续过期批次。
+    """
+    from . import resume as audit_resume
+
+    request = {"task_no": task.task_no, "execution_id": execution_id, "input_revision": input_revision}
+
+    def validate() -> None:
+        if task.status == "COMPLETED":
+            raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
+        if task.status == "RUNNING":
+            raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行，不能并发恢复", status_code=409)
+        if db.scalar(select(NodeExecution.id).where(
+            NodeExecution.audit_task_id == task.id, NodeExecution.status == "RUNNING",
+        ).limit(1)) is not None:
+            raise BusinessError("AUDIT_NODE_RUNNING", "任务已有执行中的批次，不能重复提交", status_code=409)
+        target = db.get(NodeExecution, execution_id)
+        if target is None or target.audit_task_id != task.id:
+            raise BusinessError(
+                "AUDIT_EXECUTION_MISSING", "恢复目标执行批次不存在", status_code=404,
+                details={"execution_id": execution_id},
+            )
+        if audit_resume.resumable_execution(task, target) is None:
+            raise BusinessError(
+                "AUDIT_EXECUTION_NOT_RESUMABLE",
+                "该执行批次没有可继续的未完成项，请使用「重新尝试」",
+                status_code=409,
+                details={"execution_id": execution_id, "status": target.status,
+                         "failure_code": target.failure_code},
+            )
+        _reject_stale_input_revision(task, input_revision)
+
+    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
+        _reject_unsupported_resume(command)
+        content = command.request
+        result = audit_resume.resume_interrupted_execution(
+            session, content["task_no"], execution_id=content["execution_id"],
+        )
+        command.phase(PHASE_GRAPH_ADVANCED if result.get("task_status") == "COMPLETED" else PHASE_INTERRUPT_WAITING)
+        return result
+
+    return background_service.submit_operation(
+        db,
+        object_type=OBJECT_AUDIT_TASK,
+        object_no=task.task_no,
+        operation_type="NODE_RESUME",
+        idempotency_key=_idempotency_key(idempotency_key),
+        request=request,
+        runner=runner,
+        target_node=task.current_node,
+        input_version=str(task.input_revision),
+        validate=validate,
+    )
+
+
 def submit_document_classification(db: Session, task: AuditTask, upload) -> tuple[Any, bool]:
     """上传保存与分类命令在同一事务认领，提交后由独立会话执行 8018。"""
     request = {"task_no": task.task_no, "upload_id": upload.id, "input_revision": task.input_revision}
 
     def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
-        from ...entity import DocumentUpload, TaskDocument
+        from ...entity.tasks import DocumentUpload, TaskDocument
+        from ..shared.storage import resolve_storage_path
         from .artifacts import _ensure_external_artifact
         from .document_ports import document_service
-        from ..shared.storage import resolve_storage_path
 
         content = command.request
         current = session.scalar(select(AuditTask).where(AuditTask.task_no == content["task_no"]))

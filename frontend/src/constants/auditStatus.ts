@@ -28,6 +28,20 @@ export const AUDIT_RESULT_LABELS: Record<AuditResultStatus, string> = {
   SKIPPED: "已跳过",
 };
 
+/** 风险规则使用风险结论措辞，未命中单条规则不代表整个任务无风险。 */
+export const RISK_RESULT_LABELS: Readonly<Record<AuditResultStatus, string>> = {
+  ...AUDIT_RESULT_LABELS,
+  PASSED: "未命中风险",
+  ABNORMAL: "已确认风险",
+  NOT_APPLICABLE: "本次不适用",
+  EVIDENCE_INSUFFICIENT: "无法判断",
+  PENDING_REVIEW: "待确认",
+};
+
+export function riskResultLabel(status: string): string | null {
+  return RISK_RESULT_LABELS[status as AuditResultStatus] ?? null;
+}
+
 export const AUDIT_RESULT_TONES: Record<AuditResultStatus, StatusTone> = {
   PASSED: "success",
   ABNORMAL: "danger",

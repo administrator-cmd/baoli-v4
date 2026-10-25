@@ -1,12 +1,18 @@
 """从方案创建任务及复制任务的业务写入。"""
 
 from copy import deepcopy
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
-from ....entity import AuditPlan, AuditTask, ScenarioTemplate, ScenarioVersion, TaskDocument
+from ....constants.status import TASK_PHASE_AWAITING_CONFIRMATION
 from ....domain.identity import public_no
+from ....domain.manifest import build_task_schema
 from ....domain.rule_library import execution_container_of
+from ....entity.plans import AuditPlan
+from ....entity.scenarios import ScenarioTemplate, ScenarioVersion
+from ....entity.tasks import AuditTask, TaskDocument
 from .lookup import task_or_404
 
 
@@ -21,9 +27,9 @@ def create_task_from_plan(
 ) -> AuditTask:
     """使用审核方案创建审核任务。这是新任务的唯一创建服务。
 
-    同一事务里先锁定方案行，再校验方案、场景和已固定版本。通过后把创建时确认的方案范围整体
-    冻结进 task_schema_json：场景版本、节点、Sheet、规则、材料与字段，以及方案的编号、名称与
-    范围指纹。任务之后一切读取都从这里取，不再读方案当前名称或方案后来重算的范围。
+    同一事务里先锁定方案行，再校验方案、场景和已固定版本。通过后把方案的编译产物冻结进
+    `manifest_json`，并按它现算生效范围写入 `task_schema_json`（规则与字段清单，以及方案的
+    编号、名称与范围指纹）。任务之后一切读取都从这里取，不再读方案当前名称或方案后来重算的范围。
 
     `expected_scope_hash` 是页面预览时看到的方案范围指纹：与锁定后的实际指纹不一致时明确返回
     `PLAN_SCOPE_CHANGED`——任务必须冻结用户刚刚确认的那一版范围，不在创建时静默取一个已经改过
@@ -110,37 +116,27 @@ def create_task_from_plan(
                 "current_scope_hash": plan.scope_hash,
             },
         )
-    scope = plan.scope_json if isinstance(plan.scope_json, dict) else None
-    # scope_json 本身就是保存时算好的任务 schema（外挂材料/字段数量与场景引用）：
-    # 任务直接抓这一份，不重新解释选择。
-    if not isinstance(scope, dict) or "enabled_rule_keys" not in scope:
-        raise BusinessError(
-            "PLAN_SCOPE_UNAVAILABLE",
-            "方案当前范围尚未生效，不能创建任务；请在方案页处理待核对项后重试",
-            status_code=409,
-            details={"plan_code": plan.plan_code},
-        )
-    schema = dict(scope)
     manifest = plan.manifest_json
-    if not isinstance(manifest, dict):
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("rules"), list):
         raise BusinessError(
             "PLAN_MANIFEST_UNAVAILABLE",
             "方案当前没有可执行配置，不能创建任务",
             status_code=409,
             details={"plan_code": plan.plan_code},
         )
-    # 使用用户已确认的生效范围创建任务，不改写方案。
-    schema["scenario_code"] = scenario.scenario_code
-    schema["scenario_name"] = scenario.scenario_name
-    schema["scenario_version_no"] = scenario.version_no
-    # 方案身份与范围指纹随任务冻结：任务详情与幂等重放都读它，
-    # 不读方案后来改过的名称或重算过的范围。
-    schema["plan_code"] = plan.plan_code
-    schema["plan_name"] = plan.plan_name
-    schema["plan_scope_hash"] = plan.scope_hash
-    schema["node_plan"] = [dict(item) for item in manifest.get("nodes") or []]
+    if plan.sync_error is not None or plan.scope_hash is None:
+        raise BusinessError(
+            "PLAN_SCOPE_UNAVAILABLE",
+            "方案当前范围尚未生效，不能创建任务；请在方案页处理待核对项后重试",
+            status_code=409,
+            details={"plan_code": plan.plan_code},
+        )
+    # 范围是 manifest 的纯函数结果，创建任务时现算，不读方案保存时的副本。
+    schema = {**build_task_schema(manifest, None, allow_empty=True),
+              # 方案身份随任务冻结：方案后来改名或删除都不影响任务展示与幂等回放。
+              "plan_code": plan.plan_code, "plan_name": plan.plan_name,
+              "plan_scope_hash": plan.scope_hash}
     first_node = execution_container_of(manifest)
-    first_node_index = 0
     task = AuditTask(
         task_no=task_no or public_no("TASK"),
         scenario_version_id=scenario.id,
@@ -149,13 +145,9 @@ def create_task_from_plan(
         remark=remark,
         status="READY",
         current_node=first_node["node_code"],
+        current_phase=TASK_PHASE_AWAITING_CONFIRMATION,
         manifest_json=deepcopy(manifest),
         task_schema_json=schema,
-        checkpoint_json={
-            "node_index": first_node_index,
-            "current_node": first_node["node_code"],
-            "phase": "AWAITING_CONFIRMATION",
-        },
     )
     db.add(task)
     db.flush()

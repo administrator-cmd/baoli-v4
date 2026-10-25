@@ -20,7 +20,7 @@ import { usePagedList } from "@/composables/usePagedList";
 import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { DetailTab } from "@/constants/auditWorkspaces";
-import { statusLabel } from "@/constants/labels";
+import { formatDate, statusLabel } from "@/constants/labels";
 
 /**
  * 审核任务列表：任务从已启用且配置生效的方案创建；
@@ -83,7 +83,7 @@ function openTask(row: AuditTaskRow, tab?: DetailTab): void {
 }
 
 /**
- * 操作列按状态提供任务详情入口；「更多」只提供名称备注编辑和删除。
+ * 操作列按状态提供任务详情入口：
  *   待执行   → 进入审核；
  *   执行中   → 查看进度；
  *   历史等待复核 → 查看记录；
@@ -295,26 +295,6 @@ async function submitEdit(): Promise<void> {
 }
 
 /* 永久删除 */
-async function removeRow(row: AuditTaskRow): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `确认删除任务「${row.task_name}」？删除后，该任务的材料文件和审核结果将一并永久删除，无法恢复。`,
-      "删除审核任务",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  try {
-    await deleteAuditTask(row.task_no);
-    ElMessage.success("任务已永久删除");
-    selectedRows.value = [];
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
-  }
-}
-
 async function deleteSelected(): Promise<void> {
   const targets = selectedRows.value;
   if (!targets.length) {
@@ -370,13 +350,13 @@ async function loadFilterOptions(): Promise<void> {
 <template>
   <div class="app-panel audit-task-list">
     <PageHeader
-      eyebrow="审核管理"
+      eyebrow="任务管理"
       title="审核任务"
       :show-refresh="false"
     />
     <el-form class="app-query task-query" @submit.prevent="list.search()">
-      <el-form-item label="任务/编号">
-        <el-input v-model="filters.name" clearable placeholder="任务名称或任务编号" @keyup.enter="list.search()" />
+      <el-form-item label="任务名称">
+        <el-input v-model="filters.name" clearable placeholder="任务名称" @keyup.enter="list.search()" />
       </el-form-item>
       <el-form-item label="方案">
         <el-select v-model="filters.plan_code" clearable filterable placeholder="全部方案">
@@ -419,15 +399,12 @@ async function loadFilterOptions(): Promise<void> {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
+    <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
       <el-table-column type="selection" width="50" />
-      <el-table-column label="任务编号" width="170">
-        <template #default="{ row }">
-          <el-button link type="primary" class="table-link mono" @click="openTask(row)">{{ row.task_no }}</el-button>
-        </template>
-      </el-table-column>
       <el-table-column label="任务名称" min-width="200" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.task_name }}</template>
+        <template #default="{ row }">
+          <el-button link type="primary" class="table-link" @click="openTask(row)">{{ row.task_name }}</el-button>
+        </template>
       </el-table-column>
       <el-table-column label="方案" min-width="190">
         <template #default="{ row }">
@@ -439,26 +416,18 @@ async function loadFilterOptions(): Promise<void> {
           <StatusBadge :status="row.status" :label="row.status === 'COMPLETED' ? '执行已结束' : statusLabel(row.status)" />
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="170">
-        <template #default="{ row }">{{ String(row.created_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="创建时间" width="190">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="更新时间" width="170">
-        <template #default="{ row }">{{ String(row.updated_at).replace("T", " ").slice(0, 19) }}</template>
+      <el-table-column label="更新时间" width="190">
+        <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="150" fixed="right">
+      <el-table-column label="操作" width="136" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openTask(row, primaryEntry(row).tab)">
             {{ primaryEntry(row).label }}
           </el-button>
-          <el-dropdown trigger="click">
-            <el-button link type="primary" size="small">更多</el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item @click="openEdit(row)">编辑名称与备注</el-dropdown-item>
-                <el-dropdown-item divided @click="removeRow(row)">删除任务</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
         </template>
       </el-table-column>
     </el-table>

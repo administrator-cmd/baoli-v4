@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type { AuditRule, RuleStatusItem } from "@/api/contracts";
 import { getRuleStatusCatalog } from "@/api/system";
 import AuditRuleDetailDrawer from "@/components/audit/AuditRuleDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { auditResultSummary, AUDIT_RESULT_CATEGORIES } from "@/constants/auditStatus";
+import { isOutputRule, isOutputRuleGroup, ruleGroupOf } from "@/constants/auditRuleGroups";
+import { auditResultSummary, AUDIT_RESULT_CATEGORIES, UNDECIDED_RESULT_STATUSES } from "@/constants/auditStatus";
+import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
 import { statusTone } from "@/constants/labels";
+import { quoteInlineText } from "@/utils/quoteText";
+import { compareNaturalLabels } from "@/utils/naturalSort";
 import {
   formatInputValue,
   manualNote,
@@ -16,6 +20,7 @@ import {
   payloadOf,
   reasonText,
   resultStatusLabel,
+  ruleCodeOf,
   standardText,
   valueSourcesOf,
 } from "@/utils/auditRulePresentation";
@@ -27,6 +32,12 @@ const props = defineProps<{ rules: AuditRule[] }>();
 
 const search = ref("");
 const statusFilter = ref("ALL");
+const modeFilter = ref("");
+const sheetFilter = ref("");
+/** 筛选项取自已有的来源工作表，不将展示用的缺省分组当成 Sheet。 */
+const sheetOptions = computed(() => Array.from(new Set(
+  props.rules.map((rule) => rule.source_sheet).filter((sheet): sheet is string => Boolean(sheet)),
+)).sort(compareNaturalLabels));
 /**
  * 服务端规则状态目录。分档以它为准，页面不再本地维护一份名单——
  * 本地名单与后端漂移过（`NOT_APPLICABLE`、`SKIPPED` 曾被漏出分档）。
@@ -97,6 +108,7 @@ const rows = computed(() => {
   const query = search.value.trim().toLocaleLowerCase();
   return props.rules.filter((rule) => {
     const text = [
+      ruleCodeOf(rule),
       rule.name,
       standardText(rule),
       rule.message,
@@ -110,21 +122,74 @@ const rows = computed(() => {
         item.message,
         formatInputValue(item),
       ]),
-      ...(rule.evidence ?? []).flatMap((item) => [item.material_name, item.filename, item.quote_text]),
+      ...rule.evidence.flatMap((item) => [item.material_name, item.document_name, quoteInlineText(item.quote_text)]),
     ]
       .join(" ")
       .toLocaleLowerCase();
     return (
       matchesFilter(rule, selected) &&
+      (!modeFilter.value || (rule.execution_mode || "UNKNOWN") === modeFilter.value) &&
+      (!sheetFilter.value || rule.source_sheet === sheetFilter.value) &&
       (!query || text.includes(query))
     );
-  });
+  }).sort((left, right) => compareNaturalLabels(ruleCodeOf(left), ruleCodeOf(right)));
 });
 
 function clearFilters(): void {
   search.value = "";
   statusFilter.value = "ALL";
+  modeFilter.value = "";
+  sheetFilter.value = "";
 }
+
+/* 分组：按任务冻结的来源工作表，不写死场景或规则编号 */
+
+interface RuleGroupView {
+  label: string;
+  rows: AuditRule[];
+  abnormal: number;
+  undecided: number;
+  riskOnly: boolean;
+}
+
+const groupOrder = computed(() => Array.from(new Set(props.rules.map(ruleGroupOf))).sort(compareNaturalLabels));
+
+const groups = computed<RuleGroupView[]>(() =>
+  groupOrder.value
+    .map((label) => {
+      const matched = rows.value.filter((rule) => ruleGroupOf(rule) === label);
+      const judged = matched.filter((rule) => !isOutputRule(rule));
+      return {
+        label,
+        rows: matched,
+        abnormal: judged.filter((rule) => rule.status === "ABNORMAL").length,
+        undecided: judged.filter((rule) => UNDECIDED_RESULT_STATUSES.has(rule.status)).length,
+        riskOnly: judged.length > 0 && judged.every((rule) => rule.is_risk_rule),
+      };
+    })
+    .filter((group) => group.rows.length),
+);
+
+/** 默认展开审核规则组；整组都是抽取/报告产出时收起，组头计数仍可见。 */
+function defaultExpandedGroups(): string[] {
+  const byGroup = new Map<string, AuditRule[]>();
+  for (const rule of props.rules) {
+    const label = ruleGroupOf(rule);
+    byGroup.set(label, [...(byGroup.get(label) ?? []), rule]);
+  }
+  return Array.from(byGroup.entries())
+    .filter(([, rules]) => !isOutputRuleGroup(rules))
+    .map(([label]) => label);
+}
+
+const expandedGroups = ref<string[]>(defaultExpandedGroups());
+const filtering = computed(() => Boolean(search.value.trim()) || statusFilter.value !== "ALL" || Boolean(modeFilter.value) || Boolean(sheetFilter.value));
+
+watch([search, statusFilter, modeFilter, sheetFilter], () => {
+  expandedGroups.value = filtering.value
+    ? groups.value.map((group) => group.label)
+    : defaultExpandedGroups();
+});
 
 /* 详情抽屉 */
 
@@ -145,10 +210,16 @@ function openDetail(rule: AuditRule): void {
 
   <div v-else class="rule-list">
     <div class="rule-toolbar">
-      <el-input v-model="search" clearable placeholder="搜索审核事项或原因" aria-label="搜索审核结果" class="rule-search" />
+      <el-input v-model="search" clearable placeholder="搜索编号、审核事项或原因" aria-label="搜索审核结果" class="rule-search" />
       <el-select v-model="statusFilter" aria-label="按审核结论筛选" class="rule-status-filter">
         <el-option v-for="filter in filters" :key="filter.value" :value="filter.value"
           :label="`${filter.label}（${rules.filter((rule) => matchesFilter(rule, filter)).length}）`" />
+      </el-select>
+      <el-select v-model="modeFilter" clearable aria-label="按执行方式筛选" class="rule-mode-filter" placeholder="全部执行方式">
+        <el-option v-for="item in EXECUTION_MODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
+      </el-select>
+      <el-select v-model="sheetFilter" clearable filterable aria-label="按来源 Sheet 筛选" class="rule-sheet-filter" placeholder="全部 Sheet">
+        <el-option v-for="sheet in sheetOptions" :key="sheet" :value="sheet" :label="sheet" />
       </el-select>
       <span class="text-hint rule-count">显示 {{ rows.length }} / {{ rules.length }} 项</span>
     </div>
@@ -175,40 +246,54 @@ function openDetail(rule: AuditRule): void {
       <el-button @click="clearFilters">清除筛选</el-button>
     </el-empty>
 
-    <!-- 紧凑表格：几十条规则也能一眼扫完，需要细看的再打开抽屉 -->
-    <el-table v-else :data="rows" class="result-table" @row-click="openDetail">
-      <el-table-column label="审核事项" min-width="220">
-        <template #default="{ row }">
-          <span class="cell-strong">{{ row.name }}</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="关联材料" min-width="140">
-        <template #default="{ row }">{{ materialsOf(row) || '—' }}</template>
-      </el-table-column>
-
-      <el-table-column label="结论" width="132">
-        <template #default="{ row }">
-          <StatusBadge :status="row.status" :label="resultStatusLabel(row)" :tone="statusTone(row.status)" />
-        </template>
-      </el-table-column>
-
-      <el-table-column label="原因" min-width="400">
-        <template #default="{ row }">
-          <div class="rule-reason">
-            <span v-if="manuallyReviewed(row)">{{ manualNote(row) || "本次人工复核没有记录说明" }}</span>
-            <span v-else>{{ auditResultSummary(row.status, row.message, payloadOf(row)) }}</span>
+    <el-collapse v-else v-model="expandedGroups" class="rule-groups">
+      <el-collapse-item v-for="group in groups" :key="group.label" :name="group.label">
+        <template #title>
+          <div class="rule-group-head">
+            <span class="rule-group-title">{{ group.label }}</span>
+            <span class="text-hint">{{ group.rows.length }} 条</span>
+            <span v-if="group.abnormal" class="rule-group-count rule-group-count--danger">{{ group.riskOnly ? '已确认风险' : '异常' }} {{ group.abnormal }}</span>
+            <span v-if="group.undecided" class="rule-group-count rule-group-count--warning">未判定 {{ group.undecided }}</span>
           </div>
-          <div v-if="reasonText(row)" class="table-note rule-reason">{{ reasonText(row) }}</div>
         </template>
-      </el-table-column>
 
-      <el-table-column label="操作" width="100" fixed="right" align="center">
-        <template #default="{ row }">
-          <el-button link type="primary" size="small" @click.stop="openDetail(row)">查看详情</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+        <el-table :data="group.rows" border class="audit-result-table result-table" @row-click="openDetail">
+          <el-table-column label="审核事项" width="220" align="center">
+            <template #default="{ row }">
+              <span class="cell-strong">{{ row.name }}</span>
+              <div class="table-note">{{ executionModeLabel(row.execution_mode) }}</div>
+              <div v-if="ruleCodeOf(row)" class="table-note mono">{{ ruleCodeOf(row) }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="关联材料" width="128" align="center">
+            <template #default="{ row }">{{ materialsOf(row) || '—' }}</template>
+          </el-table-column>
+
+          <el-table-column label="结论" width="120" align="center">
+            <template #default="{ row }">
+              <StatusBadge :status="row.status" :label="resultStatusLabel(row)" :tone="statusTone(row.status)" />
+            </template>
+          </el-table-column>
+
+          <el-table-column label="判断依据" min-width="400" align="center">
+            <template #default="{ row }">
+              <div class="rule-reason">
+                <span v-if="manuallyReviewed(row)">{{ manualNote(row) || "本次人工复核没有记录说明" }}</span>
+                <span v-else>{{ auditResultSummary(row.status, row.message, payloadOf(row)) }}</span>
+              </div>
+              <div v-if="reasonText(row)" class="table-note rule-reason">{{ reasonText(row) }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="96" class-name="table-actions" fixed="right" align="center">
+            <template #default="{ row }">
+              <el-button link type="primary" @click.stop="openDetail(row)">查看详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-collapse-item>
+    </el-collapse>
   </div>
 
   <AuditRuleDetailDrawer :rule="detailRule" @close="detailRule = null" />
@@ -237,13 +322,60 @@ function openDetail(rule: AuditRule): void {
   width: 190px;
 }
 
+.rule-mode-filter {
+  width: 150px;
+}
+
+.rule-sheet-filter {
+  width: 220px;
+}
+
 .rule-count {
   margin-left: auto;
+  font-size: var(--el-font-size-base);
+}
+
+.rule-groups :deep(.el-collapse-item__header) {
+  height: auto;
+  min-height: 40px;
+  padding: 0 4px;
+}
+
+.rule-groups :deep(.el-collapse-item__content) {
+  padding-bottom: 4px;
+}
+
+.rule-group-head {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-right: 8px;
+}
+
+.rule-group-title {
+  font-size: var(--el-font-size-base);
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.rule-group-count,
+.rule-group-head .text-hint {
+  font-size: var(--el-font-size-base);
+}
+
+.rule-group-count--danger {
+  color: var(--el-color-danger);
+}
+
+.rule-group-count--warning {
+  color: var(--el-color-warning);
 }
 
 .result-table :deep(.el-table__cell) {
   padding: 6px 0;
-  vertical-align: top;
+  vertical-align: middle;
 }
 
 .result-table :deep(.cell) {
@@ -262,7 +394,6 @@ function openDetail(rule: AuditRule): void {
   overflow: hidden;
   white-space: pre-wrap;
 }
-
 
 .cell-strong {
   font-weight: 600;

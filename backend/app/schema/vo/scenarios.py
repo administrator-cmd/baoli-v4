@@ -6,18 +6,6 @@ from pydantic import Field
 from ...common.api import ApiResponse
 
 
-class ScenarioVersionResponse(ApiResponse):
-    scenario_code: str
-    scenario_name: str
-    version_no: int
-    status: str
-    schema_key: str | None = None
-    schema_version: str | None = None
-    schema_definition: dict[str, Any] | None = Field(default=None, alias="schema_json")
-    manifest: dict[str, Any]
-    published_at: datetime
-
-
 class ScenarioDraftViewResponse(ApiResponse):
     configuration_kind: Literal["DRAFT", "PUBLISHED"] = "DRAFT"
     version_no: int | None = None
@@ -44,6 +32,11 @@ class ScenarioDraftViewResponse(ApiResponse):
 
 class ScenarioConfigurationViewResponse(ScenarioDraftViewResponse):
     revision_no: int | None
+
+
+class ScenarioCalculationMutationResponse(ApiResponse):
+    scenario_code: str
+    revision_no: int
 
 
 class ScenarioPublishResponse(ApiResponse):

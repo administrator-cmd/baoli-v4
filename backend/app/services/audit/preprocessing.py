@@ -4,17 +4,18 @@
 逐份执行提交与续查。每个工作步骤使用独立数据库会话，执行进度只由调度线程写入。
 """
 
+import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import deepcopy
-import logging
+from functools import partial
 from queue import Queue
 from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from ...common.exceptions import BusinessError, exception_summary
-from ...entity import AuditTask, DocumentUpload, NodeExecution, StoredArtifact
+from ...entity.tasks import AuditTask, DocumentUpload, NodeExecution, StoredArtifact
 from ..shared.storage import resolve_storage_path
 from .artifacts import _artifact_payload, _complete_ocr_job, _ensure_external_artifact, _submit_ocr_job
 from .document_ports import document_service
@@ -57,11 +58,11 @@ def _prepare_stage(
                 "filename": upload.original_filename, "content_type": upload.content_type,
             }
             if stage == "MATERIAL_CLASSIFY":
-                call = lambda: port.validate_material_type(**kwargs, material_type=upload.declared_material_type)
+                call = partial(port.validate_material_type, **kwargs, material_type=upload.declared_material_type)
             elif stage == "DOCUMENT_PARSE":
-                call = lambda: port.process_document(**kwargs)
+                call = partial(port.process_document, **kwargs)
             elif stage == "SEAL":
-                call = lambda: port.detect_seals(**kwargs)
+                call = partial(port.detect_seals, **kwargs)
             else:
                 raise ValueError(f"未知材料处理步骤：{stage}")
             artifact = _ensure_external_artifact(db, task, upload, stage, call)

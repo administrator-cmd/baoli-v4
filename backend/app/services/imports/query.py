@@ -2,11 +2,15 @@
 
 from datetime import datetime
 from typing import Any
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
 from ...common.pagination import PageResult, page_result
-from ...entity import BackgroundOperation, ImportJob, ScenarioTemplate
 from ...domain import node_profile
+from ...entity.imports import ImportJob
+from ...entity.operations import BackgroundOperation
+from ...entity.scenarios import ScenarioTemplate, ScenarioVersion
 from ..system.background import latest_operation, operation_view
 from ..system.operation_types import OBJECT_IMPORT_JOB
 from .lookup import _job_or_404, _job_schema
@@ -50,6 +54,8 @@ def list_import_jobs_page(
         # 作业所属场景：列表页显示「哪个场景的规则库」要用它，字段很小不影响排序缓冲。
         ImportJob.scenario_code,
         ImportJob.draft_revision,
+        # 文件资产信息：规则库管理页要显示原件的真实大小。
+        ImportJob.source_size,
         ImportJob.failure_code,
         ImportJob.failure_message,
         ImportJob.created_at,
@@ -94,6 +100,17 @@ def list_import_jobs_page(
         ).all():
             active_operation_counts[str(object_no)] = int(count)
 
+    # 该作业发布出的场景版本（一个作业最多对应一个版本，import_job_id 有唯一约束）。
+    published_versions: dict[int, int] = {}
+    job_ids = [row.id for row in rows]
+    if job_ids:
+        for version_job_id, version_no in db.execute(
+            select(ScenarioVersion.import_job_id, ScenarioVersion.version_no).where(
+                ScenarioVersion.import_job_id.in_(job_ids)
+            )
+        ).all():
+            published_versions[int(version_job_id)] = int(version_no)
+
     items = []
     for job in rows:
         items.append(
@@ -108,6 +125,9 @@ def list_import_jobs_page(
                 "scenario_code": job.scenario_code,
                 "scenario_name": scenario_names.get(job.scenario_code),
                 "draft_revision": job.draft_revision,
+                "source_size": job.source_size,
+                # 仅当这份 Excel 发布成了场景版本才有编号；未发布的草稿作业为 None。
+                "published_version_no": published_versions.get(int(job.id)),
                 "active_operation_count": active_operation_counts.get(job.job_no, 0),
                 "failure_code": job.failure_code,
                 "failure_message": job.failure_message,
@@ -140,7 +160,9 @@ def _job_profile_summary(db: Session, job: ImportJob) -> dict[str, Any]:
 
 
 def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
-    """导入作业的业务视图：二轮整理结果、修订号与最新后台操作。"""
+    """导入作业的业务视图：二轮整理结果、修订号、失败与可重试阶段。"""
+    from .llm import can_resume_initial
+
     return {
         "job_no": job.job_no,
         "source_filename": job.source_filename,
@@ -153,6 +175,11 @@ def import_job_view(db: Session, job: ImportJob) -> dict[str, Any]:
         "profile": _job_profile_summary(db, job),
         "draft_revision": job.draft_revision,
         "proposals": _proposal_business_view(job),
+        # 第一轮目录可复用时可只重跑第二轮；检查点缺失或契约变化时为 False。
+        "can_resume_refinement": can_resume_initial(
+            job.job_no, job.profile_version, job.schema_key, job.schema_version, job.source_sha256,
+            job.scenario_code,
+        ),
         "failure": {"code": job.failure_code, "message": job.failure_message} if job.failure_code else None,
         "latest_operation": operation_view(latest) if (latest := latest_operation(db, OBJECT_IMPORT_JOB, job.job_no)) else None,
         "created_at": job.created_at,

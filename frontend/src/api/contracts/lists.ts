@@ -40,21 +40,6 @@ export interface DocumentDetail extends ApiResponse {
   uploads: DocumentUploadRow[];
 }
 
-export interface EvidenceRow {
-  evidence_no: string;
-  task_no: string;
-  task_name: string;
-  reference_type: "FIELD_FACT" | "RULE_RESULT" | "ARTIFACT";
-  object_name: string | null;
-  material_name: string | null;
-  filename: string | null;
-  document_upload_no: string | null;
-  field_path: string | null;
-  quote_text: string;
-  historical: boolean;
-  created_at: string;
-}
-
 export interface ExecutionRow {
   execution_id: number;
   task_no: string;
@@ -67,6 +52,9 @@ export interface ExecutionRow {
   status: string;
   /** 是否已被重试、纠错或材料换版取代；不改变本次原执行结局。 */
   invalidated: boolean;
+  /** 失效时间与原因；未失效时为空。 */
+  invalidated_at: string | null;
+  invalidation_reason: string | null;
   started_at: string | null;
   finished_at: string | null;
   duration_ms: number | null;

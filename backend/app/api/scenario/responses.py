@@ -1,6 +1,7 @@
 """场景草稿写操作的响应组装。"""
 
 from fastapi import Request
+
 from ...schema.vo.scenarios import ScenarioDraftViewResponse
 
 

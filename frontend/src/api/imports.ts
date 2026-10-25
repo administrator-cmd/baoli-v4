@@ -6,7 +6,7 @@ import type {
   OperationAccepted,
   Paged,
 } from "./contracts";
-import { request, type OperationView } from "./http";
+import { apiFileUrl, request, type OperationView } from "./http";
 import { toQuery } from "./query";
 
 /** 工作台作业选择列表（完整摘要数组）。 */
@@ -31,6 +31,10 @@ export interface ImportJobRow {
   active_operation_count: number;
   failure_code: string | null;
   failure_message: string | null;
+  /** 上传原件的字节数；历史作业如实为 null。 */
+  source_size: number | null;
+  /** 这份规则库发布出的场景版本号；未发布的草稿作业为 null。 */
+  published_version_no: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +52,11 @@ export interface ImportJobQuery {
 /** 导入作业分页列表（后端筛选与 total）。 */
 export function listImportJobsPage(query: ImportJobQuery): Promise<Paged<ImportJobRow>> {
   return request<Paged<ImportJobRow>>(`/import-jobs/page${toQuery({ ...query })}`);
+}
+
+/** 规则库原件下载地址：直接交给浏览器下载，不经前端读取内容。 */
+export function importJobFileUrl(jobNo: string): string {
+  return apiFileUrl(`/import-jobs/${encodeURIComponent(jobNo)}/file`);
 }
 
 /** 删除仅允许未发布的草稿作业；已发布作业由服务端拒绝并说明原因。 */
@@ -117,11 +126,15 @@ export function updateImportProposal(
  * 触发规则转换。长处理只受理不等待：返回 202 语义的受理状态，页面再用 operation_no 查询进度。
  * idempotency_key 与作业内容绑定，重复提交同一动作不会重复执行。
  */
-export function startImportConversion(jobNo: string, idempotencyKey: string): Promise<OperationAccepted> {
+export function startImportConversion(
+  jobNo: string,
+  idempotencyKey: string,
+  mode: "FULL" | "RESUME_REFINEMENT" = "FULL",
+): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/import-jobs/${encodeURIComponent(jobNo)}/retry`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    body: JSON.stringify({ idempotency_key: idempotencyKey, mode }),
   });
 }
 

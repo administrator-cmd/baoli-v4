@@ -1,19 +1,22 @@
 """场景草稿与发布配置的只读视图组装。"""
 
+from copy import deepcopy
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...domain.calculation_config import calculation_store
-from ...repositories.shared import configuration as config_store
-from ...repositories.scenario.version import find_latest_published_version
-from ...domain import manifest as manifest_module
-from ...domain.rule_library import active, is_risk_rule
-from ...domain.report_data import report_data_refs
+
 from ...common.exceptions import BusinessError
-from ...entity import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule, ScenarioTemplate
-from ...repositories.scenario.draft import draft_rows
+from ...domain import manifest as manifest_module
+from ...domain.calculation_config import calculation_store
+from ...domain.report_data import report_data_refs
+from ...domain.rule_library import active, is_risk_rule
+from ...entity.scenario_drafts import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule
+from ...entity.scenarios import ScenarioTemplate
+from ..shared import configuration as config_store
 from .common import DRAFT_SOURCE_LABELS, _node_type_label
-from .lookup import template_or_404
+from .draft import draft_rows
+from .lookup import find_latest_published_version, template_or_404
 from .publishing import compile_draft_manifest
 
 
@@ -246,6 +249,7 @@ def _draft_rule_view(
         "name": item.name,
         "node": item.node_code,
         "operator": item.operator_code,
+        "execution_mode": definition.get("execution_mode") or "UNKNOWN",
         "enabled": active({**definition, "enabled": item.enabled}),
         "system": False,
         "inputs": inputs,
@@ -297,6 +301,7 @@ def _calculation_view_rows(raw: Any) -> list[dict[str, Any]]:
             "currency": item.get("currency"),
             "status": item.get("status"),
             "origin": item.get("origin"),
+            "definition": deepcopy(item),
         }
         for item in source
         if isinstance(item, dict)

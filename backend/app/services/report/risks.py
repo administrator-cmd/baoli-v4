@@ -1,10 +1,14 @@
 """风险结果列表与业务结论视图组装。"""
 
 from typing import Any
-from sqlalchemy import func, select
+
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, aliased
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditPlan, AuditTask, NodeExecution, RuleResult, ScenarioVersion
+from ...entity.plans import AuditPlan
+from ...entity.scenarios import ScenarioVersion
+from ...entity.tasks import AuditTask, NodeExecution, RuleResult
 from ..audit import value_store as task_value_service
 from ..audit.value_files import lock_task_files
 
@@ -32,7 +36,20 @@ def list_risk_results_page(
         .correlate(NodeExecution)
         .scalar_subquery()
     )
-    # 只取当前有效批次的风险项，风险结果包含 risk_level，即使等级未声明也不漏项。
+    # 风险身份来自任务冻结规则的明确角色/算子，等级为空不表示它不是风险规则。
+    # JSON_CONTAINS 将 rule_key 与角色限定在同一条规则中，避免串配其他规则的属性。
+    risk_rule = or_(
+        func.json_contains(
+            AuditTask.manifest_json,
+            func.json_object("rule_key", RuleResult.rule_key, "rule_role", "RISK"),
+            "$.rules",
+        ) == 1,
+        func.json_contains(
+            AuditTask.manifest_json,
+            func.json_object("rule_key", RuleResult.rule_key, "operator", "RISK_TRIGGER"),
+            "$.rules",
+        ) == 1,
+    )
     base_query = (
         select(RuleResult.id)
         .select_from(RuleResult)
@@ -41,7 +58,7 @@ def list_risk_results_page(
         .join(ScenarioVersion, ScenarioVersion.id == AuditTask.scenario_version_id)
         .outerjoin(AuditPlan, AuditPlan.id == AuditTask.plan_id)
         .where(
-            RuleResult.risk_level.is_not(None),
+            risk_rule,
             NodeExecution.id == latest_execution,
         )
     )
@@ -130,6 +147,7 @@ def list_risk_results_page(
                 "scenario_version_no": row.version_no,
                 "plan_name": row.plan_name,
                 "rule_key": result.rule_key,
+                "rule_code": result.rule_code if result.rule_code != result.rule_key else None,
                 "name": result.rule_name,
                 "risk_level": result.risk_level,
                 "status": result.status,

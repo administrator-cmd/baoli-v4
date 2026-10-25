@@ -2,11 +2,11 @@
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.query import validate_page_params
-from ...services.report import risks as report_risks
-from ...schema.vo import RiskResultPageResponse
 
+from ...core.database import get_db
+from ...schema.query.pagination import validate_page_params
+from ...schema.vo.common import RiskResultPageResponse
+from ...services.report import risks as report_risks
 
 risks_router = APIRouter(prefix="/risk-results", tags=["风险结果"])
 

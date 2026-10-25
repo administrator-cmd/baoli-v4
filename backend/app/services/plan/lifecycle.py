@@ -3,11 +3,14 @@
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
-from sqlalchemy.orm import Session
+
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditPlan, ScenarioVersion
 from ...domain.identity import public_no
+from ...entity.plans import AuditPlan
+from ...entity.scenarios import ScenarioVersion
 from ..system.operation_log import record_operation, require_idempotent_replay
 from ..system.operation_types import OBJECT_PLAN
 from .compilation import _load_manifest_into_plan, _recompile_plan

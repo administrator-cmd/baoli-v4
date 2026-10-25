@@ -1,16 +1,20 @@
 """场景创建、属性维护、启停与删除。"""
 
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...repositories.shared import configuration as config_store
-from ...domain import scenario_schema
+
 from ...common.exceptions import BusinessError
-from ...entity import ImportJob, ScenarioDraft, ScenarioTemplate
+from ...domain import scenario_schema
 from ...domain.identity import public_no
+from ...entity.imports import ImportJob
+from ...entity.scenario_drafts import ScenarioDraft
+from ...entity.scenarios import ScenarioTemplate
+from ..shared import configuration as config_store
+from ..shared.import_cleanup import delete_import_job_entities
 from ..system.operation_log import record_operation
 from ..system.operation_types import OBJECT_SCENARIO
-from ..shared.import_cleanup import delete_import_job_entities
 from .draft import _bump_draft, _commit_config_change, _default_draft_nodes, ensure_draft
 from .lookup import template_or_404
 
@@ -166,6 +170,7 @@ def delete_scenario(db: Session, scenario_code: str) -> None:
         object_no=scenario_code,
         object_name=template.scenario_name,
         operation_type="DELETE",
+        permanent=True,
         detail={
             "scenario_code": scenario_code,
             "deletion_mode": "PHYSICAL",

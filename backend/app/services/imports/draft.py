@@ -2,15 +2,17 @@
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...repositories.scenario.version import find_latest_published_version
-from ...domain.manifest import draft_config_of_import
+
 from ...common.exceptions import BusinessError
-from ...entity import ImportJob
-from ...entity import ScenarioVersion, ScenarioDraft
-from ..system.background import assert_no_active_operation
-from ..system.operation_types import OBJECT_IMPORT_JOB
-from ..system.operation_log import record_operation
 from ...domain import scenario_schema
+from ...domain.manifest import draft_config_of_import
+from ...entity.imports import ImportJob
+from ...entity.scenario_drafts import ScenarioDraft
+from ...entity.scenarios import ScenarioVersion
+from ..scenario.lookup import find_latest_published_version
+from ..system.background import assert_no_active_operation
+from ..system.operation_log import record_operation
+from ..system.operation_types import OBJECT_IMPORT_JOB
 from .lookup import _job_or_404, _job_schema, _saved_proposals
 
 
@@ -23,9 +25,9 @@ def apply_import_to_draft(
     写入替换材料、字段、规则、报告与计算定义。
     写入前核对草稿修订，执行时由 LLM 按生效规则处理。
     """
-    from ..system.operation_types import OBJECT_SCENARIO
     from ..scenario.draft import _bump_draft, _commit_config_change, ensure_draft, load_import_config_into_draft
     from ..scenario.lookup import template_or_404
+    from ..system.operation_types import OBJECT_SCENARIO
 
     job = _job_or_404(db, job_no, lock=True)
     if job.status == "APPLIED":

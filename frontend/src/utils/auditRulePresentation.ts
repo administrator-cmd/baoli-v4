@@ -1,5 +1,5 @@
 import type { AuditRule, JsonValue, RuleCheckComparison, RuleInputSnapshot, RuleStandard } from "@/api/contracts";
-import { EXTRACTION_RESULT_STATUSES } from "@/constants/auditStatus";
+import { EXTRACTION_RESULT_STATUSES, riskResultLabel } from "@/constants/auditStatus";
 import { evidenceRouteLabel, formatBusinessValue, judgeRouteLabel } from "@/constants/labels";
 
 /* 结果负载读取：全部来自服务端 result_json，不做前端推断 */
@@ -9,8 +9,16 @@ export function payloadOf(rule: AuditRule): Record<string, JsonValue> {
 }
 export function hasBusinessResult(rule: AuditRule): boolean { return payloadOf(rule).presentation_version === 2; }
 
+/** 显示真实业务编号；抽取和报告继承来源编号，内部身份不用于业务定位。 */
+export function ruleCodeOf(rule: AuditRule): string | null {
+  if (rule.kind === "EXTRACTION" || rule.kind === "REPORT") return rule.source_ref || null;
+  const code = standardOf(rule)?.rule_code;
+  return (code && code !== rule.rule_key ? code : rule.source_ref) || null;
+}
+
 /** 通用产出状态在抽取、计算、报告语境中分别命名，不改变保存的审核结论。 */
 export function resultStatusLabel(rule: AuditRule): string | null {
+  if (rule.is_risk_rule) return riskResultLabel(manualEffectiveStatus(rule) ?? rule.status);
   if (manuallyReviewed(rule)) return null;
   if (rule.kind === "EXTRACTION") {
     const fields = extractedOf(rule);
@@ -175,11 +183,6 @@ export function routeText(rule: AuditRule): string {
   }
   const record = route as Record<string, JsonValue>;
   return `${evidenceRouteLabel(record.evidence as string | null)} · ${judgeRouteLabel(record.judge as string | null)}`;
-}
-
-export function evidenceNumbers(rule: AuditRule): string[] {
-  const value = payloadOf(rule).evidence_nos;
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 export function applicabilityText(rule: AuditRule): string {

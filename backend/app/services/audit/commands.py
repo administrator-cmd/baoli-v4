@@ -10,40 +10,47 @@ checkpoint 存储暂时不可达保留确认/复核等待状态；若本次节�
 执行中断并置 BLOCKED，不能留下没有实际执行过程的 RUNNING。"""
 
 import logging
-from ...config import get_settings
-from ...domain.identity import public_no
-from ...common.exceptions import BusinessError, exception_summary
-from ...graphs.audit_graph import run_audit_node
-from .flow.runner import audit_runner
-from ...entity import (
-    AuditTask,
-    DocumentUpload,
-    ManualReview,
-    NodeExecution,
-    StoredArtifact,
-    TaskDocument,
-)
-from ...schema.dto import ExecuteNodeRequest, FieldCorrectionRequest
-from .tasks.lookup import task_or_404
-from . import value_store as task_value_service
-from .artifacts import (
-    _artifact_for_upload, _artifact_payload, _complete_ocr_job, _ocr_job_metadata,
-    _submit_authorized_ocr_retry, _submit_ocr_job,
-)
-from .evidence import _evidence_snapshot, _evidence_snapshots
-from .facts import _current_field_fact_pairs, _write_human_field_fact
-from .flow.errors import fail_running_execution, raise_graph_error
-from ..system.background import assert_no_active_operation
-from ..system.operation_types import OBJECT_AUDIT_TASK
-from .reviews import _decision_command_no, _invalidate_validation_results, _next_node_for_recalculation
-from .shared import _normalize_field_value, _task_field_definitions, _task_manifest
-from .state import _scenario_nodes, _set_task_checkpoint
 from datetime import UTC, datetime, timedelta
 from decimal import InvalidOperation
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ...common.exceptions import BusinessError, exception_summary
+from ...constants.status import (
+    FIELD_STATUS_NOT_PRESENT,
+    FIELD_STATUS_REVIEWED,
+    INTERRUPTED_EXECUTION_FAILURE_CODE,
+    TASK_PHASE_AWAITING_CONFIRMATION,
+    TASK_PHASE_COMPLETED,
+    TASK_STATUS_BLOCKED,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_READY,
+)
+from ...core.config import get_settings
+from ...domain.identity import public_no
+from ...entity.tasks import AuditTask, DocumentUpload, ManualReview, NodeExecution, StoredArtifact, TaskDocument
+from ...graphs.audit_graph import run_audit_node
+from ...schema.dto.tasks import ExecuteNodeRequest, FieldCorrectionRequest
+from ..system.background import assert_no_active_operation
+from ..system.operation_types import OBJECT_AUDIT_TASK
+from . import value_store as task_value_service
+from .artifacts import (
+    _artifact_for_upload,
+    _artifact_payload,
+    _complete_ocr_job,
+    _ocr_job_metadata,
+    _submit_authorized_ocr_retry,
+    _submit_ocr_job,
+)
+from .facts import _current_field_fact_pairs, _write_human_field_fact
+from .flow.errors import fail_running_execution, raise_graph_error
+from .flow.runner import audit_runner
+from .reviews import _decision_command_no, _invalidate_validation_results, _next_node_for_recalculation
+from .shared import _normalize_field_value, _task_field_definitions, _task_manifest
+from .state import _scenario_nodes
+from .tasks.lookup import task_or_404
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +69,13 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
     for execution in interrupted:
         execution.status = "FAILED"
         execution.finished_at = datetime.now(UTC)
-        execution.failure_code = "AUDIT_EXECUTION_INTERRUPTED"
+        execution.failure_code = INTERRUPTED_EXECUTION_FAILURE_CODE
         execution.failure_message = "服务重启导致该节点执行中断，已有结果已保留，请重新执行当前节点"
     # 只处理真正停在执行中的任务。等待节点确认或人工复核的任务必须保持等待，
     # 不能一律置 FAILED；它们的图 checkpoint 仍可用于恢复。
     running_tasks = db.scalars(select(AuditTask).where(AuditTask.status == "RUNNING")).all()
     for task in running_tasks:
-        task.status = "BLOCKED"
+        task.status = TASK_STATUS_BLOCKED
     interrupted_ocr_retries = 0
     for artifact in db.scalars(
         select(StoredArtifact).where(
@@ -82,6 +89,8 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
             continue
         attempts[-1] = {**attempts[-1], "state": "UNKNOWN", "failure_code": "OCR_RETRY_INTERRUPTED"}
         artifact.metadata_json = {**metadata, "submit_attempts": attempts}
+        artifact.failure_code = "OCR_RETRY_INTERRUPTED"
+        artifact.failure_message = "服务重启导致 OCR 重新提交结果未知，请确认后重试"
         interrupted_ocr_retries += 1
     db.commit()
     return {
@@ -115,11 +124,9 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
         # 只在本次执行事务内恢复可执行状态，不在后台命令受理时单独提交复位。
         # _begin_node_execution 会失效旧模型结果并建立新批次；失败原因保留供审计。
         _, nodes, current_index = _scenario_nodes(db, task)
-        task.status = "BLOCKED"
-        task.checkpoint_json = {
-            "node_index": current_index, "current_node": nodes[current_index]["node_code"],
-            "phase": "AWAITING_CONFIRMATION",
-        }
+        task.status = TASK_STATUS_BLOCKED
+        task.current_node = nodes[current_index]["node_code"]
+        task.current_phase = TASK_PHASE_AWAITING_CONFIRMATION
         db.flush()
     # 图节点多次提交，最终推进也可能失败；用本次执行身份收尾，不能误伤其他批次。
     attempt = {"task_no": task_no, "execution_id": None}
@@ -227,17 +234,17 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
                     "currency": field.get("currency"),
                 },
             ) from exc
-        new_status, new_raw = "REVIEWED", request.field_value.strip()
+        new_status, new_raw = FIELD_STATUS_REVIEWED, request.field_value.strip()
     else:
         if request.field_value not in (None, ""):
             raise BusinessError("FIELD_CORRECTION_VALUE_UNEXPECTED", "漏值纠正不能填写字段值")
-        new_status, new_raw = "NOT_PRESENT", None
+        new_status, new_raw = FIELD_STATUS_NOT_PRESENT, None
     system_judgment = {
         "status": fact.status,
         "raw_value": fact_value.get("raw_value"),
         "normalized_value": fact_value.get("normalized_value_json"),
-        "evidence": _evidence_snapshot(db, fact.evidence_id),
-        "evidences": _evidence_snapshots(db, fact.id),
+        # 原判断绑定旧字段版本；引文保存在该版本 CSV 中，不再复制到数据库快照。
+        "source_field_value_id": fact.id,
     }
     new_fact, previous_revision_no, invalidated_reviews = _write_human_field_fact(
         db,
@@ -268,7 +275,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     task.input_revision += 1
     db.flush()
     manifest = _task_manifest(task)
-    _, nodes, current_index = _scenario_nodes(db, task)
+    _, nodes, _ = _scenario_nodes(db, task)
     recomputed_rules = []
     invalidation = _invalidate_validation_results(db, task, manifest, {request.field_key})
     # 事实变化后按 DAG 取第一个尚未完成的启用节点，计算必须先于依赖它的校验和风险重跑。
@@ -276,8 +283,8 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     if next_node is None:
         # 没有规则、计算或报告消费该字段，且 DAG 已全部完成：字段事实仍应保存，
         # 不能把“无需重算”当成纠错失败。
-        task.status = "COMPLETED"
-        _set_task_checkpoint(task, node_index=current_index, phase="COMPLETED")
+        task.status = TASK_STATUS_COMPLETED
+        task.current_phase = TASK_PHASE_COMPLETED
         db.flush()
         db.commit()
         return {
@@ -296,15 +303,9 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
             "recomputed_rules": recomputed_rules,
             "next_node_code": None,
         }
-    rewind_index = next(index for index, item in enumerate(nodes) if item["node_code"] == next_node["node_code"])
-
-    task.status = "READY"
+    task.status = TASK_STATUS_READY
     task.current_node = next_node["node_code"]
-    task.checkpoint_json = {
-        "node_index": rewind_index,
-        "current_node": task.current_node,
-        "phase": "AWAITING_CONFIRMATION",
-    }
+    task.current_phase = TASK_PHASE_AWAITING_CONFIRMATION
     db.flush()
     db.commit()
     return {
@@ -373,6 +374,10 @@ def retry_document_ocr(
             "idempotency_key": operation_no, "state": "SUBMITTING",
             "previous_status": artifact.status, "previous_relative_path": artifact.relative_path,
             "previous_metadata": metadata,
+            "previous_external_job_id": artifact.external_job_id,
+            "previous_deadline_at": artifact.deadline_at.isoformat() if artifact.deadline_at else None,
+            "previous_failure_code": artifact.failure_code,
+            "previous_failure_message": artifact.failure_message,
             "resubmit_unknown": resubmit_unknown,
         }
         artifact.status = "SUBMITTING"
@@ -387,12 +392,11 @@ def retry_document_ocr(
             db.commit()  # 保留真实的提交失败或结果未知状态，后台异常继续上抛。
             raise
     elif artifact.status == "PENDING":
-        job_id, old_deadline = _ocr_job_metadata(artifact)
+        _, old_deadline = _ocr_job_metadata(artifact)
         resumed_at = datetime.now(UTC)
+        artifact.deadline_at = resumed_at + timedelta(seconds=get_settings().ocr_max_wait_seconds)
         artifact.metadata_json = {
             **artifact.metadata_json,
-            "job_id": job_id,
-            "deadline_at": (resumed_at + timedelta(seconds=get_settings().ocr_max_wait_seconds)).isoformat(),
             "previous_deadline_at": old_deadline.isoformat(),
             "resumed_at": resumed_at.isoformat(), "resume_operation_no": operation_no,
         }

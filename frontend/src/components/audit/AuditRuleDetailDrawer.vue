@@ -4,16 +4,17 @@ import { computed } from "vue";
 import type { AuditRule, JsonValue, RuleCheckComparison, RuleInputSnapshot } from "@/api/contracts";
 import CrossComparisonPanel from "@/components/audit/CrossComparisonPanel.vue";
 import AuditBusinessDetails from "@/components/audit/AuditBusinessDetails.vue";
-import ReportBody from "@/components/audit/ReportBody.vue";
+import QuoteBlock from "@/components/audit/QuoteBlock.vue";
+import RuleInputSnapshotTable from "@/components/audit/RuleInputSnapshotTable.vue";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { auditResultSummary } from "@/constants/auditStatus";
-import { formatBusinessValue, statusTone } from "@/constants/labels";
+import { executionModeLabel } from "@/constants/executionModes";
+import { statusTone } from "@/constants/labels";
 import {
   applicabilityText,
   capabilityOf,
   comparisonOf,
-  evidenceNumbers,
   hasBusinessResult,
   manualEffectiveStatus,
   manualNote,
@@ -25,6 +26,7 @@ import {
   reasonText,
   resultStatusLabel,
   routeText,
+  ruleCodeOf,
   standardDetail,
   standardText,
   valueSourcesOf,
@@ -35,6 +37,18 @@ defineEmits<{ close: [] }>();
 const detailRule = computed(() => props.rule);
 
 const detailPayload = computed(() => (detailRule.value ? payloadOf(detailRule.value) : {}));
+const detailBasisCount = computed(() => {
+  const basis = detailPayload.value.basis;
+  return Array.isArray(basis) ? basis.length : 0;
+});
+/** 抽取规则的产出就是取值本身；其余规则只要已有判断依据，输入快照就下沉到技术详情。 */
+const showValueTableInMain = computed(() => {
+  if (!detailRule.value) {
+    return false;
+  }
+  return detailRule.value.kind === "EXTRACTION" || detailBasisCount.value === 0;
+});
+const detailRuleCode = computed(() => detailRule.value ? ruleCodeOf(detailRule.value) : null);
 const detailCalculationSteps = computed(() => {
   const steps = detailPayload.value.calculation_steps;
   return Array.isArray(steps) ? steps.filter((step): step is string => typeof step === "string") : [];
@@ -56,11 +70,6 @@ const detailFindings = computed(() => (detailPayload.value.tool_findings ?? []) 
   comparison?: RuleCheckComparison;
   per_material?: RuleInputSnapshot[];
 }>);
-const detailEvidenceNumbers = computed(() => (detailRule.value ? evidenceNumbers(detailRule.value) : []));
-const detailEvidenceQuotes = computed(() => {
-  const quotes = detailPayload.value.evidence_quotes;
-  return Array.isArray(quotes) ? quotes.filter((quote): quote is string => typeof quote === "string") : [];
-});
 const detailIsReviewed = computed(() => (detailRule.value ? manuallyReviewed(detailRule.value) : false));
 const detailTypeNotice = computed(() => (detailRule.value ? materialTypeNotice(detailRule.value) : null));
 /** 未解决事项：结论转人工或阻断的真实原因。 */
@@ -71,6 +80,15 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
   }
   return value.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
 });
+const detailEvidenceTitle = computed(() => {
+  const status = detailRule.value?.status;
+  if (status === "EVIDENCE_INSUFFICIENT") return "已读取的原文";
+  if (status === "NOT_EXECUTED" || status === "PENDING") return "已有原文";
+  return "原文依据";
+});
+const detailEvidenceNote = computed(() => (
+  detailRule.value?.status === "EVIDENCE_INSUFFICIENT" ? "以下原文不足以形成确定结论。" : ""
+));
 </script>
 
 <template>
@@ -84,6 +102,9 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
     <template v-if="detailRule">
       <div class="detail-head">
         <StatusBadge :status="detailManualStatus ?? detailRule.status" :label="resultStatusLabel(detailRule)" :tone="statusTone(detailManualStatus ?? detailRule.status)" size="default" />
+        <span v-if="detailRule.source_sheet" class="text-hint">{{ detailRule.source_sheet }}</span>
+        <span class="text-hint">执行方式：{{ executionModeLabel(detailRule.execution_mode) }}</span>
+        <span v-if="detailRuleCode" class="text-hint mono">{{ detailRuleCode }}</span>
         <span class="text-muted">{{ materialsOf(detailRule) }}</span>
 
         <span v-if="detailTypeNotice" class="text-hint">{{ detailTypeNotice }}</span>
@@ -92,6 +113,9 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
       <div class="detail-block detail-conclusion">
         {{ detailIsReviewed ? detailManualNote || "本次人工复核没有记录说明" : auditResultSummary(detailRule.status, detailRule.message, detailPayload) }}
         <div v-if="detailReason" class="text-muted">{{ detailReason }}</div>
+      </div>
+      <div v-if="detailRule.kind === 'REPORT' && !detailBasisCount" class="text-muted detail-block">
+        报告正文在「报告」页签查看。
       </div>
       <AuditBusinessDetails :result="detailPayload" />
 
@@ -103,49 +127,12 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
       <div v-if="detailStandardDetail" class="text-muted detail-block">{{ detailStandardDetail }}</div>
 
       <!-- 2. 原文内容与标准化结果 -->
-      <h4 v-if="detailValues.length || detailMaterialRows.length" class="app-section-title">实际取值</h4>
-      <el-table v-if="detailMaterialRows.length" :data="detailMaterialRows" size="small" border empty-text="没有材料级输入">
-        <el-table-column label="材料" min-width="150">
-          <template #default="{ row }">{{ row.material_name || "未知材料" }}</template>
-        </el-table-column>
-        <el-table-column label="文件名" min-width="180" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.filename || "—" }}</template>
-        </el-table-column>
-        <el-table-column label="本份判定" width="120">
-          <template #default="{ row }">
-            <StatusBadge v-if="row.status" :status="row.status" />
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.message || "—" }}</template>
-        </el-table-column>
-      </el-table>
-      <el-table v-else-if="detailValues.length" :data="detailValues" size="small" border>
-        <el-table-column label="材料 · 字段" min-width="200">
-          <template #default="{ row }">{{ row.material_name || "未知材料" }} · {{ row.field_name || row.field_key }}</template>
-        </el-table-column>
-        <el-table-column label="原文内容" min-width="200">
-          <template #default="{ row }">
-            <span v-if="row.raw_value" class="detail-quote">{{ row.raw_value }}</span>
-            <span v-else class="text-muted">未取得原文</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="标准化结果" min-width="150">
-          <template #default="{ row }">
-            <span v-if="row.normalized_value !== null && row.normalized_value !== undefined">
-              {{ formatBusinessValue(row.normalized_value) }}
-            </span>
-            <span v-else class="text-muted">未形成标准化结果</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="取值状态" width="120">
-          <template #default="{ row }">
-            <StatusBadge v-if="row.status" :status="row.status" />
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-      </el-table>
+      <h4 v-if="showValueTableInMain && (detailValues.length || detailMaterialRows.length)" class="app-section-title">实际取值</h4>
+      <RuleInputSnapshotTable
+        v-if="showValueTableInMain"
+        :material-rows="detailMaterialRows"
+        :values="detailValues"
+      />
 
       <!-- 3. 实际比较：跨材料并排展示双方内容；金额与日期给出真实算式 -->
       <h4 v-if="detailComparison" class="app-section-title">实际比较</h4>
@@ -178,18 +165,16 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
       </template>
 
       <!-- 5. 原文依据 -->
-      <h4 v-if="(detailRule.evidence ?? []).length || detailEvidenceQuotes.length" class="app-section-title">原文依据</h4>
-      <div v-for="source in detailRule.evidence ?? []" :key="source.evidence_no" class="rule-source">
+      <h4 v-if="detailRule.evidence.length" class="app-section-title">{{ detailEvidenceTitle }}</h4>
+      <p v-if="detailEvidenceNote" class="rule-evidence-note">{{ detailEvidenceNote }}</p>
+      <div v-for="(source, index) in detailRule.evidence" :key="index" class="rule-source">
         <div class="text-muted">
           {{ source.material_name || "来源材料未记录" }}
-          <template v-if="source.filename"> · {{ source.filename }}</template>
+          <template v-if="source.document_name"> · {{ source.document_name }}</template>
+          <template v-if="source.field_path"> · {{ source.field_path }}</template>
         </div>
-        <ReportBody v-if="source.quote_text" :content="source.quote_text" content-type="text/markdown" />
+        <QuoteBlock v-if="source.quote_text" :text="source.quote_text" />
         <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>
-      </div>
-      <div v-if="detailEvidenceQuotes.length" class="detail-block text-muted">语义判断引用的 OCR 原文：</div>
-      <div v-for="(quote, index) in detailEvidenceQuotes" :key="index" class="rule-source">
-        <blockquote class="rule-quote">{{ quote }}</blockquote>
       </div>
 
       <div v-if="detailRule.status === 'PENDING_REVIEW'" class="text-muted detail-block">
@@ -200,13 +185,17 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
         <h4 class="app-section-title">人工复核记录</h4>
         <div v-if="detailManualNote" class="detail-block">{{ detailManualNote }}</div>
         <div v-if="detailManualStatus" class="detail-block">
-          复核后有效状态：<StatusBadge :status="detailManualStatus" />
+          复核后有效状态：<StatusBadge :status="detailManualStatus" :label="resultStatusLabel(detailRule)" />
         </div>
       </template>
 
       <!-- 7. 技术执行详情：能力与材料范围等辅助信息 -->
       <el-collapse class="block-gap">
         <el-collapse-item title="技术执行详情（辅助信息）" name="tech">
+          <div v-if="!showValueTableInMain && (detailMaterialRows.length || detailValues.length)" class="detail-block">
+            <div class="text-muted">输入快照：</div>
+            <RuleInputSnapshotTable :material-rows="detailMaterialRows" :values="detailValues" />
+          </div>
           <template v-if="!hasBusinessResult(detailRule)">
             <div class="text-muted">原执行说明：</div>
             <div class="detail-block original-execution-message">{{ detailRule.message || "未记录" }}</div>
@@ -222,7 +211,7 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
           <div class="text-muted">适用条件：{{ applicabilityText(detailRule) }}</div>
           <div class="text-muted">判定方式：{{ routeText(detailRule) }}</div>
           <div class="text-muted">
-            字段取值原文：{{ (detailRule.evidence ?? []).length ? `已保存 ${(detailRule.evidence ?? []).length} 段` : "未保存" }}；语义判断引文：{{ detailEvidenceQuotes.length }} 段
+            引用原文：{{ detailRule.evidence.length ? `已保存 ${detailRule.evidence.length} 段` : "未保存" }}
           </div>
           <div class="text-muted">
             判定能力：
@@ -237,18 +226,12 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
             <template v-else>本条结果未记录判定能力</template>
           </div>
           <div v-if="detailRule.rule_key" class="mono">规则键：{{ detailRule.rule_key }}</div>
-          <template v-if="detailPayload.model_response">
-            <div class="text-muted">模型最后一轮返回：</div>
-            <pre>{{ JSON.stringify(detailPayload.model_response, null, 2) }}</pre>
-          </template>
           <template v-if="Array.isArray(detailPayload.verdict_errors) && detailPayload.verdict_errors.length">
-            <div class="text-muted">结论格式修正记录（包含当时的原返回和接口错误）：</div>
+            <div class="text-muted">
+              结论格式修正记录（接口错误）：
+            </div>
             <pre>{{ JSON.stringify(detailPayload.verdict_errors, null, 2) }}</pre>
           </template>
-          <div v-if="detailEvidenceNumbers.length">
-            <div class="text-muted">关联证据编号：</div>
-            <div v-for="number in detailEvidenceNumbers" :key="number" class="mono">{{ number }}</div>
-          </div>
         </el-collapse-item>
       </el-collapse>
     </template>
@@ -271,14 +254,11 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
   margin-top: 12px;
 }
 
-.rule-quote {
-  margin: 6px 0 0;
-  padding: 8px 12px;
-  border-left: 3px solid var(--el-border-color);
-  background: var(--el-fill-color-light);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.7;
+.rule-evidence-note {
+  margin: 0 0 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .detail-head {
@@ -292,10 +272,5 @@ const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
 .detail-block {
   margin-bottom: 8px;
   line-height: 1.7;
-}
-
-.detail-quote {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 </style>

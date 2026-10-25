@@ -5,7 +5,6 @@ import type {
   AuditTaskRow,
   DocumentRemoveResult,
   DocumentUploadResponse,
-  Evidence,
   ExecutionRow,
   FieldCorrectionRequest,
   FieldCorrectionResponse,
@@ -22,6 +21,8 @@ import { toQuery } from "./query";
  * 都是服务端已持久化的事实，不是前端推断的。
  */
 export type AuditFieldView = AuditField & {
+  /** 任务冻结的字段类型，用于格式化数值，避免把账号等文本加上千分位。 */
+  value_type?: string | null;
   /** 本任务是否启用该字段的自动抽取，独立于已有人工或历史有效值。 */
   extraction_enabled?: boolean;
   material_uploaded?: boolean;
@@ -33,6 +34,8 @@ export type AuditFieldView = AuditField & {
   origin?: string | null;
   /** 抽取规则没有形成字段值时保存的真实执行原因。 */
   extraction_message?: string | null;
+  /** 方案冻结的抽取要求；用于解释本次按什么要求检查。 */
+  instruction?: string | null;
   extraction_presentation_version?: number | null;
 };
 /** 只读 OCR 状态查询结果。 */
@@ -106,19 +109,6 @@ export function updateAuditTask(taskNo: string, payload: { task_name?: string; r
     body: JSON.stringify(payload),
   });
 }
-/**
- * 复制为新任务：按源任务所属方案的当前范围重新创建。
- *
- * 不是保留原任务的执行快照——新任务冻结的是方案此刻的范围，材料与结果重新开始。
- * `idempotencyKey` 与新建任务同一口径：响应丢失后重发返回原任务。
- */
-export function copyAuditTask(taskNo: string, taskName: string, idempotencyKey: string): Promise<AuditTaskView> {
-  return request<AuditTaskView>(`/audit-tasks/${encodeURIComponent(taskNo)}/copy`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_name: taskName, idempotency_key: idempotencyKey }),
-  });
-}
 /** 永久删除任务及关联记录、文件。 */
 export function deleteAuditTask(taskNo: string): Promise<void> {
   return request<void>(`/audit-tasks/${encodeURIComponent(taskNo)}`, { method: "DELETE" });
@@ -183,7 +173,18 @@ export function executeAuditNode(
     body: JSON.stringify({ node_code: nodeCode, idempotency_key: idempotencyKey, input_revision: inputRevision }),
   });
 }
-/** 恢复因审核检查点缺失而终止的当前节点；恢复后仍需用户重新执行节点。 */
+/** 从中断的执行批次继续：已完成的规则保留，只执行没有结果的规则。 */
+export function resumeAuditTask(
+  taskNo: string,
+  idempotencyKey: string,
+  inputRevision?: number,
+): Promise<OperationAccepted> {
+  return request<OperationAccepted>(`/audit-tasks/${encodeURIComponent(taskNo)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idempotency_key: idempotencyKey, input_revision: inputRevision }),
+  });
+}
 /**
  * 字段事实纠错。PRESENT 错值与 NOT_PRESENT 漏值都能由用户主动发起；
  * 服务端会返回本次纠错使哪些复核、规则结果失效并需要重算。
@@ -246,8 +247,4 @@ export function getTaskRisks(taskNo: string): Promise<RiskList> {
 /** 该任务的审核报告正文与三信号。 */
 export function getTaskReport(taskNo: string, reportNo?: string): Promise<Report> {
   return request<Report>(`/audit-tasks/${encodeURIComponent(taskNo)}/reports${toQuery({ report_no: reportNo })}`);
-}
-/** 单条证据详情：引用原文、来源、字段属性与内容核对结论。 */
-export function getTaskEvidence(taskNo: string, evidenceNo: string): Promise<Evidence> {
-  return request<Evidence>(`/audit-tasks/${encodeURIComponent(taskNo)}/evidence/${encodeURIComponent(evidenceNo)}`);
 }

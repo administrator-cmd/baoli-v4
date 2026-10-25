@@ -8,7 +8,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..common.exceptions import BusinessError
-from .audit_vocab import SCOPE_NOT_APPLICABLE
+from ..constants.execution import FACT_KIND_DERIVED, FACT_KIND_EXTRACTED
+from ..constants.status import EXECUTABLE_FIELD_STATUSES
 from . import field_strategy
 
 # 被显式编码的标量类型。`kind` 取值即这几个，解码时据此还原。
@@ -35,7 +36,6 @@ def encode_value(value: Any) -> Any:
                 details={"value_type": type(value).__name__},
             )
         # STRUCTURED 的 JSON number 保持数值类型；金额仍走下面的 Decimal 编码。
-        # 原有可编码值及指纹投影不变，不改变历史快照版本。
         return value
     if isinstance(value, Decimal):
         # 十进制字符串：保留精度与原值，绝不经过 float。
@@ -215,8 +215,7 @@ def resolve_rule_inputs(
                     "status": "NOT_EXECUTED",
                     "raw_value": None,
                     "normalized_value": None,
-                    "evidence_id": None,
-                    "evidence_ids": [],
+                    "evidence": [],
                 }
             )
             continue
@@ -228,8 +227,8 @@ def resolve_rule_inputs(
                 # 日期是 date。工具与算子读到的是同一形状，不因事实来自哪张表而不同。
                 "raw_value": decode_value(fact.get("raw_value")),
                 "normalized_value": decode_value(fact.get("normalized_value")),
-                "evidence_id": fact.get("evidence_id"),
-                "evidence_ids": list(fact.get("evidence_ids") or []),
+                "evidence": list(fact.get("evidence") or []),
+                **{key: fact[key] for key in ("source_field_value_id", "source_rule_result_id") if key in fact},
             }
         )
     return resolved
@@ -238,7 +237,7 @@ def resolve_rule_inputs(
 def _identity_of_fact(item: dict[str, Any]) -> tuple[str, Any]:
     """字段使用已解析的内部身份；计算结果使用其 result_code。"""
     return (
-        str(item.get("field_key") or (item.get("fact_code") if item.get("fact_kind") == "DERIVED" else "") or ""),
+        str(item.get("field_key") or (item.get("fact_code") if item.get("fact_kind") == FACT_KIND_DERIVED else "") or ""),
         item.get("material_key"),
     )
 
@@ -272,9 +271,9 @@ def facts_of_task_fact_rows(
                                 details={"record_type": "TaskFact", "record_id": row.id})
         payload = values[row.id]
         normalized_value = payload.get("value")
-        executable = (row.status in {"PRESENT", "REVIEWED"} if row.fact_kind == "EXTRACTED"
-                      else row.fact_kind == "DERIVED" and row.status == "COMPUTED")
-        field_key = str(row.fact_code) if row.fact_kind == "DERIVED" else index.get(fact_identity(row))
+        executable = (row.status in EXECUTABLE_FIELD_STATUSES if row.fact_kind == FACT_KIND_EXTRACTED
+                      else row.fact_kind == FACT_KIND_DERIVED and row.status == "COMPUTED")
+        field_key = str(row.fact_code) if row.fact_kind == FACT_KIND_DERIVED else index.get(fact_identity(row))
         if field_key is None:
             raise BusinessError("TASK_FACT_FIELD_UNDECLARED", "字段事实的完整口径不属于本次字段声明", status_code=500,
                                 details={"fact_id": row.id, "identity": fact_identity(row)})
@@ -288,7 +287,7 @@ def facts_of_task_fact_rows(
             "material_state": states.get(row.material_key) if row.material_key else None,
             "raw_value": encode_value((raw_values or {}).get(row.id) if executable else None),
             "normalized_value": encode_value(normalized_value if executable else None),
-            "evidence_id": None, "evidence_ids": [],
+            "evidence": [],
         })
     return facts
 

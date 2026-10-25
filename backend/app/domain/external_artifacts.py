@@ -9,7 +9,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,29 +30,6 @@ class ExternalArtifact(BaseModel):
     status: str
     content: dict[str, Any]
     evidence: list[ExternalEvidence] = Field(default_factory=list)
-
-
-class ReadyOcrArtifact(BaseModel):
-    """OCR 完成后的产物与作业身份，供重提中断后的对账使用。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[2] = 2
-    artifact: ExternalArtifact
-    job_id: str = Field(min_length=1)
-    deadline_at: datetime
-    submit_attempts: list[dict[str, Any]] = Field(default_factory=list)
-    provider_state: str | None = None
-    extract_progress: dict[str, Any] | None = None
-    progress_updated_at: str | None = None
-
-
-def ready_artifact_payload(metadata: Any, *, artifact_type: str) -> ExternalArtifact:
-    """按当前产物类型读取信封；OCR 包含真实作业身份，其余类型为直接信封。"""
-    if artifact_type == "OCR":
-        return ReadyOcrArtifact.model_validate(metadata).artifact
-    # 非 OCR 产物沿用业务信封，调用历史是存储诊断，不属于供应商产物内容。
-    return ExternalArtifact.model_validate({key: value for key, value in metadata.items() if key != "processing_attempts"})
 
 
 @dataclass(frozen=True)

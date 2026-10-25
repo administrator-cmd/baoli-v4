@@ -4,27 +4,28 @@ import logging
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Iterator
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ....common.exceptions import BusinessError, exception_summary
-from ....entity import AuditTask, NodeExecution
-from ..tasks.lookup import task_or_404
-from ..state import _scenario_nodes, _task_checkpoint
-from .execution import running_execution
 
+from ....common.exceptions import BusinessError, exception_summary
+from ....constants.status import TASK_STATUS_BLOCKED
+from ....entity.tasks import AuditTask, NodeExecution
+from ..state import _scenario_nodes, _task_phase
+from ..tasks.lookup import task_or_404
+from .execution import running_execution
 
 logger = logging.getLogger(__name__)
 
 
 def graph_error_state(db: Session, task_no: str, node_code: str, exc: BusinessError) -> dict[str, Any]:
     task = task_or_404(db, task_no)
-    progress = _task_checkpoint(task)
     _, _, current_index = _scenario_nodes(db, task)
     return {
         "executed_node": node_code,
         "current_node": task.current_node,
         "node_index": current_index,
-        "phase": progress.get("phase"),
+        "phase": _task_phase(task),
         "last_error": {
             "code": exc.code,
             "message": exc.message,
@@ -51,15 +52,15 @@ def raise_graph_error(state: dict[str, Any]) -> None:
 def agent_step(db: Session, task_no: str) -> Iterator[None]:
     """Agent 路径单步的失败处理：先落成显式的节点失败，再原样抛出。
 
-    模型调用与工具执行会失败（配置缺失、供应商超时、快照过期、凭据失效），也可能抛出未预期
+    模型调用与工具执行会失败（配置缺失、供应商超时、凭据失效），也可能抛出未预期
     异常（唯一键冲突、JSON 序列化失败、工具参数错误）。两类都必须写进执行记录并把任务置
     BLOCKED，异常摘要原样保留——不记录的话任务与执行记录都停在 RUNNING，用户既不能重跑也
     看不到原因。
 
-    错误码的分工是刻意的：`BusinessError` 的码原样上抛（快照冲突、输入缺失、工具参数非法……）；
+    错误码的分工是刻意的：`BusinessError` 的码原样上抛（输入缺失、工具参数非法……）；
     其余异常写 `AUDIT_NODE_UNEXPECTED_ERROR` 并把异常类型、消息与出错位置落进
     `failure_message`，同时以同一错误码抛出。这样图包装层不会把它再包成「检查点不可达」——
-    那会把快照唯一键冲突、序列化失败这类真实缺陷伪装成存储故障。
+    那会把唯一键冲突、序列化失败这类真实缺陷伪装成存储故障。
 
     只对「确实有一次执行正在进行」的情况落失败：任务号、执行记录与图命名空间三者都对得上才写。
     对不上说明这次调用根本不属于当前流程（例如等待点已被材料替换取代），此时不碰任何记录，
@@ -119,6 +120,6 @@ def fail_running_execution(
     execution.finished_at = datetime.now(UTC)
     execution.failure_code = code
     execution.failure_message = message
-    task.status = "BLOCKED"
+    task.status = TASK_STATUS_BLOCKED
     db.flush()
     db.commit()

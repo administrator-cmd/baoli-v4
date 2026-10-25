@@ -182,53 +182,6 @@ const statusTones: Record<string, StatusTone> = {
 };
 
 /**
- * 证据内容依据的核对结论：引文或字段值能否在所述材料里找到原文。
- *
- * 核对依据来自所属处理产物的真实文本。
- */
-const quoteCheckLabels: Record<string, string> = {
-  FOUND: "已在所属材料中找到该原文",
-  VALUE_FOUND: "已在所属产物中找到字段值，但未找到完整引文",
-  NOT_FOUND: "在所属材料中找不到该原文，缺少原文依据",
-  NOT_CHECKABLE: "该产物没有可核对的原文文本，未能核对内容依据",
-  PENDING: "写入时尚未按当前口径核对内容依据",
-};
-
-export function quoteCheckLabel(status: string | null | undefined): string {
-  return status ? quoteCheckLabels[status] ?? "内容依据状态未知" : "内容依据状态未知";
-}
-
-export function quoteCheckTone(status: string | null | undefined): StatusTone {
-  if (status === "FOUND") {
-    return "success";
-  }
-  if (status === "NOT_FOUND") {
-    return "danger";
-  }
-  if (status === "VALUE_FOUND" || status === "NOT_CHECKABLE" || status === "PENDING") {
-    return "warning";
-  }
-  return "neutral";
-}
-
-/** 人工结论依据类型的中文口径。 */
-const basisTypeLabels: Record<string, string> = {
-  HUMAN_STATEMENT: "人工业务判断",
-  DOCUMENT_EVIDENCE: "文档证据",
-  UPLOAD_RECORD: "上传记录",
-};
-
-export function basisTypeLabel(basisType: string | null | undefined): string {
-  return basisType ? basisTypeLabels[basisType] ?? "依据未知" : "依据未知";
-}
-
-export const basisTypeOptions = [
-  { value: "HUMAN_STATEMENT", label: "人工业务判断" },
-  { value: "DOCUMENT_EVIDENCE", label: "文档证据" },
-  { value: "UPLOAD_RECORD", label: "上传记录" },
-];
-
-/**
  * 字段事实状态的语义色。
  *
  * 与规则结论分开：字段的 PRESENT 只表示「从材料里抽到了这段原文」，
@@ -315,6 +268,7 @@ const operationTypeLabels: Record<string, string> = {
   IMPORT_CONVERT: "规则解析与转换",
   SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
   NODE_EXECUTE: "规则执行",
+  NODE_RESUME: "中断恢复",
   DOCUMENT_CLASSIFY: "文件自动校验",
   DOCUMENT_ARTIFACT_RETRY: "材料单项重试",
   OCR_DOCUMENT_RETRY: "OCR 单份重试",
@@ -339,6 +293,9 @@ const operationTypeLabels: Record<string, string> = {
   DRAFT_RULE_ENABLE: "启用规则",
   DRAFT_RULE_DISABLE: "停用规则",
   DRAFT_RULE_DELETE: "删除规则配置",
+  DRAFT_CALCULATION_CREATE: "新增计算规则",
+  DRAFT_CALCULATION_UPDATE: "编辑计算规则",
+  DRAFT_CALCULATION_DELETE: "删除计算规则",
   DRAFT_SECTION_CREATE: "新增报告章节",
   DRAFT_SECTION_UPDATE: "编辑报告章节",
   DRAFT_SECTION_DELETE: "删除报告章节",
@@ -377,36 +334,6 @@ const nodeLabels: Record<string, string> = {
 export function nodeLabel(nodeCode: string | null | undefined): string {
   return nodeCode ? nodeLabels[nodeCode] ?? "未知节点" : "未知节点";
 }
-
-/** 规则适用条件：空白代表「始终适用」，不是「未配置」。 */
-const applicabilityLabels: Record<string, string> = {
-  ALWAYS: "始终适用",
-  MATERIALS_UPLOADED: "所引用材料均已上传时",
-};
-
-export function applicabilityLabel(kind: string | null | undefined): string {
-  return kind ? applicabilityLabels[kind] ?? "未支持的适用条件" : "始终适用";
-}
-
-/**
- * 只有存在真实可数总量时才返回百分比；否则返回 null，页面不显示百分比。
- */
-export function progressPercent(done: number | null | undefined, total: number | null | undefined): number | null {
-  if (typeof done !== "number" || typeof total !== "number" || !Number.isFinite(done) || !Number.isFinite(total)) {
-    return null;
-  }
-  if (total <= 0 || done < 0) {
-    return null;
-  }
-  return Math.min(100, Math.round((Math.min(done, total) / total) * 100));
-}
-
-/**
- * 风险来源的业务属性标签。
- *
- * 来源规则名称由服务端按实际引用返回，前端不推断其业务阶段。
- */
-export const riskSourceRuleColumnLabel = "来源审核规则";
 
 /** 规则结果状态的中文口径；未识别的状态码连同原始码一起显示。 */
 export function statusLabel(status: string | null | undefined): string {
@@ -459,13 +386,18 @@ export function formatBusinessValue(value: unknown): string {
 
 /**
  * 后端时间统一按 UTC 写入 MySQL DATETIME，序列化后没有时区后缀。
- * 无后缀时明确按 UTC 解析，再交给浏览器转换为用户本地时间；已有偏移量的
- * ISO 时间则按其自身时区解析。
+ * 无后缀时明确按 UTC 解析；已有偏移量的 ISO 时间则按其自身时区解析。
+ * 解析失败返回 null，由调用方决定如何展示。
  */
-export function formatDate(value: string): string {
+export function parseServerTime(value: string): Date | null {
   const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`;
   const date = new Date(normalized);
-  return Number.isNaN(date.getTime())
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function formatDate(value: string): string {
+  const date = parseServerTime(value);
+  return date === null
     ? value
     : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
@@ -519,18 +451,11 @@ export function defaultExtractionStrategy(valueType: string): "RAW_TEXT" | "DETE
   return ["STRING", "CLAUSE", "DECIMAL_CN"].includes(valueType) ? "RAW_TEXT" : "DETERMINISTIC";
 }
 
-export function extractionStrategySupports(strategy: string, valueType: string): boolean {
+export function extractionStrategySupports(strategy: string): boolean {
   // 普通策略只决定模型返回原文的方式，服务端再按 value_type 规范化；
   // 不把业务类型和策略硬编码成互斥组合。STRUCTURED 仅要求 Schema 完整。
   return strategy === "RAW_TEXT" || strategy === "DETERMINISTIC" || strategy === "STRUCTURED";
 }
-
-export const artifactTypeOptions = [
-  { value: "MATERIAL_CLASSIFY", label: "材料识别产物" },
-  { value: "DOCUMENT_PARSE", label: "文件解析产物" },
-  { value: "OCR", label: "文字识别产物" },
-  { value: "SEAL", label: "印章识别产物" },
-];
 
 /**
  * 字段的「产物来源」：当前只有印章识别一种。
@@ -583,13 +508,6 @@ export function statementScopeLabel(value: string | null | undefined): string {
   return value ? statementScopeLabels[value] ?? value : "未声明";
 }
 
-export const decimalCompareOperatorOptions = [
-  { value: "EQ", label: "等于" },
-  { value: "GTE", label: "大于或等于" },
-  { value: "LTE", label: "小于或等于" },
-  { value: "ABS_DIFF_LTE", label: "差额不超过阈值" },
-];
-
 /** 报告输出格式。当前尚未生成 PDF/Word/Excel 文件，这里维护的是配置目标格式。 */
 export const reportFormatOptions = [
   { value: "Markdown", label: "Markdown" },
@@ -611,21 +529,6 @@ export const reportResultSortOptions = [
   { value: "RISK_LEVEL_DESC", label: "风险等级降序" },
   { value: "MATERIAL_ORDER", label: "材料顺序" },
   { value: "MATERIAL_ORDER_RISK_LEVEL_DESC", label: "材料顺序；风险等级降序" },
-];
-
-/** 加总比较的方式：加法只用于数值的等于、不大于、不小于。 */
-export const decimalSumCompareOperatorOptions = [
-  { value: "EQ", label: "等于" },
-  { value: "GTE", label: "不小于" },
-  { value: "LTE", label: "不大于" },
-];
-
-export const dateCompareOperatorOptions = [
-  { value: "EQ", label: "等于" },
-  { value: "GTE", label: "不早于" },
-  { value: "LTE", label: "不晚于" },
-  { value: "GT", label: "晚于" },
-  { value: "LT", label: "早于" },
 ];
 
 
@@ -677,7 +580,8 @@ const failureNextSteps: Record<string, string> = {
   RULE_CAPABILITY_UNSUPPORTED: "该规则存在执行能力缺口，请按返回的具体原因核对规则内容和场景节点配置。",
   LLM_STREAM_INCOMPLETE: "模型流式响应未完整结束，本次生成结果未保存；请查看后端流式请求日志。",
   LLM_OUTPUT_TRUNCATED: "模型因输出长度限制而截断了响应，本次生成结果未保存；请核对模型接口的输出限制。",
-  LLM_RESULT_UNKNOWN: "模型请求的响应状态未知，系统未自动重复提交；确认模型服务状态后再重新提交解析。",
+  LLM_RESULT_UNKNOWN: "先确认模型服务可用；确认后重新提交解析（第一轮已完成时按钮为「重试第二轮」）。",
+  IMPORT_INITIAL_STAGE_UNAVAILABLE: "第一轮解析结果已不可用（缺失、损坏或解析契约已变化），请从头重新解析。",
   LLM_NETWORK_FAILED: "模型网络请求在自动重试后仍失败；确认模型服务和网络可达后再重新提交解析。",
   LLM_TIMEOUT: "模型请求超时；确认模型服务和网络可达后再重新提交解析。",
   RULE_CELL_FORMULA_UNSUPPORTED: "把公式单元格改成业务描述文字后重新上传规则库。",

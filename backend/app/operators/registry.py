@@ -4,10 +4,11 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
+from ..common.exceptions import BusinessError
+from ..constants.status import EXECUTABLE_FIELD_STATUSES
 from ..domain import quality_judgement
 from ..domain.currency import canonical_currency
 from ..domain.decimal_math import exact_subtract, exact_sum
-from ..common.exceptions import BusinessError
 
 
 def _comparison(
@@ -111,7 +112,7 @@ def _unavailable_status(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
     unavailable = [
         item
         for item in inputs
-        if item.get("status") not in {"PRESENT", "REVIEWED"} or item.get("normalized_value") is None
+        if item.get("status") not in EXECUTABLE_FIELD_STATUSES or item.get("normalized_value") is None
     ]
     if unavailable:
         # 字段级原因必须逐项写清：抽取失败、原文未形成标准化值、尚未抽取是三种不同的

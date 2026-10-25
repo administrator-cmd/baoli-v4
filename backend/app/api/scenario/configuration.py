@@ -1,15 +1,16 @@
 """场景当前配置与草稿查询接口。"""
 
 from typing import Literal
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
+
+from ...core.database import get_db
 from ...schema.vo.scenarios import ScenarioConfigurationViewResponse, ScenarioDraftViewResponse
 from ...services.scenario import configuration as scenario_configuration
 from ...services.scenario.configuration import draft_config_view
 from ...services.scenario.lookup import template_or_404
 from .responses import _draft_response
-
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 

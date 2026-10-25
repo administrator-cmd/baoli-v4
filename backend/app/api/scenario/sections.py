@@ -2,13 +2,13 @@
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
+
+from ...core.database import get_db
 from ...schema.dto.scenarios import DraftSectionRequest, DraftSectionUpdateRequest
 from ...schema.vo.scenarios import ScenarioDraftViewResponse
 from ...services.scenario import configuration as scenario_configuration
 from ...services.scenario.sections import create_draft_section, delete_draft_section, update_draft_section
 from .responses import _draft_response
-
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 

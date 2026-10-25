@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import type { PlanCalculationRuleItem, PlanConfig, PlanRuleItem } from "@/api/contracts";
+import { executionModeLabel } from "@/constants/executionModes";
 import { valueTypeOptions } from "@/constants/labels";
 
 const props = defineProps<{
@@ -12,6 +13,10 @@ const props = defineProps<{
 const emit = defineEmits<{ "update:modelValue": [value: boolean] }>();
 const rule = ref<PlanRuleItem | null>(null);
 const calculation = ref<PlanCalculationRuleItem | null>(null);
+const executionMode = computed(() => {
+  const value = rule.value?.rule_json?.execution_mode;
+  return typeof value === "string" ? value : null;
+});
 const error = ref("");
 const parametersText = ref("");
 const businessText = ref("");
@@ -198,6 +203,7 @@ function apply(): void {
         <el-form-item label="规则名称" required><el-input v-model="rule.name" maxlength="255" /></el-form-item>
         <el-form-item label="业务编号"><el-input v-model="rule.source_ref" maxlength="80" /></el-form-item>
         <el-form-item label="规则类型"><el-input v-model="rule.operator_code" /></el-form-item>
+        <el-form-item label="执行方式"><span class="text-muted">{{ executionModeLabel(executionMode) }}</span></el-form-item>
         <el-form-item label="规则用途"><el-select v-model="form.role"><el-option value="CHECK" label="普通核查" /><el-option value="RISK" label="风险结论" /></el-select></el-form-item>
         <el-form-item label="状态"><el-select v-model="form.status" @change="changeRuleStatus"><el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认" /><el-option value="DISABLED" label="暂停" /></el-select></el-form-item>
         <el-form-item label="审核要求"><el-input v-model="form.requirement" type="textarea" :rows="5" /></el-form-item>

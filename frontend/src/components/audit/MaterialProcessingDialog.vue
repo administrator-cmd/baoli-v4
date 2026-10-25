@@ -1,13 +1,45 @@
 <script setup lang="ts">
+import { onUnmounted, watch } from "vue";
+
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { MaterialProcessingState } from "@/composables/useMaterialProcessing";
 import { formatDate } from "@/constants/labels";
 
 /** 材料处理状态与单项重试；异步响应由控制器维护。 */
-defineProps<{ state: MaterialProcessingState }>();
+const props = defineProps<{ state: MaterialProcessingState }>();
 defineEmits<{
   "update:visible": [value: boolean];
 }>();
+
+/**
+ * 弹窗打开期间每 5 秒刷新一次四项产物状态。
+ * 识别页数由服务端轮询写入，只有重新查询才能看到进展；间隔放宽是为了不放大请求量。
+ */
+const REFRESH_INTERVAL_MS = 5_000;
+let timer: ReturnType<typeof setInterval> | null = null;
+
+function stopTimer(): void {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+watch(
+  () => props.state.processingDialogVisible,
+  (visible) => {
+    stopTimer();
+    if (!visible) return;
+    timer = setInterval(() => {
+      if (!props.state.processingLoading && !props.state.processingSubmitting) {
+        void props.state.loadProcessingStatuses();
+      }
+    }, REFRESH_INTERVAL_MS);
+  },
+  { immediate: true },
+);
+
+onUnmounted(stopTimer);
 </script>
 
 <template>

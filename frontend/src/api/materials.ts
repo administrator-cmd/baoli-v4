@@ -1,4 +1,4 @@
-import type { DocumentDetail, DocumentRow, EvidenceRow, JsonValue, Paged } from "./contracts";
+import type { DocumentDetail, DocumentRow, JsonValue, Paged } from "./contracts";
 import { request } from "./http";
 import { toQuery } from "./query";
 
@@ -19,19 +19,6 @@ export function listDocuments(query: DocumentQuery): Promise<Paged<DocumentRow>>
 /** 材料位详情：当前文件与历史上传版本。 */
 export function getDocument(documentNo: string): Promise<DocumentDetail> {
   return request<DocumentDetail>(`/documents/${encodeURIComponent(documentNo)}`);
-}
-
-export interface EvidenceQuery {
-  task_no?: string;
-  reference_type?: string;
-  keyword?: string;
-  page: number;
-  page_size: number;
-}
-
-/** 证据记录分页列表。 */
-export function listEvidence(query: EvidenceQuery): Promise<Paged<EvidenceRow>> {
-  return request<Paged<EvidenceRow>>(`/evidence${toQuery({ ...query })}`);
 }
 
 export type { JsonValue };

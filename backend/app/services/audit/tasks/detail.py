@@ -1,33 +1,75 @@
 """审核任务详情、规则与字段状态的只读视图组装。"""
 
 from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from ....common.exceptions import BusinessError
+from ....constants.execution import NODE_RULE_EXECUTION
+from ....constants.status import EXECUTABLE_FIELD_STATUSES
 from ....domain.manifest import enabled_extraction_field_keys
-from ....domain.rule_library import active, execution_container_of
-from ....entity import (
+from ....domain.rule_library import active, execution_container_of, is_risk_rule
+from ....entity.scenarios import ScenarioVersion
+from ....entity.tasks import (
     AuditTask,
     DocumentUpload,
-    Evidence,
     NodeExecution,
     RuleResult,
-    ScenarioVersion,
+    StoredArtifact,
     TaskDocument,
     TaskFieldValue,
 )
-from .. import value_store as task_value_service
-from ..artifacts import _material_classify_content
-from ..evidence import result_content_view
-from ..facts import _current_field_fact_pairs
 from ...system.background import latest_operation, operation_view
 from ...system.operation_types import OBJECT_AUDIT_TASK
+from .. import value_store as task_value_service
+from ..artifacts import _material_classify_content
+from ..evidence import evidence_source_views, field_evidence, result_content_view, rule_evidence
+from ..facts import _current_field_fact_pairs
+from ..flow.lifecycle import incomplete_failure_message
+from ..resume import resumable_execution
+from .processing import material_artifacts_summary
+
+
+def _execution_failure_message(execution: NodeExecution | None) -> str | None:
+    """未完成批次按逐条结果汇总原因，旧记录也能显示清楚。"""
+    if execution is None:
+        return None
+    if execution.failure_code == "AUDIT_RULE_EXECUTION_INCOMPLETE":
+        return incomplete_failure_message(execution.result_json) or execution.failure_message
+    return execution.failure_message
+
+
+def _named_rule_result(value: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
+    """把历史结果里的内部规则键替换成规则名再展示。
+
+    组合汇总的来源规则在早期记录里只保存了 `rule_...` 键，页面无法据字面理解；
+    名称取自任务冻结的 manifest，只影响展示，不改写已保存的结果。
+    """
+    def named(text: Any) -> Any:
+        if not isinstance(text, str) or "rule_" not in text:
+            return text
+        for key, name in names.items():
+            if key in text:
+                text = text.replace(key, name)
+        return text
+
+    result = dict(value)
+    basis = result.get("basis")
+    if isinstance(basis, list):
+        result["basis"] = [
+            {**row, "label": named(row.get("label"))} if isinstance(row, dict) else row
+            for row in basis
+        ]
+    missing = result.get("missing_items")
+    if isinstance(missing, list):
+        result["missing_items"] = [named(item) for item in missing]
+    return result
 
 
 def _task_display_structure(task: AuditTask) -> dict[str, Any]:
     """返回任务冻结的技术容器与字段，不补读旧快照。"""
-    schema = task.task_schema_json
-    node_source = schema["node_plan"]
+    node_source = task.manifest_json["nodes"]
     return {
         "task_no": task.task_no,
         "nodes": [
@@ -70,8 +112,8 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         raise BusinessError("SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500)
     manifest = task.manifest_json
     schema = task.task_schema_json
-    nodes = sorted(schema["node_plan"], key=lambda item: item["sequence_no"])
-    frozen_version_no = schema["scenario_version_no"]
+    nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
+    frozen_version_no = scenario.version_no
     executions = {
         item.node_code: item
         for item in db.scalars(
@@ -95,14 +137,9 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         item.material_key: _material_classify_content(db, uploads[item.current_upload_id])
         for item in documents if item.current_upload_id in uploads
     }
-    evidence_rows = db.scalars(
-        select(Evidence).where(Evidence.audit_task_id == task.id).order_by(Evidence.id)
-    ).all()
-    evidence_by_id = {item.id: item for item in evidence_rows}
-    field_evidence_by_fact: dict[int, list[Evidence]] = {}
-    for evidence_row in evidence_rows:
-        if evidence_row.field_value_id is not None and evidence_row.rule_result_id is None:
-            field_evidence_by_fact.setdefault(evidence_row.field_value_id, []).append(evidence_row)
+    # 四项处理产物的状态一次汇总返回：页面据此显示识别进度并定位失败项，
+    # 不再为每份材料发四个只读请求。
+    artifact_summary = material_artifacts_summary(db, list(uploads))
     field_facts = db.scalars(
         select(TaskFieldValue)
         .join(DocumentUpload, DocumentUpload.id == TaskFieldValue.document_upload_id)
@@ -147,19 +184,18 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
     scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
     current_execution = executions.get(current_node_definition["node_code"])
+    # 服务重启中断的批次可以原地继续；页面据此提供「继续执行」，不必整轮重跑。
+    resumable = resumable_execution(task, current_execution)
     current_node = {
         **current_node_definition,
         "status": current_execution.status if current_execution else "CURRENT",
-        "failure_message": current_execution.failure_message if current_execution else None,
+        "failure_message": _execution_failure_message(current_execution),
+        "resumable_execution_id": resumable.id if resumable else None,
     }
-    # 当前事实按字段+材料取 is_current 版本；fields_by_id 保留该上传下的全部修订，
-    # 使仍挂在历史修订上的待复核项不会因为查不到事实而报错。
+    # 当前事实按字段+材料取 is_current 版本。
     current_field_pairs = _current_field_fact_pairs(db, task)
     current_field_facts = {key: pair[0] for key, pair in current_field_pairs.items()}
     current_task_facts = {key: pair[1] for key, pair in current_field_pairs.items()}
-    current_fact_status_by_field = {key: pair[1].status for key, pair in current_field_pairs.items()}
-    fields_by_id = {item.id: item for item in field_facts}
-    rules_by_id = {item.id: item for item in rule_results}
     # 取值在任务 CSV：字段原文/规范值与规则结论都按记录 id 取。
     field_value_of = {item.id: task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FIELD_VALUE, item.id)
                       for item in field_facts}
@@ -167,34 +203,30 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                      for item in rule_results}
     current_fact_value_of = {item.id: task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FACT, item.id)
                              for item in current_task_facts.values()}
-    documents_by_id = {item.id: item for item in documents}
     documents_by_material_key = {item.material_key: item for item in documents}
-    field_definitions = {item["field_key"]: item for item in task.task_schema_json["fields"]}
-    # 展示规则当时保存的原文，不拿字段的最新取值替换历史判断依据。
-    rule_evidence: dict[int, list[dict[str, Any]]] = {}
-    evidence_upload_ids = {
-        item.document_upload_id for item in evidence_rows if item.rule_result_id in rules_by_id
+    # 证据可能引用历史上传与产物，它们不在本请求已加载的当前上传集合里。先按引用批量载入，
+    # 后面逐条解析走会话身份映射，不再为每个证据项单独查询。
+    referenced_upload_ids: set[int] = set()
+    referenced_artifact_ids: set[int] = set()
+    for payload in (*field_value_of.values(), *rule_value_of.values()):
+        for item in payload.get("evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            upload_id = item.get("document_upload_id")
+            if isinstance(upload_id, int) and not isinstance(upload_id, bool):
+                referenced_upload_ids.add(upload_id)
+            artifact_id = item.get("artifact_id")
+            if isinstance(artifact_id, int) and not isinstance(artifact_id, bool):
+                referenced_artifact_ids.add(artifact_id)
+    if referenced_upload_ids:
+        _ = db.scalars(select(DocumentUpload).where(DocumentUpload.id.in_(referenced_upload_ids))).all()
+    if referenced_artifact_ids:
+        _ = db.scalars(select(StoredArtifact).where(StoredArtifact.id.in_(referenced_artifact_ids))).all()
+    # 原文及其来源随 CSV 业务记录保存，引用只解析到当时的字段/规则版本。
+    rule_sources = {
+        item.id: evidence_source_views(db, task, rule_evidence(db, task, item.id))
+        for item in rule_results
     }
-    evidence_uploads = {
-        item.id: item
-        for item in db.scalars(
-            select(DocumentUpload).where(
-                DocumentUpload.audit_task_id == task.id,
-                DocumentUpload.id.in_(evidence_upload_ids),
-            )
-        ).all()
-    } if evidence_upload_ids else {}
-    for evidence in evidence_rows:
-        if evidence.rule_result_id not in rules_by_id:
-            continue
-        upload = evidence_uploads.get(evidence.document_upload_id)
-        document = documents_by_id.get(upload.task_document_id) if upload else None
-        rule_evidence.setdefault(evidence.rule_result_id, []).append({
-            "evidence_no": evidence.evidence_no,
-            "material_name": document.material_name if document else None,
-            "filename": upload.original_filename if upload else None,
-            "quote_text": evidence.quote_text,
-        })
     rule_definitions = {(item["node"], item["rule_key"]): item for item in manifest["rules"]}
     execution_node_by_id = {item.id: item.node_code for item in executions.values()}
     node_type_by_code = {
@@ -210,7 +242,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     # 会把后续节点尚未开始的字段提前显示成已执行失败。
     extraction_owner_by_field: dict[str, str] = {}
     for node in manifest.get("nodes") or []:
-        if str(node.get("node_type") or node.get("node_code")) != "RULE_EXECUTION":
+        if str(node.get("node_type") or node.get("node_code")) != NODE_RULE_EXECUTION:
             continue
         contract = node.get("execution_contract")
         if not isinstance(contract, dict) or not isinstance(contract.get("field_keys"), list):
@@ -237,8 +269,10 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         task_fact = current_task_facts.get(field_identity)
         fact_is_current = fact is not None and fact.status != "NOT_EXECUTED"
         document = documents_by_material_key[field["material_key"]]
-        evidence = evidence_by_id.get(fact.evidence_id) if fact_is_current and fact.evidence_id in evidence_by_id else None
-        field_evidences = field_evidence_by_fact.get(fact.id, []) if fact_is_current and fact else []
+        field_sources = (
+            evidence_source_views(db, task, field_evidence(db, task, fact.id))
+            if fact_is_current else []
+        )
         owner_code = extraction_owner_by_field.get(field["field_key"])
         owner_execution = executions.get(owner_code) if owner_code else None
         owner_finished = (
@@ -257,7 +291,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         # 候选误显示成已经生效的值。
         normalized_value = (
             current_fact_value_of[task_fact.id].get("value")
-            if fact_is_current and task_fact is not None and task_fact.status in {"PRESENT", "REVIEWED"}
+            if fact_is_current and task_fact is not None and task_fact.status in EXECUTABLE_FIELD_STATUSES
             else None
         )
         field_view.append(
@@ -265,20 +299,16 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 # 字段键与材料键是主动纠错的定位依据；页面据此对某个字段事实发起纠错。
                 "field_key": field["field_key"],
                 "material_key": field["material_key"],
+                "source_ref": field.get("source_ref"),
                 "name": field["name"],
                 "material_name": document.material_name,
+                "value_type": field.get("value_type"),
+                "instruction": field.get("instruction"),
                 "status": status,
                 "extraction_enabled": extraction_enabled,
                 "raw_value": field_value_of[fact.id].get("raw_value") if fact_is_current else None,
                 "normalized_value": normalized_value,
-                "evidence_no": evidence.evidence_no if evidence else None,
-                "evidences": [
-                    {
-                        "evidence_no": item.evidence_no,
-                        "field_path": item.field_path,
-                    }
-                    for item in field_evidences
-                ],
+                "evidence": field_sources,
                 # 材料未上传时字段属于“缺输入”；不适用与否由规则自己的适用条件决定。
                 "material_uploaded": document.current_upload_id is not None,
                 "material_required": document.required,
@@ -346,7 +376,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 **node,
                 "status": executions[node["node_code"]].status if node["node_code"] in executions else ("CURRENT" if node["node_code"] == task.current_node else "PENDING"),
                 "failure_code": executions[node["node_code"]].failure_code if node["node_code"] in executions else None,
-                "failure_message": executions[node["node_code"]].failure_message if node["node_code"] in executions else None,
+                "failure_message": _execution_failure_message(executions.get(node["node_code"])),
                 "skip_reason": _execution_skip_reason(executions.get(node["node_code"])),
                 # 真实子步骤（8010/OCR 处理数量、印章是否按需启用、未配置的文件质量规则）保存在节点结果里。
                 "result_summary": executions[node["node_code"]].result_json if node["node_code"] in executions else None,
@@ -370,6 +400,8 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 "filename": uploads[item.current_upload_id].original_filename if item.current_upload_id in uploads else None,
                 # 该材料位的 8018 识别结论（含置信度）：只作展示，不影响材料状态与后续执行。
                 "material_classify": material_classify.get(item.material_key),
+                # 当前上传的四项产物状态；没有产物时为空对象。
+                "artifacts": artifact_summary.get(item.current_upload_id, {}),
             }
             for item in documents
         ],
@@ -380,7 +412,13 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             {
                 "rule_key": item.rule_key,
                 "name": item.rule_name,
+                "source_ref": rule_definitions.get((execution_node_by_id[item.node_execution_id], item.rule_key), {}).get("source_ref"),
                 "kind": rule_definitions.get((execution_node_by_id[item.node_execution_id], item.rule_key), {}).get("kind"),
+                # 执行方式决定模型上下文与允许动作；旧快照没有该字段时前端显示未判定。
+                "execution_mode": rule_definitions.get((execution_node_by_id[item.node_execution_id], item.rule_key), {}).get("execution_mode"),
+                "is_risk_rule": is_risk_rule(rule_definitions.get((execution_node_by_id[item.node_execution_id], item.rule_key), {})),
+                # 规则来源工作表：页面按它分组，不同场景使用各自的 Sheet 名。
+                "source_sheet": (rule_definitions.get((execution_node_by_id[item.node_execution_id], item.rule_key), {}).get("origin") or {}).get("sheet_name"),
                 "material_names": [
                     documents_by_material_key[key].material_name
                     for key in rule_definitions.get((execution_node_by_id[item.node_execution_id], item.rule_key), {}).get("materials") or []
@@ -388,8 +426,9 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 ],
                 "status": item.status,
                 "message": item.message,
-                "result": {
-                    # 诊断（模型返回、格式修正记录）来自数据库，业务结论来自任务 CSV。
+                "turn_count": item.turn_count,
+                "result": _named_rule_result({
+                    # 诊断来自数据库，业务结论来自任务 CSV。
                     **rule_value_of[item.id],
                     **result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
                     # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
@@ -397,8 +436,8 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                     "node": node_type_by_code.get(execution_node_by_id[item.node_execution_id]),
                     "node_type": node_type_by_code.get(execution_node_by_id[item.node_execution_id]),
                     "node_code": execution_node_by_id[item.node_execution_id],
-                },
-                "evidence": rule_evidence.get(item.id, []),
+                }, rule_name_by_key),
+                "evidence": rule_sources[item.id],
                 # 旧结果没有 standard 快照时，单独返回任务绑定配置的要求，不改写执行结果。
                 "configured_requirement": rule_definitions.get(
                     (execution_node_by_id[item.node_execution_id], item.rule_key), {},

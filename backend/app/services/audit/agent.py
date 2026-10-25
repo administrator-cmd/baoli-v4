@@ -4,132 +4,93 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
-from ...domain import fact_projection, tool_catalog
-from ...domain.audit_vocab import LOOP_DONE, MODEL_VERDICT_STATUSES
-from ...domain.tool_context import ToolExecutionContext
-from ...common.exceptions import BusinessError
-from ...integrations.llm.gateway import ModelTurn, call_chat
-from ...entity import AuditTask
-from . import value_store as task_value_service
-from .tools import runtime as tool_service
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...common.exceptions import BusinessError
+from ...constants.execution import FACT_KIND_DERIVED
+from ...constants.status import LOOP_DONE, MODEL_VERDICT_STATUSES
+from ...domain import fact_projection, tool_catalog
+from ...domain.execution_mode import (
+    MODE_AGGREGATE,
+    MODE_CALCULATE,
+    MODE_CROSS_SCOPE_COMPARE,
+    MODE_DERIVE_RISK,
+    MODE_EXTRACT,
+    MODE_MATERIAL_CHECK,
+    MODE_REPORT,
+    MODE_UNKNOWN,
+    MODE_VALUE_COMPARE,
+    SOURCE_ONLY_MODES,
+    execution_mode_label,
+)
+from ...domain.tool_context import ToolExecutionContext
+from ...entity.tasks import AuditTask
+from ...integrations.llm.gateway import ModelTurn, call_chat
+from .prompts import (
+    BATCH_PROMPT_SUFFIX,
+    EXTRACTION_BATCH_SCHEMA,
+    SYSTEM_PROMPT,
+    VERDICT_RESPONSE_FORMAT,
+    VERDICT_SCHEMA,
+)
+from .tools import runtime as tool_service
+
 logger = logging.getLogger(__name__)
 
-# 模型能给出的结论状态。与能力目录的规则状态口径一致：模型不是另立一套状态。
-# 当前审核执行器不启用人工审核。历史结果仍可展示 PENDING_REVIEW，
-# 但模型新结果不能用它表示“开始执行/等待人工”，否则会把进度文字当成结论。
-# 候选结论的固定 Schema。模型按它输出，服务端按它校验；两者是同一份清单
-# （见 `validate_verdict`），任何一侧单独改动都会被校验当场发现。
-VERDICT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "status": {"type": "string", "enum": sorted(MODEL_VERDICT_STATUSES)},
-        "message": {"type": "string", "minLength": 1, "description": "面向审核用户的一句业务结论及直接原因，不含内部身份、工具调用或执行过程"},
-        "basis": {"type": "array", "items": {
-            "type": "object", "properties": {
-                "label": {"type": "string"}, "value": {},
-                "explanation": {"type": "string"},
-            }, "required": ["label", "value", "explanation"], "additionalProperties": False,
-        }},
-        "missing_items": {"type": "array", "items": {"type": "string"}},
-        "next_action": {"type": "string"},
-        # 提供的引用必须能在本次评估里找到。
-        "evidence": {"type": "array"},
-        "outputs": {"type": "array", "items": {
-            "type": "object",
-            "properties": {"code": {"type": "string"}, "value": {}, "raw_value": {"type": "string"},
-                           "field_status": {"enum": ["PRESENT", "NOT_PRESENT", "EVIDENCE_INSUFFICIENT"]}},
-            "required": ["code", "value"],
-        }},
-        "report": {"type": ["object", "null"]},
-    },
-    "required": ["status", "message", "basis", "missing_items", "next_action", "evidence", "outputs"],
-    "additionalProperties": True,
+EXECUTION_MODE_GUIDANCE: dict[str, str] = {
+    MODE_MATERIAL_CHECK: "只检查本条声明的材料/文件本身（格式、大小、页数、印章等）；不比较字段值，不读取未声明的材料。",
+    MODE_VALUE_COMPARE: "只使用下方列出的输入字段事实进行比较或判断；没有字段输入时，只使用本条声明的材料/产物，不读取未声明材料。",
+    MODE_CROSS_SCOPE_COMPARE: "只比较下方列出的输入事实；没有字段输入时，只比较本条声明的材料/产物，不读取未声明材料。",
+    MODE_AGGREGATE: "只汇总下方来源规则结果；不得重新执行子规则、不得读取材料或字段、不得新增子规则未给出的结论。",
+    MODE_DERIVE_RISK: "只根据下方来源规则结果与风险成立条件推导风险；不得重新检查材料或字段。",
+    MODE_EXTRACT: "只抽取本条声明的字段；不做超出字段取值的业务判断。",
+    MODE_CALCULATE: "按本条公式与参数计算；不重新抽取字段。",
+    MODE_REPORT: "按报告章节要求生成正文；不重新执行上游规则。",
+    MODE_UNKNOWN: "执行方式未确定；不得猜测执行动作，按证据不足说明原因。",
 }
 
-# 无工具请求使用 JSON 对象模式；带工具请求由原生 tool_calls 与最终 JSON 两种响应组成。
-# 最终 JSON 接口结构由同一份 VERDICT_SCHEMA 告知模型并核对。
-_VERDICT_RESPONSE_FORMAT = {"type": "json_object"}
 
-_SYSTEM_PROMPT = """你是场景共用的辅助规则执行器。按本次传入的规则原文和真实输入执行，
-不审核规则的业务正确性，不替管理员修改方法、阈值或条件。
-能由 LLM 完成的计算、日期处理、比较、汇总和判断直接完成，不要求必须调用工具。
-需要额外能力时从本次工具列表选择合适工具，通过 tool_calls 执行；参数按规则原文和工具 Schema 填写。
-需要查阅关联规则、计算公式或 Excel 原文时调用 RULE_LIBRARY_QUERY，inputs 填 []。
-parameters 可按 rule_codes（规则或计算结果编号）、rule_keys、query（原文关键词）和 kind 查询；
-不填写条件则列出本任务全部生效规则。多个条件同时填写时取交集。
-查询返回的是规则配置，查询成功不代表业务检查通过；不得据此编造材料事实或来源检查结果。
-inputs 只使用提供的 field_key/material_key，真实数值由系统按这些身份读取，不编造数据。
-工具不可用或调用失败时，系统保留真实调用错误；若已有其他真实依据足以执行，可按该依据完成。
-LLM 和可用工具都不能完成时返回 EVIDENCE_INSUFFICIENT，message 明确说明“无法执行”及原因，
-不要假装通过。本阶段暂不提供人工审核，不请求用户确认或暂停执行。
-原文明确要求人工确认时，先完成你能够完成的核查；人工审核当前未启用，不能返回 PENDING_REVIEW，
-请使用 EVIDENCE_INSUFFICIENT，basis 写明已完成的业务核查，missing_items 写明尚未确认事项，不声称已获得人工确认。
-不能用“开始执行”、进度说明或请求批准调用工具代替真实结论。
-“必须审核”“生效”“最高优先级”等要求由你直接执行，不代表需要人工确认。
-材料、事实或关联结果尚未读取时按执行需要使用真实工具；不能仅因尚未开展审核就请求复核。
-组合、汇总类规则按原文读取关联规则配置与实际结果，不能将“准备执行关联规则”当作已完成结论。
-数据不足、工具失败或不能完成时使用 EVIDENCE_INSUFFICIENT 并说明具体原因，其余生效规则继续执行。
-状态使用 PASSED、ABNORMAL、COMPUTED、NOT_APPLICABLE、EVIDENCE_INSUFFICIENT。
-业务原文仅要求计算中间值、未要求审核判断时，成功返回 COMPUTED；业务适用条件不成立时返回 NOT_APPLICABLE。
-结果面向审核用户，不是执行日志。message 直接回答本条检查的结果，仅在异常或无法判断时补充直接原因。
-能用一个短语表达就不用长句；不要复述规则要求、核查步骤、材料清单、依据全文或字段身份。
-表达示例（仅说明文风，必须依据本次真实结果，不能照抄当作结论）：
-格式检查通过写“格式正确”；大小检查通过写“文件大小符合要求”；
-确认字段未载明写“未找到合同编号”；已经抽取写“已抽取甲方名称”；
-比较异常写“签署日期晚于生效日期”；缺值无法判断写“缺少履约开始日期，无法比较”。
-确认未载明与无法读取必须区分，无法读取时不能说材料没有该字段。
-执行完成与审核通过也必须区分，发现异常同样可能是已完成执行。
-message 用材料和字段的中文名称，
-不要写内部键、产物编号、调用编号、工具名称、接口状态、output_definitions 或未启用的系统能力。
-basis 独立列出真实取值、比较双方、算式和业务依据；每项包含 label、value、explanation，使用中文业务名称。
-missing_items 只列最终仍影响本条结论的缺失数据或待确认事项；已经成功恢复的工具失败不是业务缺项。
-next_action 仅填写依据本条规则所需的业务处理建议，没有需要处理的事项时填空字符串。
-内部身份只放在 evidence 与 outputs 的对应身份字段中；系统负责记录技术诊断，不要在业务说明里复述。
-每项抽取字段输出必须给出 field_status：PRESENT 表示取得真实值；NOT_PRESENT 表示读取材料后确认未载明；
-EVIDENCE_INSUFFICIENT 表示无法确定。后两者 value 填 null，PRESENT 的 value 不得为空。
-抽取不到字段时 value 填 null，raw_value 不得用失败说明、执行过程或猜测值代替材料原文；
-成功抽取/计算用 COMPUTED，无法确定必需输出用 EVIDENCE_INSUFFICIENT；确认字段未载明时保留 NOT_PRESENT，
-业务规则判断另按其原文执行，不用空字符串伪装成已抽取。
-字段缺失原因放 missing_items，真实原文引文放 evidence.quote_text，计算过程放 basis。
-抽取与计算必须返回 outputs，不得只描述已经完成。每项包含 code、value，可选 raw_value；
-code 使用声明的输出字段键或 result_code，value 填真实结果，raw_value 填来源原文或实际计算过程。
-只允许产出本规则 output_definitions 和 result_code 声明的身份，STRUCTURED字段value为声明Schema对应的JSON对象。
-报告返回 report 对象，content 填完整正文，content_type 填实际正文 MIME 类型，支持text/markdown、text/plain、text/html，正文按 report_definition 的业务内容要求输出。正文成功生成用 COMPUTED；PDF、Word 等文件格式由系统单独记录支持情况，不在 message 和正文混入导出诊断，也不因缺少导出文件而放弃正文。
-报告正文使用业务名称、取值、核查结论、风险、缺项和建议，不复制工具日志、内部身份或上游整段执行说明。
-报告章节 data_refs 可以引用字段事实、计算结果和规则结论；report_data 按章节提供对应的真实 facts/results。
-按每章 content_instruction、业务引用和材料范围组织正文，不把计算结果或规则结论当成待抽取字段。
-missing_data=true 时在对应章节明确说明缺少哪项数据，其余真实内容继续生成；引用为空时按章节要求选择相关的 upstream_facts/upstream_results。
-结果存在但没有所需数值时如实说明；规则配置、公式或停用规则不代表已经执行，不编造数值、风险或通过结论。
-上游 PENDING_REVIEW 表示业务尚未确认，报告应列明未确认事项，不得写成已确认或通过。
-需要实际材料内容时调用 TASK_DATA_READ，parameters.material_keys 填提供的材料身份；inputs 填 []。
-工具调用必须使用接口原生 tool_calls，不要在正文 JSON 中写 function、arguments、tool_calls 或 action 来模拟调用。
-读取材料时，TASK_DATA_READ 的 inputs 填空数组，parameters.material_keys 使用本条允许读取的真实材料身份。
-程序已在业务审核前完成 8018 校验、8010 去章、PaddleOCR 正文识别和 8003 原文件印章识别。
-正文抽取使用 artifact_type=OCR，读取去章文件生成的 Markdown；印章检验使用 artifact_type=SEAL。
-印章主体来自 SEAL 的 seal_subjects/subject_name，正文主体来自 OCR Markdown；按规则要求比较，不能从去章正文猜印章主体。
-字段 output_definitions 的 artifact_source=SEAL 时从印章产物抽取，其余字段从 OCR Markdown 抽取。
-upstream_facts 或 inputs 中 origin=HUMAN_CORRECTION 的字段是人工结论，必须沿用：REVIEWED 保留人工值，输出时 field_status=PRESENT；NOT_PRESENT 保留“未载明”，输出 field_status=NOT_PRESENT、value=null。不得重新抽取覆盖人工结论；后续计算和校验使用该结论。
-8018 的 matches_declared_material 是实际校验结果，需核对材料类型时读取 artifact_type=MATERIAL_CLASSIFY。
-工具调用后等待真实工具结果，再继续执行；“准备读取”“开始核查”不是结论，不能用 PENDING_REVIEW 提前结束。
-PDF和图片原文件不是正文，8010 二进制产物也不是正文；不要重新触发文档服务，不要绕过去章和 OCR 链路。
-字段定义中的“失败处理：人工复核”不是要求本次跳过抽取，先读取材料并完成可以完成的工作。
-执行抽取和计算不需要调用另一个LLM工具，直接依据读取的材料和 upstream_facts 完成。
-最终只输出符合上述 Schema 的 JSON 对象；不要复制示例占位符，也不要在 JSON 外输出说明文字。
-evidence 中每项为引用对象，可填写实际工具结果的 tool_call_id、实际字段事实的 fact_id 或 field_key 与 material_key；使用 fact_code 时需补齐期间、报表、主体口径以唯一定位，
-或本次上下文 upstream_results 中真实的整数 rule_result_id（可同时填写匹配的 rule_key、rule_code）；
-不要把规则编号伪装成 fact_code，也不要引用上下文之外的上游结果。
-引用 TASK_DATA_READ 的 OCR/SEAL 时，同时给出实际结果中的 artifact_id、material_key 和 quote_text 原文。
-抽取字段的引用再给出 output_code，使用本规则声明的字段键；一个字段有多处依据时分别引用。
-quote_text 必须是读取结果中的原文，不能用抽取值、判断说明或整篇正文代替具体引文。
-只有工具调用编号而没有引文时仅记录产物来源，不代表已核对字段原文。
-如果本条规则声明了抽取输出且 inputs 中没有实际字段事实，先使用 TASK_DATA_READ 获取声明材料的真实正文或印章产物；
-不能以“开始读取”“准备抽取”或空 outputs 代替实际读取。读取结果必须进入后续判断并在需要时作为证据引用。
-"""
+def _without_origin(value: Any) -> Any:
+    """去掉模型不需要的来源快照（Excel 工作表名、行号和原始单元格）。
+
+    来源信息只用于页面溯源与导入回查，模型执行只依赖规则要求、输入身份与真实取值。
+    """
+    if isinstance(value, dict):
+        return {key: _without_origin(item) for key, item in value.items() if key != "origin"}
+    if isinstance(value, list):
+        return [_without_origin(item) for item in value]
+    return value
+
+
+# 上游规则结果里下游真正需要的身份与业务结论。
+# evidence、tool_findings、report、risk_context 等属于该条结果的诊断与展示，不在规则之间重复传递。
+_UPSTREAM_RESULT_KEYS = ("rule_result_id", "rule_key", "rule_code", "rule_name", "status", "message", "node_code")
+
+
+def _upstream_result_view(item: dict[str, Any]) -> dict[str, Any]:
+    """上游规则结果的紧凑视图：身份、状态、说明与业务结论，不带完整 CSV 负载。
+
+    同时接受完整上下文项（身份在顶层、取值负载在 result）和已经压缩过的视图，
+    规则上下文与报告数据因此可以复用同一份视图；证据校验依赖的 rule_result_id、
+    rule_key、rule_code 始终保留在顶层。
+    """
+    payload = item.get("result")
+    if not isinstance(payload, dict):
+        payload = item
+    return {
+        **{key: item.get(key) for key in _UPSTREAM_RESULT_KEYS},
+        "basis": payload.get("basis", []),
+        "missing_items": payload.get("missing_items", []),
+        "outputs": payload.get("outputs", []),
+        # 报告与风险处置需要等级、处置建议和下一步；这些是业务结论，不是执行诊断。
+        "risk_level": payload.get("risk_level"),
+        "action": payload.get("action"),
+        "next_action": payload.get("next_action") or "",
+    }
 
 
 def build_rule_context(
@@ -139,50 +100,90 @@ def build_rule_context(
     manifest: dict[str, Any],
     material_names: dict[str, str],
 ) -> str:
-    """规则的评估上下文：规则要求 + 可用的字段事实。
-
-    只给本次规则实际使用的事实与标识。给全量事实会让模型在无关字段上做判断，
-    也会让它有机会引用不属于这条规则的输入。
-    """
+    """规则的评估上下文：执行方式 + 规则要求 + 该动作真正需要的事实。"""
     tool_id = "LLM 与可用工具"
+    mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
+    source_only = mode in SOURCE_ONLY_MODES
+    material_only = mode == MODE_MATERIAL_CHECK
     published_parameters = dict(rule.get("parameters") or {})
-    configuration = {key: value for key, value in rule.items()
-                     if key not in {"upstream_facts", "upstream_results", "available_materials", "report_data"}}
+    configuration = _without_origin({key: value for key, value in rule.items()
+                                     if key not in {"upstream_facts", "upstream_results", "available_materials", "report_data"}})
+    # 产出身份只能取本规则声明的字段键与结果编号；单独列出来，避免模型自造 code。
+    allowed_codes = [str(item["field_key"]) for item in rule.get("output_definitions") or []
+                     if isinstance(item, dict) and item.get("field_key")]
+    if rule.get("result_code"):
+        allowed_codes.append(str(rule["result_code"]))
     lines = [
         f"规则编号：{rule.get('rule_code') or rule.get('rule_key')}",
         f"规则名称：{rule.get('name')}",
+        f"本条执行方式：{mode}（{execution_mode_label(mode)}）",
+        EXECUTION_MODE_GUIDANCE.get(mode, EXECUTION_MODE_GUIDANCE[MODE_UNKNOWN]),
         f"审核要求：{rule.get('requirement') or '（未填写）'}",
         f"执行能力：{tool_id}",
         "规则原始配置：" + json.dumps(configuration, ensure_ascii=False, sort_keys=True),
         "业务执行参数：" + json.dumps(published_parameters, ensure_ascii=False, sort_keys=True),
         "threshold 如为十进制字符串，工具调用时按工具 Schema 填 JSON 数字；实际计算仍采用发布原值。",
         "",
-        "可用字段事实（inputs 必须逐字使用这些标识）：",
     ]
-    for item in inputs:
-        material_key = item.get("material_key")
-        lines.append(
-            f"- {item.get('field_key')}@{material_key}"
-            f"（{material_names.get(material_key, material_key)}）："
-            f"原文={item.get('raw_value')!r}，标准化值={item.get('normalized_value')!r}，"
-            f"状态={item.get('status')}，类型={item.get('value_type')}，"
-            f"单位={item.get('unit') or '未声明'}，币种={item.get('currency') or '未声明'}"
-        )
-    upstream_facts = rule.get("upstream_facts") or []
-    lines.extend([
-        "",
-        "本条规则可直接使用的上游字段事实（仅限以下身份）：",
-    ])
-    lines.extend(json.dumps(item, ensure_ascii=False, default=str) for item in upstream_facts)
+    if allowed_codes:
+        lines.append("本条规则允许的产出 code（outputs[].code 只能逐字取以下值，不要自造也不要重复）：")
+        lines.append("、".join(allowed_codes))
+        lines.append("")
+    else:
+        lines.append("本条规则不产出字段取值或计算结果：outputs 必须为空数组 []，判断依据写进 basis、证据写进 evidence。")
+        lines.append("")
+    if inputs and not source_only and not material_only:
+        lines.append("可用字段事实（工具 inputs 与证据引用都按 field_key、material_key 两个字段填写，不要拼成一个字符串）：")
+        for item in inputs:
+            material_key = item.get("material_key")
+            lines.append(
+                f"- field_key={item.get('field_key')}，material_key={material_key}"
+                f"（{material_names.get(material_key, material_key)}）："
+                f"原文={item.get('raw_value')!r}，标准化值={item.get('normalized_value')!r}，"
+                f"状态={item.get('status')}，类型={item.get('value_type')}，"
+                f"单位={item.get('unit') or '未声明'}，币种={item.get('currency') or '未声明'}"
+            )
+        if any(item.get("status") == "NOT_EXECUTED" for item in inputs):
+            lines.append(
+                "状态为 NOT_EXECUTED 的输入表示上游没有形成取值，不能据此认定材料未载明，"
+                "也不能把它当作事实证据引用；应返回 EVIDENCE_INSUFFICIENT 并说明无法判断。"
+            )
+    elif mode in {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE}:
+        lines.append("本条规则没有声明字段输入；只使用本条允许的材料/产物，按规则要求判断，不读取未声明材料。")
+    # 上面已逐条打印的 inputs 与 upstream_facts 是同一批字段事实，按身份去重后只保留未覆盖的部分。
+    # inputs 没有打印时（来源规则、材料检查）不能视为已覆盖，否则会丢掉模型看不到的数据。
+    visible_inputs = inputs if inputs and not source_only and not material_only else []
+    covered_inputs = {
+        (item.get("field_key") or item.get("fact_code"), item.get("material_key"))
+        for item in visible_inputs
+    }
+    upstream_facts = [
+        item for item in rule.get("upstream_facts") or []
+        if (item.get("field_key") or item.get("fact_code"), item.get("material_key")) not in covered_inputs
+    ]
+    # 报告正文按章节从 report_data 取数；再把全量字段事实打印一遍属于同一份数据重复输入。
+    if upstream_facts and not source_only and rule.get("kind") != "REPORT":
+        lines.extend([
+            "",
+            "本条规则可直接使用的上游字段事实（仅限以下身份）：",
+        ])
+        lines.extend(json.dumps(item, ensure_ascii=False, default=str) for item in upstream_facts)
+    # 报告正文数据由 report_data 按章节提供，不再重复打印完整 upstream_results；
+    # 结论校验使用的原始 upstream_results 由调用方单独保存，不受这里是否打印影响。
     upstream_results = rule.get("upstream_results") or []
-    lines.extend([
-        "",
-        "本条规则可直接引用的上游规则结果（evidence 使用其中真实 rule_result_id）：",
-    ])
-    lines.extend(json.dumps(item, ensure_ascii=False, default=str) for item in upstream_results)
+    if (source_only or upstream_results) and rule.get("kind") != "REPORT":
+        lines.extend([
+            "",
+            "本条规则可直接引用的上游规则结果（evidence 使用其中真实 rule_result_id）：",
+        ])
+        if upstream_results:
+            lines.extend(json.dumps(_upstream_result_view(item), ensure_ascii=False, default=str)
+                         for item in upstream_results)
+        else:
+            lines.append("（没有可用的来源规则结果；不得自行补做来源检查，按证据不足说明缺少哪些来源结果。）")
     if rule.get("report_data") is not None:
         lines.extend(["", "按报告章节关联的业务数据：" + json.dumps(rule["report_data"], ensure_ascii=False, default=str)])
-    if rule.get("available_materials"):
+    if rule.get("available_materials") and not source_only:
         lines.extend([
             "",
             "本任务当前材料及上传状态（正文读取 OCR，印章读取 SEAL；未上传也如实保留）：",
@@ -206,8 +207,90 @@ def initial_messages(
 ) -> list[dict[str, Any]]:
     """一条规则实例的初始消息历史。只在 `prepare_agent_context` 里生成一次。"""
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT + "\n最终结论的数据结构：" + json.dumps(VERDICT_SCHEMA, ensure_ascii=False)},
+        {"role": "system", "content": SYSTEM_PROMPT + "\n最终结论的数据结构：" + json.dumps(VERDICT_SCHEMA, ensure_ascii=False)},
         {"role": "user", "content": build_rule_context(rule, inputs, manifest=manifest, material_names=material_names)},
+    ]
+
+
+def initial_batch_messages(
+    rules: list[dict[str, Any]],
+    *,
+    material_key: str,
+    material_name: str,
+    field_contexts: dict[str, dict[str, Any]],
+    field_codes: dict[str, str],
+) -> list[dict[str, Any]]:
+    """批量字段抽取的消息历史：一份材料、多个字段，只读取一次正文。
+
+    每条规则必须是单字段抽取（一个 output_definition、无 inputs）；调用方已按材料分好组。
+    字段定义逐条列出，避免模型把抽取要求当成材料原文或漏字段。
+    模型只看到本批的短编号：内部字段键是 20 位不透明字符串，让模型逐字抄写容易出错。
+    """
+    definitions = []
+    for rule in rules:
+        supported = rule.get("output_definitions") or []
+        if len(supported) != 1:
+            raise BusinessError(
+                "EXTRACTION_BATCH_INVALID", "批量抽取要求每条规则恰好声明一个输出字段",
+                status_code=500, details={"rule_key": rule.get("rule_key"), "outputs": len(supported)},
+            )
+        definitions.append(supported[0])
+    lines = [
+        f"本次是批量字段抽取：在材料「{material_name}」（material_key={material_key}）上抽取 {len(definitions)} 个字段。",
+        "先使用 TASK_DATA_READ 读取字段定义指定的产物：artifact_source=SEAL 时读取 SEAL，其余读取 OCR。",
+        "同一次读取覆盖全部字段，不要为每个字段重复读取材料。",
+        "",
+        "待抽取字段：",
+    ]
+    for index, definition in enumerate(definitions, 1):
+        field_key = definition["field_key"]
+        code = field_codes.get(field_key)
+        if not code:
+            raise BusinessError(
+                "EXTRACTION_BATCH_CODE_MISSING", "批量抽取缺少字段短编号",
+                status_code=500, details={"field_key": field_key},
+            )
+        lines.extend([
+            f"{index}. code={code}",
+            f"   名称：{definition.get('name')}",
+            f"   类型：{definition.get('value_type')}，单位={definition.get('unit') or '未声明'}，币种={definition.get('currency') or '未声明'}",
+            f"   抽取要求：{definition.get('instruction') or '（未填写）'}",
+        ])
+        attributes = {
+            key: definition.get(key) for key in (
+                "artifact_source", "extraction_strategy", "structure_schema",
+                "period_scope", "statement_scope", "entity_scope", "required",
+            ) if definition.get(key) is not None
+        }
+        if attributes:
+            lines.append("   执行属性：" + json.dumps(attributes, ensure_ascii=False, sort_keys=True, default=str))
+        requirement = rules[index - 1].get("requirement")
+        parameters = rules[index - 1].get("parameters") or {}
+        if requirement or parameters:
+            lines.append("   规则要求与参数：" + json.dumps(
+                {"requirement": requirement, "parameters": parameters},
+                ensure_ascii=False, sort_keys=True, default=str,
+            ))
+        context = field_contexts[field_key]
+        if context.get("upstream_facts") or context.get("upstream_results"):
+            lines.append("   当前可用事实与上游结果：" + json.dumps(context, ensure_ascii=False, default=str))
+    lines.extend([
+        "",
+        "输出要求：",
+        "- 只返回 fields 数组，每个字段一项，code 逐字取自上面列出的短编号，不遗漏、不重复、不自造。",
+        "- status 是本字段的业务结论：取到真实值为 COMPUTED，材料中确认没有该内容为 ABNORMAL，无法判断为 EVIDENCE_INSUFFICIENT。",
+        "- field_status=PRESENT 时 value 填按字段类型标准化后的真实取值、raw_value 只填字段本身的原始写法；NOT_PRESENT 时 value 必须是 null 并在 message 说明未载明；"
+        "EVIDENCE_INSUFFICIENT 时 value 必须是 null 并说明缺少什么。",
+        "- evidence 每一项都属于本字段：读取材料的引用给 tool_call_id、artifact_id、material_key、quote_text，"
+        "quote_text 必须是读取结果中的原文片段；output_code 由系统按字段补齐，不用填写。",
+        "- quote_text 只取直接支撑该字段的最小原文片段：表格只引用目标值所在单元格，不复制整行、整表或无关列。",
+        "- message 是面向审核用户的一句结论；basis 记录判断依据；missing_items 记录该字段的业务缺项；没有时用空数组。",
+        "",
+        "批量抽取结论的数据结构：" + json.dumps(EXTRACTION_BATCH_SCHEMA, ensure_ascii=False),
+    ])
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT + BATCH_PROMPT_SUFFIX},
+        {"role": "user", "content": "\n".join(lines)},
     ]
 
 
@@ -225,7 +308,7 @@ def call_model_once(
         tools=tools or None,
         tool_choice=tool_choice,
         # 工具轮次允许原生函数调用；JSON 格式只约束没有工具的直接结论请求。
-        response_format=None if tools else _VERDICT_RESPONSE_FORMAT,
+        response_format=None if tools else VERDICT_RESPONSE_FORMAT,
         idempotency_key=idempotency_key,
     )
 
@@ -241,13 +324,11 @@ def assistant_message_of(turn: ModelTurn) -> dict[str, Any]:
     return message
 
 
-def pending_calls_of(turn: ModelTurn, evaluation_id: str) -> list[dict[str, Any]]:
+def pending_calls_of(turn: ModelTurn) -> list[dict[str, Any]]:
     """本轮模型请求的工具调用，写进 State 的 `pending_tool_calls`。
 
-    账本标识带上评估批次前缀：供应商给的调用标识只在一次响应内唯一，
-    不同评估（重跑节点、下一条规则）之间可能重复，而账本要求 `tool_call_id`
-    全局唯一且「同一次调用不重复执行」。原始标识另存为
-    `provider_tool_call_id`，回填 `tool` 消息时必须用它——模型认的是自己给的那个。
+    `tool_call_id` 用于本次评估内定位工具结果；`provider_tool_call_id` 保留供应商标识，
+    回填 `tool` 消息时必须用它——模型认的是自己给的那个。当前两者相同。
     """
     return [
         {
@@ -282,14 +363,19 @@ def tool_message(call: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]
 def parse_verdict(content: str | None) -> dict[str, Any] | None:
     """把模型的最终响应解析成候选结论。
 
-    要求整体是一个 JSON 对象（见 `_VERDICT_RESPONSE_FORMAT`）。
+    要求整体是一个 JSON 对象（见 `VERDICT_RESPONSE_FORMAT`）。
+    模型偶尔把整个对象包在 Markdown 代码块里：这是排版产物，剥掉后仍是同一份 JSON。
     解析不出对象时返回 None，由调用方按「模型没有给出可解析的结论」处理（BLOCKED），
-    不在文本里扫描「最后一行像 JSON 的东西」——那会把说明文字里的片段当成结论。
+    不在说明文字里扫描「最后一行像 JSON 的东西」——那会把片段当成结论。
     """
     if not isinstance(content, str) or not content.strip():
         return None
+    text = content.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced is not None:
+        text = fenced.group(1).strip()
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
@@ -411,8 +497,11 @@ def _evidence_refs(
                     reference=references, matched_count=len(matched),
                 )
             fact = matched[0]
+            source = {key: fact[key] for key in ("source_field_value_id", "source_rule_result_id") if key in fact}
+            if len(source) != 1:
+                raise _schema_error("事实没有唯一的已保存取值来源", fact_id=fact.get("fact_id"))
             resolved.append({**{key: fact.get(key) for key in ("fact_id", "field_key", "fact_code", "material_key", "period_scope", "statement_scope", "entity_scope")},
-                             "evidence_ids": list(fact.get("evidence_ids") or [])})
+                             **source})
             continue
         result_id = item.get("rule_result_id")
         if result_id is not None:
@@ -450,6 +539,10 @@ def validate_verdict(
     definitions = {field["field_key"]: field for field in rule.get("output_definitions") or []}
     for reference in refs:
         code = reference.get("output_code")
+        # 模型对非字段证据常填空字符串；它不是声明产出，按未填写处理。
+        if isinstance(code, str) and not code.strip():
+            code = None
+            reference.pop("output_code", None)
         if code is not None:
             if not isinstance(code, str) or code not in definitions:
                 raise _schema_error("字段证据引用的 output_code 不属于本规则的输出", output_code=code)
@@ -482,16 +575,10 @@ def validate_verdict(
 # 规则输入
 
 
-def _fact_values(db: Session, task: AuditTask, rows: list[Any]) -> dict[int, dict[str, Any]]:
-    """这批事实索引行在任务 CSV 里的取值；表里不再存值。"""
-    return {row.id: task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FACT, row.id)
-            for row in rows}
-
-
 def _task_facts(db: Session, task: AuditTask, materials: list[dict[str, Any]], *,
                 rule_inputs: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """从统一事实读取可用取值，不再逐条与字段展示副本对账。"""
-    from ...entity import TaskFact
+    from ...entity.tasks import TaskFact
     definitions = {f["field_key"]: f for f in task.task_schema_json["fields"]}
     if rule_inputs is not None:
         selected = {r["field_key"] for r in rule_inputs}
@@ -509,9 +596,10 @@ def _task_facts(db: Session, task: AuditTask, materials: list[dict[str, Any]], *
 
 def _task_materials(db: Session, task: AuditTask) -> list[dict[str, Any]]:
     """当前任务材料与上传状态，包括尚未上传的材料。"""
-    from .state import _material_states
-    from ...entity import DocumentUpload, TaskDocument
     from sqlalchemy import select
+
+    from ...entity.tasks import DocumentUpload, TaskDocument
+    from .state import _material_states
 
     states = _material_states(db, task)
     documents = list(
@@ -572,22 +660,24 @@ def _task_materials(db: Session, task: AuditTask) -> list[dict[str, Any]]:
 def rule_data(db: Session, task: AuditTask, rule: dict[str, Any]) -> dict[str, Any]:
     """直接读取当前规则的实际输入；内容由图状态保存，不另建规则输入。"""
     materials = _task_materials(db, task)
-    references = fact_projection.declared_inputs_of(rule)
-    facts = _task_facts(db, task, materials, rule_inputs=None if rule.get("kind") == "REPORT" else references)
-    from ...entity import TaskFact
+    mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
+    # 汇总/风险规则只消费来源结果；材料检查只读材料本身，都不加载字段事实。
+    source_only = mode in SOURCE_ONLY_MODES or mode == MODE_MATERIAL_CHECK
+    references = [] if source_only else fact_projection.declared_inputs_of(rule)
+    facts = _task_facts(db, task, materials,
+                        rule_inputs=[] if source_only else (None if rule.get("kind") == "REPORT" else references))
+    from ...entity.tasks import TaskFact
     definition = rule.get("calculation_definition") or {}
     result_codes = set(rule.get("source_rule_codes") or []) | set(definition.get("depends_on_result_codes") or [])
     result_codes.update(p["source_code"] for p in definition.get("parameters") or []
                         if p.get("source_type") == "CALC_RESULT" and p.get("source_code"))
     query = select(TaskFact).where(TaskFact.audit_task_id == task.id,
-                                   TaskFact.is_current.is_(True), TaskFact.fact_kind == "DERIVED")
+                                   TaskFact.is_current.is_(True), TaskFact.fact_kind == FACT_KIND_DERIVED)
     if rule.get("kind") != "REPORT":
         query = query.where(TaskFact.fact_code.in_(result_codes))
     derived = list(db.scalars(query.order_by(TaskFact.id)))
-    derived_facts = fact_projection.facts_of_task_fact_rows(derived, values=_fact_values(db, task, derived))
-    from .evidence import fact_evidence_ids
-    for row, fact in zip(derived, derived_facts):
-        fact["evidence_ids"] = fact_evidence_ids(db, task, row)
+    from .fact_context import project_task_facts
+    derived_facts = project_task_facts(db, task, derived)
     facts.extend(derived_facts)
     return {"materials": materials, "facts": facts,
             "inputs": fact_projection.resolve_rule_inputs(facts, references)}
@@ -616,6 +706,14 @@ def execution_context(db: Session, *, task: AuditTask, scene_code: str,
                                 database_session=db)
 
 
+# 工具实现或运行环境错误不能当成模型参数错误交回模型继续猜结论。
+_TOOL_PROGRAM_ERRORS = frozenset({
+    "TOOL_CATALOG_OUTPUT_CONTRACT_INVALID", "TOOL_CONTEXT_MISSING", "TOOL_HANDLER_MISSING",
+    "TOOL_NOT_REGISTERED", "TOOL_RESULT_INVALID", "TOOL_RUNTIME_MISSING",
+    "TOOL_RUNTIME_UNEXPECTED", "TOOL_SCHEMA_INVALID", "TOOL_TASK_MISSING", "TOOL_VERSION_MISMATCH",
+})
+
+
 def invoke_tool(db: Session, *, call: dict[str, Any], inputs: list[dict[str, Any]],
                 context: ToolExecutionContext, runtime: dict[str, Any] | None,
                 result_context: dict[str, Any], rule: dict[str, Any],
@@ -630,6 +728,10 @@ def invoke_tool(db: Session, *, call: dict[str, Any], inputs: list[dict[str, Any
         db.commit()
         return result
     except BusinessError as exc:
+        if exc.code in _TOOL_PROGRAM_ERRORS:
+            logger.error("工具实现或运行环境错误 tool=%s code=%s message=%s",
+                         call["tool_name"], exc.code, exc.message)
+            raise
         logger.warning("工具调用失败 tool=%s code=%s message=%s details=%s",
                        call["tool_name"], exc.code, exc.message, exc.details)
         return {"status": "FAILED", "code": exc.code, "message": exc.message, "details": exc.details}

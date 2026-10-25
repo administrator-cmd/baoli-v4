@@ -1,10 +1,11 @@
 """任务复制命令的幂等处理与事务编排。"""
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ....domain.identity import public_no
+
 from ....common.exceptions import BusinessError
-from ....entity import AuditTask
-from ....repositories.audit import task as audit_task
+from ....domain.identity import public_no
+from ....entity.tasks import AuditTask
 from ...system.operation_log import normalized_request_hash
 from ...system.operation_types import OBJECT_AUDIT_TASK
 from .command_records import claim_task_command, finish_task_command, record_failed_task_command, task_of_command
@@ -71,7 +72,7 @@ def copy_audit_task(
         )
     except BusinessError:
         db.rollback()
-        failed = audit_task.find_by_no(db, new_task_no)
+        failed = db.scalar(select(AuditTask).where(AuditTask.task_no == new_task_no))
         if failed is not None and failed.status == "FAILED":
             record_failed_task_command(
                 db,

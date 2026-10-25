@@ -1,6 +1,6 @@
 """组装图的服务实现；各步骤直接绑定其职责模块，不提供旧模块兼容导出。"""
 
-from . import lifecycle, context, model, tools, results
+from . import aggregate, context, extraction_batch, lifecycle, model, results, tools
 
 
 class AuditRunner:
@@ -13,8 +13,10 @@ class AuditRunner:
     graph_save_node_result = staticmethod(lifecycle.graph_save_node_result)
     graph_prepare_materials = staticmethod(context.graph_prepare_materials)
     graph_load_evaluation = staticmethod(context.graph_load_evaluation)
+    graph_execute_extraction_batch = staticmethod(extraction_batch.graph_execute_extraction_batch)
     graph_load_rule_instance = staticmethod(context.graph_load_rule_instance)
     graph_prepare_agent_context = staticmethod(context.graph_prepare_agent_context)
+    graph_build_aggregate_verdict = staticmethod(aggregate.graph_build_aggregate_verdict)
     graph_call_model = staticmethod(model.graph_call_model)
     graph_execute_tool_calls = staticmethod(tools.graph_execute_tool_calls)
     graph_append_tool_results = staticmethod(tools.graph_append_tool_results)

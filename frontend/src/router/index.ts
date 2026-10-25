@@ -4,7 +4,7 @@ import AuditTaskDetailView from "@/views/audits/AuditTaskDetailView.vue";
 import AuditTaskListView from "@/views/audits/AuditTaskListView.vue";
 import ExecutionListView from "@/views/audits/ExecutionListView.vue";
 import DocumentListView from "@/views/documents/DocumentListView.vue";
-import EvidenceListView from "@/views/documents/EvidenceListView.vue";
+import RulebookFilesView from "@/views/documents/RulebookFilesView.vue";
 import ImportWorkbenchView from "@/views/imports/ImportWorkbenchView.vue";
 import NotFoundView from "@/views/NotFoundView.vue";
 import PlanEditView from "@/views/plans/PlanEditView.vue";
@@ -71,22 +71,22 @@ const routes: RouteRecordRaw[] = [
   // 方案管理
   { path: "/plans", name: "plans", component: PlanListView, meta: { title: "方案列表", group: "方案管理", menu: "/plans" } },
   { path: "/plans/new", name: "plan-new", component: PlanEditView, meta: { title: "新增方案", group: "方案管理", menu: "/plans" } },
-  { path: "/plans/edit", name: "plan-config", component: PlanConfigIndexView, meta: { title: "方案编辑", group: "方案管理", menu: "/plans/edit" } },
-  { path: "/plans/:planCode", name: "plan-edit", component: PlanEditView, meta: { title: "方案编辑", group: "方案管理", menu: "/plans/edit" } },
+  { path: "/plans/edit", name: "plan-config", component: PlanConfigIndexView, meta: { title: "方案配置", group: "方案管理", menu: "/plans/edit" } },
+  { path: "/plans/:planCode", name: "plan-edit", component: PlanEditView, meta: { title: "方案配置", group: "方案管理", menu: "/plans/edit" } },
 
-  // 审核管理
-  { path: "/audit-tasks", name: "audit-tasks", component: AuditTaskListView, meta: { title: "审核任务", group: "审核管理", menu: "/audit-tasks" } },
+  // 任务管理
+  { path: "/audit-tasks", name: "audit-tasks", component: AuditTaskListView, meta: { title: "审核任务", group: "任务管理", menu: "/audit-tasks" } },
   {
     path: "/audit-tasks/:taskNo",
     name: "audit-task-detail",
     component: AuditTaskDetailView,
-    meta: { title: "任务详情", group: "审核管理", menu: "/audit-tasks" },
+    meta: { title: "任务详情", group: "任务管理", menu: "/audit-tasks" },
   },
-  { path: "/executions", name: "executions", component: ExecutionListView, meta: { title: "执行记录", group: "审核管理", menu: "/executions" } },
+  { path: "/executions", name: "executions", component: ExecutionListView, meta: { title: "执行记录", group: "任务管理", menu: "/executions" } },
 
   // 资料管理
   { path: "/documents", name: "documents", component: DocumentListView, meta: { title: "审核材料", group: "资料管理", menu: "/documents" } },
-  { path: "/evidence", name: "evidence", component: EvidenceListView, meta: { title: "证据记录", group: "资料管理", menu: "/evidence" } },
+  { path: "/rulebooks", name: "rulebooks", component: RulebookFilesView, meta: { title: "规则库管理", group: "资料管理", menu: "/rulebooks" } },
 
   // 报告管理
   { path: "/reports", name: "reports", component: ReportListView, meta: { title: "审核报告", group: "报告管理", menu: "/reports" } },

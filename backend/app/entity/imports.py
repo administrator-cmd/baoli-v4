@@ -1,19 +1,19 @@
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger,
     CHAR,
+    JSON,
+    BigInteger,
     CheckConstraint,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..database import Base
+from ..core.database import Base
 from .base import TimestampMixin
 
 

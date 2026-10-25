@@ -2,7 +2,7 @@
 
 审核层需要四种外部能力——材料类型校验、文件处理、印章识别、OCR 作业——但它们各自的 HTTP
 契约、字段名与失败语义属于供应商细节。这里只声明审核层用到的入口，供应商适配器
-（`integrations.http_services`）在应用启动时注册进来。
+（`integrations.documents`）在应用启动时注册进来。
 
 这样审核层不导入任何供应商模块，供应商契约变化只影响 `integrations/*`；端口签名是显式的，
 替换或缺失会在启动自检时暴露，不会拖到真实任务执行时才报「没有这个函数」。未注册任何实现时
@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from ...domain.external_artifacts import ExternalServiceResult, OcrJobSubmission
 from ...common.exceptions import BusinessError
+from ...domain.external_artifacts import ExternalServiceResult, OcrJobSubmission
 
 
 class DocumentServicePort(Protocol):

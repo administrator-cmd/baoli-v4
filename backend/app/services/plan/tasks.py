@@ -1,14 +1,14 @@
 """从方案创建任务的幂等命令与事务编排。"""
 
 from typing import Any
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ...domain.identity import public_no
+
 from ...common.exceptions import BusinessError
-from ...entity import AuditTask
-from ...repositories.audit import task as audit_task
-from ..system.operation_log import normalized_request_hash
-from ..system.operation_types import OBJECT_PLAN
-from .lookup import plan_or_404
+from ...domain.identity import public_no
+from ...entity.scenarios import ScenarioVersion
+from ...entity.tasks import AuditTask
 from ..audit.tasks.command_records import (
     claim_task_command,
     finish_task_command,
@@ -16,6 +16,9 @@ from ..audit.tasks.command_records import (
     task_of_command,
 )
 from ..audit.tasks.creation import create_task_from_plan
+from ..system.operation_log import normalized_request_hash
+from ..system.operation_types import OBJECT_PLAN
+from .lookup import plan_or_404
 
 
 def create_from_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -61,7 +64,7 @@ def create_from_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> di
             detail.update(
                 {
                     "plan_scope_hash": task.task_schema_json.get("plan_scope_hash"),
-                    "scenario_version_no": task.task_schema_json.get("scenario_version_no"),
+                    "scenario_version_id": task.scenario_version_id,
                 }
             )
             finish_task_command(
@@ -84,7 +87,7 @@ def create_from_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> di
         db.flush()
     except BusinessError:
         db.rollback()
-        failed = audit_task.find_by_no(db, task_no)
+        failed = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no))
         if failed is not None and failed.status == "FAILED":
             record_failed_task_command(
                 db,
@@ -103,25 +106,32 @@ def create_from_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> di
             "task_no": task_no,
             "plan_code": plan_code,
             "plan_scope_hash": plan.scope_hash,
-            "scenario_version_no": task.task_schema_json.get("scenario_version_no"),
+            "scenario_version_id": task.scenario_version_id,
         },
     )
-    return frozen_task_view(db, audit_task.find_by_no(db, task_no) or task, reused=was_reused)
+    found = db.scalar(select(AuditTask).where(AuditTask.task_no == task_no))
+    return frozen_task_view(db, found or task, reused=was_reused)
 
 
 def frozen_task_view(db: Session, task: AuditTask, *, reused: bool) -> dict[str, Any]:
     """只读取任务创建时冻结的配置，不用当前场景或方案补写旧快照。"""
     schema = task.task_schema_json
+    scenario = db.get(ScenarioVersion, task.scenario_version_id)
+    if scenario is None:
+        raise BusinessError(
+            "SCENARIO_VERSION_MISSING", "任务关联的场景版本不存在", status_code=500,
+            details={"task_no": task.task_no, "scenario_version_id": task.scenario_version_id},
+        )
     return {
         "task_no": task.task_no,
         "task_name": task.task_name,
         "task_status": task.status,
-        "scenario_code": schema["scenario_code"],
-        "scenario_name": schema["scenario_name"],
-        "scenario_version_no": schema["scenario_version_no"],
-        "plan_name": schema["plan_name"],
+        "scenario_code": scenario.scenario_code,
+        "scenario_name": scenario.scenario_name,
+        "scenario_version_no": scenario.version_no,
+        "plan_name": schema.get("plan_name"),
         "current_node_name": task.current_node,
-        "material_count": schema["material_count"],
-        "field_count": schema["field_count"],
+        "material_count": len(task.manifest_json.get("materials") or []),
+        "field_count": len(schema.get("fields") or []),
         "reused": reused,
     }

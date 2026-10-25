@@ -149,6 +149,8 @@ export interface DraftRuleItem {
   name: string;
   node: string;
   operator: string;
+  /** 规则执行方式；旧配置没有该字段时为 UNKNOWN，发布前必须补填。 */
+  execution_mode?: string | null;
   rule_role: "CHECK" | "RISK";
   enabled: boolean;
   /** 系统派生规则（字段抽取 / 报告生成）只读，不能独立删除。 */
@@ -218,7 +220,7 @@ export interface DraftNodeItem {
   updated_at: string;
 }
 
-/** 草稿中的计算配置核对行。来自 calculation_json，不是运行结果。 */
+/** 当前计算配置与完整可编辑定义，来自 calculation_json，不是运行结果。 */
 export interface DraftCalculationItem {
   rule_code: string | null;
   name: string | null;
@@ -231,6 +233,7 @@ export interface DraftCalculationItem {
   currency: string | null;
   status: string | null;
   origin?: ConfigOrigin | null;
+  definition: Record<string, JsonValue>;
 }
 
 export interface ScenarioConfigurationView extends ApiResponse {

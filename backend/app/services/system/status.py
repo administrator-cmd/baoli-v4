@@ -1,8 +1,22 @@
 """系统数据库状态与外部服务配置状态查询。"""
 
 from typing import Any
-from ...config import get_settings
-from ...repositories.system import status as system_repository
+
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+from ...core.config import get_settings
+from ...core.database import engine
+
+
+def _database_status() -> str:
+    """执行一次真实连接探测，不修改任何数据库状态。"""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return "CONNECTED"
+    except SQLAlchemyError:
+        return "FAILED"
 
 
 def _configuration_status(required: dict[str, bool]) -> dict[str, Any]:
@@ -17,7 +31,7 @@ def _configuration_status(required: dict[str, bool]) -> dict[str, Any]:
 
 
 def status_view() -> dict[str, Any]:
-    database = system_repository.database_status()
+    database = _database_status()
     settings = get_settings()
     return {
         "service": "RUNNING" if database == "CONNECTED" else "DEGRADED",

@@ -6,9 +6,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from ..common.exceptions import BusinessError
+from .execution_mode import ExecutionMode
 from .proposals import (
-    CalculationCandidate, FieldProposal, MaterialProposal,
-    ReportSectionProposal, RuleProposal, ProposalModel, SourceOrigin,
+    CalculationCandidate,
+    FieldProposal,
+    MaterialProposal,
+    ProposalModel,
+    ReportSectionProposal,
+    RuleProposal,
+    SourceOrigin,
 )
 from .workbook import WorkbookIR, WorkbookSheet
 
@@ -53,6 +59,8 @@ class InventoryDefinition(BaseModel):
     source_id: str | None
     name: str
     config_status: Literal["CLEAR", "PENDING", "DISABLED"]
+    # 第一轮给出执行方式候选，第二轮对照原行确认；无法判定时为 UNKNOWN。
+    execution_mode: ExecutionMode = "UNKNOWN"
     origin: SourceOrigin
 
 

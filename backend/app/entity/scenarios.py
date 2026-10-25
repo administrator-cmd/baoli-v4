@@ -2,24 +2,22 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
-    CHAR,
     CheckConstraint,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..database import Base
-from .base import TimestampMixin
+from ..core.database import Base
+from .base import TimestampMixin, UTCDateTime
 
 
 class ScenarioTemplate(Base, TimestampMixin):
@@ -68,7 +66,7 @@ class ScenarioVersion(Base, TimestampMixin):
     base_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scenario_version.id"))
     change_summary: Mapped[str | None] = mapped_column(String(500))
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    published_at: Mapped[datetime] = mapped_column(MySQLDateTime(fsp=6), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class ScenarioNode(Base, TimestampMixin):

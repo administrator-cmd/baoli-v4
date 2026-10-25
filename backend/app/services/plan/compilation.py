@@ -3,18 +3,21 @@
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ...domain.calculation_config import calculation_store
-from ...repositories.shared import configuration as config_store
+
+from ...common.exceptions import BusinessError
 from ...domain import manifest as manifest_module
+from ...domain import node_profile
+from ...domain.calculation_config import calculation_store
+from ...domain.manifest import build_task_schema, compile_form_manifest
 from ...domain.plan_calculations import selected_calculations
 from ...domain.rule_library import active
-from ...domain import node_profile
-from ...domain.manifest import build_task_schema, compile_form_manifest
-from ...common.exceptions import BusinessError
-from ...entity import AuditPlan, PlanField, PlanMaterial, PlanRule, PlanSection, ScenarioVersion
+from ...entity.plans import AuditPlan, PlanField, PlanMaterial, PlanRule, PlanSection
+from ...entity.scenarios import ScenarioVersion
+from ..shared import configuration as config_store
 from ..system import operation_log as operation_log_service
-from ...repositories.plan.configuration import plan_config_rows
+from .views import plan_config_rows
 
 
 def _load_manifest_into_plan(db: Session, plan: AuditPlan, manifest: dict[str, Any]) -> None:
@@ -111,20 +114,11 @@ def _recompile_plan(db: Session, plan: AuditPlan) -> None:
         schema = build_task_schema(manifest, None, allow_empty=True)
     except BusinessError as exc:
         plan.manifest_json = None
-        plan.scope_json = None
         plan.scope_hash = None
         plan.sync_error = {"code": exc.code, "message": exc.message}
         return
     _sync_plan_system_rules(db, plan, rules, manifest)
     plan.manifest_json = manifest
-    plan.scope_json = {
-        **schema,
-        "scenario_code": plan.scenario_code,
-        "scenario_version_id": plan.scenario_version_id,
-        # 材料与字段数量随范围一起固化，页面与任务创建直接读它，不重新解释选择。
-        "material_count": len(manifest.get("materials", [])),
-        "field_count": len(schema.get("fields", [])),
-    }
     plan.scope_hash = operation_log_service.normalized_request_hash(
         {
             "plan_code": plan.plan_code,

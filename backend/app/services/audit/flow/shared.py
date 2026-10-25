@@ -1,7 +1,9 @@
 """规则实例定位、Agent 延迟加载与模型工具定义。"""
 
 from typing import Any
+
 from langchain_core.utils.function_calling import convert_to_openai_tool
+
 from ....common.exceptions import BusinessError
 
 

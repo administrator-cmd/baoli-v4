@@ -2,10 +2,13 @@
 
 from copy import deepcopy
 from typing import Any
+
 from sqlalchemy.orm import Session
-from ...domain.manifest import rule_comparison_view
+
 from ...common.exceptions import BusinessError
-from ...entity import ImportJob
+from ...constants.execution import OPERATOR_LLM_EXECUTE
+from ...domain.manifest import rule_comparison_view
+from ...entity.imports import ImportJob
 from ..system.background import assert_no_active_operation
 from ..system.operation_types import OBJECT_IMPORT_JOB
 from .lookup import _ensure_import_mutable, _job_or_404, _saved_proposals
@@ -19,7 +22,7 @@ def update_import_proposal(
     editable_attributes = {
         "materials": {"name", "description", "required"},
         "fields": {"name", "instruction", "required", "config_status"},
-        "rules": {"name", "requirement", "rule_role", "config_status"},
+        "rules": {"name", "requirement", "execution_mode", "rule_role", "config_status"},
         "calculations": {"rule_name", "formula", "requirement", "status"},
         "report_sections": {"section_name", "content_instruction", "config_status"},
     }
@@ -43,7 +46,7 @@ def update_import_proposal(
     item.update(changes)
     if group == "rules" and changes.get("rule_role") == "CHECK" and item.get("operator") == "RISK_TRIGGER":
         # 管理员明确改为普通核查后，不能仍被旧风险动作识别为风险规则。
-        item["operator"] = "LLM_EXECUTE"
+        item["operator"] = OPERATOR_LLM_EXECUTE
     job.proposals_json = proposals
     job.draft_revision += 1
     try:

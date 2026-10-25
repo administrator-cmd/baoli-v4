@@ -1,13 +1,14 @@
 """执行记录 API（跨任务的管理列表）。"""
 
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
-from ...database import get_db
-from ...schema.query import validate_page_params
-from ...services.audit import executions as audit_executions
-from ...schema.vo import PagedResponse
 
+from ...core.database import get_db
+from ...schema.query.pagination import validate_page_params
+from ...schema.query.timestamps import FilterDateTime
+from ...schema.vo.common import PagedResponse
+from ...services.audit import executions as audit_executions
 
 executions_router = APIRouter(prefix="/executions", tags=["执行记录"])
 
@@ -18,8 +19,8 @@ def list_executions(
     task_no: str | None = None,
     node_code: str | None = None,
     status: str | None = None,
-    started_from: datetime | None = None,
-    started_to: datetime | None = None,
+    started_from: FilterDateTime | None = None,
+    started_to: FilterDateTime | None = None,
     page: int = Query(default=1),
     page_size: int = Query(default=20),
     db: Session = Depends(get_db),

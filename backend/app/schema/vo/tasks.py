@@ -40,6 +40,8 @@ class AuditTaskResponse(ApiResponse):
     input_revision: int = 0
     # 本任务实际执行范围：未配置 / 未启用 / 不适用 的区分依据。
     scope: dict[str, Any] = Field(default_factory=dict)
+    # 任务冻结的技术容器、字段与展示结构；页面按它通用渲染。
+    display: dict[str, Any] = Field(default_factory=dict)
     # 该任务上最近一次后台操作的受理状态；有活跃操作时页面据此继续查询。
     latest_operation: dict[str, Any] | None = None
 
@@ -63,14 +65,6 @@ class DocumentUploadResponse(ApiResponse):
     material_classify: dict[str, Any] | None = None
     classification_operation: dict[str, Any]
     impact: ReplacementImpact | None = None
-
-class ExecuteNodeResponse(ApiResponse):
-    task_no: str
-    node_name: str
-    execution_status: str
-    task_status: str
-    next_node_name: str | None
-    result_summary: dict[str, Any]
 
 class FieldCorrectionResponse(ApiResponse):
     task_no: str
@@ -106,19 +100,6 @@ class RiskListResponse(ApiResponse):
     status_counts: dict[str, int] = Field(default_factory=dict)
     items: list[dict[str, Any]] = Field(default_factory=list)
 
-class EvidenceResponse(ApiResponse):
-    evidence_no: str
-    document_name: str | None
-    field_path: str | None
-    quote_text: str
-    # 引用原文在所属处理产物中的核对结论。
-    quote_check: str
-    quote_check_label: str
-    document_upload_no: str | None = None
-    artifact_type: str | None = None
-    is_current_upload: bool = False
-    historical: bool = False
-
 class DocumentRemoveResponse(ApiResponse):
     document_no: str
     material_name: str
@@ -130,12 +111,10 @@ __all__ = [
     "TaskSchemaPreviewResponse",
     "AuditTaskResponse",
     "DocumentUploadResponse",
-    "ExecuteNodeResponse",
     "FieldCorrectionResponse",
     "ExternalArtifactStatusResponse",
     "RiskListResponse",
     "ReplacementImpact",
-    "EvidenceResponse",
     "DocumentRemoveResponse",
 ]
 

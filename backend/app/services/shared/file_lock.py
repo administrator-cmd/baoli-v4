@@ -15,8 +15,8 @@ class FileLock:
         try:
             if os.name == "nt":
                 import ctypes
-                from ctypes import wintypes
                 import msvcrt
+                from ctypes import wintypes
 
                 class Overlapped(ctypes.Structure):
                     _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
