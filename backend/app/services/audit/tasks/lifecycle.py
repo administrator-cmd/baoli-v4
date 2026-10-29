@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
@@ -88,8 +88,6 @@ def delete_task(db: Session, task_no: str) -> None:
                 source.rename(staged)
                 staged_directories.append((source, staged))
 
-        # 材料位与上传存在双向外键，先解除当前引用再按依赖顺序删除。
-        db.execute(update(TaskDocument).where(TaskDocument.audit_task_id == task.id).values(current_upload_id=None))
         for entity in (
             ManualReview, TaskFieldValue, TaskFact, AuditReport,
             RuleResult, StoredArtifact, DocumentUpload, TaskDocument, NodeExecution,

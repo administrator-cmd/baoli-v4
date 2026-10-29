@@ -14,6 +14,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from ..common.exceptions import BusinessError
+from ..constants.status import SCOPE_NOT_APPLICABLE
 
 RAW_TEXT = "RAW_TEXT"
 DETERMINISTIC = "DETERMINISTIC"
@@ -110,3 +111,31 @@ def normalize_structured_value(value: Any, schema: dict[str, Any]) -> dict[str, 
         path = ".".join(str(part) for part in exc.absolute_path) or "$"
         raise ValueError(f"{path}：{exc.message}") from exc
     return value
+
+
+# 草稿表单校验三处都要用它组报错文案，只维护一份。
+FIELD_SCOPE_LABELS = {"period_scope": "取数期间", "statement_scope": "报表口径"}
+
+
+def normalize_field_scope(
+    field: dict[str, Any],
+    key: str,
+    *,
+    status_code: int = 400,
+) -> str:
+    """字段口径的内部归一化。
+
+    业务字段不必属于财报期间或报表口径体系；缺省只表示该口径不适用，
+    不猜测本期、上期、合并或母公司。数据库事实定位仍使用显式 sentinel。
+    """
+    value = field.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return SCOPE_NOT_APPLICABLE
+    if not isinstance(value, str):
+        raise BusinessError(
+            "MANIFEST_FIELD_SCOPE_INVALID",
+            f"字段“{field.get('name')}”的{FIELD_SCOPE_LABELS.get(key, key)}取值无效",
+            status_code=status_code,
+            details={"field_key": field.get("field_key"), "column": key, "value": value},
+        )
+    return value.strip()

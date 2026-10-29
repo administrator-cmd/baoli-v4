@@ -1,6 +1,5 @@
-"""方案创建、复制、启停、删除与恢复；拒绝任务反向生成方案。"""
+"""方案创建、启停、删除与恢复；拒绝任务反向生成方案。"""
 
-from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,11 +9,10 @@ from sqlalchemy.orm import Session
 from ...common.exceptions import BusinessError
 from ...domain.identity import public_no
 from ...entity.plans import AuditPlan
-from ...entity.scenarios import ScenarioVersion
 from ..system.operation_log import record_operation, require_idempotent_replay
 from ..system.operation_types import OBJECT_PLAN
 from .compilation import _load_manifest_into_plan, _recompile_plan
-from .lookup import _published_scenario_or_fail, _published_scenario_version_or_fail, plan_or_404
+from .lookup import _published_scenario_version_or_fail, plan_or_404
 
 
 def create_plan(db: Session, payload: dict[str, Any]) -> AuditPlan:
@@ -184,59 +182,6 @@ def restore_plan(db: Session, plan_code: str) -> AuditPlan:
         object_name=plan.plan_name,
         operation_type="RESTORE",
         detail={"plan_code": plan_code},
-    )
-    db.commit()
-    db.refresh(plan)
-    return plan
-
-
-def copy_plan(db: Session, plan_code: str, payload: dict[str, Any]) -> AuditPlan:
-    """复制方案为新方案：沿用原方案钉住的场景版本与规则选择，不升到最新版。
-
-    场景门禁与新建方案相同：已删除或已停用的场景不能复制出启用的新方案。
-    源方案没有版本，或所钉版本不是已发布状态时，复制失败。
-    """
-    source = plan_or_404(db, plan_code)
-    _published_scenario_or_fail(db, source.scenario_code)
-    pinned = db.get(ScenarioVersion, source.scenario_version_id) if source.scenario_version_id else None
-    if pinned is None or pinned.status != "PUBLISHED":
-        raise BusinessError(
-            "PLAN_SCENARIO_VERSION_MISSING",
-            "源方案没有可用的已发布场景版本，不能复制",
-            status_code=409,
-            details={"plan_code": plan_code, "scenario_version_id": source.scenario_version_id},
-        )
-    name = str(payload.get("plan_name") or "").strip() or f"{source.plan_name} 副本"
-    plan = AuditPlan(
-        plan_code=public_no("PLAN"),
-        plan_name=name,
-        scenario_code=source.scenario_code,
-        # 溯源：复制出来的方案基于同一版场景。
-        scenario_version_id=source.scenario_version_id,
-        description=source.description,
-        enabled=True,
-    # 节点/Sheet/协议版本与计算配置、启停选择随方案一起复制。
-        context_json=source.context_json,
-    )
-    db.add(plan)
-    db.flush()
-    # 方案自己的配置整份复制：材料 / 字段 / 规则 / 报告章节。
-    # **不复制 manifest_json / scope_* / sync_error**：它们是编译产物与结果，
-    # 复制过来会指向源方案的产物；下面重新编译一次，产物必然与新方案自己的配置一致。
-    plan.config_json = deepcopy(source.config_json)
-    plan.context_json = deepcopy(source.context_json)
-    for section in ("materials", "fields", "rules", "sections"):
-        for item in plan.config_json[section]:
-            item["plan_id"] = plan.id
-    db.flush()
-    _recompile_plan(db, plan)
-    record_operation(
-        db,
-        object_type=OBJECT_PLAN,
-        object_no=plan.plan_code,
-        object_name=name,
-        operation_type="COPY",
-        detail={"plan_code": plan.plan_code, "source_plan_code": plan_code},
     )
     db.commit()
     db.refresh(plan)

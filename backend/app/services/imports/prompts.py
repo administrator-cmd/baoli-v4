@@ -42,7 +42,7 @@ JSON 只输出必填属性和确有业务内容的可选属性；可选属性为
 - 材料引用 material_ref/material_refs 用材料 candidate_ref。规则 inputs 中 field_ref 用字段 candidate_ref，material_ref 必须是该字段实际所属材料。跨材料同名字段不能串用。
 - 字段依赖写 inputs；普通规则依赖写 source_rule_refs；计算结果依赖写 source_rule_codes。不要把字段业务编号写成普通规则引用。原文编号列表、区间和省略编号表达应结合真实定义展开，不能只在文字里保留范围并声称引用已建立。
 - depends_on_result_codes 与参数中的 CALC_RESULT 保持一致，允许多级计算。引用真实存在的对象；无法对应的原引用保存在 requirement/business_context 中，不造目标、不删除所属定义，也不伪造已建立的关系。
-- 报告 field_refs 可引用字段或普通规则 candidate_ref、计算 result_code；不要为了报告而生成虚假的抽取字段。原文范围涉及多个期间或材料时保留对应全部对象。
+- 报告 field_refs 只能填写本次配置中已存在的字段或普通规则 candidate_ref、计算 result_code。原文“引用字段”等列中的名称、编号和描述是业务说明，不是内部引用；必须映射到已存在的对象，无法对应时省略该引用，并把原描述保留在章节要求或 business_context 中，禁止直接抄写名称。不要为了报告而生成虚假的抽取字段。原文范围涉及多个期间或材料时保留对应全部对象。
 - LLM 执行抽取、计算和判断，执行时按需选择真实可用工具；解析阶段不猜工具实现、不生成工具授权矩阵、不输出业务答案。系统自动组织字段抽取和报告执行，不额外造这两类重复规则；原 Excel 明确独立定义的抽取规则除外。
 
 状态只来自原文：

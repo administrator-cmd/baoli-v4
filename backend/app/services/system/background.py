@@ -242,6 +242,24 @@ def _finish(
     session.commit()
 
 
+def existing_operation(
+    db: Session, *, object_type: str, object_no: str, operation_type: str, idempotency_key: str,
+) -> BackgroundOperation | None:
+    """同一对象、同一幂等键已受理的后台操作。
+
+    响应丢失后的重发按它取回原记录：请求内容与目标对象都以受理时为准，
+    不按当前业务状态重新推导。
+    """
+    return db.scalar(
+        select(BackgroundOperation).where(
+            BackgroundOperation.object_type == object_type,
+            BackgroundOperation.object_no == object_no,
+            BackgroundOperation.operation_type == operation_type,
+            BackgroundOperation.idempotency_key == idempotency_key,
+        )
+    )
+
+
 def submit_operation(
     db: Session,
     *,
@@ -265,13 +283,9 @@ def submit_operation(
     if not idempotency_key:
         raise BusinessError("OPERATION_IDEMPOTENCY_REQUIRED", "后台操作缺少幂等标识", status_code=400)
     request_hash = normalized_request_hash(request)
-    same_request = db.scalar(
-        select(BackgroundOperation).where(
-            BackgroundOperation.object_type == object_type,
-            BackgroundOperation.object_no == object_no,
-            BackgroundOperation.operation_type == operation_type,
-            BackgroundOperation.idempotency_key == idempotency_key,
-        )
+    same_request = existing_operation(
+        db, object_type=object_type, object_no=object_no,
+        operation_type=operation_type, idempotency_key=idempotency_key,
     )
     if same_request is not None:
         # 历史命令优先于状态校验：成功但响应丢失后的重发必须复用原命令，不能被误报为状态错误。

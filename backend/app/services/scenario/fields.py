@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
-from ...constants.execution import NODE_RULE_EXECUTION
+from ...constants.execution import ENTITY_SCOPE_SELF, NODE_RULE_EXECUTION
 from ...domain import field_strategy
 from ...domain.calculation_config import calculations_referencing_field, remap_calculation_field_codes
 from ...domain.identity import stable_key
@@ -17,21 +17,28 @@ from .draft import _locked_draft, _save_draft, next_sort_no
 from .materials import _draft_material_or_404
 
 
-def _assert_field_source_ref_available(
-    db: Session, draft_id: int, source_ref: str | None, *, field_key: str | None = None
+def _draft_field_identity(item: ScenarioDraftField) -> tuple[Any, ...]:
+    """草稿字段的完整事实身份，与编译后的字段身份同口径；主体口径在草稿层固定为 SELF。"""
+    return (
+        _normalized_source_ref(item.source_ref) or item.field_key,
+        item.material_key, item.period_scope, item.statement_scope, ENTITY_SCOPE_SELF,
+    )
+
+
+def _assert_field_identity_available(
+    db: Session, draft_id: int, identity: tuple[Any, ...], *, field_key: str | None = None
 ) -> None:
-    code = source_ref or field_key
-    if code is None:
-        return
-    existing = next((item for item in config_store.rows(db, ScenarioDraftField, draft_id)
-                     if (_normalized_source_ref(item.source_ref) or item.field_key) == code
-                     and (field_key is None or item.field_key != field_key)), None)
-    if existing is not None:
+    """按完整身份判重：同编号但材料或期间/报表口径不同的字段是合法字段。"""
+    for item in config_store.rows(db, ScenarioDraftField, draft_id):
+        if field_key is not None and item.field_key == field_key:
+            continue
+        if _draft_field_identity(item) != identity:
+            continue
         raise BusinessError(
             "FIELD_CODE_DUPLICATE",
-            f"字段编号“{code}”已由字段“{existing.name}”使用",
+            f"字段编号“{identity[0]}”在相同材料与期间/报表口径下已被字段“{item.name}”使用",
             status_code=409,
-            details={"source_ref": code, "field_key": existing.field_key},
+            details={"source_ref": identity[0], "field_key": item.field_key},
         )
 
 
@@ -58,8 +65,12 @@ def create_draft_field(db: Session, scenario_code: str, payload: dict[str, Any])
         field_name=name,
     )
     source_ref = _normalized_source_ref(payload.get("source_ref"))
-    _assert_field_source_ref_available(db, draft.id, source_ref)
     field_key = stable_key("fld", scenario_code, _item_ref())
+    _assert_field_identity_available(db, draft.id, (
+        source_ref or field_key, material_key,
+        _field_scope(payload, "period_scope"), _field_scope(payload, "statement_scope"),
+        ENTITY_SCOPE_SELF,
+    ))
     field = config_store.add(
         db, ScenarioDraftField(
             draft_id=draft.id,
@@ -191,7 +202,6 @@ def update_draft_field(db: Session, scenario_code: str, field_key: str, payload:
         item.instruction = str(payload["instruction"])
     if "source_ref" in payload:
         source_ref = _normalized_source_ref(payload.get("source_ref"))
-        _assert_field_source_ref_available(db, draft.id, source_ref, field_key=field_key)
         previous_code = _normalized_source_ref(item.source_ref) or field_key
         next_code = source_ref or field_key
         if previous_code != next_code and previous_code != field_key:
@@ -200,6 +210,8 @@ def update_draft_field(db: Session, scenario_code: str, field_key: str, payload:
                 draft.calculation_json, {previous_code: next_code},
             )
         item.source_ref = source_ref
+    # 材料、期间、报表口径与业务编号任一变化都会改变完整身份，统一按最终状态判重。
+    _assert_field_identity_available(db, draft.id, _draft_field_identity(item), field_key=field_key)
     _save_draft(
         db,
         template,

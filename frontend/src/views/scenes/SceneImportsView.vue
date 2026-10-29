@@ -13,8 +13,9 @@ import {
   type TemplateOption,
 } from "@/api/imports";
 import { usePagedList } from "@/composables/usePagedList";
-import PageHeader from "@/components/PageHeader.vue";
+import BackButton from "@/components/BackButton.vue";
 import { formatDate, statusLabel } from "@/constants/labels";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 规则库导入（入口列表）：文件名、所属场景、状态与待处理数来自真实作业。
@@ -23,6 +24,15 @@ import { formatDate, statusLabel } from "@/constants/labels";
 const router = useRouter();
 const route = useRoute();
 const scopedScenarioCode = computed(() => typeof route.query.scenario === "string" ? route.query.scenario : "");
+
+/** 导入列表不再占侧栏菜单项：按进来时的场景回到场景配置，否则回场景列表。 */
+function backFromImports(): void {
+  if (scopedScenarioCode.value) {
+    void router.push({ name: "scene-detail", params: { scenarioCode: scopedScenarioCode.value } });
+    return;
+  }
+  void router.push({ name: "scenes" });
+}
 
 const list = usePagedList<ImportJobRow, { filename: string; status: string; created_from: string; created_to: string }>({
   key: `scene-imports:${scopedScenarioCode.value || "all"}`,
@@ -215,11 +225,11 @@ watch(scopedScenarioCode, () => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="场景管理"
-      title="规则库导入"
-      :show-refresh="false"
-    />
+    <div class="app-toolbar">
+      <div class="app-toolbar__left">
+        <BackButton :label="scopedScenarioCode ? '返回场景配置' : '返回场景列表'" @click="backFromImports" />
+      </div>
+    </div>
     <el-form inline class="app-query" @submit.prevent="list.search()">
       <el-form-item label="文件名称">
         <el-input v-model="filters.filename" clearable placeholder="请输入文件名称" style="width: 200px" @keyup.enter="list.search()" />
@@ -252,7 +262,7 @@ watch(scopedScenarioCode, () => {
     <el-alert v-if="deleteError" type="error" show-icon :closable="false" :title="`删除失败：${deleteError}`" />
 
     <el-table v-if="!error" :data="items" border stripe v-loading="loading" empty-text="暂无数据">
-      <el-table-column type="index" label="序号" width="60" />
+      <el-table-column type="index" label="序号" width="64" />
       <el-table-column label="文件名称" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="openJob(row)">{{ row.source_filename }}</el-button>
@@ -261,7 +271,7 @@ watch(scopedScenarioCode, () => {
       <el-table-column label="所属场景" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ sceneText(row) }}</template>
       </el-table-column>
-      <el-table-column label="导入状态" width="130">
+      <el-table-column label="导入状态" width="140">
         <template #default="{ row }">
           <el-tag
             :type="row.status === 'APPLIED' ? 'success' : 'primary'"
@@ -273,7 +283,7 @@ watch(scopedScenarioCode, () => {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="190">
+      <el-table-column label="创建时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
       <el-table-column label="操作" width="220" fixed="right">
@@ -306,7 +316,7 @@ watch(scopedScenarioCode, () => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"

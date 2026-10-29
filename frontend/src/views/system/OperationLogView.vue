@@ -4,10 +4,16 @@ import { useRoute } from "vue-router";
 
 import type { OperationLogRow } from "@/api/contracts";
 import { listOperations } from "@/api/system";
-import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { usePagedList } from "@/composables/usePagedList";
-import { formatDate, objectTypeLabel, operationTypeLabel } from "@/constants/labels";
+import {
+  formatDate,
+  formatDuration,
+  objectTypeLabel,
+  operationTypeLabel,
+  statusFilterOptions,
+} from "@/constants/labels";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 操作日志：业务写操作与后台命令并列展示。
@@ -42,44 +48,30 @@ const list = usePagedList<OperationLogRow, { object_type: string; operation_type
 
 const { filters, page, pageSize, total, items, loading, error } = list;
 
-const objectTypeOptions = [
-  { value: "SCENARIO", label: "审核场景" },
-  { value: "AUDIT_PLAN", label: "审核方案" },
-  { value: "AUDIT_TASK", label: "审核任务" },
-  { value: "IMPORT_JOB", label: "规则库导入" },
-  { value: "AUDIT_REPORT", label: "审核报告" },
-];
+const objectTypeOptions = ["SCENARIO", "AUDIT_PLAN", "AUDIT_TASK", "IMPORT_JOB", "AUDIT_REPORT"].map(
+  (value) => ({ value, label: objectTypeLabel(value) }),
+);
 
-const resultOptions = [
-  { value: "SUCCEEDED", label: "已完成" },
-  { value: "ACCEPTED", label: "执行中" },
-  { value: "FAILED", label: "失败" },
-];
+const resultOptions = statusFilterOptions(["SUCCEEDED", "ACCEPTED", "FAILED"]);
 
 const operationTypeOptions = [
-  { value: "CREATE", label: "新增" },
-  { value: "UPDATE", label: "编辑" },
-  { value: "PUBLISH", label: "发布" },
-  { value: "DELETE", label: "删除" },
-  { value: "RESTORE", label: "恢复" },
-  { value: "COPY", label: "复制" },
-  { value: "TASK_CREATE", label: "创建审核任务" },
-  { value: "SAVE", label: "保存方案配置" },
-  { value: "ENABLE", label: "启用" },
-  { value: "DISABLE", label: "停用" },
-  { value: "NODE_EXECUTE", label: "规则执行" },
-  { value: "DOCUMENT_CLASSIFY", label: "文件自动校验" },
-  { value: "DOCUMENT_ARTIFACT_RETRY", label: "材料单项重试" },
-  { value: "OCR_DOCUMENT_RETRY", label: "OCR 单份重试" },
-  { value: "IMPORT_CONVERT", label: "规则解析与转换" },
-  { value: "REPORT_ARCHIVE", label: "归档报告" },
-];
-
-function durationText(ms: number | null): string {
-  if (ms === null) return "—";
-  if (ms < 1000) return `${ms} 毫秒`;
-  return `${(ms / 1000).toFixed(1)} 秒`;
-}
+  "CREATE",
+  "UPDATE",
+  "PUBLISH",
+  "DELETE",
+  "RESTORE",
+  "COPY",
+  "TASK_CREATE",
+  "SAVE",
+  "ENABLE",
+  "DISABLE",
+  "NODE_EXECUTE",
+  "DOCUMENT_CLASSIFY",
+  "DOCUMENT_ARTIFACT_RETRY",
+  "OCR_DOCUMENT_RETRY",
+  "IMPORT_CONVERT",
+  "REPORT_ARCHIVE",
+].map((value) => ({ value, label: operationTypeLabel(value) }));
 
 const detail = ref<OperationLogRow | null>(null);
 
@@ -97,11 +89,6 @@ onMounted(() => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="系统管理"
-      title="操作日志"
-      :show-refresh="false"
-    />
     <el-form inline class="app-query" @submit.prevent="list.search()">
       <el-form-item label="对象类型">
         <el-select v-model="filters.object_type" clearable placeholder="全部" style="width: 150px">
@@ -139,10 +126,10 @@ onMounted(() => {
     </el-alert>
 
     <el-table v-else :data="items" border stripe v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="时间" width="190">
+      <el-table-column label="时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="来源" width="100">
+      <el-table-column label="来源" width="140">
         <template #default="{ row }">
           <el-tag :type="row.source === 'COMMAND' ? 'warning' : 'primary'" size="small" effect="plain" disable-transitions>
             {{ row.source === "COMMAND" ? "后台命令" : "业务操作" }}
@@ -160,11 +147,12 @@ onMounted(() => {
       <el-table-column label="操作类型" width="160">
         <template #default="{ row }">{{ operationTypeLabel(row.operation_type) }}</template>
       </el-table-column>
-      <el-table-column label="结果" width="110">
+      <el-table-column label="结果" width="148">
         <template #default="{ row }"><StatusBadge :status="row.result" /></template>
       </el-table-column>
-      <el-table-column label="耗时" width="100">
-        <template #default="{ row }">{{ durationText(row.duration_ms) }}</template>
+      <!-- 耗时按「N 小时 M 分 S 秒」展示，列宽要放得下完整时长，否则会折成两行。 -->
+      <el-table-column label="耗时" width="200">
+        <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
       </el-table-column>
       <el-table-column label="操作编号 / 命令编号" width="190">
         <template #default="{ row }">
@@ -192,7 +180,7 @@ onMounted(() => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"
@@ -210,13 +198,9 @@ onMounted(() => {
         <el-descriptions-item label="操作">{{ operationTypeLabel(detail.operation_type) }}</el-descriptions-item>
         <el-descriptions-item label="结果"><StatusBadge :status="detail.result" /></el-descriptions-item>
         <el-descriptions-item label="时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
-        <el-descriptions-item label="耗时">{{ durationText(detail.duration_ms) }}</el-descriptions-item>
+        <el-descriptions-item label="耗时">{{ formatDuration(detail.duration_ms) }}</el-descriptions-item>
         <el-descriptions-item v-if="detail.failure_code" label="失败码">{{ detail.failure_code }}</el-descriptions-item>
         <el-descriptions-item v-if="detail.failure_message" label="失败原因">{{ detail.failure_message }}</el-descriptions-item>
-        <el-descriptions-item label="详情">
-          <pre v-if="detail.detail" class="mono">{{ JSON.stringify(detail.detail, null, 2) }}</pre>
-          <span v-else>—</span>
-        </el-descriptions-item>
       </el-descriptions>
     </el-drawer>
   </div>

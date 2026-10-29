@@ -23,10 +23,17 @@ from ...constants.status import FIELD_STATUS_REVIEWED
 from ...domain.manifest import enabled_extraction_field_keys
 from ...domain.rule_library import active, execution_container_of
 from ...entity.operations import BackgroundOperation
-from ...entity.tasks import AuditTask, ManualReview, NodeExecution, RuleResult, TaskDocument, TaskFact, TaskFieldValue
+from ...entity.tasks import (
+    AuditTask,
+    ManualReview,
+    NodeExecution,
+    RuleResult,
+    TaskFact,
+    TaskFieldValue,
+)
 from ..system.operation_types import OBJECT_AUDIT_TASK
 from .execution_history import invalidate_executions
-from .shared import _task_manifest
+from .shared import _current_upload_map, _task_manifest
 
 
 def _decision_command_no(db: Session, task: AuditTask) -> str | None:
@@ -104,12 +111,6 @@ def _invalidate_execution_records(
     rule_result_ids = list(
         db.scalars(select(RuleResult.id).where(RuleResult.node_execution_id.in_(execution_ids))).all()
     )
-    if rule_result_ids:
-        counts["invalidated_reviews"] = db.execute(
-            update(ManualReview)
-            .where(ManualReview.rule_result_id.in_(rule_result_ids), ManualReview.status == "PENDING")
-            .values(status="INVALIDATED")
-        ).rowcount or 0
     counts["invalidated_rule_results"] = len(rule_result_ids)
     field_value_ids = list(
         db.scalars(
@@ -186,15 +187,6 @@ def _invalidate_retry_results(
         ).all()
     )
     if execution_ids:
-        rule_result_ids = list(
-            db.scalars(select(RuleResult.id).where(RuleResult.node_execution_id.in_(execution_ids))).all()
-        )
-        if rule_result_ids:
-            db.execute(
-                update(ManualReview)
-                .where(ManualReview.rule_result_id.in_(rule_result_ids), ManualReview.status == "PENDING")
-                .values(status="INVALIDATED")
-            )
         invalidate_executions(db, NodeExecution.id.in_(execution_ids), reason="用户重新执行审核")
         db.execute(
             update(TaskFact)
@@ -229,11 +221,7 @@ def _invalidate_retry_results(
     }
     if not affected_field_keys:
         return
-    current_upload_ids = [
-        document.current_upload_id
-        for document in db.scalars(select(TaskDocument).where(TaskDocument.audit_task_id == task.id)).all()
-        if document.current_upload_id is not None
-    ]
+    current_upload_ids = [item.id for item in _current_upload_map(db, task).values()]
     field_value_ids = (
         list(
             db.scalars(

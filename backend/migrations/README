@@ -1,0 +1,63 @@
+# 数据库迁移
+
+`0001_baseline` 是历史起点，当前 head 为 `0003_report_and_attempt_backfill`。
+`backend/resource/schema.sql` 是当前完整结构，与 head 保持同步。
+基线本身不建表：它只把已有结构登记为迁移起点。
+
+## 已有数据库
+
+```powershell
+cd backend
+python -m alembic current
+python -m alembic upgrade head
+```
+
+停在 `0001_baseline` 的库会依次应用 `0002_schema_cleanup` 与
+`0003_report_and_attempt_backfill`；已在 head 的库无需操作。
+迁移前会检查孤立业务编号与空字段值。
+
+## 空数据库
+
+```powershell
+mysql -u <用户> -p baoli_v4_dev < backend/resource/schema.sql
+cd backend
+python -m alembic stamp head
+```
+
+`schema.sql` 已包含当前 head 的全部结构，直接 `stamp head`；
+不要再 `stamp 0001_baseline` 后执行升级，否则会重复删除已经不存在的列。
+
+## 后续结构变更
+
+1. 修改 `backend/app/entity/` 中的实体；
+2. 生成迁移并人工检查：
+
+```powershell
+cd backend
+python -m alembic revision --autogenerate -m "describe change"
+```
+
+3. 应用到数据库：
+
+```powershell
+python -m alembic upgrade head
+```
+
+4. 从当前库重新导出结构并更新 `backend/resource/schema.sql`，让空库仍能一键建库；
+   导出时保持表顺序，确保外键引用的表先创建。
+
+生成的文件必须人工审查：MySQL 的生成列、唯一键和复合外键自动生成并不总是完整。
+`0002_schema_cleanup` 已删除 `task_document.current_upload_id`，
+`task_document` 与 `document_upload` 不再互相引用；后续迁移不再受这两张表的循环外键限制。
+
+## 查看状态
+
+```powershell
+python -m alembic current
+python -m alembic history
+python -m alembic check
+```
+
+`check` 对比实体元数据与数据库，有差异时返回非零；它不能替代业务验收。
+`prepend_sys_path` 已指向 `backend/`，从仓库根目录执行时加
+`-c backend/alembic.ini` 即可。

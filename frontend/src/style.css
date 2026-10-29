@@ -53,15 +53,20 @@ a {
   flex-direction: column;
   background: var(--app-menu-bg);
   transition: width 200ms ease;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .app-brand {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 10px;
   height: var(--app-header-height);
   padding: 0 16px;
+  background: var(--app-menu-bg);
   color: #fff;
   white-space: nowrap;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -93,8 +98,6 @@ a {
 .app-menu {
   flex: 1;
   border-right: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
 }
 
 .app-menu:not(.el-menu--collapse) {
@@ -288,19 +291,6 @@ a {
 }
 
 /* 区块标题 16px */
-/* 区块标题与右侧操作按钮同一行：标题自带下边距，行内会被挤偏，这里统一归零。 */
-.app-section-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-}
-
-.app-section-head .app-section-title {
-  margin: 0;
-}
-
 .app-section-title {
   margin: 0 0 12px;
   font-size: 16px;
@@ -352,12 +342,13 @@ a {
   gap: 12px;
 }
 
-/* 卡片底部主操作：长内容滚动时保持可见 */
+/* 卡片底部主操作：长内容滚动时保持可见。
+   负的下边距会让 sticky 操作条整体上移，压住上方的表格与分页；上边距把这 20px 加回来。 */
 .sticky-actions {
   position: sticky;
   bottom: 0;
   z-index: 2;
-  margin: 16px -20px -20px;
+  margin: 36px -20px -20px;
   padding: 12px 20px;
   background: #fff;
   border-top: 1px solid var(--el-border-color-lighter);
@@ -412,45 +403,19 @@ a {
   text-align: center;
 }
 
-/* 长文本列在列上声明 cell-align-left；表头仍居中，正文左对齐。 */
-.el-table td.el-table__cell.cell-align-left,
-.el-table td.el-table__cell.cell-align-left > .cell {
-  text-align: left;
-}
-
 /* 结果与来源信息较长时，正文行与展开行都允许换行 */
 .el-descriptions__label {
   width: 120px;
   color: var(--el-text-color-secondary);
 }
 
-/* 页面标题区：不使用返回箭头，标题即当前页面 */
-.page-header.el-page-header {
-  padding: 0;
-  margin-bottom: 16px;
-}
-
-.page-header .el-page-header__icon {
-  display: none;
-}
-
-.page-header .el-page-header__left {
-  cursor: default;
-}
-
+/* 页面标题区：标题即当前页面 */
 .page-header__title {
   margin: 0;
   font-size: 18px;
   font-weight: 600;
   line-height: 1.4;
   color: var(--el-text-color-primary);
-}
-
-.page-header__title-text {
-  margin-left: 8px;
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--el-text-color-secondary);
 }
 
 .page-header__meta {
@@ -467,37 +432,6 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-/* 系统状态弹层 */
-.system-status__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 6px 0;
-  font-size: 13px;
-}
-
-.system-status__row + .system-status__row {
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-
-.system-status__name {
-  color: var(--el-text-color-regular);
-}
-
-.system-status__detail {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-
-.system-status__detail ul {
-  margin: 4px 0 0;
-  padding-left: 18px;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
 }
 
 /* 上传区域 */
@@ -525,65 +459,6 @@ a {
   justify-content: space-between;
   gap: 16px;
   width: 100%;
-}
-
-/* 复核项：左侧列表 + 右侧详情 */
-.review-layout {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-}
-
-.review-list {
-  flex: 0 0 280px;
-  max-height: 520px;
-  overflow-y: auto;
-  border-right: 1px solid var(--el-border-color-lighter);
-  padding-right: 12px;
-}
-
-.review-detail {
-  flex: 1;
-  min-width: 0;
-}
-
-.review-list__item {
-  padding: 10px 12px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 4px;
-  cursor: pointer;
-  margin-bottom: 8px;
-}
-
-.review-list__item:hover {
-  border-color: var(--el-color-primary-light-5);
-}
-
-.review-list__item.is-active {
-  border-color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.review-list__item strong {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.review-list__item small {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-
-/* 统计卡片 */
-.stat-card {
-  height: 100%;
-}
-
-.stat-card .el-statistic__head {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 4px;
 }
 
 /* 表格内的次要说明 */
@@ -618,8 +493,30 @@ a {
   font-size: var(--el-font-size-base);
 }
 
-.table-empty {
-  padding: 8px 0;
+/* 列内容与表头多留一点左右空白，避免文字贴住列边界 */
+.el-table.management-table .cell,
+.el-table.audit-result-table .cell {
+  padding-left: 22px;
+  padding-right: 22px;
+}
+
+/* 表头必须完整显示：宽度不够时折行，不用省略号截断。
+   表头两侧留白比正文小，避免窄列只剩几个像素放不下文字。 */
+.el-table.management-table th.el-table__cell > .cell,
+.el-table.audit-result-table th.el-table__cell > .cell {
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: break-word;
+  text-overflow: clip;
+  line-height: 1.35;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.el-table.management-table td.el-table__cell,
+.el-table.audit-result-table td.el-table__cell {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 /* ---- 响应式 ---- */
@@ -627,20 +524,6 @@ a {
   .app-main {
     --app-main-padding-y: 12px;
     padding: var(--app-main-padding-y);
-  }
-
-  .review-layout {
-    flex-direction: column;
-  }
-
-  .review-list {
-    flex: 1 1 auto;
-    width: 100%;
-    max-height: 240px;
-    border-right: 0;
-    border-bottom: 1px solid var(--el-border-color-lighter);
-    padding-right: 0;
-    padding-bottom: 12px;
   }
 }
 
@@ -654,7 +537,8 @@ a {
   }
 
   .sticky-actions {
-    margin: 12px -12px -12px;
+    /* 窄屏下同样留出操作条上移占用的间距。 */
+    margin: 32px -12px -12px;
     padding: 10px 12px;
   }
 

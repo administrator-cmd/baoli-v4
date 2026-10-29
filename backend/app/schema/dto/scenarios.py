@@ -172,6 +172,3 @@ class DraftSectionUpdateRequest(BaseModel):
     result_sort: ReportResultSort | None = None
     risk_level_order: list[str] | None = None
     config_status: Literal["CLEAR", "PENDING", "DISABLED"] | None = None
-
-
-__all__ = [name for name in globals() if name.startswith("Scenario") or name.startswith("Draft")]

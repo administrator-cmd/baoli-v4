@@ -23,8 +23,6 @@ const menuGroups = [
     icon: Layers,
     items: [
       { path: "/scenes", title: "场景列表" },
-      { path: "/scene-imports", title: "规则库导入" },
-      { path: "/scene-config", title: "场景配置" },
     ],
   },
   {
@@ -32,7 +30,6 @@ const menuGroups = [
     icon: ClipboardList,
     items: [
       { path: "/plans", title: "方案列表" },
-      { path: "/plans/edit", title: "方案配置" },
     ],
   },
   {

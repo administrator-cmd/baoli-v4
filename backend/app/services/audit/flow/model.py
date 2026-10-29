@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
 from ....constants.status import LOOP_BLOCKED, LOOP_RUNNING
+from ....domain.llm_failure import channel_failure_detail, is_channel_failure
 from ..tasks.lookup import task_or_404
 from .errors import agent_step
 from .shared import agent_module, openai_tools
@@ -130,10 +131,25 @@ def graph_call_model(
                 idempotency_key=request_key,
             )
         except BusinessError as exc:
-            logger.warning("规则模型请求失败，继续其他项 task_no=%s rule_key=%s code=%s message=%s", task_no, rule["rule_key"], exc.code, exc.message)
-            return {"loop_status": LOOP_BLOCKED, "loop_count": next_loop_count,
-                    "candidate_verdict": None, "pending_tool_calls": [], "last_error": None,
-                    "unresolved_items": [{"kind": exc.code, "message": exc.message, "details": exc.details}]}
+            channel = is_channel_failure(exc.code)
+            # 渠道故障与单条规则的问题分开表达：前者说明这次请求本身没完成，
+            # 后续规则同样会失败，由调用方停止调度；后者只影响本条规则。
+            logger.warning(
+                "规则模型请求失败 task_no=%s rule_key=%s code=%s channel_failure=%s message=%s",
+                task_no, rule["rule_key"], exc.code, channel, exc.message,
+            )
+            turn = {
+                "loop_status": LOOP_BLOCKED, "loop_count": next_loop_count,
+                "candidate_verdict": None, "pending_tool_calls": [], "last_error": None,
+                "unresolved_items": [{"kind": exc.code, "message": exc.message, "details": exc.details}],
+            }
+            if channel:
+                turn["channel_failure"] = channel_failure_detail(
+                    exc.code, exc.message, rule_key=rule["rule_key"],
+                    # 是否可能已经产生费用由网关按请求阶段给出，不按错误码猜。
+                    result_unknown=bool((exc.details or {}).get("result_unknown")),
+                )
+            return turn
         summary = {
             "kind": turn.kind,
             "finish_reason": turn.finish_reason,

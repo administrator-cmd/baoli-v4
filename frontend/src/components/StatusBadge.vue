@@ -2,28 +2,51 @@
 import { computed } from "vue";
 
 import { statusLabel, statusTagType, toneTagType, type StatusTone } from "@/constants/labels";
+import { statusNoteOf, statusTextOf, statusToneOf, type StatusDomain } from "@/constants/statusVocabulary";
 
 /**
- * 状态标签。颜色与中文口径统一来自 constants/labels.ts，
- * 页面只传状态码，不自己判断颜色，也不直接显示英文状态值。
+ * 状态标签。审核状态必须传 domain，文案、说明与颜色从后端词表按语境取；
+ * 其他业务状态仍可用 label/tone 显式覆盖。
  */
 const props = withDefaults(
   defineProps<{
     status: string | null | undefined;
-    /** 同一编码在不同语境下有不同中文口径时（例如候选的 PENDING 是「待补充」）显式传入。 */
+    /** 审核状态语境；传了它就不再用通用状态表解释文案。 */
+    domain?: StatusDomain | null;
+    /** 非审核状态或确有业务特例时的显式文案。 */
     label?: string | null;
-    /** 候选、节点等有自己的配色表时显式传入。 */
+    /** 非审核状态或确有业务特例时的显式配色。 */
     tone?: StatusTone | null;
     size?: "large" | "default" | "small";
     effect?: "dark" | "light" | "plain";
   }>(),
-  { label: null, tone: null, size: "small", effect: "light" },
+  { domain: null, label: null, tone: null, size: "small", effect: "light" },
 );
 
-const tagType = computed(() => (props.tone ? toneTagType(props.tone) : statusTagType(props.status)));
-const text = computed(() => props.label ?? statusLabel(props.status));
+const vocabularyTone = computed(() => (
+  props.domain ? statusToneOf(props.domain, props.status) : null
+));
+const tagType = computed(() => {
+  const tone = props.tone ?? vocabularyTone.value;
+  return tone ? toneTagType(tone) : statusTagType(props.status);
+});
+const text = computed(() => (
+  props.label
+  ?? (props.domain ? statusTextOf(props.domain, props.status) : statusLabel(props.status))
+));
+const note = computed(() => (
+  props.domain ? statusNoteOf(props.domain, props.status) : null
+));
 </script>
 
 <template>
-  <el-tag :type="tagType" :size="size" :effect="effect" disable-transitions>{{ text }}</el-tag>
+  <el-tag
+    :type="tagType"
+    :size="size"
+    :effect="effect"
+    :title="note ?? undefined"
+    disable-transitions
+  >
+    {{ text }}
+  </el-tag>
 </template>

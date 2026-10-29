@@ -37,7 +37,7 @@ import { getExecution } from "@/api/executions";
 import MaterialProcessingDialog from "@/components/audit/MaterialProcessingDialog.vue";
 import AuditFieldResults from "@/components/audit/AuditFieldResults.vue";
 import ExecutionDetailPanel from "@/components/audit/ExecutionDetailPanel.vue";
-import { executionDuration, executionSummaryText } from "@/utils/executionPresentation";
+import { executionSummaryText } from "@/utils/executionPresentation";
 import AuditReportPanel from "@/components/audit/AuditReportPanel.vue";
 import AuditRiskResults from "@/components/audit/AuditRiskResults.vue";
 import AuditRuleResults from "@/components/audit/AuditRuleResults.vue";
@@ -57,6 +57,7 @@ import { isDetailTab, type DetailTab } from "@/constants/auditWorkspaces";
 import { COMPLETED_RESULT_STATUSES } from "@/constants/auditStatus";
 import {
   formatDate,
+  formatDuration,
   nodeLabel,
   operationTypeLabel,
   parseServerTime,
@@ -110,6 +111,8 @@ const correctionResult = ref<FieldCorrectionResponse | null>(null);
 const correctionPending = ref(false);
 const lastOperationType = ref<string | null>(null);
 let executionAttemptKey: string | null = null;
+/** 续跑请求身份：受理结果未知时保留，重发同一请求由服务端返回原受理记录。 */
+let resumeAttemptKey: string | null = null;
 
 /** 页面状态代次：切换任务时递增，过期响应不得覆盖当前页面。 */
 let stateGeneration = 0;
@@ -144,6 +147,8 @@ const executionsLoading = ref(false);
 const executionDetail = ref<Awaited<ReturnType<typeof getExecution>> | null>(null);
 const executionDetailVisible = ref(false);
 const executionDetailError = ref<string | null>(null);
+/** 执行详情请求代次：切换批次或任务后，旧响应不得写回当前抽屉。 */
+let executionDetailRequest = 0;
 
 async function loadExecutions(token: number): Promise<void> {
   const currentTaskNo = taskNo.value;
@@ -163,12 +168,17 @@ async function loadExecutions(token: number): Promise<void> {
 }
 
 async function openExecutionDetail(row: ExecutionRow): Promise<void> {
+  const request = ++executionDetailRequest;
   executionDetailVisible.value = true;
   executionDetail.value = null;
   executionDetailError.value = null;
   try {
-    executionDetail.value = await getExecution(row.execution_id);
+    const payload = await getExecution(row.execution_id);
+    // 先打开的批次晚返回时不能覆盖后选中的那一份。
+    if (request !== executionDetailRequest) return;
+    executionDetail.value = payload;
   } catch (error) {
+    if (request !== executionDetailRequest) return;
     executionDetailError.value = error instanceof Error ? error.message : "执行详情读取失败";
   }
 }
@@ -322,13 +332,30 @@ const canExecuteNode = computed(
   () => !pending.value && !watching.value && unsatisfiedPrerequisites.value.length === 0 && task.value?.status !== "WAITING_REVIEW",
 );
 
-/** 有未完成规则的批次可以原地继续；为空表示只能重新执行。 */
-const resumableExecutionId = computed(() => task.value?.current_node.resumable_execution_id ?? null);
+/** 有未完成规则的批次可以原地继续；为空表示只能全部重新执行。 */
+const resumeState = computed(() => task.value?.current_node.resume ?? null);
+const resumableExecutionId = computed(() => resumeState.value?.execution_id ?? null);
 const canResumeExecution = computed(
   () => resumableExecutionId.value !== null
     && !pending.value && !watching.value && !taskOperationActive.value
     && materialArtifactIssues.value.length === 0,
 );
+
+/** 继续执行前要展示的范围与费用提示；数量来自服务端计划，页面不自行推导依赖。 */
+const resumeHint = computed(() => {
+  const state = resumeState.value;
+  if (!state || state.execution_id === null || !state.plan) return null;
+  const { preserved, pending: rerunPending, dependent } = state.plan;
+  if (preserved + rerunPending + dependent === 0) {
+    return "继续执行：只补齐本次批次的收尾与流程推进，不重新调用模型。";
+  }
+  const parts = [`保留 ${preserved} 项已完成结果，补跑 ${rerunPending} 项未完成规则`];
+  if (dependent > 0) parts.push(`重算 ${dependent} 项受依赖影响的结果`);
+  const text = `继续执行：${parts.join("，")}。`;
+  return state.channel_failure?.result_unknown
+    ? `${text}上一次模型请求结果未知，可能已送达供应商，继续执行可能再次产生费用。`
+    : text;
+});
 
 const executeDisabledReason = computed(() => {
   if (!task.value) return null;
@@ -359,8 +386,10 @@ interface PrimaryAction {
  *
  * 同一个位置在不同状态下给出唯一明确的下一步：
  *   执行中 → 查看进度；已完成 → 查看结果；
- *   材料处理失败 → 处理材料（在材料处修复，直接重试审核必然再次失败）；
- *   执行失败 → 重试审核；阻断 → 重新执行当前节点；可执行 → 执行当前节点。
+ *   材料处理失败 → 处理材料（在材料处修复，直接执行审核必然再次失败）；
+ *   有可继续批次 → 继续执行（保留已完成结果，只补跑未完成项及其下游）；
+ *   执行失败或阻断且没有可继续批次 → 全部重新执行（需用户确认后重跑全部生效规则）；
+ *   可执行 → 执行当前节点。
  * 任务未到可执行状态时不显示一个点不动的「执行当前节点」。
  */
 const primaryAction = computed<PrimaryAction>(() => {
@@ -377,7 +406,7 @@ const primaryAction = computed<PrimaryAction>(() => {
     return { label: "查看审核结果", tab: "rules", disabled: false, reason: null, loading: false };
   }
   if (materialArtifactIssues.value.length) {
-    // 材料处理失败时直接重试审核必然再次失败；把用户带到能真正修复问题的地方。
+    // 材料处理失败时直接执行审核必然再次失败；把用户带到能真正修复问题的地方。
     const first = materialArtifactIssues.value[0]!;
     return {
       label: "处理材料",
@@ -397,14 +426,14 @@ const primaryAction = computed<PrimaryAction>(() => {
       disabled: !canResumeExecution.value,
       reason: canResumeExecution.value
         ? null
-        : `继续执行需要任务空闲且材料处理已完成；如需整轮重跑请使用「重新尝试」。`,
+        : `继续执行需要任务空闲且材料处理已完成；如需重跑全部生效规则，请使用「全部重新执行」。`,
       loading: watching.value || pending.value,
     };
   }
   if (task.value.status === "FAILED") {
     return {
-      label: "重试审核",
-      run: () => void executeCurrentNode(),
+      label: "全部重新执行",
+      run: () => void requestFullRerun(),
       disabled: !canExecuteNode.value,
       reason: executeDisabledReason.value,
       loading: watching.value || pending.value,
@@ -412,8 +441,8 @@ const primaryAction = computed<PrimaryAction>(() => {
   }
   if (task.value.status === "BLOCKED") {
     return {
-      label: "重新执行审核",
-      run: () => void executeCurrentNode(),
+      label: "全部重新执行",
+      run: () => void requestFullRerun(),
       disabled: !canExecuteNode.value,
       reason: executeDisabledReason.value,
       loading: watching.value || pending.value,
@@ -488,7 +517,7 @@ const blockers = computed<BlockerItem[]>(() => {
     items.push({
       tone: "error",
       title: "上次审核执行失败",
-      description: "处理失败原因后可点击「重试审核」。沿用已上传材料，重新执行生效规则，保留旧失败记录。",
+      description: "先按失败原因处理；可续跑时用「继续执行」保留已完成结果，不能续跑时「全部重新执行」会重跑全部生效规则并保留旧失败记录。",
       tab: "executions",
       tabLabel: "查看失败原因",
     });
@@ -590,10 +619,12 @@ const reportDownloadUrl = computed(() => {
   return apiFileUrl(`/audit-tasks/${task.value.task_no}/reports/download?report_no=${encodeURIComponent(report.value.report_no ?? '')}`);
 });
 
-const retryableOperation = computed(() => {
+/** 全量重跑入口：存在可续跑批次时不提供，避免失败后的恢复被悄悄变成全部重新执行。 */
+const fullRerunOperation = computed(() => {
   if (!task.value) return false;
   if (operation.value?.status !== "FAILED" && operation.value?.status !== "INTERRUPTED") return false;
-  return (lastOperationType.value === "NODE_EXECUTE" || lastOperationType.value === "NODE_RESUME") && canExecuteNode.value;
+  return (lastOperationType.value === "NODE_EXECUTE" || lastOperationType.value === "NODE_RESUME")
+    && resumableExecutionId.value === null && canExecuteNode.value;
 });
 
 function applyTask(auditTask: AuditTaskView): void {
@@ -629,9 +660,11 @@ function resetWorkspace(): void {
   correctionPending.value = false;
   lastOperationType.value = null;
   executionAttemptKey = null;
+  resumeAttemptKey = null;
   executions.value = [];
   executionsError.value = null;
   executionsLoading.value = false;
+  executionDetailRequest += 1;
   executionDetail.value = null;
   executionDetailError.value = null;
   executionDetailVisible.value = false;
@@ -722,6 +755,7 @@ function trackOperation(value: OperationView, token = stateGeneration): void {
     return;
   }
   executionAttemptKey = null;
+  resumeAttemptKey = null;
   lastOperationType.value = value.operation_type;
   setExecutionResult(value);
   let lastDetailRefreshAt = 0;
@@ -902,15 +936,17 @@ async function executeCurrentNode(): Promise<void> {
 async function resumeInterrupted(): Promise<void> {
   const currentTaskNo = task.value?.task_no;
   if (!currentTaskNo || !canResumeExecution.value) {
-    formMessage.value = "当前没有可继续执行的未完成批次；如需整轮重跑请使用「重新尝试」。";
+    formMessage.value = "当前没有可继续执行的未完成批次；如需重跑全部生效规则，请使用「全部重新执行」。";
     return;
   }
   const token = stateGeneration;
+  const attemptKey = resumeAttemptKey ?? operationIdempotencyKey("NODE_RESUME", currentTaskNo);
+  resumeAttemptKey = attemptKey;
   await run(async () => {
     try {
       const accepted = await resumeAuditTask(
         currentTaskNo,
-        operationIdempotencyKey("NODE_RESUME", currentTaskNo),
+        attemptKey,
         task.value?.input_revision,
       );
       if (isStale(token, currentTaskNo)) return;
@@ -923,18 +959,41 @@ async function resumeInterrupted(): Promise<void> {
     } catch (error) {
       if (isStale(token, currentTaskNo)) return;
       setFailure(error);
-      if (error instanceof Error && "code" in error && (error as ApiError).code === "OPERATION_ALREADY_ACTIVE") {
-        applyTask(await getAuditTask(currentTaskNo));
-        resumeLatestOperation(token);
-      }
+      // 受理结果未知时只查询真实状态：任务详情里的 latest_operation 指向已受理的操作，
+      // 存在进行中的操作就重新接回轮询。这里不重新提交执行请求。
+      applyTask(await getAuditTask(currentTaskNo));
+      resumeLatestOperation(token);
     }
   });
 }
 
+/** 全部重新执行：只有用户明确确认才创建新批次，并按现有语义失效旧结果。 */
+async function requestFullRerun(): Promise<void> {
+  if (!task.value || !canExecuteNode.value) {
+    formMessage.value = executeDisabledReason.value ?? "当前节点暂时不能执行。";
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      "将重新执行全部生效规则，产生额外模型调用。已完成的结果会失效，旧执行记录保留。",
+      "全部重新执行",
+      { type: "warning", confirmButtonText: "全部重新执行", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  await executeCurrentNode();
+}
+
 async function retryOperation(operationType: string): Promise<void> {
-  // 继续执行与规则执行都用同一个执行入口：重新提交当前节点。
+  // 有可续跑批次时，失败后的恢复操作同样是继续执行：不能因为操作类型是 NODE_EXECUTE
+  // 就悄悄重跑全部规则。只有没有可续跑批次时才给全量重跑入口。
   if (operationType === "NODE_EXECUTE" || operationType === "NODE_RESUME") {
-    await executeCurrentNode();
+    if (resumableExecutionId.value !== null) {
+      await resumeInterrupted();
+      return;
+    }
+    await requestFullRerun();
     return;
   }
   formMessage.value = "该后台操作没有可用的重试入口，请用「再次查询」查看服务端真实状态。";
@@ -1006,7 +1065,6 @@ watch(
 
 onMounted(() => {
   void syncFromRoute();
-  void materialTypeCatalog.reload();
   clockTimer = window.setInterval(() => {
     clock.value = Date.now();
   }, 30_000);
@@ -1039,6 +1097,10 @@ watch(
           <el-button v-if="task && (primaryAction.run || primaryAction.tab !== tab)"
             type="primary" :disabled="primaryAction.disabled" :loading="primaryAction.loading"
             :title="primaryAction.reason ?? ''" @click="runPrimaryAction">{{ primaryAction.label }}</el-button>
+          <!-- 全量重跑是独立的次要操作：有可续跑批次时也能明确选择它，但必须确认。 -->
+          <el-button v-if="task && resumableExecutionId !== null" :disabled="!canExecuteNode"
+            :loading="watching || pending" title="重新执行全部生效规则，原有结果会失效"
+            @click="requestFullRerun">全部重新执行</el-button>
           <el-button :loading="loadingTask" @click="refreshTask">刷新</el-button>
           <el-button v-if="task" type="danger" plain @click="removeTask">删除</el-button>
         </div>
@@ -1075,10 +1137,11 @@ watch(
           </div>
         </div>
         <p v-if="primaryAction.reason && !blockers.length" class="text-danger primary-reason">{{ primaryAction.reason }}</p>
+        <p v-if="resumeHint" class="text-hint primary-reason">{{ resumeHint }}</p>
 
         <OperationPanel v-if="operation && (watching || operation.status !== 'SUCCEEDED' || operation.failure_code || operation.failure_message)"
           class="block-gap-sm" compact :operation="operation" :watching="watching" :label="operation.operation_type === 'DOCUMENT_CLASSIFY' ? '文件已保存，自动校验' : '执行进度'"
-          :poll-seconds="pollIntervalSeconds" :can-retry="retryableOperation"
+          :poll-seconds="pollIntervalSeconds" :can-retry="fullRerunOperation" retry-label="全部重新执行"
           :can-resume="canResumeExecution"
           @requery="requery()" @retry="retryOperation" @resume="resumeInterrupted" />
       </template>
@@ -1180,23 +1243,24 @@ watch(
               v-loading="executionsLoading"
               empty-text="暂无执行记录"
             >
-              <el-table-column label="执行批次" width="88">
+              <el-table-column label="执行批次" width="104">
                 <template #default="{ row }">第 {{ row.sequence_no }} 次</template>
               </el-table-column>
-              <el-table-column label="执行状态" width="120">
+              <el-table-column label="执行状态" width="140">
                 <template #default="{ row }">
                   <StatusBadge :status="row.status" :tone="statusTone(row.status)" />
                   <el-tag v-if="row.invalidated" type="info" size="small">已失效</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="开始时间" width="184">
+              <el-table-column label="开始时间" width="200">
                 <template #default="{ row }"><span class="table-nowrap">{{ row.started_at ? formatDate(row.started_at) : "—" }}</span></template>
               </el-table-column>
-              <el-table-column label="结束时间" width="184">
+              <el-table-column label="结束时间" width="200">
                 <template #default="{ row }"><span class="table-nowrap">{{ row.finished_at ? formatDate(row.finished_at) : "—" }}</span></template>
               </el-table-column>
-              <el-table-column label="耗时" width="120">
-                <template #default="{ row }">{{ executionDuration(row.duration_ms) }}</template>
+              <!-- 耗时按「N 小时 M 分 S 秒」展示，列宽要放得下完整时长，否则会折成两行。 -->
+              <el-table-column label="耗时" width="200">
+                <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
               </el-table-column>
               <el-table-column label="执行结果" min-width="300">
                 <template #default="{ row }">

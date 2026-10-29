@@ -5,6 +5,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     CheckConstraint,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -23,6 +24,7 @@ class ImportJob(Base, TimestampMixin):
         CheckConstraint("source_size >= 0"),
         Index("idx_import_job_status_created_at", "status", "created_at"),
         Index("idx_import_job_created_at_id", "created_at", "id"),
+        Index("idx_import_job_scenario", "scenario_code"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -35,8 +37,9 @@ class ImportJob(Base, TimestampMixin):
     schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
     schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
     schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    scenario_code: Mapped[str | None] = mapped_column(String(80))
-    profile_display_version: Mapped[str | None] = mapped_column(String(40))
+    scenario_code: Mapped[str | None] = mapped_column(
+        String(80), ForeignKey("scenario_template.scenario_code", name="fk_import_job_template", ondelete="RESTRICT", onupdate="RESTRICT")
+    )
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     proposals_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     draft_revision: Mapped[int] = mapped_column(

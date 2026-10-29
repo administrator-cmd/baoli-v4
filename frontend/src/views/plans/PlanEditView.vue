@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { PlanAdjustments, PlanCalculationRuleItem, PlanConfig, PlanFieldItem, PlanMaterialItem, PlanRuleItem, PlanSectionItem, PlanSelection } from "@/api/contracts";
-import { createPlan, getPlan, getPlanAdjustments, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
+import type { PlanCalculationRuleItem, PlanConfig, PlanFieldItem, PlanMaterialItem, PlanRuleItem, PlanSectionItem, PlanStatus } from "@/api/contracts";
+import { createPlan, getPlanConfig, updatePlan, updatePlanConfig } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { operationIdempotencyKey } from "@/api/http";
 import BackButton from "@/components/BackButton.vue";
@@ -21,6 +21,7 @@ import {
   reportResultSortOptions,
   valueTypeLabel,
 } from "@/constants/labels";
+import { newId } from "@/utils/ids";
 
 /**
  * 方案编辑：以已发布场景版本为基准的个性化配置。
@@ -35,7 +36,6 @@ const router = useRouter();
 
 const planCode = computed(() => (typeof route.params.planCode === "string" ? route.params.planCode : null));
 const isCreate = computed(() => planCode.value === null);
-const previousCode = computed(() => isCreate.value && typeof route.query.previous === "string" ? route.query.previous : null);
 const requestedSceneCode = computed(() => isCreate.value && typeof route.query.scenario === "string" ? route.query.scenario : null);
 const PLAN_TAB_NAMES = ["basic", "materials", "fields", "rules", "calculations", "sections"];
 const activeTab = computed({
@@ -51,7 +51,7 @@ const activeTab = computed({
 const scenes = ref<ScenarioOption[]>([]);
 const scenesError = ref<string | null>(null);
 const scenesLoading = ref(false);
-const plan = ref<PlanSelection | null>(null);
+const plan = ref<PlanStatus | null>(null);
 const config = ref<PlanConfig | null>(null);
 const businessEditorVisible = ref(false);
 const businessEditorKind = ref<"rule" | "calculation">("rule");
@@ -83,16 +83,31 @@ function statusTone(status: unknown, enabled?: boolean): "success" | "warning" |
   return label === "启用" ? "success" : label === "待确认" ? "warning" : "info";
 }
 const savedConfigJson = ref("");
+
+/**
+ * 可编辑配置的快照：只取五份业务集合。
+ *
+ * request_id、effective、scope_hash、sync_error 等是服务端返回的元数据，
+ * 参与比较会让「已经保存但仍显示未保存」。
+ */
+function configSnapshot(source: PlanConfig | null): string {
+  if (!source) return "";
+  return JSON.stringify({
+    materials: source.materials,
+    fields: source.fields,
+    rules: source.rules,
+    sections: source.sections,
+    calculation_rules: source.calculation_rules,
+  });
+}
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 const planStatusError = ref<string | null>(null);
 const saving = ref(false);
 let createAttempt: { signature: string; key: string } | null = null;
-const reference = ref<PlanAdjustments | null>(null);
-const referenceLoading = ref(false);
-const referenceError = ref<string | null>(null);
 let loadRequest = 0;
-let referenceRequest = 0;
+/** 新建成功后要跳到编辑页，这次导航不应再问「未保存的修改」。 */
+let allowLeave = false;
 
 const basicForm = reactive({ plan_name: "", scenario_code: "", description: "", enabled: true });
 const hasUnsavedBasic = computed(() => plan.value !== null && (
@@ -100,7 +115,7 @@ const hasUnsavedBasic = computed(() => plan.value !== null && (
   || (basicForm.description.trim() || null) !== plan.value.description
   || basicForm.enabled !== plan.value.enabled
 ));
-const hasUnsavedConfig = computed(() => config.value !== null && JSON.stringify(config.value) !== savedConfigJson.value);
+const hasUnsavedConfig = computed(() => config.value !== null && configSnapshot(config.value) !== savedConfigJson.value);
 const canCreateTask = computed(() => Boolean(
   plan.value?.enabled && plan.value.effective && !plan.value.deleted
   && !hasUnsavedBasic.value && !hasUnsavedConfig.value && !planStatusError.value && !saving.value,
@@ -163,6 +178,8 @@ async function loadScenes(): Promise<void> {
 }
 
 async function load(): Promise<void> {
+  // 新对象重新加载后，之前的「不再询问」豁免不再适用。
+  allowLeave = false;
   const code = planCode.value;
   const request = ++loadRequest;
   if (!code) {
@@ -189,15 +206,15 @@ async function load(): Promise<void> {
   basicForm.description = "";
   basicForm.enabled = true;
   try {
-    const [detail, planConfig] = await Promise.all([getPlan(code), getPlanConfig(code)]);
+    const planConfig = await getPlanConfig(code);
     if (request !== loadRequest || planCode.value !== code) return;
-    plan.value = detail;
+    plan.value = planConfig;
     config.value = planConfig;
-    savedConfigJson.value = JSON.stringify(planConfig);
-    basicForm.plan_name = detail.plan_name;
-    basicForm.scenario_code = detail.scenario_code;
-    basicForm.description = detail.description ?? "";
-    basicForm.enabled = detail.enabled;
+    savedConfigJson.value = configSnapshot(planConfig);
+    basicForm.plan_name = planConfig.plan_name;
+    basicForm.scenario_code = planConfig.scenario_code;
+    basicForm.description = planConfig.description ?? "";
+    basicForm.enabled = planConfig.enabled;
   } catch (error) {
     if (request !== loadRequest || planCode.value !== code) return;
     plan.value = null;
@@ -210,40 +227,44 @@ async function load(): Promise<void> {
 }
 
 watch(() => planCode.value, () => { createAttempt = null; void load(); }, { immediate: true });
-watch(previousCode, () => void loadReference(), { immediate: true });
-watch([previousCode, requestedSceneCode], ([previous, code]) => {
-  if (!previous) basicForm.scenario_code = code ?? "";
+watch(requestedSceneCode, (code) => {
+  basicForm.scenario_code = code ?? "";
 }, { immediate: true });
 onMounted(() => void loadScenes());
 
-async function loadReference(): Promise<void> {
-  const code = previousCode.value;
-  const request = ++referenceRequest;
-  reference.value = null;
-  referenceError.value = null;
-  if (!code) {
-    referenceLoading.value = false;
-    return;
-  }
-  basicForm.scenario_code = "";
-  referenceLoading.value = true;
+/**
+ * 未保存修改的离开提示。
+ *
+ * 只有确实存在未保存内容时才拦；同一对象的页签与查询参数切换不触发离开守卫。
+ */
+const hasUnsavedInput = computed(() => (
+  hasUnsavedBasic.value
+  || hasUnsavedConfig.value
+  || (plan.value === null && Boolean(basicForm.plan_name.trim() || basicForm.description.trim() || basicForm.scenario_code))
+));
+
+async function confirmLeave(): Promise<boolean> {
+  if (allowLeave || !hasUnsavedInput.value) return true;
   try {
-    const result = await getPlanAdjustments(code);
-    if (request !== referenceRequest || previousCode.value !== code) {
-      return;
-    }
-    reference.value = result;
-    basicForm.scenario_code = result.scenario_code;
-  } catch (error) {
-    if (request === referenceRequest && previousCode.value === code) {
-      referenceError.value = describeError(error);
-    }
-  } finally {
-    if (request === referenceRequest) {
-      referenceLoading.value = false;
-    }
+    await ElMessageBox.confirm("当前方案有未保存的修改，离开后将丢失。", "未保存的修改", {
+      type: "warning", confirmButtonText: "仍要离开", cancelButtonText: "留在本页",
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
+
+function warnBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!hasUnsavedInput.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+onMounted(() => window.addEventListener("beforeunload", warnBeforeUnload));
+onUnmounted(() => window.removeEventListener("beforeunload", warnBeforeUnload));
+onBeforeRouteLeave(() => confirmLeave());
+onBeforeRouteUpdate((to, from) => (to.params.planCode === from.params.planCode ? true : confirmLeave()));
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败";
@@ -258,10 +279,6 @@ async function submitCreate(): Promise<void> {
   if (saving.value) return;
   const createRoute = route.fullPath;
   const scene = selectedScene.value;
-  if (previousCode.value && (!reference.value || referenceLoading.value || referenceError.value)) {
-    ElMessage.warning("旧方案调整尚未读取成功");
-    return;
-  }
   if (!basicForm.plan_name.trim() || !scene || scene.available === false) {
     // 下拉里只列「已启用且已有已发布版本」的场景，选不到就是还不具备建方案的条件。
     ElMessage.warning("请填写方案名称，并选择一个已发布且已启用的场景");
@@ -285,6 +302,7 @@ async function submitCreate(): Promise<void> {
     const created = await createPlan({ ...payload, idempotency_key: attempt.key });
     if (route.fullPath !== createRoute) return;
     ElMessage.success("方案已创建，配置已从场景版本复制");
+    allowLeave = true;
     await router.replace({ name: "plan-edit", params: { planCode: created.plan_code } });
   } catch (error) {
     if (route.fullPath === createRoute) ElMessage.error(describeError(error));
@@ -319,16 +337,16 @@ async function saveBasic(): Promise<boolean> {
   }
 }
 
-async function refreshPlanStatus(): Promise<PlanSelection | null> {
+async function refreshPlanStatus(): Promise<PlanStatus | null> {
   const code = planCode.value;
   const request = loadRequest;
   if (!code) return null;
   try {
-    const detail = await getPlan(code);
+    const planConfig = await getPlanConfig(code);
     if (request !== loadRequest || planCode.value !== code) return null;
-    plan.value = detail;
+    plan.value = planConfig;
     planStatusError.value = null;
-    return detail;
+    return planConfig;
   } catch (error) {
     if (request === loadRequest && planCode.value === code) {
       planStatusError.value = describeError(error);
@@ -344,7 +362,7 @@ async function saveConfig(): Promise<void> {
   if (!code || !currentConfig || saving.value) {
     return;
   }
-  const submittedConfigJson = JSON.stringify(currentConfig);
+  const submittedConfigJson = configSnapshot(currentConfig);
   saving.value = true;
   try {
     // 整体提交完整业务配置，计算定义与启停一起保存。
@@ -356,12 +374,13 @@ async function saveConfig(): Promise<void> {
       calculation_rules: currentConfig.calculation_rules,
     });
     if (request !== loadRequest || planCode.value !== code) return;
-    const editedDuringSave = JSON.stringify(currentConfig) !== submittedConfigJson;
-    savedConfigJson.value = JSON.stringify(updated);
+    const editedDuringSave = configSnapshot(currentConfig) !== submittedConfigJson;
+    savedConfigJson.value = configSnapshot(updated);
     config.value = editedDuringSave ? currentConfig : updated;
-    const refreshedPlan = await refreshPlanStatus();
-    if (request !== loadRequest || planCode.value !== code) return;
-    if (!refreshedPlan) return;
+    // 保存响应已经带回方案状态（effective / sync_error），不再为拿状态多读一次配置。
+    plan.value = updated;
+    planStatusError.value = null;
+    const refreshedPlan = updated;
     if (editedDuringSave) {
       ElMessage.warning("本次配置已保存，保存期间的新修改仍待保存");
     } else if (refreshedPlan.effective) {
@@ -438,7 +457,7 @@ function applySection(): void {
   }
   const existing = config.value.sections.find((item) => item.section_key === editingSectionKey.value);
   const section: PlanSectionItem = {
-    section_key: existing?.section_key ?? crypto.randomUUID(),
+    section_key: existing?.section_key ?? newId(),
     title: sectionForm.title.trim(),
     content_instruction: sectionForm.content_instruction,
     field_keys: sectionForm.data_refs.filter((ref) => config.value!.fields.some((field) => field.field_key === ref)),
@@ -486,24 +505,18 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
   config.value.sections = config.value.sections.filter((section) => section.section_key !== item.section_key);
 }
 
-function adjustmentValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "未填写";
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (Array.isArray(value)) return value.map(adjustmentValue).join("、") || "空列表";
-  if (typeof value === "object") return JSON.stringify(value) ?? "未填写";
-  return String(value);
-}
 </script>
 
 <template>
   <div class="app-panel">
     <PageHeader
-      eyebrow="方案管理"
       :title="isCreate ? '新增方案' : (basicForm.plan_name ? `方案配置：${basicForm.plan_name}` : '方案配置')"
       :show-refresh="false"
     >
-      <template #actions>
+      <template #leading>
         <BackButton label="返回方案列表" @click="router.push({ name: 'plans' })" />
+      </template>
+      <template #actions>
         <el-button
           v-if="planCode"
           type="primary"
@@ -517,7 +530,6 @@ function adjustmentValue(value: unknown): string {
           :disabled="!canCreateTask"
           @click="openCreateTask"
         >创建任务</el-button>
-        <el-button v-if="planCode" @click="router.push({ name: 'plan-new', query: { previous: planCode } })">基于当前场景重新生成</el-button>
       </template>
     </PageHeader>
 
@@ -549,7 +561,7 @@ function adjustmentValue(value: unknown): string {
           <el-form-item label="所属场景" required>
             <el-select
               v-model="basicForm.scenario_code"
-              :disabled="!isCreate || !!previousCode"
+              :disabled="!isCreate"
               placeholder="选择审核场景"
               style="width: 100%"
             >
@@ -561,13 +573,6 @@ function adjustmentValue(value: unknown): string {
               />
             </el-select>
           </el-form-item>
-          <el-alert
-            v-if="isCreate && previousCode && reference && !scenesLoading && (!selectedScene || selectedScene.available === false) && !scenesError"
-            type="warning"
-            show-icon
-            :closable="false"
-            title="该场景当前没有可用于生成方案的已发布版本"
-          />
           <el-form-item label="方案说明">
             <el-input v-model="basicForm.description" type="textarea" :rows="2" maxlength="4000" />
           </el-form-item>
@@ -575,40 +580,9 @@ function adjustmentValue(value: unknown): string {
             <el-switch v-model="basicForm.enabled" active-text="启用" inactive-text="停用" />
           </el-form-item>
         </el-form>
-        <div v-if="!previousCode" class="card-actions">
+        <div class="card-actions">
           <el-button type="primary" :loading="saving" :disabled="scenesLoading || !!scenesError" @click="submitCreate">创建方案</el-button>
         </div>
-      </el-card>
-
-      <el-card v-if="previousCode" shadow="never" class="block-gap-sm" v-loading="referenceLoading">
-        <template #header>旧方案调整参考</template>
-        <el-alert v-if="referenceError" type="error" show-icon :closable="false" :title="`读取失败：${referenceError}`">
-          <el-button size="small" @click="loadReference">重试</el-button>
-        </el-alert>
-        <template v-else-if="reference">
-          <p class="text-hint">
-            {{ reference.plan_name }} 基于场景第 {{ reference.base_scenario_version_no }} 版；
-            新方案将基于当前第 {{ selectedScene?.latest_version_no ?? "—" }} 版创建。旧调整仅供参考，不会自动套用。
-          </p>
-          <el-table :data="reference.items" border stripe empty-text="旧方案没有相对来源场景的调整">
-            <el-table-column prop="category" label="类别" width="100" />
-            <el-table-column prop="name" label="配置项" min-width="170" show-overflow-tooltip />
-            <el-table-column label="调整" width="75">
-              <template #default="{ row }">{{ row.change === "ADDED" ? "新增" : row.change === "REMOVED" ? "移除" : "修改" }}</template>
-            </el-table-column>
-            <el-table-column label="内容" min-width="300">
-              <template #default="{ row }">
-                <span v-if="!row.fields.length">{{ row.change === "ADDED" ? "新增整项" : "移除整项" }}</span>
-                <div v-for="field in row.fields" :key="field.label" class="adjustment-line">
-                  {{ field.label }}：{{ adjustmentValue(field.before) }} → {{ adjustmentValue(field.after) }}
-                </div>
-              </template>
-            </el-table-column>
-          </el-table>
-          <div class="card-actions block-gap-sm">
-            <el-button type="primary" :loading="saving" :disabled="scenesLoading || !!scenesError || !selectedScene || selectedScene.available === false" @click="submitCreate">创建方案</el-button>
-          </div>
-        </template>
       </el-card>
 
       <!-- 配置：只有编辑模式才有。内容按配置对象拆成横向标签，避免长页面滚动查找。 -->
@@ -648,14 +622,14 @@ function adjustmentValue(value: unknown): string {
                 :status-text="(item: PlanMaterialItem) => statusLabel(item.config_status)"
                 keyword-placeholder="材料名称、编号或说明" empty-text="当前方案没有材料"
               >
-                  <el-table-column label="材料编号" width="120" show-overflow-tooltip>
+                  <el-table-column label="材料编号" width="140" show-overflow-tooltip>
                     <template #default="{ row }"><span class="mono">{{ row.source_ref || "未填写" }}</span></template>
                   </el-table-column>
-                  <el-table-column prop="name" label="材料名称" width="170" show-overflow-tooltip />
+                  <el-table-column prop="name" label="材料名称" width="180" show-overflow-tooltip />
                   <el-table-column prop="description" label="业务说明" min-width="300" show-overflow-tooltip />
-                  <el-table-column label="必传" width="64"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('material', row.material_key)">编辑</el-button></template></el-table-column>
+                  <el-table-column label="必传" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('material', row.material_key)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
 
@@ -669,17 +643,17 @@ function adjustmentValue(value: unknown): string {
                 group-label="数据类型" :group-text="(item: PlanFieldItem) => valueTypeLabel(item.value_type)"
                 keyword-placeholder="字段名称、编号或提取要求" empty-text="当前方案没有字段"
               >
-                  <el-table-column label="字段编号" width="120" show-overflow-tooltip>
+                  <el-table-column label="字段编号" width="140" show-overflow-tooltip>
                     <template #default="{ row }"><span class="mono">{{ row.source_ref || "未填写" }}</span></template>
                   </el-table-column>
-                  <el-table-column prop="name" label="字段名称" width="160" show-overflow-tooltip />
-                  <el-table-column label="所属材料" width="112" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
+                  <el-table-column prop="name" label="字段名称" width="180" show-overflow-tooltip />
+                  <el-table-column label="所属材料" width="168" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
                   <el-table-column label="数据类型" width="88"><template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template></el-table-column>
                   <el-table-column label="抽取策略" width="108"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
-                  <el-table-column label="必抽" width="64"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
-                  <el-table-column prop="instruction" label="提取要求" min-width="240" show-overflow-tooltip />
-                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('field', row.field_key)">编辑</el-button></template></el-table-column>
+                  <el-table-column label="必抽" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column prop="instruction" label="提取要求" min-width="300" show-overflow-tooltip />
+                  <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('field', row.field_key)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
 
@@ -694,20 +668,20 @@ function adjustmentValue(value: unknown): string {
                 :summary="`已启用 ${enabledRules.length} 条，未启用 ${disabledRules.length} 条`"
                 keyword-placeholder="规则名称、业务编号或审核要求" empty-text="当前方案没有审核规则"
               >
-                  <el-table-column label="业务编号" width="120" show-overflow-tooltip>
+                  <el-table-column label="业务编号" width="140" show-overflow-tooltip>
                     <template #default="{ row }"><span class="mono">{{ row.rule_code || row.source_ref || "未填写" }}</span></template>
                   </el-table-column>
                   <el-table-column prop="name" label="规则名称" min-width="180" show-overflow-tooltip align="center" />
                   <el-table-column label="执行方式" width="112" align="center">
                     <template #default="{ row }">{{ executionModeLabel(typeof row.rule_json?.execution_mode === "string" ? row.rule_json.execution_mode : null) }}</template>
                   </el-table-column>
-                  <el-table-column label="来源工作表" width="168" show-overflow-tooltip align="center">
+                  <el-table-column label="来源工作表" width="204" show-overflow-tooltip align="center">
                     <template #default="{ row }">{{ sourceSheetLabel(row.origin) }}</template>
                   </el-table-column>
-                  <el-table-column label="适用材料" width="112" show-overflow-tooltip align="center"><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
-                  <el-table-column label="审核要求" min-width="280" show-overflow-tooltip align="center"><template #default="{ row }">{{ row.rule_json.requirement || "—" }}</template></el-table-column>
-                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('rule', row.rule_key)">编辑</el-button></template></el-table-column>
+                  <el-table-column label="适用材料" width="180" show-overflow-tooltip align="center"><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
+                  <el-table-column label="审核要求" min-width="340" show-overflow-tooltip align="center"><template #default="{ row }">{{ row.rule_json.requirement || "—" }}</template></el-table-column>
+                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('rule', row.rule_key)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
 
@@ -720,15 +694,15 @@ function adjustmentValue(value: unknown): string {
                 group-label="来源工作表" :group-text="(item: PlanCalculationRuleItem) => sourceSheetLabel(item.origin)"
                 keyword-placeholder="指标名称、规则编号或计算方法" empty-text="当前方案没有计算规则"
               >
-                  <el-table-column prop="rule_code" label="规则编号" width="120" show-overflow-tooltip />
+                  <el-table-column prop="rule_code" label="规则编号" width="140" show-overflow-tooltip />
                   <el-table-column prop="rule_name" label="指标名称" min-width="180" show-overflow-tooltip />
-                  <el-table-column label="来源工作表" width="168" show-overflow-tooltip align="center">
+                  <el-table-column label="来源工作表" width="204" show-overflow-tooltip align="center">
                     <template #default="{ row }">{{ sourceSheetLabel(row.origin) }}</template>
                   </el-table-column>
-                  <el-table-column prop="formula" label="计算方法" min-width="240" show-overflow-tooltip />
-                  <el-table-column prop="requirement" label="业务要求" min-width="240" show-overflow-tooltip />
-                  <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="72" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('calculation', row.rule_code)">编辑</el-button></template></el-table-column>
+                  <el-table-column prop="formula" label="计算方法" min-width="300" show-overflow-tooltip />
+                  <el-table-column prop="requirement" label="业务要求" min-width="300" show-overflow-tooltip />
+                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('calculation', row.rule_code)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
 
@@ -742,15 +716,15 @@ function adjustmentValue(value: unknown): string {
                 keyword-placeholder="章节名称、报告编号或内容要求" empty-text="当前方案没有报告章节"
               >
                 <template #actions><el-button type="primary" @click="openSectionEditor()">新增章节</el-button></template>
-                  <el-table-column label="报告编号" width="120" show-overflow-tooltip>
+                  <el-table-column label="报告编号" width="140" show-overflow-tooltip>
                     <template #default="{ row }"><span class="mono">{{ row.report_code || "未填写" }}</span></template>
                   </el-table-column>
                   <el-table-column prop="title" label="章节名称" min-width="160" show-overflow-tooltip />
-                  <el-table-column prop="report_name" label="所属报告" width="160" show-overflow-tooltip />
+                  <el-table-column prop="report_name" label="所属报告" width="192" show-overflow-tooltip />
                   <el-table-column label="材料范围" width="120" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
-                  <el-table-column label="业务数据引用" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ dataNames(row.data_refs) }}</template></el-table-column>
+                  <el-table-column label="业务数据引用" min-width="300" show-overflow-tooltip><template #default="{ row }">{{ dataNames(row.data_refs) }}</template></el-table-column>
                   <el-table-column label="章节处理" width="96"><template #default="{ row }"><el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'" size="small">{{ sectionStatusLabel(row) }}</el-tag></template></el-table-column>
-                  <el-table-column label="操作" width="104" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
+                  <el-table-column label="操作" width="124" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
 

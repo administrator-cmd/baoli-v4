@@ -42,7 +42,7 @@ def process_document(
     settings = get_settings()
     base_url = required_service_url(settings.service_8010_url, PARSE_SERVICE, "BAOLI_SERVICE_8010_URL")
     infer = "gpu" if filename.lower().endswith(".pdf") else "cpu"
-    with client(settings.request_timeout_seconds) as http:
+    with client() as http:
         try:
             with file_path.open("rb") as input_file:
                 response = request(
@@ -115,7 +115,7 @@ def detect_seals(
     """把原始上传提交给印章识别，只保留归一化后的印章事实。"""
     settings = get_settings()
     base_url = required_service_url(settings.seal_service_url, SEAL_SERVICE, "BAOLI_SEAL_SERVICE_URL")
-    with client(settings.request_timeout_seconds) as http:
+    with client() as http:
         try:
             with file_path.open("rb") as input_file:
                 response = request(
@@ -198,8 +198,8 @@ def detect_seals(
                 "seal_count_note": "印章数量仅表示识别到的印章个数，不等于盖章正确；漏盖、错盖、伪造不受此数量约束。",
                 "pages": pages,
                 # 主体条目：每条印章记录一行，字段就是该枚印章识别出的主体名称。
-                # 这是本系统对供应商响应中“主体名称”的显式归一化：下游（主体检索、
-                # 主体核对）只读这个结构，不再自己判断 class_name/text 哪个是主体。
+                # 这是本系统对供应商响应中“主体名称”的显式归一化：下游（主体核对）
+                # 只读这个结构，不再自己判断 class_name/text 哪个是主体。
                 # 同一枚印章在多个页面重复出现时各条目分别保留；不同识别名不自动合并。
                 "artifact_subject": "subject_name",
                 "seal_subjects": [

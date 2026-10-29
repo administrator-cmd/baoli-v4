@@ -69,14 +69,22 @@ def configuration_view(db: Session, template: ScenarioTemplate, view: str | None
 
 def draft_config_payload(db: Session, draft: ScenarioDraft) -> dict[str, Any]:
     nodes, materials, fields, rules, sections = draft_rows(db, draft.id)
-    compiled = compile_draft_manifest(db, template_or_404(db, draft.scenario_code), draft)
+    template = template_or_404(db, draft.scenario_code)
+    try:
+        compiled = compile_draft_manifest(db, template, draft)
+        sync_error = None
+    except BusinessError as exc:
+        # 草稿允许保存不完整的配置。编译失败写进视图，页面据此说明原因并继续可编辑；
+        # 不能因为一份还没配完的草稿就让整页读取失败。
+        compiled = {"rules": [], "calculations": []}
+        sync_error = {"code": exc.code, "message": exc.message, "details": exc.details}
     return {
         "scenario_code": draft.scenario_code, "configuration_kind": "DRAFT", "version_no": None,
         "revision_no": draft.revision_no, "source": draft.source,
         "source_label": DRAFT_SOURCE_LABELS.get(draft.source, draft.source),
         "base_version_no": draft.base_version_no, "schema_key": draft.schema_key,
         "schema_version": draft.schema_version, "schema_json": draft.schema_json,
-        "profile_version": draft.profile_version, "sync_error": None, "updated_at": draft.updated_at,
+        "profile_version": draft.profile_version, "sync_error": sync_error, "updated_at": draft.updated_at,
         **_configuration_items(nodes, materials, fields, rules, sections, compiled=compiled),
         "calculations": _calculation_view_rows(draft.calculation_json),
     }

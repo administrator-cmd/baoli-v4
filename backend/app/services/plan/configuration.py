@@ -80,6 +80,7 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
     previous = plan_config_rows(db, plan.id)
     previous_rules = {item.rule_key: item for item in previous[2]}
     submitted_fields = {item.get("field_key"): item for item in fields}
+    field_material: dict[str, str] = {}
     for index, item in enumerate(rules, start=1):
         rule_json = item.get("rule_json")
         if not isinstance(rule_json, dict):
@@ -184,6 +185,8 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
                 details={"allowed": sorted(FORM_VALUE_TYPES), "value_type": value_type},
             )
         field_name = _required_key(item, "name", f"第 {index} 个字段")
+        material_key = _required_key(item, "material_key", f"第 {index} 个字段")
+        field_material[field_key] = material_key
         field_state = extensions[PlanField.__name__].get(field_key, {})
         producers = [rule for rule in rules if field_key in (rule.get("rule_json") or {}).get("outputs", [])]
         extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
@@ -198,7 +201,7 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
             db, PlanField(
                 plan_id=plan.id,
                 field_key=field_key,
-                material_key=_required_key(item, "material_key", f"第 {index} 个字段"),
+                material_key=material_key,
                 name=field_name,
                 value_type=value_type,
                 extraction_strategy=extraction_strategy,
@@ -218,6 +221,12 @@ def update_plan_config(db: Session, plan_code: str, payload: dict[str, Any]) -> 
         )
     for index, item in enumerate(rules, start=1):
         rule_json = item.get("rule_json")
+        # 字段换了所属材料时，规则输入仍写着旧材料；按本次提交的字段重新对齐引用，
+        # 否则编译只能把它记成依赖错误，而页面上没有任何地方能改回来。
+        for entry in rule_json.get("inputs") or []:
+            field_key = entry.get("field_key")
+            if field_key in field_material and entry.get("material_key") != field_material[field_key]:
+                entry["material_key"] = field_material[field_key]
         config_store.add(
             db, PlanRule(
                 plan_id=plan.id,

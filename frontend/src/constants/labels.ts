@@ -1,11 +1,9 @@
 /**
  * 中文业务标签与状态色。
  *
- * 通用任务与执行状态使用本文件；审核结论见 auditStatus.ts，材料产物见 materialProcessing.ts。
- * 同一状态码在不同业务上下文中可以具有不同含义，由对应的状态表统一文案与颜色。
+ * 通用任务、执行与材料状态使用本文件；审核结论、风险结论与字段状态的文案
+ * 统一来自后端状态词表，见 statusVocabulary.ts。
  */
-
-import { AUDIT_RESULT_LABELS, AUDIT_RESULT_TONES } from "./auditStatus";
 
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
 
@@ -16,7 +14,6 @@ const statusLabels: Record<string, string> = {
   DEGRADED: "服务降级",
   UNCONFIGURED: "未配置",
   CONFIGURATION_INCOMPLETE: "配置不完整",
-  CONFIGURED_UNVERIFIED: "已配置，未验证",
   EMPTY: "无数据，已跳过",
   NO_BUSINESS_DATA: "无业务数据，已跳过",
   HIDDEN: "隐藏工作表",
@@ -39,6 +36,7 @@ const statusLabels: Record<string, string> = {
   FAILED: "执行失败",
   INTERRUPTED: "已中断",
   BLOCKED: "已阻断",
+  SKIPPED: "已跳过",
   WAITING_REVIEW: "等待人工复核",
   COMPLETED: "已全部完成",
   INVALIDATED: "已失效",
@@ -50,12 +48,6 @@ const statusLabels: Record<string, string> = {
   TYPE_REVIEW: "材料类型待复核",
   TYPE_REJECTED: "材料类型不符",
   SUPERSEDED: "已替换",
-  PRESENT: "已抽取",
-  NOT_PRESENT: "未抽取到",
-  EXTRACTION_FAILED: "抽取失败",
-  EVIDENCE_UNCLEAR: "证据不足",
-  NORMALIZATION_FAILED: "标准化失败",
-  ...AUDIT_RESULT_LABELS,
   PASS: "通过",
   COMPLETE: "已生成",
   INCOMPLETE: "未完整执行",
@@ -124,6 +116,7 @@ const statusTones: Record<string, StatusTone> = {
   FAILED: "danger",
   INTERRUPTED: "danger",
   BLOCKED: "danger",
+  SKIPPED: "neutral",
   INVALIDATED: "neutral",
   WAITING_REVIEW: "warning",
   COMPLETED: "success",
@@ -138,12 +131,6 @@ const statusTones: Record<string, StatusTone> = {
   TYPE_REJECTED: "danger",
 
   // 字段与规则结果
-  PRESENT: "success",
-  NOT_PRESENT: "warning",
-  EXTRACTION_FAILED: "danger",
-  EVIDENCE_UNCLEAR: "warning",
-  NORMALIZATION_FAILED: "danger",
-  ...AUDIT_RESULT_TONES,
   PASS: "success",
 
   // 报告
@@ -175,34 +162,10 @@ const statusTones: Record<string, StatusTone> = {
   REMOVED: "neutral",
   ACCEPTED: "info",
   CONFIGURED: "success",
-  CONFIGURED_UNVERIFIED: "warning",
   UNCONFIGURED: "neutral",
   CONFIGURATION_INCOMPLETE: "warning",
   NOT_CONFIGURED: "neutral",
 };
-
-/**
- * 字段事实状态的语义色。
- *
- * 与规则结论分开：字段的 PRESENT 只表示「从材料里抽到了这段原文」，
- * 是事实存在性，不是审核通过，因此不能用绿色（绿色在本系统里固定表示通过/完成）。
- * 只有人工已经确认过的 REVIEWED 才是经过人确认的有效值。
- */
-export function fieldStatusTone(status: string | null | undefined): StatusTone {
-  if (status === "REVIEWED") {
-    return "success";
-  }
-  if (status === "PRESENT") {
-    return "info";
-  }
-  if (status === "NOT_PRESENT" || status === "EVIDENCE_UNCLEAR") {
-    return "warning";
-  }
-  if (status === "EXTRACTION_FAILED" || status === "NORMALIZATION_FAILED") {
-    return "danger";
-  }
-  return "neutral";
-}
 
 /** 字段事实来源：人工纠错与文档抽取必须分开显示。 */
 const factOriginLabels: Record<string, string> = {
@@ -349,6 +312,14 @@ export function statusLabel(status: string | null | undefined): string {
   return label ? label : `未识别状态（${status}）`;
 }
 
+/** 用统一状态文案生成筛选下拉；页面只声明状态码和必要的上下文特例。 */
+export function statusFilterOptions(
+  values: readonly string[],
+  overrides: Record<string, string> = {},
+): Array<{ value: string; label: string }> {
+  return values.map((value) => ({ value, label: overrides[value] ?? statusLabel(value) }));
+}
+
 const valueTypeLabels: Record<string, string> = {
   STRING: "文本",
   DECIMAL: "数值",
@@ -400,6 +371,18 @@ export function formatDate(value: string): string {
   return date === null
     ? value
     : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+/** 耗时：毫秒以下保留毫秒，其余按秒/分/时拆分。 */
+export function formatDuration(ms: number | null): string {
+  if (ms === null) return "—";
+  if (ms < 1000) return `${ms} 毫秒`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} 秒`;
+  const seconds = Math.round(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60
+    ? `${minutes} 分 ${seconds % 60} 秒`
+    : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分 ${seconds % 60} 秒`;
 }
 
 /** 文件大小：只用于业务展示，不显示本地路径。 */
@@ -558,6 +541,7 @@ export const ruleOperatorOptions = [
 /** 业务错误码 → 用户能执行的下一步。未收录的错误码只显示原始原因和错误码。 */
 const failureNextSteps: Record<string, string> = {
   NETWORK_ERROR: "检查后端服务是否已启动，以及本机网络是否可达。",
+  UNEXPECTED_ERROR: "这是前端页面自身抛出的错误，不是服务端返回；请把错误码和技术信息交给开发排查。",
   REQUEST_TIMEOUT: "已提交的后台操作不会丢失，可稍后重新查询状态；不要重复提交。",
   OPERATION_ALREADY_ACTIVE: "该对象已有正在执行的后台操作，请等待其结束或用「再次查询」查看真实状态。",
   INVALID_RESPONSE: "服务返回的内容无法识别，请查看后端日志确认接口版本是否一致。",
@@ -659,23 +643,4 @@ export function failureNextStep(code: string | null | undefined): string {
     return "如问题持续，请携带错误码和请求编号联系技术支持。";
   }
   return failureNextSteps[code] ?? "如问题持续，请携带错误码和请求编号联系技术支持。";
-}
-
-
-/** 取证方式与判定方式的中文口径：让用户一眼看懂这条检查是怎么判的。 */
-const evidenceRouteLabels: Record<string, string> = {
-  DIRECT_FACTS: "直接读取结构化字段",
-};
-
-const judgeRouteLabels: Record<string, string> = {
-  PROGRAM: "由程序判定",
-  LLM: "由大模型按规则分析",
-};
-
-export function evidenceRouteLabel(evidence: string | null | undefined): string {
-  return evidence ? evidenceRouteLabels[evidence] ?? "取证方式未知" : "取证方式未记录";
-}
-
-export function judgeRouteLabel(judge: string | null | undefined): string {
-  return judge ? judgeRouteLabels[judge] ?? "判定方式未知" : "判定方式未记录";
 }

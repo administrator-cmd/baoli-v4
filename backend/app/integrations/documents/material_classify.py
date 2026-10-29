@@ -33,7 +33,7 @@ def list_material_types() -> list[dict[str, Any]]:
     """
     settings = get_settings()
     base_url = required_service_url(settings.service_8018_url, SERVICE_CODE, "BAOLI_SERVICE_8018_URL")
-    with client(settings.request_timeout_seconds) as http:
+    with client() as http:
         catalog_response = request(
             http, "GET", f"{base_url}/supported-types",
             service_code=SERVICE_CODE, operation="LIST_TYPES",
@@ -70,7 +70,7 @@ def validate_material_type(
             "当前材料位未声明 8018 材料类型，无法执行材料校验",
             status_code=409,
         )
-    with client(settings.request_timeout_seconds) as http:
+    with client() as http:
         try:
             catalog_response = request(
                 http, "GET", f"{base_url}/supported-types",

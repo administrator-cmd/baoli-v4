@@ -1,6 +1,7 @@
 <script setup lang="ts" generic="T">
 import { computed, reactive, ref, watch } from "vue";
 import { compareNaturalLabels } from "@/utils/naturalSort";
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /** 方案各配置页签共用的查找与分页；只筛选视图，不裁剪待保存的完整配置。 */
 const props = defineProps<{
@@ -20,7 +21,7 @@ const props = defineProps<{
 
 const query = reactive({ keyword: "", material: "", group: "", status: "" });
 const page = ref(1);
-const pageSize = ref(20);
+const pageSize = ref(DEFAULT_PAGE_SIZE);
 
 function countedOptions(values: string[], selected: string) {
   const counts = new Map<string, number>();
@@ -100,7 +101,7 @@ function resetFilters(): void {
         v-model:current-page="page"
         v-model:page-size="pageSize"
         :total="filteredItems.length"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
       />

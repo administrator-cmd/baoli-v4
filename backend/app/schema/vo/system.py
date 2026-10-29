@@ -6,14 +6,28 @@ from pydantic import BaseModel, Field
 from ...common.api import ApiResponse
 
 
-class ExternalServiceConfiguration(BaseModel):
-    status: Literal["UNCONFIGURED", "CONFIGURATION_INCOMPLETE", "CONFIGURED_UNVERIFIED"]
+class SystemServiceItem(BaseModel):
+    """一个渠道的配置与本次探测结果。
+
+    连接状态只来自真实探测；`latency_ms` 与 `last_checked_at` 同一次检查写入，
+    短时间内重复查看会复用那一次探测并原样返回它的检查时间，不冒充刚刚探测过。
+    """
+
+    name: str
+    capability: str
+    configuration_status: str
+    connection_status: str
+    last_checked_at: datetime | None = None
+    latency_ms: int | None = None
     missing: list[str] = Field(default_factory=list)
+    note: str | None = None
 
 class SystemStatusResponse(ApiResponse):
-    service: str
-    database: Literal["CONNECTED", "FAILED"]
-    external_services: dict[str, ExternalServiceConfiguration]
+    """系统总体状态；数据库与大模型的连接结论与状态页同源。"""
+
+    service: Literal["RUNNING", "DEGRADED"]
+    database: Literal["CONNECTED", "FAILED", "NOT_CONFIGURED"]
+    services: list[SystemServiceItem] = Field(default_factory=list)
 
 class UploadKindPolicy(BaseModel):
     """一种上传入口的体量上限与允许扩展名。"""
@@ -77,51 +91,31 @@ class ToolCatalogResponse(ApiResponse):
 
     tools: list[ToolCatalogItem] = Field(default_factory=list)
 
-class RuleCapabilityStatusResponse(BaseModel):
-    """一个规则结果状态的标准解释。
+class StatusVocabularyTerm(BaseModel):
+    """一个状态码在某个语境下的标准文案。
 
-    页面显示状态时用它区分「已判定 / 尚未判定 / 不适用 / 未识别」，
-    而不是把不认识的码显示成「未开始」。
+    页面显示状态时只用这里的中文与说明；未知状态码不在词表中，页面必须显示
+    原始码并标注「未识别」，不能自行补一个看起来正常的中文。
     """
 
-    status: str | None = None
-    known: bool = False
-    label: str | None = None
-    category: str = "UNKNOWN"
+    code: str
+    label: str
+    category: str | None = None
     category_label: str | None = None
     note: str | None = None
 
-class RuleStatusCatalogResponse(ApiResponse):
-    """全部审核结论状态的标准口径与分档。"""
+class StatusVocabularyDomain(BaseModel):
+    """一个语境（规则、风险、字段）下的完整状态词表。"""
 
-    statuses: list[RuleCapabilityStatusResponse] = Field(default_factory=list)
+    domain: str
+    statuses: list[StatusVocabularyTerm] = Field(default_factory=list)
+
+class StatusVocabularyResponse(ApiResponse):
+    """全部语境的审核状态词表与分档。"""
+
+    domains: list[StatusVocabularyDomain] = Field(default_factory=list)
     categories: list[dict[str, str]] = Field(default_factory=list)
 
-class SystemServiceItem(BaseModel):
-    name: str
-    capability: str
-    configuration_status: str
-    connection_status: str
-    last_checked_at: datetime | None = None
-    missing: list[str] = Field(default_factory=list)
-    note: str | None = None
-
 class SystemServicesResponse(ApiResponse):
-    database: Literal["CONNECTED", "FAILED"]
+    database: Literal["CONNECTED", "FAILED", "NOT_CONFIGURED"]
     services: list[SystemServiceItem] = Field(default_factory=list)
-
-__all__ = [
-    "ExternalServiceConfiguration",
-    "SystemStatusResponse",
-    "UploadKindPolicy",
-    "UploadPolicyResponse",
-    "MaterialTypeItem",
-    "MaterialTypeCatalogResponse",
-    "ToolCatalogItem",
-    "ToolCatalogResponse",
-    "RuleCapabilityStatusResponse",
-    "RuleStatusCatalogResponse",
-    "SystemServiceItem",
-    "SystemServicesResponse",
-]
-

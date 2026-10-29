@@ -67,6 +67,3 @@ class ScenarioDetailResponse(ApiResponse):
     updated_at: datetime
     plan_count: int = 0
     draft: dict[str, Any] | None = None
-
-
-__all__ = [name for name in globals() if name.endswith("Response") or name.endswith("Item")]

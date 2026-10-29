@@ -7,8 +7,8 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import AuditBusinessDetails from "@/components/audit/AuditBusinessDetails.vue";
 import QuoteBlock from "@/components/audit/QuoteBlock.vue";
-import { statusTone } from "@/constants/labels";
-import { auditResultSummary, riskResultLabel } from "@/constants/auditStatus";
+import { auditResultSummary } from "@/constants/auditStatus";
+import { statusTextOf } from "@/constants/statusVocabulary";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /**
@@ -45,7 +45,7 @@ const statusOptions = computed(() => {
   }
   return Array.from(counts, ([status, count]) => ({
     value: status,
-    label: `${riskResultLabel(status) ?? status}（${count}）`,
+    label: `${statusTextOf("risk", status)}（${count}）`,
   }));
 });
 function countedOptions(valueOf: (item: RiskItem) => string, emptyLabel: string) {
@@ -72,7 +72,7 @@ const filteredItems = computed(() => {
     if (!query) return true;
     return [
       item.rule_code, item.name, item.risk_level, item.source_sheet,
-      riskResultLabel(item.status), riskSummary(item), item.message,
+      statusTextOf("risk", item.status), riskSummary(item), item.message,
       ...item.evidence.flatMap((source) => [source.material_name, source.document_name, source.quote_text]),
     ].join(" ").toLocaleLowerCase().includes(query);
   });
@@ -171,7 +171,7 @@ const emptyState = computed(() => {
       <span class="text-hint risk-count">显示 {{ filteredItems.length }} / {{ riskItems.length }} 项</span>
     </div>
     <el-table v-if="filteredItems.length" :data="filteredItems" border stripe class="audit-result-table" @row-click="(row: RiskItem) => detailRisk = row">
-      <el-table-column label="风险编号" width="120" align="center">
+      <el-table-column label="风险编号" width="140" align="center">
         <template #default="{ row }">{{ row.rule_code || "—" }}</template>
       </el-table-column>
       <el-table-column label="风险" width="180">
@@ -180,9 +180,9 @@ const emptyState = computed(() => {
           <div v-if="row.risk_level" class="table-note">风险等级：{{ row.risk_level }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="风险结论" width="120">
+      <el-table-column label="风险结论" width="148">
         <template #default="{ row }">
-          <StatusBadge :status="row.status" :label="riskResultLabel(row.status)" :tone="statusTone(row.status)" />
+          <StatusBadge domain="risk" :status="row.status" />
         </template>
       </el-table-column>
       <el-table-column label="判断理由" min-width="340">
@@ -190,7 +190,7 @@ const emptyState = computed(() => {
           <div class="risk-message">{{ riskSummary(row) }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="100" fixed="right" align="center">
+      <el-table-column label="操作" width="124" fixed="right" align="center">
         <template #default="{ row }">
           <el-button link type="primary" @click.stop="detailRisk = row">查看详情</el-button>
         </template>
@@ -203,7 +203,7 @@ const emptyState = computed(() => {
   </div>
   <DrawerPanel :open="Boolean(detailRisk)" :title="detailRisk?.name ?? '风险详情'" size="min(900px, 100%)" @close="detailRisk = null">
     <template v-if="detailRisk">
-      <StatusBadge :status="detailRisk.status" :label="riskResultLabel(detailRisk.status)" />
+      <StatusBadge domain="risk" :status="detailRisk.status" />
       <span v-if="detailRisk.rule_code" class="risk-code">{{ detailRisk.rule_code }}</span>
       <span v-if="detailRisk.risk_level" class="risk-level">规则等级：{{ detailRisk.risk_level }}</span>
       <p>{{ riskSummary(detailRisk) }}</p>
@@ -212,7 +212,8 @@ const emptyState = computed(() => {
         <h4 class="app-section-title">来源审核项</h4>
         <el-table :data="sourceRules" border size="small">
           <el-table-column prop="rule_name" label="审核项" min-width="220" />
-          <el-table-column label="结论" width="130"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column>
+          <!-- 来源审核项沿用规则状态文案，列宽按「已产出（无结论）」留足。 -->
+          <el-table-column label="结论" width="184"><template #default="{ row }"><StatusBadge domain="rule" :status="row.status" /></template></el-table-column>
         </el-table>
       </template>
       <template v-if="detailRisk.evidence.length && detailRisk.status !== 'NOT_APPLICABLE'">
@@ -229,10 +230,9 @@ const emptyState = computed(() => {
         </div>
       </template>
       <p v-else class="text-muted">{{ noQuoteText(detailRisk) }}</p>
-      <el-collapse class="block-gap">
-        <el-collapse-item title="原执行说明与技术详情" name="technical">
-          <div v-if="!hasBusinessResult(detailRisk)" class="original-message">{{ detailRisk.message || "未记录" }}</div>
-          <pre class="technical-json">{{ JSON.stringify(detailRisk.details, null, 2) }}</pre>
+      <el-collapse v-if="!hasBusinessResult(detailRisk)" class="block-gap">
+        <el-collapse-item title="原执行说明" name="technical">
+          <div class="original-message">{{ detailRisk.message || "未记录" }}</div>
         </el-collapse-item>
       </el-collapse>
     </template>
@@ -270,7 +270,7 @@ const emptyState = computed(() => {
 }
 .risk-code, .risk-level { margin-left: 12px; color: var(--el-text-color-secondary); }
 .risk-source { margin: 12px 0; padding: 12px; background: var(--el-fill-color-light); }
-.technical-json, .original-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.original-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 .risk-message {
   display: -webkit-box;
   -webkit-line-clamp: 2;

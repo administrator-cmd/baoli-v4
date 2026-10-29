@@ -1,4 +1,5 @@
 import type { ApiFailure, OperationAccepted, OperationStatus } from "./contracts";
+import { newId } from "../utils/ids";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -58,7 +59,7 @@ function httpFailure(payload: unknown, statusCode: number, requestId: string): A
 /** 统一请求入口：沿用 60 秒超时；取消、网络、HTTP 和响应格式错误分别暴露。 */
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  const requestId = headers.get("X-Request-ID") || crypto.randomUUID();
+  const requestId = headers.get("X-Request-ID") || newId();
   headers.set("X-Request-ID", requestId);
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
 
@@ -124,7 +125,7 @@ export function uploadWithProgress<T>(
   onProgress?: (percent: number) => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const requestId = crypto.randomUUID();
+    const requestId = newId();
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${apiBaseUrl}${path}`);
     xhr.responseType = "text";

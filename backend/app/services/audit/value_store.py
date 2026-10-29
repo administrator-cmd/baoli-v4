@@ -1,6 +1,6 @@
 """按业务列保存取值及明细；数据库决定身份、当前版本与状态。
 
-每个任务维护一组固定的四张业务表（格式版本 5）。原文依据直接存主记录的 JSON 列。
+每个任务维护一组固定的四张业务表（格式版本 6）。原文依据直接存主记录的 JSON 列。
 写入时按记录身份合并并原子替换，
 全部文件落盘后才更新数据库清单。旧格式不做原地转换，读取时明确报错。
 """
@@ -31,9 +31,9 @@ from ...domain.task_value_csv import (
 )
 from ...entity.tasks import AuditTask, RuleResult, TaskFact, TaskFieldValue
 from ..shared.storage import resolve_storage_path
-from .value_files import lock_task_files, read_task_files, snapshot_files
+from .value_files import TABLE_CACHE, lock_task_files, read_task_files, snapshot_files
 
-FORMAT_VERSION = 5
+FORMAT_VERSION = 6
 
 
 CURRENT_BATCH_ID = "current"
@@ -113,7 +113,6 @@ def _business_context(db: Session, task: AuditTask, record_type: str, record_id:
     manifest = task.manifest_json
     materials = {item["material_key"]: item["name"] for item in manifest["materials"]}
     fields = manifest["fields"]
-    context = {"任务编号": task.task_no, "写入时状态": record.status}
     if record_type == RECORD_RULE_RESULT:
         rule = next(item for item in manifest["rules"] if item["rule_key"] == record.rule_key)
         definitions = {
@@ -122,39 +121,37 @@ def _business_context(db: Session, task: AuditTask, record_type: str, record_id:
         }
         if rule.get("result_code"):
             definitions[rule["result_code"]] = {**rule["calculation_definition"], "name": rule["name"]}
-        context.update({"业务类别": "审核结论", "业务编号": record.rule_code, "名称": record.rule_name,
-                        "材料名称": "、".join(materials[key] for key in rule["materials"]),
-                        "规则类型": rule.get("kind"), "审核要求": rule.get("requirement"),
-                        "计算公式": (rule.get("calculation_definition") or {}).get("formula"),
-                        "执行批次ID": record.node_execution_id, "取值来源": "规则执行"})
+        context = {
+            "业务编号": record.rule_code, "名称": record.rule_name,
+            "材料名称": "、".join(materials[key] for key in rule["materials"]),
+            "规则类型": rule.get("kind"), "审核要求": rule.get("requirement"),
+            "计算公式": (rule.get("calculation_definition") or {}).get("formula"),
+        }
         return context, definitions
     if record_type == RECORD_TASK_FIELD_VALUE:
         field = next(item for item in fields if item["field_key"] == record.field_key)
-        context.update({"业务类别": "字段候选", "业务编号": field.get("source_id") or field.get("source_ref"),
-                        "字段键": record.field_key, "取值来源": record.origin,
-                        "执行批次ID": record.extraction_execution_id})
+        context = {"业务类别": "字段候选", "业务编号": field.get("source_id") or field.get("source_ref"),
+                   "取值来源": record.origin}
     elif record.fact_kind == FACT_KIND_EXTRACTED:
         matches = [item for item in fields if field_fact_identity(item) == fact_identity(record)]
         if len(matches) != 1:
             raise BusinessError("TASK_FACT_FIELD_IDENTITY_INVALID", "事实索引无法唯一对应完整字段身份", status_code=500,
                                 details={"fact_id": record.id, "matched_count": len(matches)})
         field = matches[0]
-        context.update({"业务类别": "字段事实", "业务编号": record.fact_code, "字段键": field["field_key"]})
+        context = {"业务类别": "字段事实", "业务编号": record.fact_code}
     else:
         field = next(item for item in manifest["calculations"] if item["result_code"] == record.fact_code)
-        context.update({"业务类别": "计算结果", "业务编号": record.fact_code})
+        context = {"业务类别": "计算结果", "业务编号": record.fact_code}
     context.update({
-        "名称": field.get("name") or field.get("rule_name"), "材料键": record.material_key,
+        "名称": field.get("name") or field.get("rule_name"),
         "材料名称": materials[record.material_key] if record.material_key else "",
         "期间": field.get("period_scope") or field.get("period_policy"), "报表口径": field.get("statement_scope"),
         "主体范围": field.get("entity_scope"), "声明类型": field.get("value_type") or field.get("result_type"),
         "取值说明": field.get("instruction") or field.get("requirement"),
-        "修订号": record.revision_no,
     })
     if record_type == RECORD_TASK_FACT:
         context.update({"期间": record.period_scope, "报表口径": record.statement_scope,
                         "主体范围": record.entity_scope, "声明类型": record.value_type,
-                        "执行批次ID": record.source_execution_id,
                         "取值来源": "计算产出" if record.fact_kind == FACT_KIND_DERIVED else "字段有效事实"})
     return context, {}
 
@@ -172,38 +169,50 @@ def append_values(db: Session, task: AuditTask, entries: Iterable[tuple[str, int
     if len(identities) != len(set(identities)):
         raise ValueError("同一次取值写入包含重复记录身份")
     batches = _batches(task)
-
-    existing: dict[str, list[dict[str, str]]] = {name: [] for name in TABLE_COLUMNS}
-    for batch in batches:
-        for name, relative in batch["files"].items():
-            existing[name] = _read_table(resolve_storage_path(relative), TABLE_COLUMNS[name])
-        _records_from_tables(task.task_no, existing, expected_count=batch["record_count"])
+    cache = db.info.setdefault(TABLE_CACHE, {})
+    cached = cache.get(task.id)
+    if cached is not None and cached["metadata"] is task.value_file_json:
+        # 同一事务内刚写过这批文件：内容由本进程写入并已落地，不再整表重读解析。
+        existing = cached["tables"]
+    else:
+        existing = {name: [] for name in TABLE_COLUMNS}
+        for batch in batches:
+            for name, relative in batch["files"].items():
+                existing[name] = _read_table(resolve_storage_path(relative), TABLE_COLUMNS[name])
+            _records_from_tables(task.task_no, existing, expected_count=batch["record_count"])
 
     incoming: dict[str, list[dict[str, Any]]] = {name: [] for name in TABLE_COLUMNS}
     for record_type, record_id, payload in entries:
         context, definitions = _business_context(db, task, record_type, int(record_id))
-        RecordWriter({"记录类型": record_type, "记录ID": int(record_id), "写入批次": uuid4().hex},
-                     context, incoming).record(payload, definitions)
+        RecordWriter({"记录类型": record_type, "记录ID": int(record_id)}, context, incoming).record(payload, definitions)
 
     # 删除将被更新的旧记录及其明细，再追加新版本。
     incoming_identities = set(identities)
     tables: dict[str, list[dict[str, Any]]] = {}
+    changed: list[str] = []
+    # 首次写入没有历史清单：必须建齐四张带表头的文件。清单登记四张表，缺任何一张，
+    # 下一次严格读取都会报缺文件；已有清单但缺文件属真实损坏，继续由 _read_table 报错。
+    initial = not batches
     for name in TABLE_COLUMNS:
-        tables[name] = [
+        kept = [
             row for row in existing[name]
             if (row["记录类型"], int(row["记录ID"])) not in incoming_identities
         ]
-        tables[name].extend(incoming[name])
+        if initial or incoming[name] or len(kept) != len(existing[name]):
+            changed.append(name)
+        tables[name] = [*kept, *incoming[name]]
 
     directory = f"tasks/{task.task_no}/value_batches/{CURRENT_BATCH_ID}"
     files = {name: f"{directory}/{name}" for name in TABLE_COLUMNS}
     targets = {name: resolve_storage_path(relative) for name, relative in files.items()}
     resolve_storage_path(directory).mkdir(parents=True, exist_ok=True)
-    snapshot_files(db, targets)
+    # 只重写本次真正变化的表：四张表都很大，逐条提交时全量重写加 fsync 会重复整份文件。
+    writing = {name: targets[name] for name in changed}
+    snapshot_files(db, writing)
     temporary: dict[str, Path] = {}
     try:
         token = uuid4().hex
-        for name, target in targets.items():
+        for name, target in writing.items():
             temporary[name] = target.with_name(f".{target.name}.{token}.tmp")
             with temporary[name].open("x", encoding="utf-8-sig", newline="") as output:
                 writer = csv.DictWriter(output, fieldnames=TABLE_COLUMNS[name])
@@ -211,7 +220,7 @@ def append_values(db: Session, task: AuditTask, entries: Iterable[tuple[str, int
                 writer.writerows(tables[name])
                 output.flush()
                 os.fsync(output.fileno())
-        for name, target in targets.items():
+        for name, target in writing.items():
             os.replace(temporary[name], target)
     finally:
         for path in temporary.values():
@@ -223,12 +232,12 @@ def append_values(db: Session, task: AuditTask, entries: Iterable[tuple[str, int
     record_count = sum(len(tables[name]) for name in MAIN_TABLES)
     task.value_file_json = {**(task.value_file_json or {}), "format_version": FORMAT_VERSION,
                             "batches": [{"batch_id": CURRENT_BATCH_ID, "files": files,
-                                         "record_count": record_count}],
-                            "record_count": record_count}
+                                         "record_count": record_count}]}
+    cache[task.id] = {"metadata": task.value_file_json, "tables": tables}
 
 
-def _identity(row: dict[str, str]) -> tuple[str, int, str]:
-    return row["记录类型"], int(row["记录ID"]), row["写入批次"]
+def _identity(row: dict[str, str]) -> tuple[str, int]:
+    return row["记录类型"], int(row["记录ID"])
 
 
 def read_business_files(task_no: str, files: dict[str, str], *, expected_count: int | None = None) -> dict[tuple[str, int], dict[str, Any]]:
@@ -261,11 +270,11 @@ def _records_from_tables(task_no: str, tables: dict[str, list[dict[str, str]]], 
         raise BusinessError("TASK_VALUE_FILE_INVALID", "取值批次的记录缺失、重复或数量与已提交清单不一致", status_code=500,
                             details={"task_no": task_no, "expected_count": expected_count,
                                      "actual_count": sum(len(tables[name]) for name in MAIN_TABLES)})
-    details: dict[tuple[str, int, str], dict[str, list[dict[str, str]]]] = defaultdict(lambda: defaultdict(list))
+    details: dict[tuple[str, int], dict[str, list[dict[str, str]]]] = defaultdict(lambda: defaultdict(list))
     for row in tables["value_details.csv"]:
         details[_identity(row)][row["所属项目"]].append(row)
     # 同一明细表按（记录身份, 明细类别）分组；类别来自“明细类别”列。
-    items: dict[tuple[str, int, str], dict[str, list[dict[str, str]]]] = defaultdict(lambda: defaultdict(list))
+    items: dict[tuple[str, int], dict[str, list[dict[str, str]]]] = defaultdict(lambda: defaultdict(list))
     for row in tables[ITEM_FILE]:
         category = row[ITEM_CATEGORY]
         if category not in ITEM_TABLES:
@@ -273,7 +282,7 @@ def _records_from_tables(task_no: str, tables: dict[str, list[dict[str, str]]], 
         items[_identity(row)][category].append(row)
     # 明细必须属于一条真实主记录；孤儿明细既不参与读取也不应长期留在文件里。
     orphans = sorted(
-        identity for identity in [*details, *items] if (identity[0], identity[1]) not in latest
+        identity for identity in [*details, *items] if identity not in latest
     )
     if orphans:
         raise BusinessError(
@@ -284,12 +293,11 @@ def _records_from_tables(task_no: str, tables: dict[str, list[dict[str, str]]], 
     records = {}
     for identity, (row, mapping) in latest.items():
         try:
-            batch = _identity(row)
-            reader = RecordReader(details[batch])
+            reader = RecordReader(details[identity])
             payload = reader.attributes(row, mapping, "")
             for key, item_mapping in ITEM_TABLES.items():
                 count = row.get(COUNT_COLUMNS[key])
-                rows = sorted(items[batch][key], key=lambda item: int(item["明细序号"]))
+                rows = sorted(items[identity][key], key=lambda item: int(item["明细序号"]))
                 if not count:
                     if rows:
                         raise ValueError(f"{key} 有明细但没有主记录声明")
@@ -341,7 +349,6 @@ def _cached_values(db: Session, task: AuditTask) -> dict[tuple[str, int], dict[s
         return cached["records"]
     records = _load(task)
     cache[task.id] = {"metadata": metadata, "records": records}
-    return records
     return records
 
 

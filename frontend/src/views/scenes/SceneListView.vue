@@ -13,7 +13,7 @@ import {
 } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
-import PageHeader from "@/components/PageHeader.vue";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 场景列表：管理场景身份（名称/业务类型/启停/实际删除）与配置入口。
@@ -165,11 +165,6 @@ onMounted(() => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="场景管理"
-      title="场景列表"
-      :show-refresh="false"
-    />
     <el-form inline class="app-query" @submit.prevent="search">
       <el-form-item label="场景名称">
         <el-input v-model="filters.name" clearable placeholder="请输入场景名称" style="width: 200px" @keyup.enter="search" />
@@ -219,7 +214,7 @@ onMounted(() => {
       v-loading="loading"
       empty-text="暂无数据"
     >
-      <el-table-column type="index" label="序号" width="56" />
+      <el-table-column type="index" label="序号" width="64" />
       <el-table-column label="场景名称" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="goDetail(row)">{{ row.scenario_name }}</el-button>
@@ -228,7 +223,7 @@ onMounted(() => {
       <el-table-column label="业务类型" width="110" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category || "—" }}</template>
       </el-table-column>
-      <el-table-column label="配置状态" width="120">
+      <el-table-column label="配置状态" width="140">
         <template #default="{ row }">
           <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>配置待完善</el-tag>
           <el-tag v-else-if="row.configuration_kind === 'DRAFT'" type="warning" size="small" effect="light" disable-transitions>{{ row.published_version_no ? '有未发布修改' : '尚未发布' }}</el-tag>
@@ -236,23 +231,23 @@ onMounted(() => {
           <div v-if="row.sync_error" class="text-hint">{{ row.sync_error.message }}</div>
         </template>
       </el-table-column>
-      <el-table-column prop="material_count" label="材料数" width="72" />
-      <el-table-column prop="field_count" label="字段数" width="72" />
-      <el-table-column prop="rule_count" label="业务规则数" width="100" />
+      <el-table-column prop="material_count" label="材料数" width="104" />
+      <el-table-column prop="field_count" label="字段数" width="104" />
+      <el-table-column prop="rule_count" label="业务规则数" width="104" />
       <el-table-column label="已发布版本" width="100">
         <template #default="{ row }">{{ row.published_version_no ?? "未发布" }}</template>
       </el-table-column>
-      <el-table-column label="场景状态" width="88">
+      <el-table-column label="场景状态" width="140">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
             {{ row.enabled ? "启用" : "停用" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="更新时间" width="184">
+      <el-table-column label="更新时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="168" class-name="table-actions" align="center" fixed="right">
+      <el-table-column label="操作" width="208" class-name="table-actions" align="center" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
@@ -273,7 +268,7 @@ onMounted(() => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"

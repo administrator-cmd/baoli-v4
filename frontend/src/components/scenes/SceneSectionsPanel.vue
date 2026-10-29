@@ -1,17 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type {
-  DraftFieldItem,
-  DraftMaterialItem,
-  DraftSectionItem,
-  ScenarioConfigurationView,
-} from "@/api/contracts";
+import type { DraftSectionItem, ScenarioConfigurationView } from "@/api/contracts";
 import {
   createDraftSection,
   deleteDraftSection,
-  getSceneConfiguration,
   updateDraftSection,
 } from "@/api/scenes";
 import { reportContentTypeOptions, reportFormatOptions, reportResultSortOptions } from "@/constants/labels";
@@ -20,24 +14,27 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
 /** 场景章节控制报告正文，材料范围与排序由配置确定。 */
 const props = defineProps<{
   scenarioCode: string | null;
-  /** 由父页面触发的外部刷新（例如发布后）。 */
-  refreshToken?: number;
+  /** 父级持有的同一份场景配置；面板不再各自请求整份配置。 */
+  config: ScenarioConfigurationView | null;
+  configError?: string | null;
+  configLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
   changed: [];
+  refresh: [];
 }>();
 
-const sections = ref<DraftSectionItem[]>([]);
+/** 数据来自父级唯一的配置请求。 */
+const draft = computed(() => props.config);
+const sections = computed(() => props.config?.sections ?? []);
 const sortedSections = computed(() => [...sections.value]
   .sort((left, right) => compareNaturalLabels(left.report_code, right.report_code)));
-const fields = ref<DraftFieldItem[]>([]);
-const materials = ref<DraftMaterialItem[]>([]);
-const draft = ref<ScenarioConfigurationView | null>(null);
-const loading = ref(false);
-const loadError = ref<string | null>(null);
+const fields = computed(() => props.config?.fields ?? []);
+const materials = computed(() => props.config?.materials ?? []);
+const loading = computed(() => props.configLoading === true);
+const loadError = computed(() => props.configError ?? null);
 const saving = ref(false);
-let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
@@ -79,33 +76,6 @@ const dataOptions = computed(() => {
 const materialOptions = computed(() =>
   materials.value.map((item) => ({ value: item.material_key, label: item.name })),
 );
-
-async function load(): Promise<void> {
-  const sequence = ++loadSequence;
-  if (!props.scenarioCode) {
-    sections.value = [];
-    fields.value = [];
-    return;
-  }
-  loading.value = true;
-  loadError.value = null;
-  try {
-    const payload = await getSceneConfiguration(props.scenarioCode);
-    if (sequence !== loadSequence) return;
-    draft.value = payload;
-    sections.value = payload.sections;
-    fields.value = payload.fields;
-    materials.value = payload.materials;
-  } catch (error) {
-    if (sequence !== loadSequence) return;
-    sections.value = [];
-    loadError.value = error instanceof Error ? error.message : "报告配置读取失败";
-  } finally {
-    if (sequence === loadSequence) loading.value = false;
-  }
-}
-
-watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immediate: true });
 
 function openCreate(): void {
   editingItem.value = null;
@@ -172,7 +142,6 @@ async function submitForm(): Promise<void> {
       ElMessage.success("报告章节已新增");
     }
     dialogVisible.value = false;
-    await load();
     emit("changed");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "操作失败");
@@ -198,7 +167,6 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
   try {
     await deleteDraftSection(props.scenarioCode, item.section_key);
     ElMessage.success("报告章节已删除");
-    await load();
     emit("changed");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "操作失败");
@@ -218,20 +186,20 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增章节</el-button>
         </div>
         <div class="app-toolbar__right">
-          <el-button :loading="loading" @click="load">刷新</el-button>
+          <el-button :loading="loading" @click="$emit('refresh')">刷新</el-button>
         </div>
       </div>
 
       <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="`读取失败：${loadError}`">
-        <el-button size="small" @click="load">重试</el-button>
+        <el-button size="small" @click="$emit('refresh')">重试</el-button>
       </el-alert>
 
       <el-table v-else :data="sortedSections" border stripe class="management-table" v-loading="loading" empty-text="暂无报告章节（系统执行摘要仍会生成）">
-        <el-table-column label="报告编号" width="120" align="center">
+        <el-table-column label="报告编号" width="140" align="center">
           <template #default="{ row }">{{ row.report_code || "—" }}</template>
         </el-table-column>
         <el-table-column prop="title" label="章节名称" min-width="160" show-overflow-tooltip />
-        <el-table-column label="章节顺序" width="88" align="center">
+        <el-table-column label="章节顺序" width="104" align="center">
           <template #default="{ row }">{{ row.section_order ?? "—" }}</template>
         </el-table-column>
         <el-table-column label="材料范围" width="120" show-overflow-tooltip>
@@ -240,23 +208,23 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
             <span v-else class="text-hint">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="业务数据引用" min-width="260" show-overflow-tooltip>
+        <el-table-column label="业务数据引用" min-width="320" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.data_names.length">{{ row.data_names.join("、") }}</span>
             <span v-else class="text-hint">按章节要求选择业务数据</span>
           </template>
         </el-table-column>
-        <el-table-column prop="content_instruction" label="内容要求" min-width="220" show-overflow-tooltip>
+        <el-table-column prop="content_instruction" label="内容要求" min-width="300" show-overflow-tooltip>
           <template #default="{ row }">{{ row.content_instruction || "—" }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="80" align="center">
+        <el-table-column label="状态" width="140" align="center">
           <template #default="{ row }">
             <el-tag size="small" :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'">
               {{ row.config_status === 'PENDING' ? '待确认' : row.config_status === 'DISABLED' ? '暂停' : '启用' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="canEdit" label="操作" width="104" class-name="table-actions" fixed="right" align="center">
+        <el-table-column v-if="canEdit" label="操作" width="124" class-name="table-actions" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="removeItem(row)">删除</el-button>

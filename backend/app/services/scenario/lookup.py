@@ -51,7 +51,6 @@ def find_published_version(db: Session, scenario_code: str, version_no: int) -> 
         select(ScenarioVersion).where(
             ScenarioVersion.scenario_code == scenario_code,
             ScenarioVersion.version_no == version_no,
-            ScenarioVersion.status == "PUBLISHED",
         )
     )
 
@@ -60,7 +59,7 @@ def find_latest_published_version(db: Session, scenario_code: str) -> ScenarioVe
     # 排序只读取 ID，完整 JSON 配置按主键读取，不进入排序缓冲区。
     version_id = db.scalar(
         select(ScenarioVersion.id)
-        .where(ScenarioVersion.scenario_code == scenario_code, ScenarioVersion.status == "PUBLISHED")
+        .where(ScenarioVersion.scenario_code == scenario_code)
         .order_by(ScenarioVersion.version_no.desc())
         .limit(1)
     )

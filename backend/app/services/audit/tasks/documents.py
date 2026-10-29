@@ -9,7 +9,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
-from ....constants.status import TASK_PHASE_AWAITING_CONFIRMATION, TASK_STATUS_READY
+from ....constants.status import TASK_STATUS_READY
 from ....core.config import get_settings
 from ....domain.identity import public_no
 from ....domain.rule_library import execution_container_of
@@ -30,6 +30,7 @@ from ...shared.storage import DOCUMENT_EXTENSIONS, resolve_storage_path, save_up
 from ...system.background import assert_no_active_operation
 from ...system.operation_types import OBJECT_AUDIT_TASK
 from ..execution_history import invalidate_executions
+from ..shared import current_upload
 from .lookup import task_or_404
 
 logger = logging.getLogger(__name__)
@@ -71,9 +72,9 @@ def _invalidate_for_input_change(
     """任务输入变化（替换 / 首次补传 / 移除当前文件）的统一失效流程。
 
     受影响的处理产物、字段事实、后续结果与报告一起失效；旧版本事实保留可追溯。
-    失效通过“节点执行批次 + current_upload_id 绑定 + 统一事实当前标记”表达，旧版本事实本身保留，
+    失效通过“节点执行批次 + 当前上传版本 + 统一事实当前标记”表达，旧版本事实本身保留，
     因此不覆盖原始字段值和原始规则结论，历史仍能查到当时抽到了什么、判定了什么。
-    调用方负责更新材料位指针，并在完成后重新建立审核等待点。
+    调用方负责维护 is_current 与材料位状态，并在完成后重新建立审核等待点。
     """
     manifest = task.manifest_json
     if not isinstance(manifest, dict) or not manifest:
@@ -145,7 +146,6 @@ def _invalidate_for_input_change(
     first_node_code = execution_container_of(manifest)["node_code"]
     task.current_node = first_node_code
     task.status = TASK_STATUS_READY
-    task.current_phase = TASK_PHASE_AWAITING_CONFIRMATION
     # 当前有效事实与结果已失效：必须递增输入修订号，使携带旧修订的命令被明确拒绝。
     task.input_revision = (task.input_revision or 0) + 1
     logger.info(
@@ -210,7 +210,8 @@ def upload_document(
         raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能替换材料")
     if task.status == "RUNNING":
         raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能替换材料", status_code=409)
-    previous_upload_id = document.current_upload_id
+    previous_upload = current_upload(db, document)
+    previous_upload_id = previous_upload.id if previous_upload else None
     if previous_upload_id and not replace:
         raise BusinessError(
             "TASK_DOCUMENT_REPLACE_CONFIRMATION_REQUIRED",
@@ -274,7 +275,6 @@ def upload_document(
                 previous_upload_id,
                 action_label="已替换" if previous_upload_id else "已补传此前缺失的",
             )
-        document.current_upload_id = record.id
         document.status = "UPLOADED"
 
         # 文件保存、输入失效和分类命令一起提交；活跃命令占位消除提交后的替换/执行竞态。
@@ -337,19 +337,19 @@ def remove_current_document_file(
     )
     if not document:
         raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
-    if document.current_upload_id is None:
+    previous_upload = current_upload(db, document)
+    if previous_upload is None:
         raise BusinessError("TASK_DOCUMENT_NO_CURRENT_FILE", "该材料位没有当前文件，无法移除", status_code=409)
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能移除材料文件", status_code=409)
     if task.status == "RUNNING":
         raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能移除材料文件", status_code=409)
-    previous_upload_id = document.current_upload_id
+    previous_upload_id = previous_upload.id
     db.execute(
         update(DocumentUpload)
         .where(DocumentUpload.id == previous_upload_id)
         .values(is_current=False, status="REMOVED")
     )
-    document.current_upload_id = None
     document.status = "WAITING_UPLOAD"
     impact = _invalidate_for_input_change(
         db,

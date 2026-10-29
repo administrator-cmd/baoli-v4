@@ -234,14 +234,6 @@ export function updateDraftRule(scenarioCode: string, ruleKey: string, payload: 
   );
 }
 
-/** 启用 / 停用草稿中的规则。 */
-export function setDraftRuleEnabled(scenarioCode: string, ruleKey: string, enabled: boolean): Promise<ScenarioDraftView> {
-  return request<ScenarioDraftView>(
-    `/scenarios/${encodeURIComponent(scenarioCode)}/draft/rules/${encodeURIComponent(ruleKey)}/enabled`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) },
-  );
-}
-
 /** 删除草稿中的规则。 */
 export function deleteDraftRule(scenarioCode: string, ruleKey: string): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(

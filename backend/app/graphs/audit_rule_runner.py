@@ -73,7 +73,7 @@ class RuleEvaluationRunner(Protocol):
     def graph_produce_candidate_verdict(
         self, db: Any, task_no: str, node_code: str,
         rule_instance: dict[str, Any] | None, last_model_response: dict[str, Any] | None,
-        tool_results: list[dict[str, Any]] | None, allowed_tools: list[dict[str, Any]] | None,
+        tool_results: list[dict[str, Any]] | None,
         loop_status: str, unresolved_items: list[dict[str, Any]] | None,
         messages: list[dict[str, Any]] | None, verdict_errors: list[dict[str, Any]] | None,
     ) -> dict[str, Any]: ...
@@ -164,11 +164,15 @@ def run_rule_evaluation(
         db, task_no, node_code, planned_rule, state["rule_instance"], state["messages"],
     ))
 
+    channel_failure: dict[str, Any] | None = None
     while True:
         turn = nodes.graph_call_model(
             db, task_no, node_code, planned_rule, state["messages"], state["allowed_tools"],
             state["loop_count"], state["evaluation_id"], state["tool_results"],
         )
+        # 渠道故障已经由模型步记录为本条未完成；这里原样带给调度方，用于停止后续请求。
+        if turn.get("channel_failure"):
+            channel_failure = turn["channel_failure"]
         if "unresolved_items" in turn:
             turn["unresolved_items"] = [*state["unresolved_items"], *turn["unresolved_items"]]
         state.update(turn)
@@ -187,7 +191,7 @@ def run_rule_evaluation(
             break
         state.update(nodes.graph_produce_candidate_verdict(
             db, task_no, node_code, state["rule_instance"], state["last_model_response"],
-            state["tool_results"], state["allowed_tools"], state["loop_status"],
+            state["tool_results"], state["loop_status"],
             state["unresolved_items"], state["messages"], state["verdict_errors"],
         ))
         if state["loop_status"] != LOOP_RUNNING:
@@ -201,4 +205,7 @@ def run_rule_evaluation(
     outcome = saved["rule_outcome"]
     logger.info("审核规则执行结束 task_no=%s rule_key=%s status=%s loop_count=%s",
                 task_no, rule_key, outcome["status"], outcome["loop_count"])
+    if channel_failure is not None:
+        # 结果已经按真实原因保存；渠道故障单独带出，调用方据此暂停调度而不是继续请求。
+        outcome = {**outcome, "channel_failure": channel_failure}
     return outcome

@@ -20,7 +20,7 @@ from ...constants.execution import (
 )
 from ...constants.status import EXECUTABLE_FIELD_STATUSES, FIELD_STATUS_REVIEWED
 from ...domain import fact_projection
-from ...domain.manifest import normalize_field_scope
+from ...domain.field_strategy import normalize_field_scope
 from ...entity.tasks import AuditTask, DocumentUpload, ManualReview, TaskDocument, TaskFact, TaskFieldValue
 from . import value_store as task_value_service
 from .shared import _task_field_definitions
@@ -75,7 +75,6 @@ def _current_field_fact_pairs(
                 DocumentUpload.is_current.is_(True),
                 TaskDocument.audit_task_id == task.id,
                 TaskDocument.material_key == TaskFieldValue.material_key,
-                TaskDocument.current_upload_id == TaskFieldValue.document_upload_id,
             )
             .order_by(TaskFieldValue.id)
         ).all()

@@ -1,17 +1,16 @@
-"""方案列表、详情、复制及生命周期接口。"""
+"""方案列表与生命周期接口。"""
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from ...core.database import get_db
-from ...schema.dto.plans import PlanCopyRequest, PlanCreateRequest, PlanEnabledRequest, PlanUpdateRequest
+from ...schema.dto.plans import PlanCreateRequest, PlanEnabledRequest, PlanUpdateRequest
 from ...schema.query.pagination import validate_page_params
 from ...schema.vo.common import PagedResponse
 from ...schema.vo.plans import PlanSelectionResponse
-from ...services.plan.lifecycle import copy_plan, create_plan, delete_plan, restore_plan, set_plan_enabled, update_plan
-from ...services.plan.lookup import plan_or_404
+from ...services.plan.lifecycle import create_plan, delete_plan, restore_plan, set_plan_enabled, update_plan
 from ...services.plan.query import list_plan_options, list_plans_page, plan_selection_view
-from .configuration import _selection_response
+from .configuration import selection_response
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])
 
@@ -57,14 +56,7 @@ def create_plan_endpoint(payload: PlanCreateRequest, request: Request, db: Sessi
     不静默改取「当前最新版本」。
     """
     plan = create_plan(db, payload.model_dump())
-    return _selection_response(request, plan_selection_view(db, plan))
-
-
-@router.get("/{plan_code}", response_model=PlanSelectionResponse)
-def get_plan(plan_code: str, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
-    """方案详情：场景版本来源与方案自己的规则启停。"""
-    plan = plan_or_404(db, plan_code, include_deleted=True)
-    return _selection_response(request, plan_selection_view(db, plan))
+    return selection_response(request, plan_selection_view(db, plan))
 
 
 @router.put("/{plan_code}", response_model=PlanSelectionResponse)
@@ -73,7 +65,7 @@ def update_plan_endpoint(
 ) -> PlanSelectionResponse:
     """编辑方案基本资料（名称、说明）；不修改规则范围。"""
     plan = update_plan(db, plan_code, payload.model_dump(exclude_unset=True))
-    return _selection_response(request, plan_selection_view(db, plan))
+    return selection_response(request, plan_selection_view(db, plan))
 
 
 @router.put("/{plan_code}/enabled", response_model=PlanSelectionResponse)
@@ -82,27 +74,18 @@ def set_plan_enabled_endpoint(
 ) -> PlanSelectionResponse:
     """启用 / 停用方案；已停用的方案不能用于创建任务。"""
     plan = set_plan_enabled(db, plan_code, payload.enabled)
-    return _selection_response(request, plan_selection_view(db, plan))
+    return selection_response(request, plan_selection_view(db, plan))
 
 
 @router.delete("/{plan_code}", response_model=PlanSelectionResponse)
 def delete_plan_endpoint(plan_code: str, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """逻辑删除方案；历史任务保留。"""
     plan = delete_plan(db, plan_code)
-    return _selection_response(request, plan_selection_view(db, plan))
+    return selection_response(request, plan_selection_view(db, plan))
 
 
 @router.post("/{plan_code}/restore", response_model=PlanSelectionResponse)
 def restore_plan_endpoint(plan_code: str, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """恢复已逻辑删除的方案。"""
     plan = restore_plan(db, plan_code)
-    return _selection_response(request, plan_selection_view(db, plan))
-
-
-@router.post("/{plan_code}/copy", response_model=PlanSelectionResponse, status_code=201)
-def copy_plan_endpoint(
-    plan_code: str, payload: PlanCopyRequest, request: Request, db: Session = Depends(get_db)
-) -> PlanSelectionResponse:
-    """复制方案：场景门禁与新建相同，并继续钉住源方案的场景版本。"""
-    plan = copy_plan(db, plan_code, payload.model_dump())
-    return _selection_response(request, plan_selection_view(db, plan))
+    return selection_response(request, plan_selection_view(db, plan))

@@ -7,22 +7,13 @@ from sqlalchemy.orm import Session
 from ....common.exceptions import BusinessError
 from ....constants.status import LOOP_RUNNING
 from ....domain.execution_mode import EXECUTION_MODES, MODE_UNKNOWN
-from ....domain.rule_library import active
-from ....entity.tasks import AuditTask
+from ....entity.tasks import AuditTask, NodeExecution
 from ..shared import _material_names, _task_manifest
 from ..tasks.lookup import task_or_404
 from .errors import agent_step
 from .execution import execution_in_progress
+from .plan import enabled_rules, evaluation_plan
 from .shared import agent_module, rule_of_instance
-
-
-def _enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) -> list[dict[str, Any]]:
-    enabled_keys = set(task.task_schema_json["enabled_rule_keys"])
-    return [
-        rule
-        for rule in manifest["rules"]
-        if active(rule) and rule.get("node") == node_code and rule.get("rule_key") in enabled_keys
-    ]
 
 
 def _assert_execution_modes(rules: list[dict[str, Any]]) -> None:
@@ -43,20 +34,26 @@ def _assert_execution_modes(rules: list[dict[str, Any]]) -> None:
         )
 
 
-def _plan_entry(node_code: str, cursor: int, rule: dict[str, Any]) -> dict[str, Any]:
-    """统一执行计划中的一条生效规则实例。"""
-    return {
-        "cursor": cursor,
-        "rule_key": rule.get("rule_key"),
-        "rule_code": rule.get("rule_code") or rule.get("rule_key"),
-        "node_code": node_code,
-        "rule": rule,
-    }
+def execution_attempt_no(execution: NodeExecution) -> int:
+    """执行批次的模型请求轮次；缺轮次直接报错，不用默认值冒充。
+
+    每次继续执行都递增，幂等键与评估标识都依赖它。0003 迁移已为旧批次补上第一轮，
+    所以这里读到缺失就是真实的结构问题。
+    """
+    attempt_no = (execution.result_json or {}).get("attempt_no")
+    if not isinstance(attempt_no, int) or attempt_no < 1:
+        raise BusinessError(
+            "AUDIT_EXECUTION_ATTEMPT_MISSING",
+            "执行批次缺少轮次标识，无法建立模型请求身份",
+            status_code=500,
+            details={"execution_id": execution.id},
+        )
+    return attempt_no
 
 
-def _evaluation_id(task: AuditTask, execution_id: int, rule_instance_id: str) -> str:
-    """执行记录与规则实例构成评估标识。"""
-    return f"evaluation:{execution_id}:{rule_instance_id}"
+def _evaluation_id(task: AuditTask, execution_id: int, rule_instance_id: str, attempt_no: int) -> str:
+    """执行记录、规则实例与执行轮次构成评估标识。"""
+    return f"evaluation:{execution_id}:{rule_instance_id}:attempt{attempt_no}"
 
 
 def _rule_instance_id(node_code: str, rule_identity: str, execution_id: int) -> str:
@@ -86,13 +83,10 @@ def graph_load_evaluation(
         task = task_or_404(db, task_no, lock=True)
         manifest = _task_manifest(task)
         execution = execution_in_progress(db, task, execution_id)
-        from ....domain.rule_library import execution_order
-        enabled_rules = _enabled_rules(task, manifest, node_code)
-        _assert_execution_modes(enabled_rules)
-        agent_rules = execution_order(enabled_rules, all_rules=manifest["rules"])
+        _assert_execution_modes(enabled_rules(task, manifest, node_code))
         return {
             "agent_mode": True,
-            "evaluation_plan": [_plan_entry(node_code, index, rule) for index, rule in enumerate(agent_rules)],
+            "evaluation_plan": evaluation_plan(task, node_code),
             "execution_id": execution.id,
             "rule_outcomes": [],
             "loop_count": 0,
@@ -112,13 +106,14 @@ def graph_load_rule_instance(
     with agent_step(db, task_no):
         task = task_or_404(db, task_no, lock=True)
         execution = execution_in_progress(db, task, execution_id)
+        attempt_no = execution_attempt_no(execution)
         rule = planned_rule
         rule_code = str(rule.get("rule_code") or rule.get("rule_key"))
         agent = agent_module()
         allowed = agent.available_tools()
         identity = rule["rule_key"]
         rule_instance_id = _rule_instance_id(node_code, identity, execution.id)
-        evaluation_id = _evaluation_id(task, execution.id, rule_instance_id)
+        evaluation_id = _evaluation_id(task, execution.id, rule_instance_id, attempt_no)
         data = agent.rule_data(db, task, {**rule, "inputs": []} if rule.get("dependency_error") else rule)
         inputs = data["inputs"]
         return {

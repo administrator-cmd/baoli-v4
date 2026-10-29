@@ -1,16 +1,17 @@
-"""上传策略、材料类型、工具与规则状态目录接口。"""
+"""上传策略、材料类型、工具与审核状态词表接口。"""
 
 from fastapi import APIRouter, Request
 
-from ...constants.status import RULE_STATUSES, STATUS_CATEGORY_LABELS
+from ...constants.status import STATUS_CATEGORY_LABELS
 from ...core.config import get_settings
 from ...domain import audit_vocab, tool_catalog
 from ...integrations.documents.material_classify import list_material_types
 from ...schema.vo.system import (
     MaterialTypeCatalogResponse,
     MaterialTypeItem,
-    RuleCapabilityStatusResponse,
-    RuleStatusCatalogResponse,
+    StatusVocabularyDomain,
+    StatusVocabularyResponse,
+    StatusVocabularyTerm,
     ToolCatalogItem,
     ToolCatalogResponse,
     UploadKindPolicy,
@@ -78,18 +79,23 @@ def tools_catalog(request: Request) -> ToolCatalogResponse:
     )
 
 
-@router.get("/rule-statuses", response_model=RuleStatusCatalogResponse)
-def rule_status_catalog(request: Request) -> RuleStatusCatalogResponse:
-    """审核结论状态目录：每个状态码的标准中文含义与分档。
+@router.get("/status-vocabulary", response_model=StatusVocabularyResponse)
+def status_vocabulary(request: Request) -> StatusVocabularyResponse:
+    """审核状态词表：按语境给出每个状态码的唯一中文文案、分档与说明。
 
-    页面用它区分「已判定 / 已完成产出 / 尚未判定 / 不适用」，未知码单独显示。
-    分档之外的状态不进入任何分档：页面必须把原始码单独计数并显示出来，
-    不能静默消失，也不能按兜底文案显示成正常状态。
+    页面只按语境取文案，不再各自维护状态表。词表里没有的码必须显示原始码并
+    标注「未识别」，不能补一个看起来正常的中文；分档之外的结果也不能静默消失。
     """
-    return RuleStatusCatalogResponse(
-        statuses=[
-            RuleCapabilityStatusResponse(**audit_vocab.status_view(status))
-            for status in RULE_STATUSES
+    return StatusVocabularyResponse(
+        domains=[
+            StatusVocabularyDomain(
+                domain=domain,
+                statuses=[
+                    StatusVocabularyTerm(**term)
+                    for term in audit_vocab.domain_status_terms(domain)
+                ],
+            )
+            for domain in audit_vocab.STATUS_DOMAINS
         ],
         categories=[
             {"category": category, "label": label}

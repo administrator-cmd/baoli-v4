@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { DraftMaterialItem } from "@/api/contracts";
+import type { DraftMaterialItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
 import {
   createDraftMaterial,
   deleteDraftMaterial,
-  getSceneConfiguration,
   updateDraftMaterial,
 } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
@@ -20,21 +19,24 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
  */
 const props = defineProps<{
   scenarioCode: string | null;
-  /** 由父页面触发的外部刷新（例如发布后）。 */
-  refreshToken?: number;
+  /** 父级持有的同一份场景配置；面板不再各自请求整份配置。 */
+  config: ScenarioConfigurationView | null;
+  configError?: string | null;
+  configLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
   changed: [];
+  refresh: [];
 }>();
 
-const materials = ref<DraftMaterialItem[]>([]);
+/** 数据来自父级唯一的配置请求。 */
+const materials = computed(() => props.config?.materials ?? []);
 const sortedMaterials = computed(() => [...materials.value]
   .sort((left, right) => compareNaturalLabels(left.source_ref, right.source_ref)));
-const loading = ref(false);
-const loadError = ref<string | null>(null);
+const loading = computed(() => props.configLoading === true);
+const loadError = computed(() => props.configError ?? null);
 const saving = ref(false);
-let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
@@ -52,29 +54,6 @@ const form = reactive({
 });
 
 const dependencyIssue = ref<{ title: string; entries: string[] } | null>(null);
-
-async function load(): Promise<void> {
-  const sequence = ++loadSequence;
-  if (!props.scenarioCode) {
-    materials.value = [];
-    return;
-  }
-  loading.value = true;
-  loadError.value = null;
-  try {
-    const payload = await getSceneConfiguration(props.scenarioCode);
-    if (sequence !== loadSequence) return;
-    materials.value = payload.materials;
-  } catch (error) {
-    if (sequence !== loadSequence) return;
-    materials.value = [];
-    loadError.value = error instanceof Error ? error.message : "材料配置读取失败";
-  } finally {
-    if (sequence === loadSequence) loading.value = false;
-  }
-}
-
-watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immediate: true });
 
 function openCreate(): void {
   editingItem.value = null;
@@ -122,7 +101,6 @@ async function submitForm(): Promise<void> {
       ElMessage.success("材料配置已新增");
     }
     dialogVisible.value = false;
-    await load();
     emit("changed");
   } catch (error) {
     // 失败时保留弹窗与输入，错误贴近当前操作区显示。
@@ -149,7 +127,6 @@ async function removeItem(item: DraftMaterialItem): Promise<void> {
   try {
     await deleteDraftMaterial(props.scenarioCode, item.material_key);
     ElMessage.success("材料配置已删除");
-    await load();
     emit("changed");
   } catch (error) {
     if (error instanceof ApiError && error.code === "MATERIAL_REFERENCED") {
@@ -175,7 +152,6 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
   try {
     await updateDraftMaterial(props.scenarioCode, item.material_key, { required: !item.required });
     ElMessage.success(item.required ? "已改为按需材料" : "已改为必传材料");
-    await load();
     emit("changed");
   } catch (error) {
     ElMessage.error(describeError(error));
@@ -193,12 +169,12 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增材料</el-button>
         </div>
         <div class="app-toolbar__right">
-          <el-button :loading="loading" @click="load">刷新</el-button>
+          <el-button :loading="loading" @click="$emit('refresh')">刷新</el-button>
         </div>
       </div>
 
       <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="`读取失败：${loadError}`">
-        <el-button size="small" @click="load">重试</el-button>
+        <el-button size="small" @click="$emit('refresh')">重试</el-button>
       </el-alert>
 
       <el-table
@@ -211,13 +187,13 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         empty-text="暂无材料配置"
         :cell-style="{ textAlign: 'center' }"
       >
-        <el-table-column prop="source_ref" label="材料编号" width="120">
+        <el-table-column prop="source_ref" label="材料编号" width="140">
           <template #default="{ row }">
             <span v-if="row.source_ref" class="mono">{{ row.source_ref }}</span>
             <span v-else class="text-hint">未填写</span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="材料名称" width="170" show-overflow-tooltip />
+        <el-table-column prop="name" label="材料名称" width="180" show-overflow-tooltip />
         <el-table-column label="是否必需" width="88">
           <template #default="{ row }">
             <el-tag :type="row.required ? 'warning' : 'info'" size="small" effect="plain" disable-transitions>
@@ -228,7 +204,7 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         <el-table-column prop="description" label="业务说明" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">{{ row.description || "—" }}</template>
         </el-table-column>
-        <el-table-column label="更新时间" width="190">
+        <el-table-column label="更新时间" width="200">
           <template #default="{ row }"><span class="table-nowrap">{{ row.updated_at ? formatDate(String(row.updated_at)) : "—" }}</span></template>
         </el-table-column>
         <el-table-column v-if="canEdit" label="操作" width="168" class-name="table-actions" fixed="right">

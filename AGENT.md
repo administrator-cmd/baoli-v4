@@ -33,7 +33,7 @@ cd frontend
 npm run dev
 ```
 
-数据库初始化与清库工具 `script/reset_database.py` 的用法见根目录 `README.md`。结构变更直接修改 `backend/resource/schema.sql`；结构校验实现在 `backend/app/runtime/schema_check.py`。
+数据库初始化与清库工具 `script/reset_database.py` 的用法见根目录 `README.md`。结构变更走 Alembic：修改实体后生成并人工审查迁移，命令见 `backend/migrations/README`；`backend/resource/schema.sql` 是当前完整结构，空库执行后 `stamp head`。结构校验实现在 `backend/app/runtime/schema_check.py`。
 
 仅在用户明确要求时运行测试、类型检查、构建、浏览器、服务、数据库、模型或外部接口；未授权时只做静态核对。
 
@@ -41,7 +41,7 @@ npm run dev
 
 
 数据库：
-在用户确认数据库的表结构需要新增的时候 直接修改 schema.sql 然后由用户来进行删库重新建表
+表结构变更使用 Alembic 迁移：先改实体，再在 `backend/` 下执行 `python -m alembic revision --autogenerate -m "..."`，人工审查生成列、唯一键和复合外键后 `upgrade head`，最后从当前库重新导出并更新 `schema.sql`。迁移文件在 `backend/migrations/versions/`，基线为 `0001_baseline`，当前 head 为 `0003_report_and_attempt_backfill`；`schema.sql` 与 head 保持同步。
 
 
 系统业务：

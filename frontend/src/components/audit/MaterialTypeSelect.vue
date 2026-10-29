@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
-
 import { useMaterialTypeCatalog, type MaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
 
 /**
@@ -9,6 +7,9 @@ import { useMaterialTypeCatalog, type MaterialTypeCatalog } from "@/composables/
  * 目录是外部服务的当前事实，本组件不内置任何默认清单，也不把 8018 的取值与
  * 材料名称做映射。目录读不到时明确报错并让上传入口不可用——不退回自由输入，
  * 也不跳过类型声明：8018 的 doc_type 是严格枚举，自由输入的值会在服务端被直接拒绝。
+ *
+ * 目录在用户第一次展开选择框时才读取：打开页面并不需要它，提前取会为一次
+ * 未必发生的上传打一次 8018。
  */
 const model = defineModel<string>({ required: true });
 
@@ -20,9 +21,11 @@ const props = defineProps<{
 }>();
 
 const catalog = props.catalog ?? useMaterialTypeCatalog();
-onMounted(() => {
-  if (!props.catalog) void catalog.reload();
-});
+
+/** 展开下拉时按需读取；已取到或正在读取时不重复请求。 */
+function onVisibleChange(visible: boolean): void {
+  if (visible && !catalog.state.items.length && !catalog.state.loading) void catalog.reload();
+}
 </script>
 
 <template>
@@ -32,10 +35,11 @@ onMounted(() => {
       filterable
       clearable
       :loading="catalog.state.loading"
-      :disabled="props.disabled || !catalog.state.available"
+      :disabled="props.disabled || catalog.state.error !== null"
       placeholder="请选择材料类型"
       size="small"
       style="min-width: 180px"
+      @visible-change="onVisibleChange"
     >
       <el-option v-for="item in catalog.state.items" :key="item.id" :label="item.name" :value="item.name" />
     </el-select>

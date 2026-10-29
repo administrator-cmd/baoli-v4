@@ -12,9 +12,9 @@ import {
   type TemplateOption,
 } from "@/api/imports";
 import { usePagedList } from "@/composables/usePagedList";
-import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { formatDate, formatFileSize, statusLabel } from "@/constants/labels";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 规则库管理：已上传的规则库 Excel 文件资产。
@@ -102,12 +102,7 @@ onMounted(() => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="资料管理"
-      title="规则库管理"
-      :notes="['下载取的是上传时的原始 Excel 原件']"
-      :show-refresh="false"
-    />
+    <p class="text-hint">下载取的是上传时的原始 Excel 原件</p>
     <el-form inline class="app-query" @submit.prevent="list.search()">
       <el-form-item label="文件名">
         <el-input v-model="filters.filename" clearable placeholder="规则库文件名" style="width: 200px" @keyup.enter="list.search()" />
@@ -135,36 +130,35 @@ onMounted(() => {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe size="small" class="rulebook-table"
-      style="width: 1180px; max-width: 100%"
+    <el-table v-else :data="items" border stripe class="management-table"
       v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="规则库文件" width="380" show-overflow-tooltip class-name="cell-align-left">
+      <el-table-column label="规则库文件" width="380" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="mono">{{ row.source_filename }}</span>
           <span class="text-hint rulebook-table__size">{{ formatFileSize(row.source_size) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="所属场景" width="180" show-overflow-tooltip class-name="cell-align-left">
+      <el-table-column label="所属场景" width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ scenarioText(row) }}</template>
       </el-table-column>
-      <el-table-column label="上传时间" width="190">
+      <el-table-column label="上传时间" width="200">
         <template #default="{ row }">
           <span class="table-nowrap">{{ formatDate(row.created_at) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="处理状态" width="130">
+      <el-table-column label="处理状态" width="180">
         <template #default="{ row }">
           <StatusBadge :status="row.status" />
           <div v-if="row.failure_message" class="text-hint">{{ row.failure_message }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="发布版本" width="110">
+      <el-table-column label="发布版本" width="120">
         <template #default="{ row }">
           <span v-if="row.published_version_no">第 {{ row.published_version_no }} 版</span>
           <span v-else class="text-hint">未发布</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="190" fixed="right">
+      <el-table-column label="操作" width="232" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" tag="a" :href="downloadUrl(row)" :download="row.source_filename">
             下载原件
@@ -181,7 +175,7 @@ onMounted(() => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"
@@ -192,9 +186,8 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 文件资产列表：单行紧凑展示，文件名与大小并排，时间不换行。 */
+/* 文件资产列表：文件名与大小并排展示，时间不换行。 */
 .rulebook-table__size {
   margin-left: 8px;
-  font-size: 12px;
 }
 </style>

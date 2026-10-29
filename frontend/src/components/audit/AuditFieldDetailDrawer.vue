@@ -5,7 +5,7 @@ import type { AuditFieldView } from "@/api/audits";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import QuoteBlock from "@/components/audit/QuoteBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { factOriginLabel, fieldStatusTone } from "@/constants/labels";
+import { factOriginLabel } from "@/constants/labels";
 import {
   evidenceNote,
   evidenceTitle,
@@ -118,7 +118,7 @@ function reasonTone(current: FieldMode): string {
   <DrawerPanel :open="open" :title="field?.name ?? '字段详情'" size="min(680px, 100%)" @close="emit('close')">
     <template v-if="field">
       <div class="field-detail-meta">
-        <StatusBadge :status="field.status" :tone="fieldStatusTone(field.status)" />
+        <StatusBadge domain="field" :status="field.status" />
         <span v-if="field.source_ref" class="text-muted">字段编号：{{ field.source_ref }}</span>
         <span class="field-detail-meta__material">{{ field.material_name }}</span>
         <span v-if="field.fact_revision_no" class="text-muted">第 {{ field.fact_revision_no }} 版</span>

@@ -8,23 +8,9 @@ from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
 from ...domain import fact_projection
+from ...domain.execution_scope import pending_rerun_keys_of
 from ...entity.scenarios import ScenarioVersion
-from ...entity.tasks import AuditTask, DocumentUpload, TaskDocument
-
-REVIEW_DECISION_LABELS = {
-    "CONFIRM_ABNORMAL": "确认异常",
-    "MARK_NORMAL": "判定正常",
-    "EVIDENCE_INSUFFICIENT": "证据不足",
-    "CONFIRM_FIELD": "确认字段",
-    "MODIFY_FIELD": "修改字段",
-    "MARK_NOT_PRESENT": "判定字段不存在",
-}
-
-BASIS_TYPE_LABELS = {
-    "HUMAN_STATEMENT": "人工业务判断",
-    "DOCUMENT_EVIDENCE": "文档证据",
-    "UPLOAD_RECORD": "上传记录",
-}
+from ...entity.tasks import AuditTask, DocumentUpload, NodeExecution, TaskDocument
 
 _OCR_LATEX_WRAP = re.compile(
     r"\\(?:underline|text|textbf|textit|textrm|mathrm|mathit|emph|mbox|hbox)\s*\{([^{}]*)\}"
@@ -103,9 +89,72 @@ def _task_manifest(task: AuditTask) -> dict[str, Any]:
         raise BusinessError("TASK_MANIFEST_MISSING", "任务缺少已冻结的执行配置", status_code=500)
     return manifest
 
+def pending_rerun_keys(execution: NodeExecution) -> set[str]:
+    """执行批次里尚未完成重跑的规则键；续跑与报告失效判断共用这一份归一化。"""
+    return pending_rerun_keys_of(
+        (execution.result_json or {}).get("pending_rerun_keys"), execution_id=execution.id,
+    )
+
+
+def current_upload(db: Session, document: TaskDocument) -> DocumentUpload | None:
+    """材料位的当前上传版本；is_current 是唯一判定来源。"""
+    return db.scalar(
+        select(DocumentUpload).where(
+            DocumentUpload.task_document_id == document.id,
+            DocumentUpload.is_current.is_(True),
+        )
+    )
+
+
+def _task_documents(db: Session, task: AuditTask) -> list[TaskDocument]:
+    """任务的全部材料位，按 id 升序。"""
+    return list(
+        db.scalars(
+            select(TaskDocument)
+            .where(TaskDocument.audit_task_id == task.id)
+            .order_by(TaskDocument.id)
+        ).all()
+    )
+
+
+def _current_upload_map(db: Session, task: AuditTask) -> dict[int, DocumentUpload]:
+    """任务下各材料位的当前上传版本，按材料位 id 索引。"""
+    return {
+        item.task_document_id: item
+        for item in db.scalars(
+            select(DocumentUpload)
+            .join(TaskDocument, TaskDocument.id == DocumentUpload.task_document_id)
+            .where(TaskDocument.audit_task_id == task.id, DocumentUpload.is_current.is_(True))
+        ).all()
+    }
+
+
 def _current_uploads(db: Session, task: AuditTask) -> list[tuple[TaskDocument, DocumentUpload | None]]:
-    documents = db.scalars(select(TaskDocument).where(TaskDocument.audit_task_id == task.id).order_by(TaskDocument.id)).all()
-    return [(document, db.get(DocumentUpload, document.current_upload_id) if document.current_upload_id else None) for document in documents]
+    """材料位与各自的当前上传；未上传的材料位也在列表里，上传为 None。"""
+    uploads = _current_upload_map(db, task)
+    return [(document, uploads.get(document.id)) for document in _task_documents(db, task)]
+
+
+def _material_entries(
+    pairs: list[tuple[TaskDocument, DocumentUpload | None]], states: dict[str, str | None],
+) -> list[dict[str, Any]]:
+    """材料位与当前上传的只读视图，按材料位键排序；状态由调用方按同一份快照算出。"""
+    return [
+        {
+            "material_key": document.material_key,
+            "material_name": document.material_name,
+            "required": bool(document.required),
+            "document_status": document.status,
+            "material_state": states.get(document.material_key),
+            "upload_id": upload.id if upload else None,
+            "upload_sha256": upload.sha256 if upload else None,
+            "upload_revision": upload.upload_no if upload else None,
+            "upload_filename": upload.original_filename if upload else None,
+            "upload_content_type": upload.content_type if upload else None,
+            "upload_size_bytes": upload.size_bytes if upload else None,
+        }
+        for document, upload in sorted(pairs, key=lambda item: item[0].material_key)
+    ]
 
 def _material_names(manifest: dict[str, Any]) -> dict[str, str]:
     return {item["material_key"]: item["name"] for item in manifest["materials"]}

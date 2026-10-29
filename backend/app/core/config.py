@@ -84,9 +84,12 @@ class Settings(BaseSettings):
 
     # 普通外部 HTTP 请求的超时，不是整轮 OCR 作业的超时，也不用于 LLM 长响应。
     request_timeout_seconds: float = Field(default=600.0, gt=0)
-    # LLM 规则解析、抽取和审核响应可能持续输出数分钟；单独配置，避免普通 HTTP
-    # 请求的 5 分钟时限截断仍在正常流式输出的模型响应。无固定上限，由部署环境决定。
+    # 模型在持续输出时不能按总时长判失败：这是「连续多久收不到任何数据就判定请求卡住」
+    # 的读取超时。规则库解析、抽取等长响应只要还在出块就一直继续。
     llm_timeout_seconds: float = Field(default=900.0, gt=0)
+    # 单次模型请求（含自动重试）的总时限，只用于兜住永不结束的流。
+    # 真实解析耗时超过它时按实际耗时调大，这与「网络不可达」是两件事。
+    llm_max_seconds: float = Field(default=7200.0, gt=0)
     log_level: str = "INFO"
 
     @field_validator(

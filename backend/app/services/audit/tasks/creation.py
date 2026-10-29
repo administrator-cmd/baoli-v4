@@ -6,7 +6,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
-from ....constants.status import TASK_PHASE_AWAITING_CONFIRMATION
 from ....domain.identity import public_no
 from ....domain.manifest import build_task_schema
 from ....domain.rule_library import execution_container_of
@@ -93,14 +92,6 @@ def create_task_from_plan(
             status_code=409,
             details={"plan_code": plan.plan_code, "scenario_version_id": plan.scenario_version_id},
         )
-    if scenario.status != "PUBLISHED":
-        # 方案只能引用已发布版本；非发布版本不能作为任务的执行依据。
-        raise BusinessError(
-            "SCENARIO_VERSION_NOT_PUBLISHED",
-            "方案关联的场景版本不是已发布状态，不能创建任务",
-            status_code=409,
-            details={"plan_code": plan.plan_code, "status": scenario.status},
-        )
     if (
         expected_scope_hash is not None
         and plan.scope_hash is not None
@@ -145,7 +136,6 @@ def create_task_from_plan(
         remark=remark,
         status="READY",
         current_node=first_node["node_code"],
-        current_phase=TASK_PHASE_AWAITING_CONFIRMATION,
         manifest_json=deepcopy(manifest),
         task_schema_json=schema,
     )

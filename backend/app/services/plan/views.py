@@ -3,28 +3,63 @@
 from copy import deepcopy
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...constants.status import SCENARIO_VERSION_STATUS_PUBLISHED
 from ...domain import manifest as manifest_module
 from ...domain.plan_calculations import plan_calculation_config
 from ...domain.report_data import report_data_refs
 from ...domain.rule_library import active
 from ...entity.plans import AuditPlan, PlanField, PlanMaterial, PlanRule, PlanSection
+from ...entity.scenarios import ScenarioVersion
 from ..shared import configuration as config_store
 
 
 def plan_config_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
-    """方案的可编辑配置：材料 / 字段 / 全部规则 / 报告章节 / 完整计算定义。
+    """方案的可编辑配置与状态：材料 / 字段 / 全部规则 / 报告章节 / 完整计算定义。
 
-    这是方案页各页签的数据源。节点与选用 Sheet 不在这里 —— 它们是场景级执行结构，
+    这是方案页各页签的数据源，同时携带方案本身的基本资料与范围状态；
+    方案页不再单独读取另一份“详情”。节点与选用 Sheet 不在这里 —— 它们是场景级执行结构，
     方案里只读（随 `context_json` 冻结），单独返回供页面展示。
     """
     materials, fields, rules, sections = plan_config_rows(db, plan.id)
     context = plan.context_json if isinstance(plan.context_json, dict) else {}
     calculation_candidates, calculation_enabled = plan_calculation_config(context)
     calculation_source = calculation_candidates
+    # 只取展示用的三列：场景版本行带着几百 KB 的 manifest_json，整行载入没有意义。
+    version = (
+        db.execute(
+            select(
+                ScenarioVersion.version_no,
+                ScenarioVersion.published_at,
+                ScenarioVersion.scenario_name,
+            ).where(ScenarioVersion.id == plan.scenario_version_id)
+        ).first()
+        if plan.scenario_version_id
+        else None
+    )
     return {
         "plan_code": plan.plan_code,
+        "plan_name": plan.plan_name,
+        "scenario_code": plan.scenario_code,
+        "description": plan.description,
+        "enabled": plan.enabled,
+        "deleted": plan.deleted_at is not None,
+        # 与列表页同一口径：sync_error 非空表示最近一次保存没算出可用范围。
+        "effective": plan.sync_error is None and plan.scope_hash is not None,
+        "sync_error": plan.sync_error,
+        "scope_hash": plan.scope_hash,
+        "base_scenario_version": (
+            {
+                "version_no": version.version_no,
+                "status": SCENARIO_VERSION_STATUS_PUBLISHED,
+                "published_at": version.published_at,
+                "scenario_name": version.scenario_name,
+            }
+            if version
+            else None
+        ),
         "materials": [
             {
                 "material_key": item.material_key,

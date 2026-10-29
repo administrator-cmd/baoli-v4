@@ -2,7 +2,7 @@ import type {
   MaterialTypeItem,
   OperationLogRow,
   Paged,
-  RuleStatusCatalog,
+  StatusVocabulary,
   SystemServices,
   UploadPolicy,
 } from "./contracts";
@@ -27,17 +27,20 @@ export function getUploadPolicy(): Promise<UploadPolicy> {
   return request<UploadPolicy>("/system/upload-policy");
 }
 
-/** 服务状态：配置状态与连接状态分开；只有真实探测过的连接才显示已连接。 */
-export function getSystemServices(): Promise<SystemServices> {
-  return request<SystemServices>("/system/services");
+/**
+ * 服务状态：配置状态与连接状态分开；只有真实探测过的连接才显示已连接。
+ * `refresh` 忽略服务端的短时探测缓存，立即重新探测。
+ */
+export function getSystemServices(refresh = false): Promise<SystemServices> {
+  return request<SystemServices>(`/system/services${refresh ? "?refresh=true" : ""}`);
 }
 
 /**
- * 全部审核结论状态的标准口径与分档。
- * 页面用它区分「已判定 / 尚未判定 / 不适用」，未识别的状态码必须显式显示原始码。
+ * 全部语境的审核状态词表：规则、风险、字段各自的唯一文案、分档与说明。
+ * 页面按语境取文案，不再各自维护状态表。
  */
-export function getRuleStatusCatalog(): Promise<RuleStatusCatalog> {
-  return request<RuleStatusCatalog>("/system/rule-statuses");
+export function getStatusVocabulary(): Promise<StatusVocabulary> {
+  return request<StatusVocabulary>("/system/status-vocabulary");
 }
 
 export interface OperationQuery {

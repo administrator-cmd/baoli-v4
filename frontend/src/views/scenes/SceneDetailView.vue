@@ -41,7 +41,6 @@ const loading = ref(false);
 const loadError = ref<string | null>(null);
 const saving = ref(false);
 const deleting = ref(false);
-const refreshToken = ref(0);
 let loadSequence = 0;
 
 /**
@@ -62,7 +61,24 @@ const tabs = computed({
 
 const canEditBasic = computed(() => detail.value !== null);
 const calculations = computed(() => configuration.value?.calculations ?? []);
-const basicForm = reactive({ scenario_name: "", category: "", description: "", enabled: true });
+
+interface BasicForm {
+  scenario_name: string;
+  category: string;
+  description: string;
+  enabled: boolean;
+}
+
+const EMPTY_BASIC: BasicForm = { scenario_name: "", category: "", description: "", enabled: true };
+const basicForm = reactive<BasicForm>({ ...EMPTY_BASIC });
+/** 最近一次服务端确认的基本资料；表单与它不同就表示有未保存输入。 */
+const basicSnapshot = ref<BasicForm>({ ...EMPTY_BASIC });
+const basicDirty = computed(() => (
+  basicForm.scenario_name !== basicSnapshot.value.scenario_name
+  || basicForm.category !== basicSnapshot.value.category
+  || basicForm.description !== basicSnapshot.value.description
+  || basicForm.enabled !== basicSnapshot.value.enabled
+));
 
 const publishBlockedReason = computed(() => {
   if (!detail.value?.draft) {
@@ -71,17 +87,15 @@ const publishBlockedReason = computed(() => {
   if (configError.value) {
     return `草稿配置读取失败：${configError.value}`;
   }
-  const error = detail.value?.draft?.sync_error;
-  if (!error) {
-    return null;
-  }
-  return error.message;
+  // 编译状态只认当前配置响应；场景基本详情里的草稿记录不携带编译结果。
+  return configuration.value?.sync_error?.message ?? null;
 });
 
 async function load(): Promise<void> {
   const sequence = ++loadSequence;
   const code = scenarioCode.value;
   const previousCode = detail.value?.scenario_code;
+  const switching = previousCode !== undefined && previousCode !== code;
   if (previousCode && previousCode !== code) {
     detail.value = null;
     configuration.value = null;
@@ -93,10 +107,17 @@ async function load(): Promise<void> {
     const payload = await getScene(code);
     if (sequence !== loadSequence || code !== scenarioCode.value) return;
     detail.value = payload;
-    basicForm.scenario_name = payload.scenario_name;
-    basicForm.category = payload.category ?? "";
-    basicForm.description = payload.description ?? "";
-    basicForm.enabled = payload.enabled;
+    // 服务端值就是新的比较基线；有未保存输入时只更新基线，不重填表单。
+    // 切换场景必须强制同步，避免把上一个场景的输入留在表单里。
+    const values: BasicForm = {
+      scenario_name: payload.scenario_name,
+      category: payload.category ?? "",
+      description: payload.description ?? "",
+      enabled: payload.enabled,
+    };
+    const keepLocalEdits = basicDirty.value && !switching;
+    basicSnapshot.value = values;
+    if (!keepLocalEdits) Object.assign(basicForm, values);
     try {
       const config = await getSceneConfiguration(payload.scenario_code);
       if (sequence !== loadSequence || code !== scenarioCode.value) return;
@@ -118,8 +139,9 @@ async function load(): Promise<void> {
 }
 
 async function onChildChanged(): Promise<void> {
+  // 子面板保存只刷新这一份服务端配置：四个面板都消费同一份结果，不各自再请求。
+  // 重填表单的口径由 load() 统一处理，未保存的基本信息不会被覆盖。
   await load();
-  refreshToken.value += 1;
 }
 
 watch(scenarioCode, () => void load(), { immediate: true });
@@ -146,7 +168,6 @@ async function publishScene(): Promise<void> {
     });
     ElMessage.success(published.reused ? "配置与当前版本一致" : `第 ${published.version_no} 版已生效`);
     await load();
-    refreshToken.value += 1;
   } catch (failure) {
     ElMessage.error(failure instanceof Error ? failure.message : "发布失败");
   } finally {
@@ -162,17 +183,25 @@ async function saveBasic(): Promise<void> {
     ElMessage.warning("请填写场景名称");
     return;
   }
+  const submitted: BasicForm = {
+    scenario_name: basicForm.scenario_name.trim(),
+    category: basicForm.category.trim(),
+    description: basicForm.description.trim(),
+    enabled: basicForm.enabled,
+  };
   saving.value = true;
   try {
     await updateScene(detail.value.scenario_code, {
-      scenario_name: basicForm.scenario_name.trim(),
-      category: basicForm.category.trim() || null,
-      description: basicForm.description.trim() || null,
-      enabled: basicForm.enabled,
+      scenario_name: submitted.scenario_name,
+      category: submitted.category || null,
+      description: submitted.description || null,
+      enabled: submitted.enabled,
     });
     ElMessage.success("场景资料已保存");
+    // 提交值就是新基线：保存期间继续输入的内容不被响应覆盖。
+    // 配置随这次 load 一起刷新，面板消费同一份结果，不再额外触发整份配置重取。
+    basicSnapshot.value = { ...submitted };
     await load();
-    if (detail.value?.draft) await onChildChanged();
   } catch (failure) {
     ElMessage.error(failure instanceof Error ? failure.message : "保存失败");
   } finally {
@@ -210,7 +239,7 @@ async function removeScenario(): Promise<void> {
   try {
     await deleteScene(detail.value.scenario_code);
     ElMessage.success("场景已删除");
-    await router.replace({ name: "scene-config" });
+    await router.replace({ name: "scenes" });
   } catch (failure) {
     ElMessage.error(failure instanceof Error ? failure.message : "删除失败");
   } finally {
@@ -247,7 +276,7 @@ function openPlanCreation(): void {
       <template v-if="detail">
         <div class="app-detail-head">
           <div class="app-detail-head__identity">
-            <BackButton label="返回场景列表" @click="router.push({ name: 'scene-config' })" />
+            <BackButton label="返回场景列表" @click="router.push({ name: 'scenes' })" />
             <span class="app-detail-head__divider" aria-hidden="true" />
             <div class="app-detail-head__title-wrap">
               <h1 class="app-detail-head__name">{{ detail.scenario_name }}</h1>
@@ -265,7 +294,7 @@ function openPlanCreation(): void {
               label="返回导入作业"
               @click="router.push({ name: 'scene-import-detail', params: { jobNo: returnImportJobNo } })"
             />
-            <el-button @click="openImports">
+            <el-button type="primary" plain @click="openImports">
               <template #icon><FileUp :size="15" /></template>
               规则库导入
             </el-button>
@@ -279,11 +308,11 @@ function openPlanCreation(): void {
               <template #icon><Rocket :size="15" /></template>
               发布场景
             </el-button>
-            <el-button v-if="detail.enabled && detail.latest_version_no > 0" @click="openPlanCreation">
+            <el-button v-if="detail.enabled && detail.latest_version_no > 0" type="success" plain @click="openPlanCreation">
               <template #icon><Plus :size="15" /></template>
               创建方案
             </el-button>
-            <el-button plain @click="toggleEnabled">
+            <el-button :type="detail.enabled ? 'warning' : 'success'" plain @click="toggleEnabled">
               <template #icon><Power :size="15" /></template>
               {{ detail.enabled ? "停用场景" : "启用场景" }}
             </el-button>
@@ -297,10 +326,12 @@ function openPlanCreation(): void {
         <div class="app-toolbar">
           <div class="app-toolbar__left">
             <el-tag v-if="configError" type="danger" effect="plain">配置读取失败</el-tag>
+            <el-tag v-else-if="configuration?.sync_error" type="warning" effect="plain">配置待完善</el-tag>
             <el-tag v-else-if="configuration?.configuration_kind === 'DRAFT'" type="warning" effect="plain">{{ detail.latest_version_no > 0 ? '有未发布修改' : '尚未发布' }}</el-tag>
             <el-tag v-else-if="configuration?.configuration_kind === 'PUBLISHED'" type="success" effect="plain">已发布</el-tag>
             <span class="text-muted">已发布版本：{{ detail.latest_version_no > 0 ? `第 ${detail.latest_version_no} 版` : "无" }}</span>
             <span v-if="configError" class="text-danger">{{ configError }}</span>
+            <span v-else-if="configuration?.sync_error" class="text-danger">{{ configuration.sync_error.message }}</span>
           </div>
         </div>
 
@@ -347,13 +378,34 @@ function openPlanCreation(): void {
           </el-tab-pane>
 
           <el-tab-pane label="材料" name="materials">
-            <SceneMaterialsPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />
+            <SceneMaterialsPanel
+              :scenario-code="detail.scenario_code"
+              :config="configuration"
+              :config-error="configError"
+              :config-loading="loading"
+              @changed="onChildChanged"
+              @refresh="load"
+            />
           </el-tab-pane>
           <el-tab-pane label="字段" name="fields">
-            <SceneFieldsPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />
+            <SceneFieldsPanel
+              :scenario-code="detail.scenario_code"
+              :config="configuration"
+              :config-error="configError"
+              :config-loading="loading"
+              @changed="onChildChanged"
+              @refresh="load"
+            />
           </el-tab-pane>
           <el-tab-pane label="审核规则" name="rules">
-            <SceneRulesPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />
+            <SceneRulesPanel
+              :scenario-code="detail.scenario_code"
+              :config="configuration"
+              :config-error="configError"
+              :config-loading="loading"
+              @changed="onChildChanged"
+              @refresh="load"
+            />
           </el-tab-pane>
           <el-tab-pane label="计算规则" name="calculations">
             <el-alert v-if="configError" type="error" show-icon :closable="false" :title="configError" />
@@ -361,7 +413,14 @@ function openPlanCreation(): void {
               :items="calculations" :fields="configuration?.fields ?? []" @changed="onChildChanged" />
           </el-tab-pane>
           <el-tab-pane label="报告" name="sections">
-            <SceneSectionsPanel :scenario-code="detail.scenario_code" :refresh-token="refreshToken" @changed="onChildChanged" />
+            <SceneSectionsPanel
+              :scenario-code="detail.scenario_code"
+              :config="configuration"
+              :config-error="configError"
+              :config-loading="loading"
+              @changed="onChildChanged"
+              @refresh="load"
+            />
           </el-tab-pane>
         </el-tabs>
       </template>
@@ -477,6 +536,23 @@ function openPlanCreation(): void {
   .app-detail-head__actions .el-button {
     flex: 0 0 auto;
   }
+}
+
+/* 同一行动作按钮用浅底色区分：纯白底在白色面板上不够醒目 */
+.app-detail-head__actions :deep(.el-button--primary.is-plain) {
+  --el-button-bg-color: var(--el-color-primary-light-8);
+}
+
+.app-detail-head__actions :deep(.el-button--success.is-plain) {
+  --el-button-bg-color: var(--el-color-success-light-8);
+}
+
+.app-detail-head__actions :deep(.el-button--warning.is-plain) {
+  --el-button-bg-color: var(--el-color-warning-light-8);
+}
+
+.app-detail-head__actions :deep(.el-button--danger.is-plain) {
+  --el-button-bg-color: var(--el-color-danger-light-8);
 }
 
 </style>

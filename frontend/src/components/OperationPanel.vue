@@ -21,11 +21,13 @@ const props = withDefaults(
     label?: string | null;
     /** 查询间隔秒数，用于说明轮询行为。 */
     pollSeconds?: number;
-    /** 是否显示「重新尝试」按钮（操作失败或被中断时由页面决定）。 */
+    /** 是否显示「重新执行」按钮（操作失败或被中断时由页面决定）。 */
     canRetry?: boolean;
+    /** 重新执行的按钮文案；页面应写明这是全量重跑还是原操作重试。 */
+    retryLabel?: string;
     /**
-     * 是否显示「继续执行」按钮：只对服务重启中断、可原地继续的批次提供。
-     * 继续执行复用原批次与已完成的规则结果；重新尝试另建批次重跑全部规则。
+     * 是否显示「继续执行」按钮：只对可原地继续的批次提供。
+     * 继续执行复用原批次与已完成的规则结果；重新执行会另建批次重跑全部规则。
      */
     canResume?: boolean;
     /**
@@ -42,7 +44,7 @@ const props = withDefaults(
     /** 业务页面使用简洁布局，内部操作信息默认折叠。 */
     compact?: boolean;
   }>(),
-  { label: null, pollSeconds: 2, canRetry: false, canResume: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false },
+  { label: null, pollSeconds: 2, canRetry: false, retryLabel: "重新执行", canResume: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false },
 );
 
 defineEmits<{
@@ -116,7 +118,7 @@ const elapsedText = computed(() => {
             :type="canResume ? 'default' : 'primary'"
             @click="$emit('retry', operation.operation_type)"
           >
-            重新尝试
+            {{ retryLabel }}
           </el-button>
         </div>
       </div>

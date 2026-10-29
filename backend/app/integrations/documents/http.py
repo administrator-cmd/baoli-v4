@@ -6,20 +6,44 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import math
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
 import requests
 
 from ...common.exceptions import BusinessError
+from ...core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+_client_lock = threading.Lock()
+_shared: httpx.Client | None = None
 
-def client(timeout: float) -> httpx.Client:
-    return httpx.Client(timeout=timeout, follow_redirects=False)
+
+def _shared_client() -> httpx.Client:
+    """进程内唯一的 HTTP 客户端：连接池跨调用保留，进程退出时关闭。
+
+    httpx.Client 线程安全；超时取当前配置的请求时限，不再按调用新建连接池。
+    """
+    global _shared
+    with _client_lock:
+        if _shared is None:
+            shared = httpx.Client(timeout=get_settings().request_timeout_seconds, follow_redirects=False)
+            atexit.register(shared.close)
+            _shared = shared
+        return _shared
+
+
+@contextmanager
+def client() -> Iterator[httpx.Client]:
+    """复用共享客户端；离开 with 只结束本次调用，不关闭共享连接。"""
+    yield _shared_client()
 
 
 def required_service_url(

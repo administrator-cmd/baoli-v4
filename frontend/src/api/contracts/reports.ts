@@ -19,8 +19,10 @@ export interface Report extends ApiResponse {
   risk_conclusion_available: boolean;
   /** 报告范围只对应当前有效事实与执行结果。 */
   results_scope: "CURRENT_RUN";
-  /** 当前入口返回的报告是否仍对应当前输入修订。 */
+  /** 当前入口返回的报告是否仍对应当前执行；为 false 时页面必须标明“已失效”。 */
   current: boolean;
+  /** 失效的真实原因；current 为 true 时为空。 */
+  stale_reason?: string | null;
   input_revision: number;
   snapshot: {
     task_input_revision: number;
@@ -78,6 +80,8 @@ export interface ReportRow {
   archived_at: string | null;
   current: boolean;
   stale: boolean;
+  /** 失效的真实原因；stale 为 false 时为空。 */
+  stale_reason: string | null;
   input_revision: number | null;
   task_input_revision: number;
   remark: string | null;
@@ -103,6 +107,8 @@ export interface ReportDetail extends ApiResponse {
   archived_at: string | null;
   remark: string | null;
   stale: boolean;
+  /** 失效的真实原因；stale 为 false 时为空。 */
+  stale_reason: string | null;
   input_revision: number | null;
   task_input_revision: number | null;
 }

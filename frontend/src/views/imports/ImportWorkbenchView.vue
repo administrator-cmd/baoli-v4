@@ -22,6 +22,7 @@ import ImportProposalEditor from "@/components/import/ImportProposalEditor.vue";
 import FileUploadCard from "@/components/import/FileUploadCard.vue";
 import ImportJobPicker from "@/components/import/ImportJobPicker.vue";
 import ImportStepNav from "@/components/import/ImportStepNav.vue";
+import BackButton from "@/components/BackButton.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import StateBlock from "@/components/StateBlock.vue";
@@ -214,6 +215,12 @@ async function loadUploadPolicy(): Promise<void> {
 
 async function chooseImportJob(importJob: ImportJobSummary): Promise<void> {
   await router.replace({ name: "scene-import-detail", params: { jobNo: importJob.job_no } });
+}
+
+/** 返回导入作业列表；带着作业所属场景，列表仍按该场景筛选。 */
+function backToImports(): void {
+  const scenarioCode = job.value?.profile?.scenario_code;
+  void router.push({ name: "scene-imports", query: scenarioCode ? { scenario: scenarioCode } : {} });
 }
 
 /** 回到入口重新选择文件：清空当前作业的 URL 参数，由路由同步重置工作区。 */
@@ -485,10 +492,13 @@ watch(
   <div class="import-workbench">
     <PageHeader
       :title="job ? '规则库导入工作台' : '规则库导入'"
-      :object-name="job?.source_filename ?? null"
       :busy="pending || proposalSaving"
       @refresh="job ? loadJob(job.job_no) : loadImportJobs()"
-    />
+    >
+      <template #leading>
+        <BackButton label="返回导入列表" @click="backToImports" />
+      </template>
+    </PageHeader>
 
     <FailureNotice :error="failure" @dismiss="failure = null" />
 

@@ -1,7 +1,5 @@
 """规则业务结论、CSV 取值及引用证据的持久化；事务由执行流程管理。"""
 
-from datetime import date, datetime
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -40,34 +38,53 @@ def _agent_standard_of(rule: dict[str, Any]) -> dict[str, Any]:
 _INPUT_DIAGNOSTIC_KEYS = (
     "field_key", "material_key", "value_type", "unit", "currency", "material_state",
     "period_scope", "statement_scope", "entity_scope", "origin", "status",
-    "source_field_value_id", "source_rule_result_id",
+    "fact_id", "source_field_value_id", "source_rule_result_id",
 )
-# 页面按这两个键展示输入的原文与标准化结果；取值本身不是身份信息，但不能裁剪。
-_INPUT_VALUE_KEYS = ("raw_value", "normalized_value")
-
-
-def _json_safe(value: Any) -> Any:
-    """JSON 列不接受 Decimal 与日期类型；取值按文本落库，页面照原样展示。"""
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    return value
 
 
 def _diagnostic_inputs(inputs: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """诊断只保存身份与来源记录 id。
+
+    业务取值以任务 CSV 为准，不在每条结果里重复保存；展示时按这些 id 读取当时的版本。
+    """
     return [
-        {
-            **{key: item.get(key) for key in _INPUT_DIAGNOSTIC_KEYS},
-            **{key: _json_safe(item.get(key)) for key in _INPUT_VALUE_KEYS},
-        }
+        {key: item.get(key) for key in _INPUT_DIAGNOSTIC_KEYS}
         for item in (inputs or [])
         if isinstance(item, dict)
     ]
+
+
+def restore_diagnostic_inputs(
+    db: Session, task: AuditTask, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """把诊断输入里的来源记录 id 还原成当时的取值。
+
+    标准化取值按事实记录读取，原文按字段取值记录读取；两者都是不可变的历史记录，
+    因此还原出来就是保存那一刻的取值。旧结果仍带着复制值，这里不改写它们。
+    """
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list):
+        return payload
+    restored = []
+    for item in inputs:
+        if not isinstance(item, dict):
+            restored.append(item)
+            continue
+        values = dict(item)
+        fact_id = values.get("fact_id")
+        if isinstance(fact_id, int) and not isinstance(fact_id, bool):
+            values["normalized_value"] = task_value_service.value_of(
+                db, task, task_value_service.RECORD_TASK_FACT, fact_id,
+            ).get("value")
+        source_id = values.get("source_field_value_id")
+        if isinstance(source_id, int) and not isinstance(source_id, bool):
+            values["raw_value"] = task_value_service.value_of(
+                db, task, task_value_service.RECORD_TASK_FIELD_VALUE, source_id,
+            ).get("raw_value")
+        values.setdefault("raw_value", None)
+        values.setdefault("normalized_value", None)
+        restored.append(values)
+    return {**payload, "inputs": restored}
 
 
 def save_rule_result(
@@ -103,13 +120,15 @@ def save_rule_result(
         "next_action": (verdict or {}).get("next_action") or "",
         "tool_findings": (verdict or {}).get("tool_findings") or [],
     }
+    risk_level = None
+    rule_role = "RISK" if is_risk_rule(rule) else "CHECK"
     if rule.get("calculation_ref"):
         payload["calculation_definition"] = rule["calculation_definition"]
         # 计算过程已经逐条保存在 basis，不再重复保存一份说明文本。
-    if is_risk_rule(rule):
+    if rule_role == "RISK":
         # 风险上下文是模型判断依据的真实上游结论，属于业务结论而不是执行诊断。
         payload.update((verdict or {}).get("risk_context") or {})
-        payload["risk_level"] = rule.get("risk_level_value") or (rule.get("parameters") or {}).get("risk_level")
+        risk_level = rule.get("risk_level_value") or (rule.get("parameters") or {}).get("risk_level")
         payload["action"] = (rule.get("parameters") or {}).get("action")
     if verdict is None:
         status = "NOT_EXECUTED"
@@ -117,13 +136,8 @@ def save_rule_result(
     else:
         status = str(verdict.get("status") or "NOT_EXECUTED")
         message = str(verdict.get("message") or "")
-    payload["status"] = status
-    payload["message"] = message
-    # 风险等级单独成列：风险结果列表要按它筛选排序，不能压在取值文件里。
-    risk_level = payload.get("risk_level")
     # 循环状态与轮次已单独成列，诊断 JSON 不再重复保存。
     diagnostics = {
-        "origin": "AGENT",
         "evaluation_id": evaluation_id,
         "standard": _agent_standard_of(rule),
         "inputs": _diagnostic_inputs(inputs),
@@ -134,6 +148,7 @@ def save_rule_result(
         record.status = status
         record.message = message
         record.risk_level = risk_level
+        record.rule_role = rule_role
         record.loop_status = loop_status
         record.turn_count = turn_count
         # 本次保存重新声明执行来源；批量路径在保存完成后附加自己的标记。
@@ -151,6 +166,7 @@ def save_rule_result(
             status=status,
             message=message,
             risk_level=risk_level,
+            rule_role=rule_role,
             loop_status=loop_status,
             turn_count=turn_count,
             result_json=diagnostics,

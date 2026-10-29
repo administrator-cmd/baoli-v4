@@ -69,14 +69,3 @@ class TaskCopyRequest(BaseModel):
     task_name: str = Field(min_length=1, max_length=255)
     # 复制同样是一次真实写操作：响应丢失时用同一幂等标识重发，返回原任务。
     idempotency_key: str = Field(min_length=1, max_length=120)
-
-__all__ = [
-    "TaskSchemaPreviewRequest",
-    "ExecuteNodeRequest",
-    "DocumentOcrRetryRequest",
-    "DocumentArtifactRetryRequest",
-    "FieldCorrectionRequest",
-    "TaskUpdateRequest",
-    "TaskCopyRequest",
-]
-

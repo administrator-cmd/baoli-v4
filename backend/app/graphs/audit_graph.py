@@ -33,6 +33,7 @@ class AuditGraphState(TypedDict, total=False):
     evaluation_plan: list[dict[str, Any]]
     rule_outcomes: list[dict[str, Any]]
     loop_count: int
+    channel_failure: dict[str, Any] | None
 
 
 class AuditNodeRunner(RuleEvaluationRunner, Protocol):
@@ -56,6 +57,11 @@ class AuditNodeRunner(RuleEvaluationRunner, Protocol):
         self, db: Any, task_no: str, node_code: str, execution_id: int | None,
         entries: list[dict[str, Any]],
     ) -> list[dict[str, Any]]: ...
+
+    def graph_pause_scheduling(
+        self, db: Any, task_no: str, execution_id: int | None,
+        failure: dict[str, Any],
+    ) -> dict[str, Any]: ...
 
     def graph_finalize_node_execution(
         self, db: Any, task_no: str, execution_id: int | None, execution_mode: str,
@@ -107,26 +113,45 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
 
     合并只发生在连续的、同材料同产物来源的单字段抽取之间：它们互不依赖，逐个执行会把同一份
     正文重复送进模型。每条字段的结果仍各自保存、各自成败，不因同批其他字段失败而连带阻断。
+
+    模型渠道故障是唯一的提前结束：渠道不可用时后续每条规则都会失败，继续请求只会重复排队和
+    计费。已经形成的结果按单一规则或按字段逐条提交，未完成的规则留在同一批次里等待继续执行。
     """
     outcomes: list[dict[str, Any]] = []
     plan = state["evaluation_plan"]
     index = 0
+    channel_failure: dict[str, Any] | None = None
     while index < len(plan):
         group = extraction_group(plan, index)
         index += len(group)
         if len(group) > 1:
-            outcomes.extend(runtime.context["nodes"].graph_execute_extraction_batch(
+            produced = runtime.context["nodes"].graph_execute_extraction_batch(
                 runtime.context["db"], state["task_no"], state["current_node"],
                 state["execution_id"], group,
-            ))
-            continue
-        entry = group[0]
-        outcomes.append(run_rule_evaluation(
-            runtime.context["db"], runtime.context["nodes"], task_no=state["task_no"],
-            node_code=state["current_node"], execution_id=state["execution_id"],
-            rule_cursor=entry["cursor"], planned_rule=entry["rule"],
-        ))
-    return {"rule_outcomes": outcomes, "loop_count": sum(item["loop_count"] for item in outcomes)}
+            )
+        else:
+            entry = group[0]
+            produced = [run_rule_evaluation(
+                runtime.context["db"], runtime.context["nodes"], task_no=state["task_no"],
+                node_code=state["current_node"], execution_id=state["execution_id"],
+                rule_cursor=entry["cursor"], planned_rule=entry["rule"],
+            )]
+        outcomes.extend(produced)
+        failure = next(
+            (item["channel_failure"] for item in produced if item.get("channel_failure")), None,
+        )
+        if failure is not None:
+            channel_failure = failure
+            # 进度先落库再结束：即使收尾阶段再出错，页面也能看到停在哪一条、为什么停。
+            runtime.context["nodes"].graph_pause_scheduling(
+                runtime.context["db"], state["task_no"], state["execution_id"], failure=failure,
+            )
+            break
+    return {
+        "rule_outcomes": outcomes,
+        "loop_count": sum(item["loop_count"] for item in outcomes),
+        "channel_failure": channel_failure,
+    }
 
 
 def collect_agent_summary(
@@ -142,12 +167,16 @@ def collect_agent_summary(
             break
     if missing_keys:
         overall = "BLOCKED"
-    return {
-        "origin": "AGENT", "evaluation_mode": "AGENT", "agent_rule_count": len(outcomes),
+    summary = {
+        "agent_rule_count": len(outcomes),
         "missing_rule_keys": sorted(missing_keys), "rule_outcomes": outcomes,
         "loop_status": overall, "loop_count": loop_count,
         "unresolved_items": [item for outcome in outcomes for item in outcome["unresolved_items"]],
     }
+    failure = next((item["channel_failure"] for item in outcomes if item.get("channel_failure")), None)
+    if failure is not None:
+        summary["channel_failure"] = failure
+    return summary
 
 
 def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:

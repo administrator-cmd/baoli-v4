@@ -7,10 +7,10 @@ import { listPlanOptions, type PlanOption } from "@/api/plans";
 import { listRiskResults, type RiskPage } from "@/api/reports";
 import { listAdminSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
-import { RISK_RESULT_LABELS, riskResultLabel } from "@/constants/auditStatus";
+import { statusTextOf } from "@/constants/statusVocabulary";
 import { usePagedList } from "@/composables/usePagedList";
-import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 风险结果：只展示当前有效执行批次的风险规则结果。
@@ -19,11 +19,12 @@ import StatusBadge from "@/components/StatusBadge.vue";
  */
 const router = useRouter();
 
-const list = usePagedList<RiskResultRow, { scenario_code: string; plan_code: string; risk_level: string; status: string }>({
+const list = usePagedList<RiskResultRow, { task_name: string; scenario_code: string; plan_code: string; risk_level: string; status: string }>({
   key: "risk-results",
-  initialFilters: { scenario_code: "", plan_code: "", risk_level: "", status: "" },
+  initialFilters: { task_name: "", scenario_code: "", plan_code: "", risk_level: "", status: "" },
   fetch: (params) =>
     listRiskResults({
+      task_name: params.task_name || undefined,
       scenario_code: params.scenario_code || undefined,
       plan_code: params.plan_code || undefined,
       risk_level: params.risk_level || undefined,
@@ -58,14 +59,14 @@ const riskLevels = computed(() => {
     .map((value) => ({ value, label: value }));
 });
 
-const statusOptions = [
-  { value: "ABNORMAL", label: RISK_RESULT_LABELS.ABNORMAL },
-  { value: "PASSED", label: RISK_RESULT_LABELS.PASSED },
-  { value: "EVIDENCE_INSUFFICIENT", label: RISK_RESULT_LABELS.EVIDENCE_INSUFFICIENT },
-  { value: "NOT_APPLICABLE", label: RISK_RESULT_LABELS.NOT_APPLICABLE },
-  { value: "NOT_EXECUTED", label: RISK_RESULT_LABELS.NOT_EXECUTED },
-  { value: "PENDING_REVIEW", label: RISK_RESULT_LABELS.PENDING_REVIEW },
-];
+const statusOptions = computed(() => [
+  "ABNORMAL",
+  "PASSED",
+  "EVIDENCE_INSUFFICIENT",
+  "NOT_APPLICABLE",
+  "NOT_EXECUTED",
+  "PENDING_REVIEW",
+].map((value) => ({ value, label: statusTextOf("risk", value) })));
 
 
 
@@ -110,12 +111,10 @@ onMounted(async () => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="报告管理"
-      title="风险结果"
-      :show-refresh="false"
-    />
     <el-form inline class="app-query" @submit.prevent="list.search()">
+      <el-form-item label="任务名称">
+        <el-input v-model="filters.task_name" clearable placeholder="任务名称" style="width: 180px" @keyup.enter="list.search()" />
+      </el-form-item>
       <el-form-item label="所属方案">
         <el-select v-model="filters.plan_code" clearable filterable placeholder="全部方案" style="width: 200px">
           <el-option v-for="item in planOptions" :key="item.plan_code" :value="item.plan_code" :label="item.plan_name" />
@@ -161,8 +160,11 @@ onMounted(async () => {
     />
 
     <div class="app-toolbar">
-      <div class="app-toolbar__left">
-        <span>命中 {{ hitCount }} 条</span>
+      <div class="app-toolbar__left risk-summary">
+        <span class="risk-summary__hit" :class="{ 'risk-summary__hit--empty': !hitCount }">
+          <span class="risk-summary__count">{{ hitCount }}</span> 条已确认风险
+        </span>
+        <span class="text-hint">共 {{ total }} 条结果</span>
       </div>
     </div>
 
@@ -171,11 +173,11 @@ onMounted(async () => {
     </el-alert>
 
     <el-table v-else :data="items" border stripe class="audit-result-table" v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="风险编号" width="120">
+      <el-table-column label="风险编号" width="140">
         <template #default="{ row }"><span class="mono">{{ row.rule_code || "—" }}</span></template>
       </el-table-column>
-      <el-table-column prop="task_name" label="任务" min-width="128" show-overflow-tooltip />
-      <el-table-column label="风险名称" min-width="160" show-overflow-tooltip>
+      <el-table-column prop="task_name" label="任务" min-width="200" show-overflow-tooltip />
+      <el-table-column label="风险名称" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="detail = row">{{ row.name }}</el-button>
         </template>
@@ -183,7 +185,7 @@ onMounted(async () => {
       <el-table-column label="来源规则" min-width="112" show-overflow-tooltip>
         <template #default="{ row }">{{ row.source_rule_name || "—" }}</template>
       </el-table-column>
-      <el-table-column label="风险等级" width="104">
+      <el-table-column label="风险等级" width="140">
         <template #default="{ row }">
           <el-tag v-if="row.risk_level" type="info" size="small" effect="light" disable-transitions>
             {{ row.risk_level }}
@@ -191,16 +193,16 @@ onMounted(async () => {
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="当前状态" width="120">
-        <template #default="{ row }"><StatusBadge :status="row.status" :label="riskResultLabel(row.status)" /></template>
+      <el-table-column label="当前状态" width="140">
+        <template #default="{ row }"><StatusBadge domain="risk" :status="row.status" /></template>
       </el-table-column>
       <el-table-column label="处理建议" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">{{ row.suggestion || "—" }}</template>
       </el-table-column>
-      <el-table-column label="创建时间" width="184">
+      <el-table-column label="创建时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="136" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="156" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="detail = row">详情</el-button>
           <el-button link type="primary" size="small" @click="openTask(row)">查看任务</el-button>
@@ -213,7 +215,7 @@ onMounted(async () => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"
@@ -229,7 +231,7 @@ onMounted(async () => {
         <el-descriptions-item label="来源规则">{{ detail.source_rule_name || "未记录来源规则" }}</el-descriptions-item>
         <el-descriptions-item label="风险等级">{{ detail.risk_level || "—" }}</el-descriptions-item>
         <el-descriptions-item label="当前状态">
-          <StatusBadge :status="detail.status" :label="riskResultLabel(detail.status)" />
+          <StatusBadge domain="risk" :status="detail.status" />
           <div class="text-muted block-gap-sm">{{ detail.message }}</div>
         </el-descriptions-item>
         <el-descriptions-item label="处理建议">{{ detail.suggestion || "—" }}</el-descriptions-item>
@@ -243,3 +245,25 @@ onMounted(async () => {
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.risk-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.risk-summary__hit {
+  color: var(--el-color-danger);
+}
+
+.risk-summary__hit--empty {
+  color: var(--el-text-color-regular);
+}
+
+.risk-summary__count {
+  font-size: 18px;
+  font-weight: 600;
+}
+</style>

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _LOCKS = "task_value_file_locks"
 _SNAPSHOTS = "task_value_file_snapshots"
 _CACHE = "task_value_records"
+TABLE_CACHE = "task_value_tables"
 
 
 def _file_lock(task_no: str) -> FileLock:
@@ -98,6 +99,7 @@ def _finish_snapshot(db: Session, transaction, *, restore: bool) -> None:
                 shutil.copyfile(backup, restoring)
                 os.replace(restoring, target)
         db.info.pop(_CACHE, None)
+        db.info.pop(TABLE_CACHE, None)
     del snapshots[transaction]
     _discard_backups(files)
 
@@ -124,6 +126,7 @@ def _end_files(db: Session, transaction) -> None:
             _finish_snapshot(db, pending, restore=False)
         db.info.pop(_SNAPSHOTS, None)
         db.info.pop(_CACHE, None)
+        db.info.pop(TABLE_CACHE, None)
         locks = db.info.pop(_LOCKS, {})
         for lock in locks.values():
             lock.release()

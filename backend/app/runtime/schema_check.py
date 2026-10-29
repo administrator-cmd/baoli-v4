@@ -59,23 +59,39 @@ def verify_schema(engine: Engine | None = None) -> dict[str, list[str]]:
     if missing:
         raise RuntimeError(
             "数据库缺少必需业务表：" + "、".join(missing)
-            + "。应用不会自动修表；请执行 backend/resource/schema.sql 重建空库。"
+            + "。应用不会自动建表；新库请执行 backend/resource/schema.sql 后 alembic stamp head，已有库按需 upgrade head。"
         )
     problems: list[str] = []
     missing_all: list[str] = []
+    unexpected_all: list[str] = []
     for name in REQUIRED_TABLES:
         table = Base.metadata.tables.get(name)
         if table is None:
             continue
-        actual = {column["name"] for column in inspector.get_columns(name)}
-        missing_columns = sorted(column.name for column in table.columns if column.name not in actual)
+        actual_columns = inspector.get_columns(name)
+        actual = {column["name"] for column in actual_columns}
+        expected = {column.name for column in table.columns}
+        missing_columns = sorted(column for column in expected if column not in actual)
         if missing_columns:
             problems.append(f"{name} 缺少列（{', '.join(missing_columns)}）")
             missing_all.extend(f"{name}.{column}" for column in missing_columns)
+        # 迁移前启动时，代码已不再写入的 NOT NULL 无默认列会让插入直接失败；
+        # 启动校验必须把它当作结构不一致，而不是只看“实体列是否都在”。
+        unexpected_required = sorted(
+            column["name"] for column in actual_columns
+            if column["name"] not in expected
+            and not column["nullable"]
+            and column.get("default") is None
+            and not column.get("computed")
+            and not column.get("autoincrement")
+        )
+        if unexpected_required:
+            problems.append(f"{name} 存在代码未写入的必填列（{', '.join(unexpected_required)}）")
+            unexpected_all.extend(f"{name}.{column}" for column in unexpected_required)
     if problems:
         raise RuntimeError(
             "数据库结构与当前代码不一致：" + "；".join(problems)
-            + "。应用不会自动迁移；请执行 backend/resource/schema.sql 重建空库。"
+            + "。应用不会自动迁移；已有库请执行 alembic upgrade head，新库用当前 schema.sql 建库。"
         )
     logger.info("必需业务表与列齐全")
-    return {"missing_tables": [], "missing_columns": missing_all}
+    return {"missing_tables": [], "missing_columns": missing_all, "unexpected_required_columns": unexpected_all}

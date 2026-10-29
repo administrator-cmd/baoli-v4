@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...common.pagination import PageResult, page_result
+from ...constants.status import SCENARIO_VERSION_STATUS_PUBLISHED
 from ...domain.plan_calculations import plan_calculation_config
 from ...domain.rule_library import active
 from ...entity.plans import AuditPlan, PlanMaterial, PlanRule
@@ -71,6 +72,7 @@ def list_plans_page(
     plan_ids = [item.id for item in plans]
     rule_counts: dict[int, int] = {}
     scenario_names: dict[str, str] = {}
+    base_versions: dict[int, Any] = {}
     if plan_ids:
         rule_counts = {
             plan.id: sum(active({**(item.get("rule_json") or {}), "enabled": item["enabled"]}) for item in plan.config_json["rules"])
@@ -81,6 +83,17 @@ def list_plans_page(
             select(ScenarioTemplate.scenario_code, ScenarioTemplate.scenario_name).where(ScenarioTemplate.scenario_code.in_(codes))
         ).all():
             scenario_names[code] = scenario_name
+        # 来源版本一次读完：逐个 db.get 会把每份版本的 manifest_json（200KB+）都载入内存，
+        # 而列表只用版本号和名称。
+        version_ids = {plan.scenario_version_id for plan in plans if plan.scenario_version_id}
+        if version_ids:
+            base_versions = {
+                row.id: row
+                for row in db.execute(
+                    select(ScenarioVersion.id, ScenarioVersion.version_no, ScenarioVersion.scenario_name)
+                    .where(ScenarioVersion.id.in_(version_ids))
+                ).all()
+            }
 
     items = []
     for plan in plans:
@@ -89,7 +102,7 @@ def list_plans_page(
         enabled_rule_count = sum(1 for item in rules if active(item)) if isinstance(rules, list) else 0
         context = plan.context_json if isinstance(plan.context_json, dict) else {}
         _, calculation_enabled = plan_calculation_config(context)
-        base_version = db.get(ScenarioVersion, plan.scenario_version_id) if plan.scenario_version_id else None
+        base_version = base_versions.get(plan.scenario_version_id) if plan.scenario_version_id else None
         items.append(
             {
                 "plan_code": plan.plan_code,
@@ -114,7 +127,10 @@ def list_plans_page(
 
 
 def list_plan_options(db: Session, *, scenario_code: str | None) -> list[dict[str, Any]]:
-    """下拉选项：启用且未删除、且范围已生效的方案。"""
+    """下拉选项：启用且未删除、且范围已生效的方案。
+
+    选项带 `scope_hash`：创建任务页据此提交并发保护，不再为拿范围哈希单独读一次方案详情。
+    """
     conditions = [
         AuditPlan.deleted_at.is_(None),
         AuditPlan.enabled.is_(True),
@@ -122,7 +138,7 @@ def list_plan_options(db: Session, *, scenario_code: str | None) -> list[dict[st
     ]
     if scenario_code:
         conditions.append(AuditPlan.scenario_code == scenario_code)
-    # 下拉只需要四个轻量字段。直接 select(AuditPlan) 会把多个大 JSON 列
+    # 下拉只需要几个轻量字段。直接 select(AuditPlan) 会把多个大 JSON 列
     # 带入 ORDER BY plan_name，在 MySQL 小 sort buffer 下触发 1038。
     rows = db.execute(
         select(
@@ -130,6 +146,7 @@ def list_plan_options(db: Session, *, scenario_code: str | None) -> list[dict[st
             AuditPlan.plan_name,
             AuditPlan.scenario_code,
             ScenarioVersion.version_no,
+            AuditPlan.scope_hash,
         )
         .outerjoin(ScenarioVersion, ScenarioVersion.id == AuditPlan.scenario_version_id)
         .where(*conditions)
@@ -141,8 +158,9 @@ def list_plan_options(db: Session, *, scenario_code: str | None) -> list[dict[st
             "plan_name": plan_name,
             "scenario_code": scenario_code,
             "scenario_version_no": version_no,
+            "scope_hash": scope_hash,
         }
-        for plan_code, plan_name, scenario_code, version_no in rows
+        for plan_code, plan_name, scenario_code, version_no, scope_hash in rows
     ]
 
 
@@ -175,7 +193,7 @@ def plan_selection_view(db: Session, plan: AuditPlan) -> dict[str, Any]:
         "base_scenario_version": (
             {
                 "version_no": version.version_no,
-                "status": version.status,
+                "status": SCENARIO_VERSION_STATUS_PUBLISHED,
                 "published_at": version.published_at,
                 "scenario_name": version.scenario_name,
             }

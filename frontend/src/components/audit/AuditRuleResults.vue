@@ -1,25 +1,25 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 
-import type { AuditRule, RuleStatusItem } from "@/api/contracts";
-import { getRuleStatusCatalog } from "@/api/system";
+import type { AuditRule } from "@/api/contracts";
 import AuditRuleDetailDrawer from "@/components/audit/AuditRuleDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { isOutputRule, isOutputRuleGroup, ruleGroupOf } from "@/constants/auditRuleGroups";
 import { auditResultSummary, AUDIT_RESULT_CATEGORIES, UNDECIDED_RESULT_STATUSES } from "@/constants/auditStatus";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
-import { statusTone } from "@/constants/labels";
+import {
+  categoryLabel,
+  isStatusVocabularyLoaded,
+  statusCategoryOf,
+  statusVocabularyError,
+} from "@/constants/statusVocabulary";
 import { quoteInlineText } from "@/utils/quoteText";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 import {
   formatInputValue,
-  manualNote,
-  manuallyReviewed,
   materialsOf,
   payloadOf,
-  reasonText,
-  resultStatusLabel,
   ruleCodeOf,
   standardText,
   valueSourcesOf,
@@ -39,54 +39,50 @@ const sheetOptions = computed(() => Array.from(new Set(
   props.rules.map((rule) => rule.source_sheet).filter((sheet): sheet is string => Boolean(sheet)),
 )).sort(compareNaturalLabels));
 /**
- * 服务端规则状态目录。分档以它为准，页面不再本地维护一份名单——
+ * 审核状态词表由后端统一提供（main.ts 启动时加载）。分档以它为准，页面不再维护名单——
  * 本地名单与后端漂移过（`NOT_APPLICABLE`、`SKIPPED` 曾被漏出分档）。
  *
- * 目录读取中或读取失败时退回下面的只读兜底分档：兜底只在拿不到目录时生效，
- * 且未覆盖的状态码仍会被显式提示出来。没有兜底的话，目录还没到时所有结果都会落进
- * 「未识别」，筛选数量显示为 0，用户会以为结果丢了。
+ * 词表尚未加载或读取失败时退回下面的只读兜底分档；词表已加载但状态码不在其中时，
+ * 结果进入「未识别」并单独提示，不能被兜底表伪装成正常分档。
  */
-const catalog = ref<RuleStatusItem[] | null>(null);
-const catalogError = ref<string | null>(null);
+const vocabularyError = computed(() => statusVocabularyError());
 
-void (async () => {
-  try {
-    catalog.value = (await getRuleStatusCatalog()).statuses;
-  } catch (error) {
-    catalogError.value = error instanceof Error ? error.message : "未知原因";
-  }
-})();
-
-/** 与服务端 STATUS_CATEGORIES 同口径的兜底分档；仅用于目录不可用时。 */
+/** 与服务端 STATUS_CATEGORIES 同口径的兜底分档；仅用于词表不可用时。 */
 const FALLBACK_CATEGORY: Readonly<Record<string, string>> = AUDIT_RESULT_CATEGORIES;
+
+interface RuleFilter {
+  value: string;
+  label: string;
+  categories: string[];
+}
 
 /**
  * 筛选分档。它必须覆盖服务端可能给出的全部状态码：
  *   「未执行」= 应当执行但没有跑完；「不适用」= 适用条件明确不成立，本次就不该查；
  *   「已跳过」= 当前场景没配置这类检查。三者都不是通过，也不能互相冒充。
- * 在目录中找不到的码（新增或历史遗留）不会被静默丢掉——它进「未识别」，并在下方单独提示。
+ * 在词表中找不到的码（新增或历史遗留）不会被静默丢掉——它进「未识别」，并在下方单独提示。
  */
-const filters = [
-  { value: "ALL", label: "全部", categories: [] as string[] },
-  { value: "DECIDED", label: "已判定", categories: ["DECIDED"] },
-  { value: "COMPUTED", label: "已完成产出", categories: ["COMPUTED"] },
-  { value: "UNDECIDED", label: "尚未判定", categories: ["UNDECIDED"] },
-  { value: "NOT_APPLICABLE", label: "不适用", categories: ["NOT_APPLICABLE"] },
-];
+const filters = computed<RuleFilter[]>(() => [
+  { value: "ALL", label: "全部", categories: [] },
+  { value: "DECIDED", label: categoryLabel("DECIDED") ?? "已判定", categories: ["DECIDED"] },
+  { value: "COMPUTED", label: categoryLabel("COMPUTED") ?? "已产出（无结论）", categories: ["COMPUTED"] },
+  { value: "UNDECIDED", label: categoryLabel("UNDECIDED") ?? "尚未判定", categories: ["UNDECIDED"] },
+  { value: "NOT_APPLICABLE", label: categoryLabel("NOT_APPLICABLE") ?? "不适用", categories: ["NOT_APPLICABLE"] },
+]);
 
-/** 目录可用时以目录为准；否则用兜底表，两者都没有才判为未识别。 */
+/** 词表可用时以词表为准；词表未加载时用兜底表，两者都没有才判为未识别。 */
 function categoryOf(rule: AuditRule): string {
-  const known = catalog.value?.find((item) => item.status === rule.status);
-  if (known) {
-    return known.category;
+  const category = statusCategoryOf("rule", rule.status);
+  if (category) {
+    return category;
   }
-  if (!catalog.value) {
+  if (!isStatusVocabularyLoaded()) {
     return FALLBACK_CATEGORY[rule.status] ?? "UNKNOWN";
   }
   return "UNKNOWN";
 }
 
-function matchesFilter(rule: AuditRule, filter: (typeof filters)[number]): boolean {
+function matchesFilter(rule: AuditRule, filter: RuleFilter): boolean {
   return filter.value === "ALL" || filter.categories.includes(categoryOf(rule));
 }
 
@@ -104,7 +100,7 @@ const unknownStatusCounts = computed(() => {
 const unknownStatusTotal = computed(() => Object.values(unknownStatusCounts.value).reduce((sum, item) => sum + item, 0));
 
 const rows = computed(() => {
-  const selected = filters.find((item) => item.value === statusFilter.value)!;
+  const selected = filters.value.find((item) => item.value === statusFilter.value)!;
   const query = search.value.trim().toLocaleLowerCase();
   return props.rules.filter((rule) => {
     const text = [
@@ -112,7 +108,6 @@ const rows = computed(() => {
       rule.name,
       standardText(rule),
       rule.message,
-      manualNote(rule),
       materialsOf(rule),
       ...valueSourcesOf(rule).flatMap((item) => [
         item.material_name,
@@ -225,11 +220,11 @@ function openDetail(rule: AuditRule): void {
     </div>
 
     <el-alert
-      v-if="catalogError"
+      v-if="vocabularyError"
       type="warning"
       show-icon
       :closable="false"
-      :title="`规则状态口径读取失败：${catalogError}`"
+      :title="`规则状态口径读取失败：${vocabularyError}`"
     >
       分档暂按内置口径显示；未识别的状态码会在下方单独列出，不会被静默丢弃。
     </el-alert>
@@ -239,7 +234,7 @@ function openDetail(rule: AuditRule): void {
       type="warning"
       show-icon
       :closable="false"
-      :title="`有 ${unknownStatusTotal} 条结果的状态不在服务端状态目录中（${Object.entries(unknownStatusCounts).map(([status, count]) => `${status} ${count} 条`).join('、')}），它们只在「全部」里出现，既不计入已判定也不计入尚未判定。`"
+      :title="`有 ${unknownStatusTotal} 条结果的状态不在服务端状态词表中（${Object.entries(unknownStatusCounts).map(([status, count]) => `${status} ${count} 条`).join('、')}），它们只在「全部」里出现，既不计入已判定也不计入尚未判定。`"
     />
 
     <el-empty v-if="!rows.length" description="没有符合筛选条件的检查结果">
@@ -270,23 +265,22 @@ function openDetail(rule: AuditRule): void {
             <template #default="{ row }">{{ materialsOf(row) || '—' }}</template>
           </el-table-column>
 
-          <el-table-column label="结论" width="120" align="center">
+          <!-- 结论列要容纳最长的状态文案「已产出（无结论）」，列宽不足时标签会向右溢出压到列边界。 -->
+          <el-table-column label="结论" width="184" align="center">
             <template #default="{ row }">
-              <StatusBadge :status="row.status" :label="resultStatusLabel(row)" :tone="statusTone(row.status)" />
+              <StatusBadge domain="rule" :status="row.status" />
             </template>
           </el-table-column>
 
           <el-table-column label="判断依据" min-width="400" align="center">
             <template #default="{ row }">
               <div class="rule-reason">
-                <span v-if="manuallyReviewed(row)">{{ manualNote(row) || "本次人工复核没有记录说明" }}</span>
-                <span v-else>{{ auditResultSummary(row.status, row.message, payloadOf(row)) }}</span>
+                <span>{{ auditResultSummary(row.status, row.message, payloadOf(row)) }}</span>
               </div>
-              <div v-if="reasonText(row)" class="table-note rule-reason">{{ reasonText(row) }}</div>
             </template>
           </el-table-column>
 
-          <el-table-column label="操作" width="96" class-name="table-actions" fixed="right" align="center">
+          <el-table-column label="操作" width="112" class-name="table-actions" fixed="right" align="center">
             <template #default="{ row }">
               <el-button link type="primary" @click.stop="openDetail(row)">查看详情</el-button>
             </template>

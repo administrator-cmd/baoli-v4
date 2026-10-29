@@ -8,12 +8,10 @@ import RulebookFilesView from "@/views/documents/RulebookFilesView.vue";
 import ImportWorkbenchView from "@/views/imports/ImportWorkbenchView.vue";
 import NotFoundView from "@/views/NotFoundView.vue";
 import PlanEditView from "@/views/plans/PlanEditView.vue";
-import PlanConfigIndexView from "@/views/plans/PlanConfigIndexView.vue";
 import PlanListView from "@/views/plans/PlanListView.vue";
 import ReportListView from "@/views/reports/ReportListView.vue";
 import RiskResultListView from "@/views/reports/RiskResultListView.vue";
 import SceneDetailView from "@/views/scenes/SceneDetailView.vue";
-import SceneConfigIndexView from "@/views/scenes/SceneConfigIndexView.vue";
 import SceneImportsView from "@/views/scenes/SceneImportsView.vue";
 import SceneListView from "@/views/scenes/SceneListView.vue";
 import SceneRuleEditView from "@/views/scenes/SceneRuleEditView.vue";
@@ -38,12 +36,11 @@ const routes: RouteRecordRaw[] = [
 
   // 场景管理
   { path: "/scenes", name: "scenes", component: SceneListView, meta: { title: "场景列表", group: "场景管理", menu: "/scenes" } },
-  { path: "/scene-config", name: "scene-config", component: SceneConfigIndexView, meta: { title: "场景配置", group: "场景管理", menu: "/scene-config" } },
   {
     path: "/scenes/:scenarioCode",
     name: "scene-detail",
     component: SceneDetailView,
-    meta: { title: "场景配置", group: "场景管理", menu: "/scene-config" },
+    meta: { title: "场景配置", group: "场景管理", menu: "/scenes" },
   },
   {
     // 规则编辑是场景上下文页面：路径里已经带固定的场景编码，
@@ -51,28 +48,27 @@ const routes: RouteRecordRaw[] = [
     path: "/scene-rules/edit/:scenarioCode/:ruleKey",
     name: "scene-rule-edit",
     component: SceneRuleEditView,
-    meta: { title: "规则编辑", group: "场景管理", menu: "/scene-config" },
+    meta: { title: "规则编辑", group: "场景管理", menu: "/scenes" },
   },
   {
-    // 导入作业列表与工作台是场景上下文页面：上传必须以场景为起点，
-    // 页面可从侧栏进入，也可通过 `?scenario=` 指定场景；作业记录所属场景。
+    // 导入作业列表与工作台是场景上下文页面：从场景详情的「规则库导入」进入，
+    // 也可通过 `?scenario=` 指定场景；作业记录所属场景。
     path: "/scene-imports",
     name: "scene-imports",
     component: SceneImportsView,
-    meta: { title: "规则库导入", group: "场景管理", menu: "/scene-imports" },
+    meta: { title: "规则库导入", group: "场景管理", menu: "/scenes" },
   },
   {
     path: "/scene-imports/:jobNo",
     name: "scene-import-detail",
     component: ImportWorkbenchView,
-    meta: { title: "导入详情", group: "场景管理", menu: "/scene-imports" },
+    meta: { title: "导入详情", group: "场景管理", menu: "/scenes" },
   },
 
   // 方案管理
   { path: "/plans", name: "plans", component: PlanListView, meta: { title: "方案列表", group: "方案管理", menu: "/plans" } },
   { path: "/plans/new", name: "plan-new", component: PlanEditView, meta: { title: "新增方案", group: "方案管理", menu: "/plans" } },
-  { path: "/plans/edit", name: "plan-config", component: PlanConfigIndexView, meta: { title: "方案配置", group: "方案管理", menu: "/plans/edit" } },
-  { path: "/plans/:planCode", name: "plan-edit", component: PlanEditView, meta: { title: "方案配置", group: "方案管理", menu: "/plans/edit" } },
+  { path: "/plans/:planCode", name: "plan-edit", component: PlanEditView, meta: { title: "方案配置", group: "方案管理", menu: "/plans" } },
 
   // 任务管理
   { path: "/audit-tasks", name: "audit-tasks", component: AuditTaskListView, meta: { title: "审核任务", group: "任务管理", menu: "/audit-tasks" } },

@@ -107,19 +107,31 @@ def prepare_task_materials(db: Session, task: AuditTask, execution: NodeExecutio
                      task_no, item["material_name"], stage, detail["reason"])
 
     for document, upload in uploads:
-        if upload is None and document.current_upload_id is None:
+        if upload is None:
+            # 可选材料未上传时确实没有要处理的文件；必填材料没有当前上传不能跳过，
+            # 否则整轮审核会在缺输入的情况下继续，页面却看不到任何缺项。
+            if document.required:
+                missing = {
+                    "material_key": document.material_key, "material_name": document.material_name,
+                    "upload_id": None, "filename": None,
+                    "status": "WAITING", "stage": "SOURCE", "artifacts": {},
+                    "stages": {stage: {"status": "WAITING"} for stage in STAGES},
+                }
+                progress["materials"].append(missing)
+                fail(missing, "SOURCE", BusinessError(
+                    "TASK_DOCUMENT_UPLOAD_MISSING", "必填材料没有当前上传文件，无法进行前置处理",
+                    status_code=500,
+                ))
             continue
         item = {
             "material_key": document.material_key, "material_name": document.material_name,
-            "upload_id": document.current_upload_id, "filename": upload.original_filename if upload else None,
+            "upload_id": upload.id, "filename": upload.original_filename,
             "status": "WAITING", "stage": "SOURCE", "artifacts": {},
             "stages": {stage: {"status": "WAITING"} for stage in STAGES},
         }
         progress["materials"].append(item)
-        documents[document.current_upload_id] = document
-        if upload is None:
-            fail(item, "SOURCE", BusinessError("TASK_DOCUMENT_UPLOAD_MISSING", "材料的当前上传记录不存在", status_code=500))
-        elif not resolve_storage_path(upload.relative_path).is_file():
+        documents[upload.id] = document
+        if not resolve_storage_path(upload.relative_path).is_file():
             fail(item, "SOURCE", BusinessError("DOCUMENT_SOURCE_MISSING", "当前上传文件不存在，无法进行前置处理", status_code=500))
         else:
             runnable.append(item)

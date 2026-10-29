@@ -1,7 +1,6 @@
 import type { JsonValue } from "@/api/contracts";
-import type { StatusTone } from "@/constants/labels";
 
-/** 审核结果状态的稳定业务口径。 */
+/** 审核结果状态的稳定业务口径。中文文案与颜色由后端状态词表按语境提供。 */
 export type AuditResultStatus =
   | "PASSED"
   | "ABNORMAL"
@@ -14,47 +13,6 @@ export type AuditResultStatus =
   | "RUNNING"
   | "SKIPPED";
 
-/** 审核结果状态的中文标签；COMPUTED 表示产出完成，不代指审核通过。 */
-export const AUDIT_RESULT_LABELS: Record<AuditResultStatus, string> = {
-  PASSED: "通过",
-  ABNORMAL: "异常",
-  COMPUTED: "已完成产出",
-  NOT_APPLICABLE: "不适用",
-  EVIDENCE_INSUFFICIENT: "证据不足",
-  NOT_EXECUTED: "未执行",
-  PENDING_REVIEW: "未确认",
-  REVIEWED: "已复核",
-  RUNNING: "执行中",
-  SKIPPED: "已跳过",
-};
-
-/** 风险规则使用风险结论措辞，未命中单条规则不代表整个任务无风险。 */
-export const RISK_RESULT_LABELS: Readonly<Record<AuditResultStatus, string>> = {
-  ...AUDIT_RESULT_LABELS,
-  PASSED: "未命中风险",
-  ABNORMAL: "已确认风险",
-  NOT_APPLICABLE: "本次不适用",
-  EVIDENCE_INSUFFICIENT: "无法判断",
-  PENDING_REVIEW: "待确认",
-};
-
-export function riskResultLabel(status: string): string | null {
-  return RISK_RESULT_LABELS[status as AuditResultStatus] ?? null;
-}
-
-export const AUDIT_RESULT_TONES: Record<AuditResultStatus, StatusTone> = {
-  PASSED: "success",
-  ABNORMAL: "danger",
-  COMPUTED: "info",
-  NOT_APPLICABLE: "neutral",
-  EVIDENCE_INSUFFICIENT: "warning",
-  NOT_EXECUTED: "neutral",
-  PENDING_REVIEW: "warning",
-  REVIEWED: "success",
-  RUNNING: "info",
-  SKIPPED: "neutral",
-};
-
 export const COMPLETED_RESULT_STATUSES: ReadonlySet<string> = new Set([
   "PASSED",
   "ABNORMAL",
@@ -62,16 +20,13 @@ export const COMPLETED_RESULT_STATUSES: ReadonlySet<string> = new Set([
   "NOT_APPLICABLE",
 ]);
 
-/** 抽取规则形成产出的状态；沿用页面原有口径，避免把异常判定当作抽取完成。 */
-export const EXTRACTION_RESULT_STATUSES: ReadonlySet<string> = new Set(["COMPUTED", "PASSED"]);
-
 export const UNDECIDED_RESULT_STATUSES: ReadonlySet<string> = new Set([
   "EVIDENCE_INSUFFICIENT",
   "PENDING_REVIEW",
   "NOT_EXECUTED",
 ]);
 
-/** 与后端状态目录同口径；服务端目录可用时仍以目录为准。 */
+/** 后端状态词表不可用时的兜底分档；词表可用时以词表为准。 */
 export const AUDIT_RESULT_CATEGORIES: Record<AuditResultStatus, string> = {
   COMPUTED: "COMPUTED",
   PASSED: "DECIDED",
@@ -106,9 +61,9 @@ export function auditResultSummary(status: string, message: string, result: Reco
   const summaries: Record<string, string> = {
     PASSED: "符合要求",
     ABNORMAL: "不符合要求",
-    COMPUTED: "已完成计算或生成",
+    COMPUTED: "已产出中间值，本条没有合格或异常结论",
     NOT_APPLICABLE: "本次不适用",
-    EVIDENCE_INSUFFICIENT: "依据不足，无法判断",
+    EVIDENCE_INSUFFICIENT: "依据不足，尚未形成结论",
     NOT_EXECUTED: "未完成执行",
     PENDING_REVIEW: "尚未确认",
     REVIEWED: "已人工复核",

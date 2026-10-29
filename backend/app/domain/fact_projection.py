@@ -152,11 +152,10 @@ def fact_identity(item: Any) -> tuple[Any, ...]:
 
 
 def field_fact_identity(field: dict[str, Any]) -> tuple[Any, ...]:
-    from .manifest import normalize_field_scope
     return (
         str(field.get("source_ref") or field["field_key"]), field["material_key"],
-        normalize_field_scope(field, "period_scope", status_code=500),
-        normalize_field_scope(field, "statement_scope", status_code=500),
+        field_strategy.normalize_field_scope(field, "period_scope", status_code=500),
+        field_strategy.normalize_field_scope(field, "statement_scope", status_code=500),
         str(field.get("entity_scope") or "SELF"),
     )
 
@@ -202,6 +201,8 @@ def resolve_rule_inputs(
         common = {
             "field_key": field_key,
             "material_key": material_key,
+            # 事实记录 id 供诊断按历史版本回读取值，不在结果里再复制一份业务值。
+            "fact_id": (fact or {}).get("fact_id"),
             "value_type": (fact or {}).get("value_type"),
             "unit": (fact or {}).get("unit"),
             "currency": (fact or {}).get("currency"),

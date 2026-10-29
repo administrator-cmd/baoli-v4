@@ -14,6 +14,11 @@ export function executionOutcomes(summary: Record<string, JsonValue> | null): Ex
   return (summary?.rule_outcomes as unknown as ExecutionOutcome[] | undefined) ?? [];
 }
 
+/** 缺项与未完成原因：一行展示，不把原始结构摊在表格里。 */
+export function unresolvedText(outcome: Pick<ExecutionOutcome, "unresolved_items">): string {
+  return outcome.unresolved_items.map((reason) => reason.message ?? reason.kind).join("；") || "—";
+}
+
 export function executionSummaryText(row: Pick<ExecutionRow, "result_summary">): string {
   const outcomes = executionOutcomes(row.result_summary);
   const missing = (row.result_summary?.missing_rule_keys as string[] | undefined)?.length ?? 0;
@@ -21,15 +26,4 @@ export function executionSummaryText(row: Pick<ExecutionRow, "result_summary">):
   const abnormal = outcomes.filter((item) => item.status === "ABNORMAL").length;
   const undecided = outcomes.filter((item) => !COMPLETED_RESULT_STATUSES.has(item.status)).length + missing;
   return `已记录 ${outcomes.length} 项 · 异常 ${abnormal} 项 · 未形成结论 ${undecided} 项`;
-}
-
-export function executionDuration(ms: number | null): string {
-  if (ms === null) return "—";
-  if (ms < 1000) return `${ms} 毫秒`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)} 秒`;
-  const seconds = Math.round(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  return minutes < 60
-    ? `${minutes} 分 ${seconds % 60} 秒`
-    : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分 ${seconds % 60} 秒`;
 }

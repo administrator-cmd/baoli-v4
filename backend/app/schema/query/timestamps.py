@@ -29,5 +29,3 @@ def _reject_naive(value: datetime) -> datetime:
 
 # 时间区间端点：必须是带时区的时间点。
 FilterDateTime = Annotated[datetime, AfterValidator(_reject_naive)]
-
-__all__ = ["FilterDateTime"]

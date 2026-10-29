@@ -11,9 +11,9 @@ import { usePagedList } from "@/composables/usePagedList";
 import { useOperationTracker } from "@/composables/useOperationTracker";
 import OperationPanel from "@/components/OperationPanel.vue";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
-import PageHeader from "@/components/PageHeader.vue";
 import { formatDate, formatFileSize, statusLabel } from "@/constants/labels";
 import StatusBadge from "@/components/StatusBadge.vue";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 审核材料：跨任务的材料位与当前文件。
@@ -22,11 +22,12 @@ import StatusBadge from "@/components/StatusBadge.vue";
  */
 const router = useRouter();
 
-const list = usePagedList<DocumentRow, { keyword: string; material_name: string; has_file: string }>({
+const list = usePagedList<DocumentRow, { task_name: string; keyword: string; material_name: string; has_file: string }>({
   key: "documents",
-  initialFilters: { keyword: "", material_name: "", has_file: "" },
+  initialFilters: { task_name: "", keyword: "", material_name: "", has_file: "" },
   fetch: (params) =>
     listDocuments({
+      task_name: params.task_name || undefined,
       keyword: params.keyword || undefined,
       material_name: params.material_name || undefined,
       has_file: params.has_file === "" ? undefined : params.has_file === "true",
@@ -174,18 +175,24 @@ const detailVisible = ref(false);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 const detail = ref<DocumentDetail | null>(null);
+/** 历史版本请求代次：先开的详情晚返回时不能覆盖后选中的那一份。 */
+let detailRequest = 0;
 
 async function openHistory(row: DocumentRow): Promise<void> {
+  const request = ++detailRequest;
   detailVisible.value = true;
   detailLoading.value = true;
   detailError.value = null;
   detail.value = null;
   try {
-    detail.value = await getDocument(row.document_no);
+    const payload = await getDocument(row.document_no);
+    if (request !== detailRequest) return;
+    detail.value = payload;
   } catch (failure) {
+    if (request !== detailRequest) return;
     detailError.value = failure instanceof Error ? failure.message : "历史版本读取失败";
   } finally {
-    detailLoading.value = false;
+    if (request === detailRequest) detailLoading.value = false;
   }
 }
 
@@ -196,12 +203,10 @@ onMounted(() => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="资料管理"
-      title="审核材料"
-      :show-refresh="false"
-    />
     <el-form inline class="app-query" @submit.prevent="list.search()">
+      <el-form-item label="任务名称">
+        <el-input v-model="filters.task_name" clearable placeholder="任务名称" style="width: 180px" @keyup.enter="list.search()" />
+      </el-form-item>
       <el-form-item label="材料位">
         <el-input v-model="filters.material_name" clearable placeholder="材料位名称" style="width: 160px" @keyup.enter="list.search()" />
       </el-form-item>
@@ -233,42 +238,42 @@ onMounted(() => {
     </el-alert>
 
     <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="任务" min-width="150" show-overflow-tooltip>
+      <el-table-column label="任务" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="openTask(row)">{{ row.task_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="材料位" width="120" show-overflow-tooltip>
+      <el-table-column label="材料位" width="220" show-overflow-tooltip>
         <template #default="{ row }">
           {{ row.material_name }}
           <el-tag v-if="row.required" type="warning" size="small" effect="plain" disable-transitions>必传</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="文件名" min-width="200" show-overflow-tooltip>
+      <el-table-column label="文件名" min-width="230" show-overflow-tooltip>
         <template #default="{ row }">{{ row.filename || "—（未上传）" }}</template>
       </el-table-column>
-      <el-table-column label="文件版本" width="88">
+      <el-table-column label="文件版本" width="120">
         <template #default="{ row }">
           <span v-if="row.version_no">第 {{ row.version_no }} 版</span>
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="88">
+      <el-table-column label="大小" width="120">
         <template #default="{ row }">{{ row.size_bytes === null ? "—" : formatFileSize(row.size_bytes) }}</template>
       </el-table-column>
-      <el-table-column label="上传时间" width="184">
+      <el-table-column label="上传时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ row.uploaded_at ? formatDate(String(row.uploaded_at)) : "—" }}</span></template>
       </el-table-column>
-      <el-table-column label="处理状态" width="130">
+      <el-table-column label="处理状态" width="140">
         <template #default="{ row }"><StatusBadge :status="row.status" /></template>
       </el-table-column>
-      <el-table-column label="上传版本数" width="100">
+      <el-table-column label="上传版本数" width="104">
         <template #default="{ row }">
           <span v-if="row.version_count">{{ row.version_count }} 个</span>
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="128" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="156" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" :disabled="classificationActive"
             :title="classificationActive ? '上一份文件仍在自动校验，完成后再上传其他材料' : ''"
@@ -283,7 +288,7 @@ onMounted(() => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"
@@ -350,12 +355,12 @@ onMounted(() => {
             <el-table-column label="大小" width="88">
               <template #default="{ row }">{{ formatFileSize(row.size_bytes) }}</template>
             </el-table-column>
-            <el-table-column label="状态" width="110">
+            <el-table-column label="状态" width="120">
               <template #default="{ row }">
                 <StatusBadge :status="row.status" :label="row.is_current ? '当前' : statusLabel(row.status)" />
               </template>
             </el-table-column>
-            <el-table-column label="上传时间" width="184">
+            <el-table-column label="上传时间" width="200">
               <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
             </el-table-column>
           </el-table>

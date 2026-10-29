@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { AuditTaskRow, PlanSelection } from "@/api/contracts";
+import type { AuditTaskRow } from "@/api/contracts";
 import { operationIdempotencyKey } from "@/api/http";
 import {
   deleteAuditTask,
@@ -12,15 +12,14 @@ import {
 } from "@/api/audits";
 import {
   createTaskFromPlan,
-  getPlan,
   listPlanOptions,
   type PlanOption,
 } from "@/api/plans";
 import { usePagedList } from "@/composables/usePagedList";
-import PageHeader from "@/components/PageHeader.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { DetailTab } from "@/constants/auditWorkspaces";
-import { formatDate, statusLabel } from "@/constants/labels";
+import { formatDate, statusFilterOptions, statusLabel } from "@/constants/labels";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 审核任务列表：任务从已启用且配置生效的方案创建；
@@ -58,14 +57,10 @@ const list = usePagedList<AuditTaskRow, {
 
 const { filters, page, pageSize, total, items, loading, error } = list;
 
-const statusOptions = [
-  { value: "READY", label: "待执行" },
-  { value: "RUNNING", label: "执行中" },
-  { value: "WAITING_REVIEW", label: "等待人工复核" },
-  { value: "BLOCKED", label: "已阻断" },
-  { value: "COMPLETED", label: "执行已结束" },
-  { value: "FAILED", label: "执行失败" },
-];
+const statusOptions = statusFilterOptions(
+  ["READY", "RUNNING", "WAITING_REVIEW", "BLOCKED", "COMPLETED", "FAILED"],
+  { COMPLETED: "执行已结束" },
+);
 
 const selectedRows = ref<AuditTaskRow[]>([]);
 const deleteDisabled = computed(() => selectedRows.value.length === 0);
@@ -120,7 +115,6 @@ const createError = ref<string | null>(null);
 const createForm = reactive({ plan_code: "", task_name: "", remark: "" });
 let createAttemptKey: string | null = null;
 let createAttemptPayload: string | null = null;
-let snapshotRequest = 0;
 let createOpenRequest = 0;
 
 async function openCreate(planCode?: string): Promise<void> {
@@ -129,10 +123,6 @@ async function openCreate(planCode?: string): Promise<void> {
   // 每次打开弹窗生成新的幂等标识：失败重开时不会与上一次请求的内容冲突。
   createAttemptKey = null;
   createAttemptPayload = null;
-  ++snapshotRequest;
-  createSnapshot.value = null;
-  snapshotLoading.value = false;
-  snapshotError.value = null;
   planOptions.value = [];
   createError.value = null;
   createForm.plan_code = "";
@@ -161,46 +151,16 @@ async function openCreate(planCode?: string): Promise<void> {
   }
 }
 
-/** 创建时校验方案配置，并提交范围哈希以防止并发修改。 */
-const createSnapshot = ref<PlanSelection | null>(null);
-const snapshotLoading = ref(false);
-const snapshotError = ref<string | null>(null);
-const canCreateTask = computed(() => {
-  const snapshot = createSnapshot.value;
-  return Boolean(snapshot?.effective && snapshot.enabled && !snapshot.deleted
-    && snapshot.scope_hash && snapshot.plan_code === createForm.plan_code);
-});
-
-async function loadCreateSnapshot(): Promise<void> {
-  const planCode = createForm.plan_code;
-  const request = ++snapshotRequest;
-  createSnapshot.value = null;
-  snapshotError.value = null;
-  if (!planCode) {
-    snapshotLoading.value = false;
-    return;
-  }
-  snapshotLoading.value = true;
-  try {
-    const snapshot = await getPlan(planCode);
-    if (request === snapshotRequest && createForm.plan_code === planCode) {
-      createSnapshot.value = snapshot;
-    }
-  } catch (failure) {
-    if (request === snapshotRequest && createForm.plan_code === planCode) {
-      snapshotError.value = failure instanceof Error ? failure.message : "方案范围读取失败";
-    }
-  } finally {
-    if (request === snapshotRequest) {
-      snapshotLoading.value = false;
-    }
-  }
-}
-
-watch(
-  () => createForm.plan_code,
-  () => void loadCreateSnapshot(),
+/**
+ * 创建任务使用的方案范围：直接取下拉选项。
+ *
+ * 选项只包含「启用、未删除、范围已生效」的方案，并带 `scope_hash`；
+ * 同一哈希随创建请求提交，服务端据此拒绝打开弹窗后发生的并发修改。
+ */
+const createSnapshot = computed(() =>
+  planOptions.value.find((item) => item.plan_code === createForm.plan_code) ?? null,
 );
+const canCreateTask = computed(() => Boolean(createSnapshot.value?.scope_hash));
 
 watch(
   () => route.query.createPlan,
@@ -222,9 +182,8 @@ async function submitCreate(): Promise<void> {
     return;
   }
   const snapshot = createSnapshot.value;
-  if (!snapshot?.effective || !snapshot.enabled || snapshot.deleted
-    || !snapshot.scope_hash || snapshot.plan_code !== createForm.plan_code) {
-    ElMessage.warning("方案范围尚未读取或已变化，请重新核对后创建任务");
+  if (!snapshot?.scope_hash) {
+    ElMessage.warning("方案范围尚未就绪，请重新选择方案");
     return;
   }
   const taskName = createForm.task_name.trim();
@@ -349,11 +308,6 @@ async function loadFilterOptions(): Promise<void> {
 
 <template>
   <div class="app-panel audit-task-list">
-    <PageHeader
-      eyebrow="任务管理"
-      title="审核任务"
-      :show-refresh="false"
-    />
     <el-form class="app-query task-query" @submit.prevent="list.search()">
       <el-form-item label="任务名称">
         <el-input v-model="filters.name" clearable placeholder="任务名称" @keyup.enter="list.search()" />
@@ -411,18 +365,18 @@ async function loadFilterOptions(): Promise<void> {
           <span>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="任务状态" width="130">
+      <el-table-column label="任务状态" width="140">
         <template #default="{ row }">
           <StatusBadge :status="row.status" :label="row.status === 'COMPLETED' ? '执行已结束' : statusLabel(row.status)" />
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="190">
+      <el-table-column label="创建时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="更新时间" width="190">
+      <el-table-column label="更新时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="136" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="160" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openTask(row, primaryEntry(row).tab)">
             {{ primaryEntry(row).label }}
@@ -437,7 +391,7 @@ async function loadFilterOptions(): Promise<void> {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"
@@ -447,18 +401,6 @@ async function loadFilterOptions(): Promise<void> {
 
     <el-dialog v-model="createVisible" title="新增审核任务" width="640px" :close-on-click-modal="false">
       <el-alert v-if="createError" class="block-gap-sm" type="warning" show-icon :closable="false" :title="createError" />
-      <el-alert v-if="snapshotError" class="block-gap-sm" type="error" show-icon :closable="false" :title="`方案读取失败：${snapshotError}`">
-        <el-button size="small" @click="loadCreateSnapshot">重试</el-button>
-      </el-alert>
-      <el-alert
-        v-if="createSnapshot && !createSnapshot.effective"
-        class="block-gap-sm"
-        type="warning"
-        show-icon
-        :closable="false"
-        :title="`方案配置尚未生效：${createSnapshot.sync_error?.message ?? '配置不完整'}`"
-      />
-      <el-alert v-if="createSnapshot && (createSnapshot.deleted || !createSnapshot.enabled)" class="block-gap-sm" type="warning" show-icon :closable="false" title="方案已停用或删除，不能创建任务" />
       <el-form label-width="100px" class="block-gap-sm">
         <el-form-item label="方案" required>
           <el-select v-model="createForm.plan_code" filterable :loading="createOptionsLoading" :disabled="createOptionsLoading" placeholder="选择已启用的方案" style="width: 100%">
@@ -474,7 +416,7 @@ async function loadFilterOptions(): Promise<void> {
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createSaving" :disabled="createOptionsLoading || snapshotLoading || !canCreateTask" @click="submitCreate">创建任务</el-button>
+        <el-button type="primary" :loading="createSaving" :disabled="createOptionsLoading || !canCreateTask" @click="submitCreate">创建任务</el-button>
       </template>
     </el-dialog>
 

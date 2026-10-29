@@ -1,7 +1,6 @@
 """上传文件及业务产物的存储路径、保存与读取。"""
 
 import hashlib
-import shutil
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -63,18 +62,3 @@ def save_upload_sync(
         target.unlink(missing_ok=True)
         raise BusinessError("FILE_EMPTY", "上传文件为空")
     return total, digest.hexdigest()
-
-
-def remove_storage_tree(relative_path: str) -> None:
-    """删除存储根目录下的一组业务文件；路径越界或类型错误时明确失败。"""
-    target = resolve_storage_path(relative_path)
-    if not target.exists():
-        return
-    if not target.is_dir():
-        raise BusinessError(
-            "STORAGE_PATH_INVALID",
-            "待清理的业务存储路径不是目录",
-            status_code=500,
-            details={"path": relative_path},
-        )
-    shutil.rmtree(target)

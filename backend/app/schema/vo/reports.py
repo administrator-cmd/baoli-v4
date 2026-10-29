@@ -46,6 +46,8 @@ class ReportResponse(ApiResponse):
     results_scope: Literal["CURRENT_RUN"] = "CURRENT_RUN"
     # 当前入口返回的报告是否仍对应当前输入修订；为 false 时页面必须标明“已失效”。
     current: bool = True
+    # 失效的真实原因；current 为 true 时为空。页面直接展示它，不再自行推断失效原因。
+    stale_reason: str | None = None
     input_revision: int = 0
     snapshot: ReportSnapshotSignal | None = None
     # 本节报告声明的输出格式与各自的真实支持状态；缺少该字段会让页面无从判断
@@ -57,10 +59,3 @@ class ReportResponse(ApiResponse):
     # 报告结论的结构化形式（报告是否生成 / 范围是否完整 / 风险是否可判定 / 未实现的格式 / 能力缺口）。
     # 页面优先读它；报告正文里的中文行仍是给人读的原文，页面不再靠匹配行首文案提取结论。
     conclusion: dict[str, Any] | None = None
-
-__all__ = [
-    "ReportSnapshotSignal",
-    "ReportFormatSupport",
-    "ReportResponse",
-]
-

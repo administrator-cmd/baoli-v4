@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
 from ....constants.status import (
+    AUDIT_LLM_CHANNEL_UNAVAILABLE,
     LOOP_BLOCKED,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_COMPLETED,
@@ -20,9 +21,9 @@ from ....entity.tasks import AuditTask, NodeExecution
 from ..execution_history import invalidate_executions
 from ..reviews import _invalidate_retry_results
 from ..shared import _task_manifest
-from ..state import _scenario_nodes, _set_task_phase, _task_phase
+from ..state import _scenario_nodes, _task_phase
 from ..tasks.lookup import task_or_404
-from .errors import graph_error_state
+from .errors import agent_step, graph_error_state
 from .execution import execution_in_progress, running_execution
 
 logger = logging.getLogger(__name__)
@@ -39,8 +40,6 @@ def graph_load_task(db: Session, task_no: str) -> dict[str, Any]:
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
     _, _, current_index = _scenario_nodes(db, task)
     phase = _task_phase(task)
-    if phase != "AWAITING_CONFIRMATION":
-        raise BusinessError("AUDIT_PROGRESS_INVALID", "任务当前不处于可执行状态", status_code=409)
     return {
         "current_node": task.current_node,
         "node_index": current_index,
@@ -134,11 +133,47 @@ def _begin_node_execution(
         sequence_no=sequence_no,
         status="RUNNING",
         started_at=datetime.now(UTC),
+        # 执行轮次标识模型请求身份；继续执行时递增，避免复用上一轮的幂等键。
+        result_json={"attempt_no": 1},
     )
     db.add(execution)
     db.flush()
     task.status = TASK_STATUS_RUNNING
     return execution
+
+
+def _channel_failure_message(failure: dict[str, Any]) -> str:
+    """渠道故障的对外说明：真实原因 + 本次请求是否可能已经产生费用。"""
+    reason = str(failure.get("message") or failure.get("code") or "远程大模型渠道不可用")
+    if failure.get("result_unknown"):
+        return (
+            f"{reason}；该次请求结果未知，可能已送达供应商并产生费用，系统没有自动重复提交。"
+            "已完成的结果已保留，可在渠道恢复后继续执行未完成项"
+        )
+    return f"{reason}；本次执行已暂停，已完成的结果已保留，可在渠道恢复后继续执行未完成项"
+
+
+def graph_pause_scheduling(
+    db: Session,
+    task_no: str,
+    execution_id: int | None,
+    *,
+    failure: dict[str, Any],
+) -> dict[str, Any]:
+    """模型渠道故障时停止后续调度：先把真实原因落到批次上，再结束本次执行。
+
+    已提交的规则结果不动，也不写成任何成功状态。未完成的规则没有结果，继续执行时按
+    「未完成项 + 受影响下游」重新计算，不在这里另记一份会与结果不一致的清单。
+    """
+    with agent_step(db, task_no):
+        task = task_or_404(db, task_no, lock=True)
+        execution = execution_in_progress(db, task, execution_id)
+        execution.result_json = {
+            **(execution.result_json or {}),
+            "channel_failure": failure,
+        }
+        db.commit()
+        return {"last_error": None}
 
 
 def _incomplete_reason_counts(failed: list[dict[str, Any]]) -> list[tuple[str, int]]:
@@ -194,15 +229,24 @@ def graph_finalize_node_execution(
     # 遍历结束不等于执行成功。格式/产出失败在所有规则尝试完后汇总，允许重跑。
     failed = [item for item in execution.result_json.get("rule_outcomes", [])
               if item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED"]
-    if execution.result_json.get("loop_status") == LOOP_BLOCKED or failed:
+    # 只认本次执行产生的渠道故障：result_json 里可能还留着上一次暂停的记录，
+    # 继续执行成功后不能因为那条旧记录把本批次再判成渠道故障。
+    channel_failure = (agent_summary or {}).get("channel_failure")
+    if not isinstance(channel_failure, dict):
+        channel_failure = None
+    if channel_failure is not None:
+        # 渠道故障独立成一种失败：它不是某条规则的输出问题，修规则没有用，
+        # 而应按原批次继续未完成项。
+        execution.status = "BLOCKED"
+        execution.failure_code = AUDIT_LLM_CHANNEL_UNAVAILABLE
+        execution.failure_message = _channel_failure_message(channel_failure)
+        task.status = TASK_STATUS_BLOCKED
+        db.flush()
+    elif execution.result_json.get("loop_status") == LOOP_BLOCKED or failed:
         execution.status = "BLOCKED"
         execution.failure_code = "AUDIT_RULE_EXECUTION_INCOMPLETE"
-        incomplete_count = len(failed) + len(execution.result_json.get("missing_rule_keys", []))
-        execution.failure_message = incomplete_failure_message(execution.result_json) or (
-            f"本批次有 {incomplete_count} 项未完成执行；可处理后重新执行"
-        )
+        execution.failure_message = incomplete_failure_message(execution.result_json)
         task.status = TASK_STATUS_BLOCKED
-        _set_task_phase(task, "AWAITING_CONFIRMATION")
         db.flush()
     else:
         execution.status = "SUCCEEDED"
@@ -273,16 +317,14 @@ def graph_advance_workflow(
     if next_node:
         task.current_node = next_node["node_code"]
         task.status = TASK_STATUS_READY
-        _set_task_phase(task, "AWAITING_CONFIRMATION")
     else:
         task.status = TASK_STATUS_COMPLETED
-        _set_task_phase(task, "COMPLETED")
     db.flush()
     db.commit()
     return {
         "current_node": task.current_node,
         "node_index": _index_of(nodes, task.current_node) if next_node else current_index,
-        "phase": "AWAITING_CONFIRMATION" if next_node else "COMPLETED",
+        "phase": _task_phase(task),
         "last_execution": {
             "task_no": task.task_no,
             "node_name": nodes[current_index]["name"],

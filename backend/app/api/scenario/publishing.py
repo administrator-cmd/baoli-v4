@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from ...constants.status import SCENARIO_VERSION_STATUS_PUBLISHED
 from ...core.database import get_db
 from ...domain.manifest import build_task_schema
 from ...schema.dto.scenarios import ScenarioPublishRequest
@@ -36,7 +37,7 @@ def publish_scenario_draft(
         scenario_code=version.scenario_code,
         scenario_name=version.scenario_name,
         version_no=version.version_no,
-        status=version.status,
+        status=SCENARIO_VERSION_STATUS_PUBLISHED,
         source=version.source,
         change_summary=version.change_summary,
         material_count=len(manifest.get("materials", [])),

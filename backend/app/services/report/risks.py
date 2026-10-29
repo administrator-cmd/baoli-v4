@@ -2,14 +2,15 @@
 
 from typing import Any
 
-from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
 from ...entity.plans import AuditPlan
 from ...entity.scenarios import ScenarioVersion
 from ...entity.tasks import AuditTask, NodeExecution, RuleResult
 from ..audit import value_store as task_value_service
+from ..audit.execution_scope import current_execution_subquery, pending_rerun_predicate
 from ..audit.value_files import lock_task_files
 
 
@@ -17,6 +18,7 @@ def list_risk_results_page(
     db: Session,
     *,
     task_no: str | None,
+    task_name: str | None,
     scenario_code: str | None,
     plan_code: str | None,
     risk_level: str | None,
@@ -25,31 +27,13 @@ def list_risk_results_page(
     page_size: int,
 ) -> dict[str, Any]:
     """按真实风险结果读取当前有效批次，不依赖业务节点类型。"""
-    later_execution = aliased(NodeExecution)
-    latest_execution = (
-        select(func.max(later_execution.id))
-        .where(
-            later_execution.audit_task_id == NodeExecution.audit_task_id,
-            later_execution.node_code == NodeExecution.node_code,
-            later_execution.status != "INVALIDATED",
-        )
-        .correlate(NodeExecution)
-        .scalar_subquery()
+    # 当前批次口径与任务详情、报告共用一份实现。
+    latest_execution = current_execution_subquery(
+        NodeExecution.audit_task_id, NodeExecution.node_code,
     )
-    # 风险身份来自任务冻结规则的明确角色/算子，等级为空不表示它不是风险规则。
-    # JSON_CONTAINS 将 rule_key 与角色限定在同一条规则中，避免串配其他规则的属性。
-    risk_rule = or_(
-        func.json_contains(
-            AuditTask.manifest_json,
-            func.json_object("rule_key", RuleResult.rule_key, "rule_role", "RISK"),
-            "$.rules",
-        ) == 1,
-        func.json_contains(
-            AuditTask.manifest_json,
-            func.json_object("rule_key", RuleResult.rule_key, "operator", "RISK_TRIGGER"),
-            "$.rules",
-        ) == 1,
-    )
+    # 风险身份是执行时按任务清单判定并写在结果行上的角色，列表不再逐行解析 manifest_json。
+    # 等级为空不表示它不是风险规则。
+    risk_rule = RuleResult.rule_role == "RISK"
     base_query = (
         select(RuleResult.id)
         .select_from(RuleResult)
@@ -60,12 +44,16 @@ def list_risk_results_page(
         .where(
             risk_rule,
             NodeExecution.id == latest_execution,
+            # 待重跑的结果写着重跑前的旧结论，与任务风险视图、报告同一口径排除。
+            ~pending_rerun_predicate(RuleResult.rule_key),
         )
     )
     risk_level_expr = RuleResult.risk_level
     conditions = []
     if task_no:
         conditions.append(AuditTask.task_no == task_no)
+    if task_name:
+        conditions.append(AuditTask.task_name.like(f"%{task_name.strip()}%"))
     if scenario_code:
         conditions.append(ScenarioVersion.scenario_code == scenario_code)
     if plan_code:

@@ -9,7 +9,7 @@ from typing import Any
 from ..common.exceptions import BusinessError
 from ..constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
 from ..constants.status import CONFIG_STATUS_DISABLED, CONFIG_STATUS_PENDING
-from . import scenario_schema
+from . import fact_projection, scenario_schema
 from .execution_mode import (
     EXECUTION_MODE_ORDER,
     EXECUTION_MODES,
@@ -55,16 +55,21 @@ def is_risk_rule(rule: dict[str, Any]) -> bool:
 
 
 def _validate_execution_modes(rules: list[dict[str, Any]]) -> None:
-    """执行方式是执行器选择上下文的唯一依据；缺失时拒绝发布，不默认成 CHECK。"""
+    """执行方式是执行器选择上下文的唯一依据；缺失时拒绝发布，不默认成 CHECK。
+
+    停用项不执行，内容不参与校验：这与 `_validate_calculation_codes` 只判启用项一致。
+    """
     missing: list[dict[str, str]] = []
     problems: list[str] = []
     for rule in rules:
+        if not rule.get("enabled"):
+            continue
         name = str(rule.get("name") or rule.get("rule_key") or "")
         mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
         if mode == MODE_UNKNOWN or mode not in EXECUTION_MODES:
             missing.append({"rule_key": str(rule.get("rule_key") or ""), "name": name})
             continue
-        if not rule.get("enabled") or rule.get("kind") != "RULE":
+        if rule.get("kind") != "RULE":
             continue
         if mode in {MODE_AGGREGATE, MODE_DERIVE_RISK} and not (
             rule.get("source_rule_keys") or rule.get("source_rule_codes")
@@ -93,6 +98,83 @@ def _validate_execution_modes(rules: list[dict[str, Any]]) -> None:
             "规则执行方式与配置不匹配：" + "；".join(problems[:8]),
             details={"problems": problems},
         )
+
+
+def _validate_calculation_codes(rules: list[dict[str, Any]]) -> None:
+    """启用的计算规则编号必须唯一，且不能与其它启用规则同号。
+
+    计算事实按业务编号回查产出规则；同号时无法确定来源，不能等到读取事实才报错。
+    停用与待确认项不执行、不产出事实，让它们参与判重只会把可用配置挡在发布之外，
+    因此判重只看启用项——与 `_validate_execution_modes` 跳过停用规则的口径一致。
+    """
+    calculations = [rule for rule in rules if rule.get("calculation_ref") and rule.get("enabled")]
+    codes = [str(rule.get("rule_code") or "") for rule in calculations]
+    if not all(codes) or len(codes) != len(set(codes)):
+        raise BusinessError(
+            "RULE_CODE_CONFLICT", "计算规则编号缺失或重复，无法确定结果来源",
+            details={"rule_codes": codes},
+        )
+    # 计算事实按 result_code 落库与回查；两条计算规则同号时当前事实会互相覆盖。
+    result_codes = [str(rule.get("result_code") or "") for rule in calculations]
+    if not all(result_codes) or len(result_codes) != len(set(result_codes)):
+        raise BusinessError(
+            "RULE_CODE_CONFLICT", "计算结果编号缺失或重复，无法确定事实来源",
+            details={"result_codes": result_codes},
+        )
+    calculation_keys = {rule["rule_key"] for rule in calculations}
+    by_code: dict[str, list[str]] = {}
+    for rule in rules:
+        if not rule.get("enabled"):
+            continue
+        by_code.setdefault(str(rule.get("rule_code") or ""), []).append(rule["rule_key"])
+    conflicts = {
+        code: sorted(keys) for code, keys in by_code.items()
+        if len(keys) > 1 and calculation_keys.intersection(keys)
+    }
+    if conflicts:
+        raise BusinessError(
+            "RULE_CODE_CONFLICT", "计算规则编号与其它规则相同，无法确定结果来源",
+            details={"conflicts": conflicts},
+        )
+
+
+def _validate_output_producers(rules: list[dict[str, Any]]) -> None:
+    """同一字段只能有一条启用规则声明为产出。
+
+    字段事实按身份只保留一个当前值；两条启用规则产出同一字段时，写入与撤销都无法
+    判断该由谁负责，运行期只会静默互相覆盖。这里在编译期直接拒绝。
+    """
+    producers: dict[str, set[str]] = {}
+    for rule in rules:
+        if not rule.get("enabled"):
+            continue
+        for field_key in rule.get("outputs") or []:
+            producers.setdefault(str(field_key), set()).add(rule["rule_key"])
+    conflicts = {field_key: sorted(keys) for field_key, keys in producers.items() if len(keys) > 1}
+    if conflicts:
+        raise BusinessError(
+            "RULE_OUTPUT_CONFLICT", "同一字段被多条启用规则声明为产出，无法确定当前值来源",
+            details={"conflicts": conflicts},
+        )
+
+
+def _validate_field_fact_identity(fields: list[dict[str, Any]], owner_keys: set[str]) -> None:
+    """会形成字段事实的定义，其完整事实身份必须唯一。
+
+    事实只由启用规则的产出字段形成，因此唯一性只校验这一组：停用/未选字段仍可
+    说明引用与缺项，不参与事实归属。运行期 `field_identity_index` 用同一组判定。
+    """
+    identities: dict[tuple[Any, ...], str] = {}
+    for field in fields:
+        if field["field_key"] not in owner_keys:
+            continue
+        identity = fact_projection.field_fact_identity(field)
+        if identity in identities:
+            raise BusinessError(
+                "RULE_FIELD_IDENTITY_CONFLICT", "多个字段使用相同的完整事实身份，无法确定事实归属",
+                details={"field_keys": [identities[identity], field["field_key"]], "identity": list(identity)},
+            )
+        identities[identity] = field["field_key"]
 
 
 def compile_library(**config: Any) -> dict[str, Any]:
@@ -245,7 +327,13 @@ def compile_library(**config: Any) -> dict[str, Any]:
             rule["dependency_error"] = missing
         else:
             rule.pop("dependency_error", None)
+    _validate_calculation_codes(rules)
+    _validate_output_producers(rules)
     _validate_execution_modes(rules)
+    _validate_field_fact_identity(
+        fields,
+        {key for rule in rules if rule["enabled"] for key in rule.get("outputs") or []},
+    )
     container = execution_container()
     container["execution_contract"].update(field_keys=list(field_by_key), rule_keys=[i["rule_key"] for i in rules], calculation_rule_codes=[c["rule_code"] for c in calculations])
     manifest = {"manifest_version": "2.0", "execution_contract_version": EXECUTION_VERSION,
@@ -262,10 +350,10 @@ def compile_library(**config: Any) -> dict[str, Any]:
     return manifest
 
 
-def _dependency_indexes(
+def dependency_indexes(
     all_rules: list[dict[str, Any]],
 ) -> tuple[dict[str, set[str]], dict[str, list[str]]]:
-    """字段产出规则与业务编号索引；同一次依赖解析内只构建一次。"""
+    """字段产出规则与业务编号索引；调用方按需构建一次后复用。"""
     producers: dict[str, set[str]] = {}
     by_code: dict[str, list[str]] = {}
     for item in all_rules:
@@ -311,9 +399,15 @@ def _dependency_refs(
     return deps, unresolved
 
 
-def rule_dependencies(rule: dict[str, Any], *, all_rules: list[dict[str, Any]]) -> set[str]:
-    """本条规则直接依赖的规则键；报告与无法解析的引用由调用方补充。"""
-    producers, by_code = _dependency_indexes(all_rules)
+def rule_dependencies(
+    rule: dict[str, Any], *, all_rules: list[dict[str, Any]],
+    indexes: tuple[dict[str, set[str]], dict[str, list[str]]] | None = None,
+) -> set[str]:
+    """本条规则直接依赖的规则键；报告与无法解析的引用由调用方补充。
+
+    `indexes` 传入同一批规则构建好的 `dependency_indexes`，逐条调用时不必重复扫描全部规则。
+    """
+    producers, by_code = indexes or dependency_indexes(all_rules)
     deps, _ = _dependency_refs(rule, producers=producers, by_code=by_code)
     if rule.get("kind") == "EXTRACTION":
         deps.discard(rule["rule_key"])
@@ -325,7 +419,7 @@ def execution_order(rules: list[dict[str, Any]], *, all_rules: list[dict[str, An
     rules = deepcopy(rules)
     selected = {r["rule_key"] for r in rules}
     known_by_key = {r["rule_key"]: r for r in all_rules}
-    producers, by_code = _dependency_indexes(all_rules)
+    producers, by_code = dependency_indexes(all_rules)
     dependencies = {}
     for rule in rules:
         rule.pop("unavailable_dependencies", None)

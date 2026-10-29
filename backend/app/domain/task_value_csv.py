@@ -10,23 +10,25 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-IDENTITY_COLUMNS = ("记录类型", "记录ID", "写入批次")
-CONTEXT_COLUMNS = (
+IDENTITY_COLUMNS = ("记录类型", "记录ID")
+VALUES_CONTEXT_COLUMNS = (
     "业务类别", "业务编号", "名称", "材料名称", "期间", "报表口径", "主体范围",
-    "声明类型", "取值说明", "修订号", "写入时状态", "取值来源", "执行批次ID", "字段键", "材料键", "任务编号",
+    "声明类型", "取值说明", "取值来源",
 )
+RESULT_CONTEXT_COLUMNS = ("业务编号", "名称", "材料名称")
 
 # payload 属性 → 人工可直接维护的业务列；每个值都有独立的存储类型列。
+# 结论状态、结论原因与风险等级只存数据库，CSV 不保留镜像副本。
 VALUE_COLUMNS = {
     "raw_value": "原文", "normalized_value_json": "候选值", "value": "有效值",
-    "unit": "单位", "currency": "币种", "status": "结论状态", "message": "结论原因",
-    "risk_level": "风险等级", "action": "风险处置", "next_action": "处理建议",
+    "unit": "单位", "currency": "币种",
+    "action": "风险处置", "next_action": "处理建议",
     "evidence": "原文依据",
     "presentation_version": "展示协议版本",
 }
 MAIN_TABLES = {
     "values.csv": {key: VALUE_COLUMNS[key] for key in ("raw_value", "normalized_value_json", "value", "unit", "currency", "evidence")},
-    "rule_results.csv": {key: VALUE_COLUMNS[key] for key in ("status", "message", "risk_level", "action", "next_action", "evidence", "presentation_version")},
+    "rule_results.csv": {key: VALUE_COLUMNS[key] for key in ("action", "next_action", "evidence", "presentation_version")},
 }
 
 # 证据引用有固定的业务形状，作为一个 JSON 单元格保存，避免为每个引用、属性和
@@ -41,7 +43,7 @@ ITEM_TABLES = {
     "missing_items": {"item": "缺失事项"},
 }
 ITEM_CONTEXT_COLUMNS = ("业务编号", "名称", "材料名称")
-DETAIL_COLUMNS = (*ITEM_CONTEXT_COLUMNS, "业务项目", "属性名", "数组序号", "值类型", "值", "所属项目", "节点编号", "上级节点", *IDENTITY_COLUMNS)
+DETAIL_COLUMNS = ("业务项目", "属性名", "数组序号", "值类型", "值", "所属项目", "节点编号", "上级节点", *IDENTITY_COLUMNS)
 EXTRA_LABELS = {
     "tool_findings": "工具核查明细", "extracted_values": "抽取字段明细",
     "calculation_definition": "计算定义", "calculation_steps": "计算过程",
@@ -68,17 +70,16 @@ _TYPED_ITEM_COLUMNS = _union_item_columns()
 
 TABLE_COLUMNS = {
     "values.csv": (
-        *CONTEXT_COLUMNS[:-4], *typed_columns(MAIN_TABLES["values.csv"]),
-        "补充属性数", *CONTEXT_COLUMNS[-4:], *IDENTITY_COLUMNS,
+        *VALUES_CONTEXT_COLUMNS, *typed_columns(MAIN_TABLES["values.csv"]),
+        "补充属性数", *IDENTITY_COLUMNS,
     ),
     "rule_results.csv": (
-        *ITEM_CONTEXT_COLUMNS, "规则类型", "审核要求", "计算公式", *typed_columns(MAIN_TABLES["rule_results.csv"]),
-        "执行批次ID", "任务编号",
+        *RESULT_CONTEXT_COLUMNS, "规则类型", "审核要求", "计算公式", *typed_columns(MAIN_TABLES["rule_results.csv"]),
         "判断依据数", "实际产出数", "缺失事项数", "补充属性数", *IDENTITY_COLUMNS,
     ),
     "rule_items.csv": (
         *ITEM_CONTEXT_COLUMNS, "明细序号", ITEM_CATEGORY,
-        "字段名称", "产出材料名称", "产出单位", "产出币种",
+        "字段名称", "产出材料名称",
         *_TYPED_ITEM_COLUMNS, "补充属性数", "字段键", "产出材料键", *IDENTITY_COLUMNS,
     ),
     "value_details.csv": DETAIL_COLUMNS,
@@ -156,7 +157,7 @@ class RecordWriter:
             next_id += 1
             kind, text = _scalar(item)
             rows.append({
-                **self.identity, **{name: self.context.get(name) for name in ITEM_CONTEXT_COLUMNS},
+                **self.identity,
                 "业务项目": EXTRA_LABELS.get(slot.removeprefix("补充/"), slot),
                 "所属项目": slot, "节点编号": node_id, "上级节点": parent,
                 "属性名": key, "数组序号": index, "值类型": kind, "值": text,
@@ -202,7 +203,6 @@ class RecordWriter:
                 if key == "outputs":
                     definition = output_definitions.get(item["code"], {})
                     detail.update({"字段名称": definition.get("name"), "产出材料名称": definition.get("material_name"),
-                                   "产出单位": definition.get("unit"), "产出币种": definition.get("currency"),
                                    "字段键": definition.get("field_key"), "产出材料键": definition.get("material_key")})
                 self.tables[ITEM_FILE].append(detail)
         # 主记录最后追加，只有写完所有明细的批次才会被读取。

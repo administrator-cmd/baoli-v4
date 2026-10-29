@@ -1,7 +1,7 @@
 """外部处理产物的持久化与幂等占位。
 
 外部调用（8018 识别 / 8010 处理 / OCR / 印章识别）的产物一律先落库再使用，并且先占位后调用：
-占位在联系供应商之前提交，唯一键 (上传, 产物类型, 上传哈希) 保证同一份上传同一类产物只调用一次。
+占位在联系供应商之前提交，唯一键 (上传, 产物类型) 保证同一份上传同一类产物只调用一次。
 
 8018/8010/8003 失败语义：调用前错误与供应商明确拒绝保存 FAILED；其他失败保留 PROCESSING
 并保存真实异常，表示结果未知。用户可单项重试，未知结果须明确确认，系统不自动重发。
@@ -44,7 +44,6 @@ def _artifact_for_upload(db: Session, upload: DocumentUpload, service_code: str)
         select(StoredArtifact).where(
             StoredArtifact.document_upload_id == upload.id,
             StoredArtifact.artifact_type == service_code,
-            StoredArtifact.upload_sha256 == upload.sha256,
         )
     )
 
@@ -85,8 +84,8 @@ def _artifact_payload(artifact: StoredArtifact) -> ExternalArtifact:
 def _artifact_content_digest(content: Any, binary: bytes | None) -> str:
     """产物内容哈希：JSON 产物按规范序列化的字节，二进制产物按真实文件字节。
 
-    它与「上传身份」的哈希是两件事：同一份上传文件重新识别后上传哈希不变，
-    产物内容却可能不同。索引必须绑定内容哈希，否则旧主体向量会继续冒充当前产物。
+    它与上传文件的 sha256 是两件事：同一份上传文件重新识别后上传哈希不变，
+    产物内容却可能不同。内容哈希用于判断产物是否更新。
     """
     if binary is not None:
         return hashlib.sha256(binary).hexdigest()
@@ -128,7 +127,7 @@ def _ensure_external_artifact(
     service_code: str,
     call: Callable[[], ExternalServiceResult],
 ) -> StoredArtifact:
-    """先占位再调用外部服务：唯一键 (上传, 产物类型, sha256) 让同一上传同一产物只调用一次。
+    """先占位再调用外部服务：唯一键 (上传, 产物类型) 让同一上传同一产物只调用一次。
 
     占位在调用前提交，因此并发与进程中断都不会重复产生外部作业：
     已 READY 直接复用；FAILED 或 PROCESSING 明确报错，由材料弹窗单项重试。
@@ -154,7 +153,6 @@ def _ensure_external_artifact(
         document_upload_id=upload.id,
         artifact_type=service_code,
         relative_path=f"tasks/{task.task_no}/artifacts/{upload.upload_no}/{service_code.lower()}.processing",
-        upload_sha256=upload.sha256,
         status="PROCESSING",
         metadata_json={"submission_state": "PROCESSING"},
     )
@@ -240,7 +238,6 @@ def _submit_ocr_job(db: Session, task: AuditTask, upload: DocumentUpload, parsed
         document_upload_id=upload.id,
         artifact_type="OCR",
         relative_path=f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting",
-        upload_sha256=upload.sha256,
         status="SUBMITTING",
         metadata_json={"submission_state": "SUBMITTING"},
     )

@@ -82,7 +82,6 @@ def _publish_manifest(
         schema_version=draft.schema_version,
         schema_json=draft.schema_json,
         version_no=version_no,
-        status="PUBLISHED",
         source=source,
         base_version_id=base_version.id if base_version else None,
         change_summary=change_summary,

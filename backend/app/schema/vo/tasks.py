@@ -106,15 +106,3 @@ class DocumentRemoveResponse(ApiResponse):
     status: str
     input_revision: int
     impact: ReplacementImpact | None = None
-
-__all__ = [
-    "TaskSchemaPreviewResponse",
-    "AuditTaskResponse",
-    "DocumentUploadResponse",
-    "FieldCorrectionResponse",
-    "ExternalArtifactStatusResponse",
-    "RiskListResponse",
-    "ReplacementImpact",
-    "DocumentRemoveResponse",
-]
-

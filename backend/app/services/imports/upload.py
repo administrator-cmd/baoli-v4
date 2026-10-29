@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
 from ...core.config import get_settings
-from ...domain import node_profile, scenario_schema
+from ...domain import scenario_schema
 from ...domain.identity import public_no
 from ...entity.imports import ImportJob
 from ...entity.scenarios import ScenarioTemplate
@@ -83,7 +83,6 @@ def create_import_job(db: Session, upload: UploadFile, *, scenario_code: str) ->
             schema_key=schema["schema_key"],
             schema_version=schema["schema_version"],
             schema_json=schema,
-            profile_display_version=node_profile.NODE_PROFILE_VERSION,
             status="PARSED",
         )
         db.add(job)

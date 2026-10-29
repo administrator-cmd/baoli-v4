@@ -13,9 +13,10 @@
     python script/reset_database.py            # 只看会删哪些表
     python script/reset_database.py --yes      # 真正执行
 
-删完之后数据库是空的，需要重新执行唯一建表脚本：
+删完之后数据库是空的，需要重新执行建表脚本并登记当前迁移版本：
 
     backend/resource/schema.sql
+    cd backend && python -m alembic stamp head
 
 注意：本脚本只清数据库。data/ 目录下已经上传的文件不会被删除，
 清库后会变成孤儿文件，需要时请自行清理。
@@ -113,8 +114,9 @@ def main() -> int:
             raise SystemExit(f"清理未完成，仍存在 {len(remaining)} 张表：{', '.join(remaining)}")
         print()
         print(f"已删除 {len(tables)} 张表，库内现在是空的。")
-        print("请重新执行唯一的建表脚本：")
+        print("请重新执行建表脚本并登记当前迁移版本：")
         print("  backend/resource/schema.sql")
+        print("  cd backend && python -m alembic stamp head")
         return 0
     finally:
         connection.close()

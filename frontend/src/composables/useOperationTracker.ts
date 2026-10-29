@@ -39,17 +39,27 @@ export function useOperationTracker(): OperationTracker {
   let onFinished: ((operation: OperationView) => void | Promise<void>) | null = null;
   let onUpdate: ((operation: OperationView) => void | Promise<void>) | null = null;
   let onError: ((error: unknown) => void) | null = null;
+  /** 追踪代次：换对象或停止后，旧轮询的异步回调与报错都不再影响当前追踪。 */
+  let generation = 0;
 
-  function stop(): void {
+  function stopWatch(): void {
     handle?.stop();
     handle = null;
     watching.value = false;
   }
 
-  async function receive(value: OperationView): Promise<void> {
+  function stop(): void {
+    generation += 1;
+    stopWatch();
+  }
+
+  async function receive(value: OperationView, token: number): Promise<void> {
+    if (token !== generation) {
+      return;
+    }
     operation.value = value;
     if (isOperationFinished(value.status)) {
-      stop();
+      stopWatch();
       const handler = onFinished;
       if (handler) {
         await handler(value);
@@ -63,13 +73,19 @@ export function useOperationTracker(): OperationTracker {
     if (!operationNo) {
       return;
     }
-    handle?.stop();
+    stopWatch();
+    const token = ++generation;
     watching.value = true;
+    const currentOperationNo = operationNo;
     handle = watchOperation(
-      operationNo,
-      receive,
+      currentOperationNo,
+      (value) => receive(value, token),
       (error) => {
-        stop();
+        // 旧代次的回调报错属于已经放弃的那次查询，不能停掉新追踪或交给新对象的处理器。
+        if (token !== generation) {
+          return;
+        }
+        stopWatch();
         const handler = onError;
         if (handler) {
           handler(error);

@@ -10,22 +10,11 @@ import DrawerPanel from "@/components/DrawerPanel.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { auditResultSummary } from "@/constants/auditStatus";
 import { executionModeLabel } from "@/constants/executionModes";
-import { statusTone } from "@/constants/labels";
 import {
-  applicabilityText,
-  capabilityOf,
-  comparisonOf,
   hasBusinessResult,
-  manualEffectiveStatus,
-  manualNote,
-  manuallyReviewed,
   materialsOf,
   materialRowsOf,
-  materialTypeNotice,
   payloadOf,
-  reasonText,
-  resultStatusLabel,
-  routeText,
   ruleCodeOf,
   standardDetail,
   standardText,
@@ -49,29 +38,18 @@ const showValueTableInMain = computed(() => {
   return detailRule.value.kind === "EXTRACTION" || detailBasisCount.value === 0;
 });
 const detailRuleCode = computed(() => detailRule.value ? ruleCodeOf(detailRule.value) : null);
-const detailCalculationSteps = computed(() => {
-  const steps = detailPayload.value.calculation_steps;
-  return Array.isArray(steps) ? steps.filter((step): step is string => typeof step === "string") : [];
-});
 
 /** 详情抽屉的取值来源：与列表同一份事实，不重新查库也不重新计算。 */
 const detailValues = computed(() => (detailRule.value ? valueSourcesOf(detailRule.value) : []));
 const detailMaterialRows = computed(() => (detailRule.value ? materialRowsOf(detailRule.value) : []));
 
-/** 抽屉里的一次性读取：避免在模板里反复调用 payloadOf。 */
-const detailCapability = computed(() => (detailRule.value ? capabilityOf(detailRule.value) : null));
-const detailManualNote = computed(() => (detailRule.value ? manualNote(detailRule.value) : null));
-const detailManualStatus = computed(() => (detailRule.value ? manualEffectiveStatus(detailRule.value) : null));
-const detailReason = computed(() => (detailRule.value ? reasonText(detailRule.value) : null));
 const detailStandardText = computed(() => (detailRule.value ? standardText(detailRule.value) : ""));
 const detailStandardDetail = computed(() => (detailRule.value ? standardDetail(detailRule.value) : ""));
-const detailComparison = computed(() => (detailRule.value ? comparisonOf(detailRule.value) : null));
+
 const detailFindings = computed(() => (detailPayload.value.tool_findings ?? []) as Array<{
   comparison?: RuleCheckComparison;
   per_material?: RuleInputSnapshot[];
 }>);
-const detailIsReviewed = computed(() => (detailRule.value ? manuallyReviewed(detailRule.value) : false));
-const detailTypeNotice = computed(() => (detailRule.value ? materialTypeNotice(detailRule.value) : null));
 /** 未解决事项：结论转人工或阻断的真实原因。 */
 const detailUnresolvedItems = computed<Record<string, JsonValue>[]>(() => {
   const value = detailPayload.value.unresolved_items;
@@ -89,6 +67,37 @@ const detailEvidenceTitle = computed(() => {
 const detailEvidenceNote = computed(() => (
   detailRule.value?.status === "EVIDENCE_INSUFFICIENT" ? "以下原文不足以形成确定结论。" : ""
 ));
+/** 同一材料、同一文件的引用合并成一组，来源只写一次。 */
+const evidenceGroups = computed(() => {
+  const groups: Array<{ source: string; items: Array<{ key: string; label: string; quote: string }> }> = [];
+  const positions = new Map<string, number>();
+  for (const item of detailRule.value?.evidence ?? []) {
+    const sourceParts = [item.material_name || "来源材料未记录"];
+    if (item.document_name) sourceParts.push(item.document_name);
+    const source = sourceParts.join(" · ");
+    let position = positions.get(source);
+    if (position === undefined) {
+      position = groups.length;
+      positions.set(source, position);
+      groups.push({ source, items: [] });
+    }
+    groups[position].items.push({
+      key: `${position}-${groups[position].items.length}`,
+      label: item.field_path ?? "",
+      quote: item.quote_text,
+    });
+  }
+  return groups;
+});
+/** 三项技术信息都取不到时整块不渲染，避免出现点开是空白的折叠项。 */
+const hasTechnicalDetail = computed(() => {
+  if (!detailRule.value) {
+    return false;
+  }
+  const hasSnapshot = !showValueTableInMain.value
+    && (detailMaterialRows.value.length > 0 || detailValues.value.length > 0);
+  return hasSnapshot || !hasBusinessResult(detailRule.value) || detailUnresolvedItems.value.length > 0;
+});
 </script>
 
 <template>
@@ -101,96 +110,72 @@ const detailEvidenceNote = computed(() => (
   >
     <template v-if="detailRule">
       <div class="detail-head">
-        <StatusBadge :status="detailManualStatus ?? detailRule.status" :label="resultStatusLabel(detailRule)" :tone="statusTone(detailManualStatus ?? detailRule.status)" size="default" />
-        <span v-if="detailRule.source_sheet" class="text-hint">{{ detailRule.source_sheet }}</span>
-        <span class="text-hint">执行方式：{{ executionModeLabel(detailRule.execution_mode) }}</span>
-        <span v-if="detailRuleCode" class="text-hint mono">{{ detailRuleCode }}</span>
-        <span class="text-muted">{{ materialsOf(detailRule) }}</span>
-
-        <span v-if="detailTypeNotice" class="text-hint">{{ detailTypeNotice }}</span>
+        <StatusBadge domain="rule" :status="detailRule.status" size="default" />
+        <span v-if="detailRuleCode" class="mono detail-head__code">{{ detailRuleCode }}</span>
+        <span class="detail-head__meta">执行方式：{{ executionModeLabel(detailRule.execution_mode) }}</span>
+        <span class="detail-head__meta">{{ materialsOf(detailRule) }}</span>
+        <span v-if="detailRule.source_sheet" class="detail-head__sheet">{{ detailRule.source_sheet }}</span>
       </div>
 
-      <div class="detail-block detail-conclusion">
-        {{ detailIsReviewed ? detailManualNote || "本次人工复核没有记录说明" : auditResultSummary(detailRule.status, detailRule.message, detailPayload) }}
-        <div v-if="detailReason" class="text-muted">{{ detailReason }}</div>
-      </div>
-      <div v-if="detailRule.kind === 'REPORT' && !detailBasisCount" class="text-muted detail-block">
-        报告正文在「报告」页签查看。
-      </div>
-      <AuditBusinessDetails :result="detailPayload" />
+      <section class="detail-section detail-section--lead">
+        <h4 class="app-section-title">检查结论</h4>
+        <div class="detail-conclusion">{{ auditResultSummary(detailRule.status, detailRule.message, detailPayload) }}</div>
+        <div v-if="detailRule.kind === 'REPORT' && !detailBasisCount" class="text-muted detail-note">
+          报告正文在「报告」页签查看。
+        </div>
+        <div v-if="detailRule.status === 'PENDING_REVIEW'" class="text-muted detail-note">
+          该项业务尚未确认；人工审核暂不启用，后续规则继续执行。
+        </div>
+      </section>
 
-      <div v-if="detailIsReviewed" class="text-muted detail-block">系统原说明：{{ detailRule.message || "未记录" }}</div>
+      <section class="detail-section">
+        <h4 class="app-section-title">审核标准</h4>
+        <div class="detail-standard">{{ detailStandardText }}</div>
+        <div v-if="detailStandardDetail" class="text-muted detail-note">{{ detailStandardDetail }}</div>
+      </section>
 
-      <!-- 1. 审核标准 -->
-      <h4 class="app-section-title">审核标准</h4>
-      <div class="detail-block">{{ detailStandardText }}</div>
-      <div v-if="detailStandardDetail" class="text-muted detail-block">{{ detailStandardDetail }}</div>
+      <AuditBusinessDetails class="detail-section" :result="detailPayload" />
 
-      <!-- 2. 原文内容与标准化结果 -->
-      <h4 v-if="showValueTableInMain && (detailValues.length || detailMaterialRows.length)" class="app-section-title">实际取值</h4>
-      <RuleInputSnapshotTable
-        v-if="showValueTableInMain"
-        :material-rows="detailMaterialRows"
-        :values="detailValues"
-      />
+      <section v-if="showValueTableInMain" class="detail-section">
+        <h4 v-if="detailValues.length || detailMaterialRows.length" class="app-section-title">实际取值</h4>
+        <RuleInputSnapshotTable :material-rows="detailMaterialRows" :values="detailValues" />
+      </section>
 
-      <!-- 3. 实际比较：跨材料并排展示双方内容；金额与日期给出真实算式 -->
-      <h4 v-if="detailComparison" class="app-section-title">实际比较</h4>
-      <CrossComparisonPanel
-        v-if="detailComparison"
-        :comparison="detailComparison"
-        :rule-name="detailRule.name"
-      />
+      <!-- 实际比较：只展示工具实际保存的比较结果 -->
       <template v-for="(finding, index) in detailFindings" :key="index">
-        <template v-if="finding.comparison">
+        <section v-if="finding.comparison" class="detail-section">
           <h4 class="app-section-title">实际比较</h4>
           <CrossComparisonPanel :comparison="finding.comparison" :rule-name="detailRule.name" />
-        </template>
-        <template v-if="finding.per_material?.length">
+        </section>
+        <section v-if="finding.per_material?.length" class="detail-section">
           <h4 class="app-section-title">逐份材料检查</h4>
           <el-table :data="finding.per_material" size="small" border>
             <el-table-column prop="material_name" label="材料" min-width="130" />
             <el-table-column prop="filename" label="文件" min-width="180" />
-            <el-table-column label="结论" width="120"><template #default="{ row }"><StatusBadge :status="row.status" /></template></el-table-column>
+            <!-- 结论列要容纳最长的状态文案「已产出（无结论）」，列宽不足时标签会向右溢出压到列边界。 -->
+            <el-table-column label="结论" width="184"><template #default="{ row }"><StatusBadge domain="rule" :status="row.status" /></template></el-table-column>
             <el-table-column prop="message" label="检查说明" min-width="240" />
           </el-table>
-        </template>
+        </section>
       </template>
 
-      <template v-if="detailCalculationSteps.length">
-        <h4 class="app-section-title">AI 计算说明</h4>
-        <ol class="detail-block">
-          <li v-for="(step, index) in detailCalculationSteps" :key="index">{{ step }}</li>
-        </ol>
-      </template>
-
-      <!-- 5. 原文依据 -->
-      <h4 v-if="detailRule.evidence.length" class="app-section-title">{{ detailEvidenceTitle }}</h4>
-      <p v-if="detailEvidenceNote" class="rule-evidence-note">{{ detailEvidenceNote }}</p>
-      <div v-for="(source, index) in detailRule.evidence" :key="index" class="rule-source">
-        <div class="text-muted">
-          {{ source.material_name || "来源材料未记录" }}
-          <template v-if="source.document_name"> · {{ source.document_name }}</template>
-          <template v-if="source.field_path"> · {{ source.field_path }}</template>
+      <section v-if="evidenceGroups.length" class="detail-section">
+        <h4 class="app-section-title">{{ detailEvidenceTitle }}</h4>
+        <p v-if="detailEvidenceNote" class="rule-evidence-note">{{ detailEvidenceNote }}</p>
+        <div v-for="(group, groupIndex) in evidenceGroups" :key="groupIndex" class="evidence-group">
+          <div class="evidence-group__source">{{ group.source }}</div>
+          <div class="evidence-group__list">
+            <div v-for="item in group.items" :key="item.key" class="evidence-group__item">
+              <div v-if="item.label" class="evidence-group__label">{{ item.label }}</div>
+              <QuoteBlock v-if="item.quote" :text="item.quote" />
+              <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>
+            </div>
+          </div>
         </div>
-        <QuoteBlock v-if="source.quote_text" :text="source.quote_text" />
-        <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>
-      </div>
+      </section>
 
-      <div v-if="detailRule.status === 'PENDING_REVIEW'" class="text-muted detail-block">
-        该项业务尚未确认；人工审核暂不启用，后续规则继续执行。
-      </div>
-      <!-- 已有人工记录仍按实际内容展示。 -->
-      <template v-if="detailIsReviewed || detailRule.status === 'REVIEWED'">
-        <h4 class="app-section-title">人工复核记录</h4>
-        <div v-if="detailManualNote" class="detail-block">{{ detailManualNote }}</div>
-        <div v-if="detailManualStatus" class="detail-block">
-          复核后有效状态：<StatusBadge :status="detailManualStatus" :label="resultStatusLabel(detailRule)" />
-        </div>
-      </template>
-
-      <!-- 7. 技术执行详情：能力与材料范围等辅助信息 -->
-      <el-collapse class="block-gap">
+      <!-- 技术执行详情：能力与材料范围等辅助信息 -->
+      <el-collapse v-if="hasTechnicalDetail" class="block-gap">
         <el-collapse-item title="技术执行详情（辅助信息）" name="tech">
           <div v-if="!showValueTableInMain && (detailMaterialRows.length || detailValues.length)" class="detail-block">
             <div class="text-muted">输入快照：</div>
@@ -204,34 +189,6 @@ const detailEvidenceNote = computed(() => (
             <div class="text-muted">最终缺项 / 未完成原因：</div>
             <ul><li v-for="(item, index) in detailUnresolvedItems" :key="index">{{ item.kind }}：{{ item.message }}</li></ul>
           </div>
-          <template v-if="Array.isArray(detailPayload.execution_issues) && detailPayload.execution_issues.length">
-            <div class="text-muted">执行过程中出现的历史问题（不等同于最终业务缺项）：</div>
-            <pre>{{ JSON.stringify(detailPayload.execution_issues, null, 2) }}</pre>
-          </template>
-          <div class="text-muted">适用条件：{{ applicabilityText(detailRule) }}</div>
-          <div class="text-muted">判定方式：{{ routeText(detailRule) }}</div>
-          <div class="text-muted">
-            引用原文：{{ detailRule.evidence.length ? `已保存 ${detailRule.evidence.length} 段` : "未保存" }}
-          </div>
-          <div class="text-muted">
-            判定能力：
-            <template v-if="detailCapability">
-              {{ detailCapability.label || detailCapability.capability_id || "未记录" }}
-              <span class="mono">（{{ detailCapability.capability_id }} · v{{ detailCapability.version }}）</span>
-              <template v-if="detailCapability.known === false">｜该能力不在系统能力目录中</template>
-              <template v-else-if="detailCapability.implemented === false">
-                ｜当前未实现：{{ detailCapability.unimplemented_reason || "未说明原因" }}
-              </template>
-            </template>
-            <template v-else>本条结果未记录判定能力</template>
-          </div>
-          <div v-if="detailRule.rule_key" class="mono">规则键：{{ detailRule.rule_key }}</div>
-          <template v-if="Array.isArray(detailPayload.verdict_errors) && detailPayload.verdict_errors.length">
-            <div class="text-muted">
-              结论格式修正记录（接口错误）：
-            </div>
-            <pre>{{ JSON.stringify(detailPayload.verdict_errors, null, 2) }}</pre>
-          </template>
         </el-collapse-item>
       </el-collapse>
     </template>
@@ -239,19 +196,69 @@ const detailEvidenceNote = computed(() => (
 </template>
 
 <style scoped>
+/* 每个区块之间留同一份间距，标题不再各自带上下留白 */
+.detail-section {
+  margin-top: 24px;
+}
+
+.detail-section--lead {
+  margin-top: 0;
+}
+
+:deep(.app-section-title) {
+  margin: 0 0 10px;
+}
+
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 16px;
+}
+
+.detail-head__code,
+.detail-head__meta {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.detail-head__sheet {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+/* 结论是抽屉里最该先看到的内容 */
 .detail-conclusion {
   padding: 12px 16px;
   background: var(--el-fill-color-light);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.original-execution-message {
+  border-left: 3px solid var(--el-color-primary-light-5);
+  border-radius: 0 4px 4px 0;
+  line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.rule-source + .rule-source {
-  margin-top: 12px;
+/* 审核标准单独成块，与下面的依据正文区分开 */
+.detail-standard {
+  padding: 10px 14px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 4px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detail-note {
+  margin-top: 8px;
+}
+
+.original-execution-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .rule-evidence-note {
@@ -261,12 +268,39 @@ const detailEvidenceNote = computed(() => (
   line-height: 1.6;
 }
 
-.detail-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+/* 原文依据：同材料同文件的来源只写一次，多条引用排成带分隔线的一栏 */
+.evidence-group + .evidence-group {
+  margin-top: 16px;
+}
+
+.evidence-group__source {
+  margin-bottom: 6px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.evidence-group__list {
+  border-left: 3px solid var(--el-border-color);
+  border-radius: 0 4px 4px 0;
+  background: var(--el-fill-color-lighter);
+}
+
+.evidence-group__item {
+  padding: 8px 12px;
+}
+
+.evidence-group__item + .evidence-group__item {
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.evidence-group__label {
+  margin-bottom: 4px;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+
+.evidence-group__item :deep(.evidence-quote) {
+  padding: 0;
 }
 
 .detail-block {

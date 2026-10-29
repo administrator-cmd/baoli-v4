@@ -8,15 +8,15 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
-from ....constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING
+from ....constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING, PRODUCED_RESULT_STATUSES
 from ....domain.rule_library import is_risk_rule
 from ...shared.storage import resolve_storage_path
 from ..rule_results import save_rule_result
-from ..shared import _task_manifest
+from ..shared import _task_manifest, pending_rerun_keys
 from ..tasks.lookup import task_or_404
 from .errors import agent_step
 from .execution import execution_in_progress
-from .shared import agent_module, openai_tools, rule_of_instance
+from .shared import agent_module, rule_of_instance
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,34 @@ logger = logging.getLogger(__name__)
 _RULE_SAVE_ERRORS = {
     "FACT_VALUE_INVALID", "RULE_OUTPUT_STRUCTURE_INVALID", "RULE_OUTPUT_IDENTITY_INVALID",
     "RULE_OUTPUT_MISSING", "RULE_OUTPUT_STATUS_INVALID", "RULE_OUTPUT_MANUAL_VALUE_CONFLICT",
-    "RULE_OUTPUT_SOURCE_MISSING", "RULE_REPORT_CONTENT_MISSING", "RULE_REPORT_FORMAT_UNSUPPORTED",
-    "RULE_EVIDENCE_ARTIFACT_INVALID", "RULE_EVIDENCE_SOURCE_INVALID", "RULE_EVIDENCE_MISSING",
+    "RULE_OUTPUT_SOURCE_MISSING", "RULE_OUTPUT_RAW_VALUE_MISSING", "RULE_REPORT_CONTENT_MISSING",
+    "RULE_REPORT_FORMAT_UNSUPPORTED", "RULE_EVIDENCE_ARTIFACT_INVALID", "RULE_EVIDENCE_SOURCE_INVALID",
+    "RULE_EVIDENCE_MISSING",
 }
+
+
+def _unproduced_codes(rule: dict[str, Any], verdict: dict[str, Any] | None) -> set[str]:
+    """本次结论没有写出的声明产出；这些产出的旧事实必须退出当前位。
+
+    字段产出即使值为空也会写入新的字段事实，旧事实由 save_outputs 退出当前位；
+    计算产出只有真正产生非空值时才算写出。
+    """
+    fields = {field["field_key"] for field in rule.get("output_definitions") or []}
+    declared = set(fields)
+    if rule.get("result_code"):
+        declared.add(rule["result_code"])
+    produced: set[str] = set()
+    for item in (verdict or {}).get("outputs") or []:
+        code = item.get("code")
+        if code in fields:
+            produced.add(code)
+        elif (
+            code == rule.get("result_code")
+            and item.get("value") is not None
+            and (verdict or {}).get("status") in PRODUCED_RESULT_STATUSES
+        ):
+            produced.add(code)
+    return declared - produced
 
 
 def graph_produce_candidate_verdict(
@@ -36,7 +61,6 @@ def graph_produce_candidate_verdict(
     rule_instance: dict[str, Any] | None,
     last_model_response: dict[str, Any] | None,
     tool_results: list[dict[str, Any]] | None,
-    allowed_tools: list[dict[str, Any]] | None,
     loop_status: str,
     unresolved_items: list[dict[str, Any]] | None,
     messages: list[dict[str, Any]] | None,
@@ -75,7 +99,6 @@ def graph_produce_candidate_verdict(
                 tool_results=list(tool_results or []),
                 facts=facts,
                 upstream_results=upstream_results,
-                tools=openai_tools(allowed_tools),
             )
             validate_outputs(rule, raw)
         except BusinessError as exc:
@@ -189,10 +212,17 @@ def graph_save_evaluation_result(
             "loop_count": loop_count,
             "unresolved_items": list(unresolved_items or []),
         }
+        from ..rule_execution import revoke_outputs, save_outputs
+        revoke_codes = _unproduced_codes(rules[0], candidate_verdict)
         try:
             with db.begin_nested():
-                from ..rule_execution import save_outputs
-                output_values = save_outputs(db, task, execution, rules[0], candidate_verdict)
+                if revoke_codes:
+                    # 本次没有写出的声明产出：上一轮的模型产出不能继续作为当前值供下游读取。
+                    revoke_outputs(db, task, execution, rules[0], revoke_codes)
+                output_values = save_outputs(
+                    db, task, execution, rules[0], candidate_verdict,
+                    evaluation_id=evaluation_id,
+                )
                 saved_result = save_rule_result(db, task=task, execution=execution, rule=rules[0], verdict=candidate_verdict,
                                                loop_status=loop_status, unresolved_items=unresolved_items,
                                                evaluation_id=evaluation_id, inputs=list(instance.get("inputs") or []),
@@ -206,6 +236,7 @@ def graph_save_evaluation_result(
             unresolved_items = [*(unresolved_items or []), {"kind": exc.code, "message": exc.message, "details": exc.details}]
             outcome.update(loop_status=loop_status, unresolved_items=unresolved_items)
             with db.begin_nested():
+                revoke_outputs(db, task, execution, rules[0])
                 saved_result = save_rule_result(db, task=task, execution=execution, rule=rules[0], verdict=None,
                                                loop_status=loop_status, unresolved_items=unresolved_items,
                                                evaluation_id=evaluation_id, inputs=list(instance.get("inputs") or []),
@@ -221,6 +252,12 @@ def graph_save_evaluation_result(
             cleaned_errors.append(cleaned)
         saved_result.result_json = {**saved_result.result_json,
                                     "verdict_errors": cleaned_errors}
+        # 结果与续跑清单同一事务提交：报告刚生成时不会短暂被当成“已列入重跑”。
+        if (execution.result_json or {}).get("pending_rerun_keys") is not None:
+            execution.result_json = {
+                **(execution.result_json or {}),
+                "pending_rerun_keys": sorted(pending_rerun_keys(execution) - {rules[0]["rule_key"]}),
+            }
         outcome["status"] = saved_result.status
         db.commit()
         return {

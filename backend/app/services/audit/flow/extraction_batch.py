@@ -9,6 +9,7 @@
 和 `save_rule_result`，两种执行方式的结果口径一致。
 """
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -19,15 +20,16 @@ from sqlalchemy.orm import Session
 from ....common.exceptions import BusinessError
 from ....constants.status import LOOP_BLOCKED, LOOP_DONE
 from ....entity.tasks import AuditTask, NodeExecution
-from ..rule_execution import evaluation_context, save_outputs, validate_outputs
+from ..rule_execution import evaluation_context, revoke_outputs, save_outputs, validate_outputs
 from ..rule_results import save_rule_result
-from ..shared import _task_manifest
+from ..shared import _task_manifest, pending_rerun_keys
 from ..tasks.lookup import task_or_404
+from .context import execution_attempt_no
 from .errors import agent_step
 from .execution import execution_in_progress
 from .model import graph_call_model
 from .results import _RULE_SAVE_ERRORS
-from .shared import agent_module, openai_tools
+from .shared import agent_module
 from .tools import graph_append_tool_results, graph_execute_tool_calls
 
 logger = logging.getLogger(__name__)
@@ -71,9 +73,10 @@ def _finish(
 def _record_blocked(
     db: Session, task: AuditTask, execution: NodeExecution, rule: dict[str, Any], *,
     unresolved: list[dict[str, Any]], evaluation_id: str, turn_count: int, batch_size: int,
-    counted_turns: int,
+    counted_turns: int, channel_failure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     with db.begin_nested():
+        revoke_outputs(db, task, execution, rule)
         saved = save_rule_result(
             db, task=task, execution=execution, rule=rule, verdict=None,
             loop_status=LOOP_BLOCKED, unresolved_items=unresolved,
@@ -82,6 +85,9 @@ def _record_blocked(
         )
     outcome = _finish(saved, rule, loop_status=LOOP_BLOCKED, turn_count=turn_count,
                       unresolved=unresolved, batch_size=batch_size, counted_turns=counted_turns)
+    if channel_failure is not None:
+        # 同批其他字段已经各自保存；这条字段的未完成原因是渠道故障，交给调度方停止后续请求。
+        outcome["channel_failure"] = channel_failure
     db.commit()
     return outcome
 
@@ -150,7 +156,7 @@ def _index_fields(
 
 def _validate_field(
     agent, rule: dict[str, Any], item: dict[str, Any], *,
-    tool_results: list[dict[str, Any]], context: dict[str, Any], tools: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]], context: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """校验一个字段的结论与产出；错误交调用方决定是让模型修正还是记未执行。"""
     field_key = str((rule.get("output_definitions") or [{}])[0].get("field_key"))
@@ -158,7 +164,6 @@ def _validate_field(
     verdict, _, unresolved = agent.validate_verdict(
         raw, rule=rule, tool_results=tool_results, facts=context["upstream_facts"],
         upstream_results=context["upstream_results"],
-        tools=tools,
     )
     validate_outputs(rule, raw)
     return verdict, list(unresolved)
@@ -167,7 +172,7 @@ def _validate_field(
 def _validate_fields(
     agent, rules: list[dict[str, Any]], by_field: dict[str, dict[str, Any]],
     duplicate_fields: set[str], *, tool_results: list[dict[str, Any]],
-    field_contexts: dict[str, dict[str, Any]], tools: list[dict[str, Any]],
+    field_contexts: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, tuple[dict[str, Any], list[dict[str, Any]]]], dict[str, BusinessError]]:
     """逐字段校验；字段自身的问题只记在该字段上，程序异常照常上抛。"""
     verdicts: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
@@ -180,7 +185,7 @@ def _validate_fields(
         try:
             verdicts[field_key] = _validate_field(
                 agent, rule, item, tool_results=tool_results,
-                context=field_contexts[field_key], tools=tools,
+                context=field_contexts[field_key],
             )
         except BusinessError as exc:
             if exc.code not in _FIELD_SAVE_ERRORS:
@@ -203,6 +208,21 @@ def _repair_message(errors: dict[str, BusinessError], field_codes: dict[str, str
     )
 
 
+def _clear_pending_key(execution: NodeExecution, rule_key: str) -> None:
+    """在内存里清掉这一条规则的待重跑标记，由调用方与字段结果一起提交。
+
+    只清本条规则自己的标记：同批其他字段与依赖它的历史结果的重算意图不受影响。
+    """
+    if (execution.result_json or {}).get("pending_rerun_keys") is None:
+        return
+    keys = pending_rerun_keys(execution)
+    if rule_key in keys:
+        execution.result_json = {
+            **(execution.result_json or {}),
+            "pending_rerun_keys": sorted(keys - {rule_key}),
+        }
+
+
 def _save_field(
     db: Session, task: AuditTask, execution: NodeExecution, rule: dict[str, Any], *,
     verdict: dict[str, Any], unresolved: list[dict[str, Any]],
@@ -213,7 +233,10 @@ def _save_field(
     try:
         verdict["execution_issues"] = list(execution_issues)
         with db.begin_nested():
-            output_values = save_outputs(db, task, execution, rule, verdict)
+            output_values = save_outputs(
+                db, task, execution, rule, verdict,
+                evaluation_id=evaluation_id,
+            )
             saved = save_rule_result(
                 db, task=task, execution=execution, rule=rule, verdict=verdict,
                 loop_status=LOOP_DONE, unresolved_items=unresolved,
@@ -235,6 +258,8 @@ def _save_field(
         )
     outcome = _finish(saved, rule, loop_status=LOOP_DONE, turn_count=turn_count,
                       unresolved=list(unresolved), batch_size=batch_size, counted_turns=counted_turns)
+    # 字段结果与它的待重跑标记同一事务提交：再次中断时不会重复请求已经完成的字段。
+    _clear_pending_key(execution, rule["rule_key"])
     db.commit()
     return outcome
 
@@ -265,8 +290,11 @@ def graph_execute_extraction_batch(
         )
         agent = agent_module()
         allowed = agent.available_tools()
-        # 每次批量抽取生成新的评估编号，组内各轮沿用；网络重发目前会生成新编号。
-        evaluation_id = f"evaluation:{execution.id}:batch:{uuid4().hex}"
+        # 同一轮里同一批字段得到同一个评估编号：网络重发复用幂等键，只有续跑换轮次才换键。
+        attempt_no = execution_attempt_no(execution)
+        field_keys = [rule["output_definitions"][0]["field_key"] for rule in rules]
+        batch_digest = hashlib.sha1("|".join(sorted(field_keys)).encode("utf-8")).hexdigest()[:12]
+        evaluation_id = f"evaluation:{execution.id}:batch:attempt{attempt_no}:{batch_digest}"
         field_contexts: dict[str, dict[str, Any]] = {}
         for rule in rules:
             context = evaluation_context(db, task, rule)
@@ -297,10 +325,14 @@ def graph_execute_extraction_batch(
         unresolved: list[dict[str, Any]] = []
         loop_count = 0
         final_response: dict[str, Any] | None = None
-        blocked = False
+        # 本次请求的状态，只决定「还没有结论的字段」怎么记录，不影响已通过校验的字段。
+        request_blocked = False
+        # 渠道级故障：已校验的字段照常保存，未形成结论的字段带着真实原因停止调度。
+        channel_failure: dict[str, Any] | None = None
         repaired = False
-        tools = openai_tools(allowed)
         by_field: dict[str, dict[str, Any]] = {}
+        # 已通过本轮接口校验的字段：修正轮未再返回的字段仍按它们上一轮的结论保存。
+        settled_fields: dict[str, dict[str, Any]] = {}
         duplicate_fields: set[str] = set()
         # 无法定位身份的条目单独记录：它们不能让整批可用字段一起作废，
         # 但对应字段会因为没有结果而记为未执行，不会被静默跳过。
@@ -315,6 +347,8 @@ def graph_execute_extraction_batch(
             loop_count = int(turn.get("loop_count") or loop_count)
             messages = turn.get("messages") or messages
             unresolved = [*unresolved, *(turn.get("unresolved_items") or [])]
+            if turn.get("channel_failure"):
+                channel_failure = turn["channel_failure"]
             if turn.get("last_model_response"):
                 final_response = turn["last_model_response"]
             pending = turn.get("pending_tool_calls") or []
@@ -327,25 +361,37 @@ def graph_execute_extraction_batch(
                 messages = graph_append_tool_results(messages, tool_results)["messages"]
                 continue
             if turn.get("loop_status") == LOOP_BLOCKED:
-                blocked = True
+                request_blocked = True
                 break
             parsed = agent.parse_verdict((final_response or {}).get("content"))
             if not isinstance(parsed, dict) or not isinstance(parsed.get("fields"), list):
-                blocked = True
+                request_blocked = True
                 unresolved = [*unresolved, {
                     "kind": "EXTRACTION_BATCH_UNPARSEABLE",
                     "message": "模型没有返回可解析的批量抽取结果",
                 }]
                 break
-            by_field, duplicate_fields, response_issues = _index_fields(parsed["fields"], code_to_field)
+            parsed_fields, duplicate_fields, response_issues = _index_fields(parsed["fields"], code_to_field)
+            # 修正轮只要求模型重答出错字段。已通过校验的字段只能沿用上一轮结论：
+            # 本轮重答（包括重复返回）不能再改写它们，否则一个字段抄错就会把已经有效的结论作废。
+            parsed_fields = {
+                field_key: item for field_key, item in parsed_fields.items()
+                if field_key not in settled_fields
+            }
+            duplicate_fields -= set(settled_fields)
+            by_field = {**settled_fields, **parsed_fields}
             verdicts, field_errors = _validate_fields(
                 agent, rules, by_field, duplicate_fields,
-                tool_results=tool_results, field_contexts=field_contexts, tools=tools,
+                tool_results=tool_results, field_contexts=field_contexts,
             )
             if field_errors and not repaired:
                 # 单条路径把接口错误交回模型继续修正；批量先给一次同样的修正机会：
                 # 一个字段的引文或编号抄错，不该让整批字段一起记成未执行。
                 repaired = True
+                settled_fields = {
+                    field_key: by_field[field_key]
+                    for field_key in verdicts if field_key not in field_errors
+                }
                 messages = [
                     *messages,
                     {"role": "assistant", "content": str((final_response or {}).get("content") or "")},
@@ -354,7 +400,7 @@ def graph_execute_extraction_batch(
                 continue
             break
 
-        if blocked:
+        if request_blocked:
             logger.warning(
                 "批量抽取未完成 task_no=%s material=%s fields=%s reasons=%s",
                 task.task_no, material_key, len(rules),
@@ -374,6 +420,17 @@ def graph_execute_extraction_batch(
             counted = loop_count if position == 0 else 0
             field_key = str((rule.get("output_definitions") or [{}])[0].get("field_key"))
             item = by_field.get(field_key)
+            # 已通过接口校验的字段只取决于它自己的结论。后续修正请求整体失败（模型被阻断、
+            # 返回不可解析）时，这里仍然按上一轮已校验的结果保存，不跟着记为未执行。
+            if field_key in verdicts:
+                verdict, field_unresolved = verdicts[field_key]
+                outcomes.append(_save_field(
+                    db, task, execution, rule, verdict=verdict, unresolved=field_unresolved,
+                    execution_issues=unresolved,
+                    evaluation_id=evaluation_id, turn_count=loop_count, batch_size=batch_size,
+                    counted_turns=counted,
+                ))
+                continue
             field_issues = [*unresolved, *response_issues]
             if field_key in duplicate_fields:
                 field_issues.append({
@@ -381,7 +438,7 @@ def graph_execute_extraction_batch(
                     "message": "批量结果重复返回同一字段，本条未形成唯一结论",
                     "details": {"code": field_codes.get(field_key)},
                 })
-            elif not blocked and item is None:
+            elif item is None and not request_blocked:
                 field_issues.append({
                     "kind": "EXTRACTION_BATCH_FIELD_MISSING",
                     "message": "本次批量抽取没有返回该字段的结果，本条未形成结论",
@@ -389,19 +446,13 @@ def graph_execute_extraction_batch(
             error = field_errors.get(field_key)
             if error is not None:
                 field_issues.append({"kind": error.code, "message": error.message, "details": error.details})
-            if blocked or field_key in duplicate_fields or item is None or error is not None:
-                outcomes.append(_record_blocked(
-                    db, task, execution, rule,
-                    unresolved=field_issues,
-                    evaluation_id=evaluation_id, turn_count=loop_count, batch_size=batch_size,
-                    counted_turns=counted,
-                ))
-                continue
-            verdict, field_unresolved = verdicts[field_key]
-            outcomes.append(_save_field(
-                db, task, execution, rule, verdict=verdict, unresolved=field_unresolved,
-                execution_issues=unresolved,
+            outcomes.append(_record_blocked(
+                db, task, execution, rule,
+                unresolved=field_issues,
                 evaluation_id=evaluation_id, turn_count=loop_count, batch_size=batch_size,
                 counted_turns=counted,
+                # 本次请求因渠道故障中断时，未形成结论的字段都带着这一原因；
+                # 已通过校验的字段在上面已经各自保存，不受影响。
+                channel_failure=channel_failure,
             ))
         return outcomes

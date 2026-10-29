@@ -18,17 +18,24 @@ export interface MaterialTypeItem {
   name: string;
 }
 
-export interface RuleStatusItem {
-  status: string | null;
-  known: boolean;
-  label: string | null;
-  category: string;
+/** 一个状态码在某个语境下的标准文案。 */
+export interface StatusVocabularyTerm {
+  code: string;
+  label: string;
+  category: string | null;
   category_label: string | null;
   note: string | null;
 }
 
-export interface RuleStatusCatalog extends ApiResponse {
-  statuses: RuleStatusItem[];
+/** 一个语境（规则、风险、字段）下的完整状态词表。 */
+export interface StatusVocabularyDomain {
+  domain: string;
+  statuses: StatusVocabularyTerm[];
+}
+
+/** 全部语境的审核状态词表与分档。 */
+export interface StatusVocabulary extends ApiResponse {
+  domains: StatusVocabularyDomain[];
   categories: Array<{ category: string; label: string }>;
 }
 
@@ -38,6 +45,7 @@ export interface SystemServiceItem {
   configuration_status: string;
   connection_status: string;
   last_checked_at: string | null;
+  latency_ms: number | null;
   missing: string[];
   note: string | null;
 }

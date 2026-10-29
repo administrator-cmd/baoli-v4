@@ -1,6 +1,7 @@
-import { reactive, ref } from "vue";
+import { getCurrentScope, onScopeDispose, reactive, ref } from "vue";
 
 import type { Paged } from "@/api/contracts";
+import { DEFAULT_PAGE_SIZE } from "@/constants/pagination";
 
 /**
  * 统一的后端分页列表状态。
@@ -23,7 +24,7 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
   const persisted = listStateStore.get(options.key);
   const filters = reactive({ ...options.initialFilters, ...(persisted?.filters as Partial<F> ?? {}) }) as F;
   const page = ref(persisted?.page ?? 1);
-  const pageSize = ref(persisted?.pageSize ?? options.defaultPageSize ?? 20);
+  const pageSize = ref(persisted?.pageSize ?? options.defaultPageSize ?? DEFAULT_PAGE_SIZE);
   const total = ref(0);
   const items = ref<T[]>([]);
   const loading = ref(false);
@@ -31,18 +32,26 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
   /** 最近一次成功响应的完整负载（含分页之外的附加字段，例如风险命中数与等级集合）。 */
   const lastResponse = ref<unknown>(null);
   let latestRequest = 0;
+  /** 组件卸载后旧请求不得写回列表，也不得覆盖共享的筛选记忆。 */
+  let disposed = false;
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      disposed = true;
+    });
+  }
 
   function persist(): void {
+    if (disposed) return;
     listStateStore.set(options.key, { filters: { ...filters }, page: page.value, pageSize: pageSize.value });
   }
 
-  async function load(): Promise<void> {
+  async function load(allowPageFallback = true): Promise<void> {
     const request = ++latestRequest;
     loading.value = true;
     error.value = null;
     try {
       const payload = await options.fetch({ ...filters, page: page.value, page_size: pageSize.value });
-      if (request !== latestRequest) {
+      if (disposed || request !== latestRequest) {
         return;
       }
       items.value = payload.items;
@@ -50,8 +59,16 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
       page.value = payload.page;
       pageSize.value = payload.page_size;
       lastResponse.value = payload;
+      // 删除当前页最后一条后，服务端仍按请求页码返回空页：按真实 total 收敛到最后一个
+      // 有效页再读一次，否则用户会停在空页上，看不到前面还有数据。
+      const lastPage = Math.max(1, Math.ceil(payload.total / payload.page_size));
+      if (allowPageFallback && payload.items.length === 0 && payload.total > 0 && payload.page > lastPage) {
+        page.value = lastPage;
+        await load(false);
+        return;
+      }
     } catch (failure) {
-      if (request !== latestRequest) {
+      if (disposed || request !== latestRequest) {
         return;
       }
       items.value = [];
@@ -59,7 +76,7 @@ export function usePagedList<T, F extends Record<string, unknown>>(options: Page
       lastResponse.value = null;
       error.value = failure instanceof Error ? failure.message : "列表读取失败";
     } finally {
-      if (request === latestRequest) {
+      if (!disposed && request === latestRequest) {
         loading.value = false;
         persist();
       }

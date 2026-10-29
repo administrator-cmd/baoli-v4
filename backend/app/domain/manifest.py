@@ -8,6 +8,7 @@ from ..common.exceptions import BusinessError
 from ..constants.execution import NODE_RULE_EXECUTION
 from ..constants.status import SCOPE_NOT_APPLICABLE
 from . import field_strategy, tool_catalog
+from .field_strategy import normalize_field_scope
 from .identity import stable_key
 from .proposals import FieldProposal, MaterialProposal, ReportSectionProposal, RuleProposal
 from .report_data import report_data_refs
@@ -372,34 +373,6 @@ def draft_config_of_import(
 
 
 # 字段「取数期间 / 报表口径」两个列的业务中文名。发布编译、运行期写事实、
-# 草稿表单校验三处都要用它组报错文案，只维护一份。
-FIELD_SCOPE_LABELS = {"period_scope": "取数期间", "statement_scope": "报表口径"}
-
-
-def normalize_field_scope(
-    field: dict[str, Any],
-    key: str,
-    *,
-    status_code: int = 400,
-) -> str:
-    """字段口径的内部归一化。
-
-    业务字段不必属于财报期间或报表口径体系；缺省只表示该口径不适用，
-    不猜测本期、上期、合并或母公司。数据库事实定位仍使用显式 sentinel。
-    """
-    value = field.get(key)
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return SCOPE_NOT_APPLICABLE
-    if not isinstance(value, str):
-        raise BusinessError(
-            "MANIFEST_FIELD_SCOPE_INVALID",
-            f"字段“{field.get('name')}”的{FIELD_SCOPE_LABELS.get(key, key)}取值无效",
-            status_code=status_code,
-            details={"field_key": field.get("field_key"), "column": key, "value": value},
-        )
-    return value.strip()
-
-
 def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str, Any]:
     """已发布 manifest → 可编辑配置行的唯一映射口径。
 

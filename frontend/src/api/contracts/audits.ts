@@ -4,6 +4,34 @@ import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 import type { TaskScope } from "./scenes";
 import type { TaskPlanInfo } from "./plans";
 
+/** 继续执行的范围：三类互斥，数量由服务端按真实重跑计划给出。 */
+export interface ResumeScope {
+  /** 保留的已完成项。 */
+  preserved: number;
+  /** 补跑的未完成项。 */
+  pending: number;
+  /** 因上游重跑需要重算的已完成项。 */
+  dependent: number;
+}
+
+/** 模型渠道故障：暂停原因，以及这次请求是否可能已经产生费用。 */
+export interface ChannelFailure {
+  code: string;
+  message: string;
+  result_unknown: boolean;
+  /** 触发暂停的规则键；没有具体规则时为空。 */
+  rule_key?: string | null;
+}
+
+/** 服务端对当前批次能否续跑、续跑多少的统一判断；页面只展示，不自行推导。 */
+export interface ResumeState {
+  execution_id: number | null;
+  /** 不能续跑的原因；可续跑时为 null。 */
+  blocked_reason: string | null;
+  plan: ResumeScope | null;
+  channel_failure: ChannelFailure | null;
+}
+
 export interface AuditNode {
   /** 节点实例码：用户配置的实例，同一能力类型可以有多个。 */
   node_code: string;
@@ -15,8 +43,10 @@ export interface AuditNode {
   status: string;
   failure_message: string | null;
   skip_reason: string | null;
-  /** 服务重启中断、可原地继续的执行批次；为 null 表示只能重新执行。 */
+  /** 可原地继续的执行批次；为 null 表示只能全部重新执行。 */
   resumable_execution_id?: number | null;
+  /** 续跑判断与范围；任务还没有执行批次时为 null。 */
+  resume?: ResumeState | null;
 }
 /**
  * 任务的展示结构：由后端按当前任务的场景配置返回。
@@ -143,19 +173,9 @@ export interface RuleStandard {
   operator_label?: string | null;
   requirement?: string | null;
   check_level?: string | null;
-  risk_level?: string | null;
-  comparison_mode?: string | null;
   comparison_label?: string | null;
   threshold?: string | number | null;
   threshold_unit?: string | null;
-  /** 文件质量检查的检查项目与合格要求（业务配置事实，与审核要求原文分开表达）。 */
-  check_item?: string | null;
-  check_item_label?: string | null;
-  check_requirement?: string | null;
-  check_requirement_label?: string | null;
-  /** 标准是否明确；为 false 时 missing 说明具体缺什么。 */
-  clear?: boolean | null;
-  missing?: string | null;
 }
 
 export interface AuditRule {

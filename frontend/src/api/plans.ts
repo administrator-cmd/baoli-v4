@@ -1,7 +1,6 @@
 import type {
   JsonValue,
   Paged,
-  PlanAdjustments,
   PlanConfig,
   PlanConfigPayload,
   PlanListItem,
@@ -31,6 +30,8 @@ export interface PlanOption {
   plan_name: string;
   scenario_code: string;
   scenario_version_no: number;
+  /** 创建任务时提交的范围哈希；选项本身已按「启用、未删除、范围已生效」过滤。 */
+  scope_hash: string | null;
 }
 
 /** 方案下拉选项，可按场景编码过滤。 */
@@ -58,11 +59,6 @@ export function createPlan(payload: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-}
-
-/** 方案详情：场景版本来源与方案自己的规则启停。 */
-export function getPlan(planCode: string): Promise<PlanSelection> {
-  return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`);
 }
 
 /** 编辑方案基本资料；不修改规则范围。 */
@@ -96,23 +92,9 @@ export function restorePlan(planCode: string): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/restore`, { method: "POST" });
 }
 
-/** 复制方案为新方案（沿用原方案的绑定与规则选择）。 */
-export function copyPlan(planCode: string, planName: string | null): Promise<PlanSelection> {
-  return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/copy`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ plan_name: planName }),
-  });
-}
-
 /** 方案的可编辑配置：材料 / 字段 / 审核规则 / 完整计算定义 / 报告章节。 */
 export function getPlanConfig(planCode: string): Promise<PlanConfig> {
   return request<PlanConfig>(`/plans/${encodeURIComponent(planCode)}/config`);
-}
-
-/** 旧方案相对其来源场景版本的调整，供重新生成时参考。 */
-export function getPlanAdjustments(planCode: string): Promise<PlanAdjustments> {
-  return request<PlanAdjustments>(`/plans/${encodeURIComponent(planCode)}/adjustments`);
 }
 
 /** 整体替换方案的配置并立即重新编译。提交的是五份完整集合。 */

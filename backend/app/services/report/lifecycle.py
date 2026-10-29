@@ -38,7 +38,6 @@ def set_report_archived(db: Session, report_no: str, archived: bool) -> AuditRep
     if not archived and report.archived_at is None:
         raise BusinessError("REPORT_NOT_ARCHIVED", "报告未归档，无需取消归档", status_code=409, details={"report_no": report_no})
     report.archived_at = datetime.now(UTC) if archived else None
-    report.status = "ARCHIVED" if archived else "GENERATED"
     task = db.get(AuditTask, report.audit_task_id)
     record_operation(
         db,

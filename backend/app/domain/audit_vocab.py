@@ -1,25 +1,30 @@
 """审核状态词汇的查询函数。
 
-状态码、标签和分档的唯一定义在 `constants/status.py`；本模块只保留按状态查询的辅助函数，
-避免 domain、services 与页面各自解释状态。
+状态码、标签、分档与说明的唯一定义在 `constants/status.py`；本模块按语境
+（规则、风险、字段）组装词表，供目录接口与页面共用，避免各处重复解释状态。
 """
 
 from typing import Any
 
 from ..constants.status import (
+    FIELD_STATUS_LABELS,
     MATERIAL_TYPE_UNAVAILABLE_STATUSES,
+    RISK_STATUS_LABELS,
     RULE_STATUS_LABELS,
     RULE_STATUSES,
     STATUS_CATEGORIES,
     STATUS_CATEGORY_LABELS,
-    STATUS_CATEGORY_UNKNOWN,
     STATUS_NOTES,
 )
 
-__all__ = [
-    "is_type_unavailable", "status_category_label_of", "status_category_of",
-    "status_label_of", "status_note", "status_view",
-]
+# 页面上同一状态码在不同语境使用不同文案；域就是这套语境的名字。
+STATUS_DOMAINS: tuple[str, ...] = ("rule", "risk", "field")
+
+_DOMAIN_LABELS: dict[str, dict[str, str]] = {
+    "rule": RULE_STATUS_LABELS,
+    "risk": RISK_STATUS_LABELS,
+    "field": FIELD_STATUS_LABELS,
+}
 
 
 def is_type_unavailable(status: str | None) -> bool:
@@ -27,45 +32,26 @@ def is_type_unavailable(status: str | None) -> bool:
     return status in MATERIAL_TYPE_UNAVAILABLE_STATUSES
 
 
-def status_category_of(status: str | None) -> str:
-    """规则结果状态的分档。未知状态码返回 UNKNOWN，不归入任何已知分档。"""
-    if not isinstance(status, str):
-        return STATUS_CATEGORY_UNKNOWN
-    return STATUS_CATEGORIES.get(status, STATUS_CATEGORY_UNKNOWN)
+def domain_status_terms(domain: str) -> list[dict[str, Any]]:
+    """一个语境下的全部状态码、文案、分档与说明。
 
-
-def status_label_of(status: str | None) -> str | None:
-    """状态的标准中文含义；未知状态码返回 None（调用方必须显式显示原始码）。"""
-    if not isinstance(status, str):
-        return None
-    return RULE_STATUS_LABELS.get(status)
-
-
-def status_category_label_of(status: str | None) -> str | None:
-    """状态分档的中文名；未知状态码归入「未识别状态」。"""
-    category = status_category_of(status)
-    return STATUS_CATEGORY_LABELS.get(category)
-
-
-def status_note(status: str | None) -> str | None:
-    """某个「未判定」状态到底缺什么；未知状态码返回 None。"""
-    if not isinstance(status, str):
-        return None
-    return STATUS_NOTES.get(status)
-
-
-def status_view(status: str | None) -> dict[str, Any]:
-    """一个状态码的标准解释，供接口与页面共用。
-
-    未知状态码 `known=False` 且 `label=None`：页面必须显示原始码并标注「未识别」，
-    不能用「未开始」这类兜底文案把它伪装成正常状态。
+    未知域直接报错，不返回空表——静默空表会让页面把全部结果显示成未识别。
     """
-    known = isinstance(status, str) and status in RULE_STATUSES
-    return {
-        "status": status,
-        "known": known,
-        "label": status_label_of(status),
-        "category": status_category_of(status),
-        "category_label": status_category_label_of(status),
-        "note": status_note(status),
-    }
+    labels = _DOMAIN_LABELS.get(domain)
+    if labels is None:
+        raise ValueError(f"未知状态域：{domain}")
+    codes = RULE_STATUSES if domain in ("rule", "risk") else tuple(labels)
+    terms: list[dict[str, Any]] = []
+    for code in codes:
+        label = labels.get(code)
+        if label is None:
+            continue
+        category = STATUS_CATEGORIES.get(code) if domain in ("rule", "risk") else None
+        terms.append({
+            "code": code,
+            "label": label,
+            "category": category,
+            "category_label": STATUS_CATEGORY_LABELS.get(category) if category else None,
+            "note": STATUS_NOTES.get(code) if domain in ("rule", "risk") else None,
+        })
+    return terms

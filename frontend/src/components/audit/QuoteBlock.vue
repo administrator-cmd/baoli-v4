@@ -12,7 +12,11 @@ import { quoteBlockText, quoteTableRows } from "@/utils/quoteText";
  */
 const props = defineProps<{ text?: string | null }>();
 
-const rows = computed(() => quoteTableRows(props.text));
+/** 单格「表格」没有行列结构可还原，按普通文本展示，否则只剩一个无边框的居中单元格。 */
+const rows = computed(() => {
+  const parsed = quoteTableRows(props.text);
+  return parsed && parsed.length === 1 && parsed[0].length === 1 ? null : parsed;
+});
 const header = computed(() => (rows.value && rows.value.length > 1 ? rows.value[0] : null));
 const body = computed(() => (rows.value ? (header.value ? rows.value.slice(1) : rows.value) : []));
 const plain = computed(() => quoteBlockText(props.text));

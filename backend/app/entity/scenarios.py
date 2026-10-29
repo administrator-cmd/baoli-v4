@@ -49,21 +49,21 @@ class ScenarioVersion(Base, TimestampMixin):
         UniqueConstraint("scenario_code", "version_no"),
         UniqueConstraint("import_job_id"),
         CheckConstraint("version_no >= 1"),
-        Index("idx_scenario_version_code_status", "scenario_code", "status", "published_at"),
+        Index("idx_scenario_version_code_published", "scenario_code", "published_at"),
         Index("idx_scenario_version_base", "base_version_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    import_job_id: Mapped[int | None] = mapped_column(ForeignKey("import_job.id"))
+    import_job_id: Mapped[int | None] = mapped_column(ForeignKey("import_job.id", name="fk_scenario_version_import_job", ondelete="RESTRICT", onupdate="RESTRICT"))
+    # 历史快照：场景删除后版本仍保留，因此不建指向 scenario_template 的外键。
     scenario_code: Mapped[str] = mapped_column(String(80), nullable=False)
     scenario_name: Mapped[str] = mapped_column(String(255), nullable=False)
     schema_key: Mapped[str] = mapped_column(String(80), nullable=False)
     schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
     schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     version_no: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), nullable=False)
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="IMPORT", server_default=text("'IMPORT'"))
-    base_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scenario_version.id"))
+    base_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scenario_version.id", name="fk_scenario_version_base", ondelete="RESTRICT", onupdate="RESTRICT"))
     change_summary: Mapped[str | None] = mapped_column(String(500))
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     published_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
@@ -80,7 +80,7 @@ class ScenarioNode(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
+    scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id", name="fk_scenario_node_version", ondelete="RESTRICT", onupdate="RESTRICT"), nullable=False)
     node_code: Mapped[str] = mapped_column(String(80), nullable=False)
     node_type: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)

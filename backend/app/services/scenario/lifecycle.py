@@ -12,7 +12,11 @@ from ...entity.imports import ImportJob
 from ...entity.scenario_drafts import ScenarioDraft
 from ...entity.scenarios import ScenarioTemplate
 from ..shared import configuration as config_store
-from ..shared.import_cleanup import delete_import_job_entities
+from ..shared.import_cleanup import (
+    delete_import_job_entities,
+    discard_staged_trees,
+    restore_staged_trees,
+)
 from ..system.operation_log import record_operation
 from ..system.operation_types import OBJECT_SCENARIO
 from .draft import _bump_draft, _commit_config_change, _default_draft_nodes, ensure_draft
@@ -179,8 +183,16 @@ def delete_scenario(db: Session, scenario_code: str) -> None:
     )
     # 导入作业、后台转换和 LLM 原始响应属于该场景的临时验证数据，随场景删除。
     # 活跃转换会在共享清理函数中明确拒绝，避免后台线程在删除后继续写回。
-    delete_import_job_entities(db, import_jobs)
-    if draft is not None:
-        db.delete(draft)
-    db.delete(template)
-    db.commit()
+    # 文件目录只改名暂存，提交成功后再清理，提交失败原样改回。
+    staged = []
+    try:
+        staged = delete_import_job_entities(db, import_jobs)
+        if draft is not None:
+            db.delete(draft)
+        db.delete(template)
+        db.commit()
+    except Exception:
+        restore_staged_trees(staged)
+        db.rollback()
+        raise
+    discard_staged_trees(staged, object_no=scenario_code)

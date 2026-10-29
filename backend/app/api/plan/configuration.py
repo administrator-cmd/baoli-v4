@@ -1,4 +1,4 @@
-"""方案配置与定制差异接口；任务反向生成方案的入口明确拒绝。"""
+"""方案配置接口；任务反向生成方案的入口明确拒绝。"""
 
 from typing import Any
 
@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from ...core.database import get_db
 from ...schema.dto.plans import PlanConfigUpdateRequest, PlanFromTaskRequest
 from ...schema.vo.plans import PlanSelectionResponse
-from ...services.plan.adjustments import plan_adjustments_view
 from ...services.plan.configuration import update_plan_config
 from ...services.plan.lifecycle import save_task_range_as_plan
 from ...services.plan.lookup import plan_or_404
@@ -18,7 +17,7 @@ from ...services.plan.views import plan_config_view
 router = APIRouter(prefix="/plans", tags=["审核方案"])
 
 
-def _selection_response(request: Request, payload: dict[str, Any]) -> PlanSelectionResponse:
+def selection_response(request: Request, payload: dict[str, Any]) -> PlanSelectionResponse:
     return PlanSelectionResponse.model_validate({**payload, "request_id": request.state.request_id})
 
 
@@ -31,13 +30,6 @@ def get_plan_config(plan_code: str, request: Request, db: Session = Depends(get_
     """
     plan = plan_or_404(db, plan_code)
     return {**plan_config_view(db, plan), "request_id": request.state.request_id}
-
-
-@router.get("/{plan_code}/adjustments")
-def get_plan_adjustments(plan_code: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    """旧方案相对其来源场景版本的调整，供重新生成方案时参考。"""
-    plan = plan_or_404(db, plan_code)
-    return {**plan_adjustments_view(db, plan), "request_id": request.state.request_id}
 
 
 @router.put("/{plan_code}/config")
@@ -57,4 +49,4 @@ def put_plan_config(
 def plan_from_task(payload: PlanFromTaskRequest, request: Request, db: Session = Depends(get_db)) -> PlanSelectionResponse:
     """拒绝用任务反向生成方案。"""
     plan = save_task_range_as_plan(payload.model_dump())
-    return _selection_response(request, plan_selection_view(db, plan))
+    return selection_response(request, plan_selection_view(db, plan))

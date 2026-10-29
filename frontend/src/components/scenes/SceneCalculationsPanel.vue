@@ -114,20 +114,20 @@ async function remove(item: DraftCalculationItem): Promise<void> {
     </div>
 
     <el-table :data="filteredCalculations" border stripe class="management-table" :empty-text="items.length ? '未找到匹配的规则' : '当前配置没有计算规则'">
-      <el-table-column prop="rule_code" label="规则编号" width="120" show-overflow-tooltip align="center" />
-      <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
-      <el-table-column label="来源工作表" width="160" show-overflow-tooltip>
+      <el-table-column prop="rule_code" label="规则编号" width="140" show-overflow-tooltip align="center" />
+      <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
+      <el-table-column label="来源工作表" width="204" show-overflow-tooltip>
         <template #default="{ row }">
           {{ sourceSheetLabel(row.origin) }}
         </template>
       </el-table-column>
-      <el-table-column prop="formula" label="计算方法" min-width="160" show-overflow-tooltip />
-      <el-table-column prop="requirement" label="业务要求" min-width="180" show-overflow-tooltip />
-      <el-table-column prop="result_code" label="结果编号" width="112" show-overflow-tooltip align="center" />
+      <el-table-column prop="formula" label="计算方法" min-width="240" show-overflow-tooltip />
+      <el-table-column prop="requirement" label="业务要求" min-width="260" show-overflow-tooltip />
+      <el-table-column prop="result_code" label="结果编号" width="140" show-overflow-tooltip align="center" />
       <el-table-column prop="unit" label="单位" width="64" align="center" />
       <el-table-column prop="currency" label="币种" width="64" align="center" />
-      <el-table-column label="状态" width="80" align="center"><template #default="{ row }">{{ statusLabel(row) }}</template></el-table-column>
-      <el-table-column label="操作" width="140" class-name="table-actions" fixed="right" align="center">
+      <el-table-column label="状态" width="140" align="center"><template #default="{ row }">{{ statusLabel(row) }}</template></el-table-column>
+      <el-table-column label="操作" width="160" class-name="table-actions" fixed="right" align="center">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="detailItem = row">详情</el-button>
           <el-button link type="primary" size="small" @click="openEditor(row)">编辑</el-button>
@@ -158,8 +158,8 @@ async function remove(item: DraftCalculationItem): Promise<void> {
           <el-descriptions-item label="依赖计算" :span="2"><div class="detail-text">{{ (detailItem.definition.depends_on_result_codes as string[] | undefined)?.map(resultName).join('、') || '—' }}</div></el-descriptions-item>
           <el-descriptions-item label="计算参数" :span="2">
             <el-table :data="detailParameters" border empty-text="未配置参数">
-              <el-table-column prop="parameter_code" label="参数名称" min-width="110" />
-              <el-table-column label="来源" width="100"><template #default="{ row }">{{ sourceLabel(row.source_type) }}</template></el-table-column>
+              <el-table-column prop="parameter_code" label="参数名称" min-width="130" />
+              <el-table-column label="来源" width="140"><template #default="{ row }">{{ sourceLabel(row.source_type) }}</template></el-table-column>
               <el-table-column label="取值" min-width="170"><template #default="{ row }">{{ parameterValue(row) }}</template></el-table-column>
             </el-table>
           </el-descriptions-item>

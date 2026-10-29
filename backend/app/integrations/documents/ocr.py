@@ -26,9 +26,6 @@ SERVICE_CODE = "OCR"
 # PaddleOCR 轮询状态枚举。来源：真实参考客户端
 # OCR-Demo/src/utils/paddleocr_vl_client.py（第 6、111、133-152 行，对应 PaddleOCR-VL 在线 API）：
 # 状态流转为 pending → running → done / failed。
-# 只有这四个取值来自真实契约；出现集合之外的取值说明供应商契约发生变化，
-# 必须立即报 EXTERNAL_SERVICE_CONTRACT_INVALID，而不是继续等到本地预算耗尽。
-OCR_JOB_STATES = frozenset({"pending", "running", "done", "failed"})
 OCR_JOB_ACTIVE_STATES = frozenset({"pending", "running"})
 
 # PaddleOCR NDJSON 结果中供应商真实页号字段名。

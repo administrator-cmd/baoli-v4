@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from ...common.pagination import PageResult, page_result
@@ -91,17 +91,26 @@ def list_scenarios_page(
     draft_by_code: dict[str, ScenarioDraft] = {}
     draft_counts: dict[str, dict[str, int]] = {}
     if codes:
+        # 最新发布版本在 SQL 里聚合，不把整段版本历史读回 Python 再挑。
+        latest_version = (
+            select(
+                ScenarioVersion.scenario_code.label("scenario_code"),
+                func.max(ScenarioVersion.version_no).label("version_no"),
+            )
+            .where(ScenarioVersion.scenario_code.in_(codes))
+            .group_by(ScenarioVersion.scenario_code)
+            .subquery()
+        )
         for scenario_code, version_no, published_at, version_id in db.execute(
-            select(ScenarioVersion.scenario_code, ScenarioVersion.version_no, ScenarioVersion.published_at, ScenarioVersion.id)
-            .where(ScenarioVersion.scenario_code.in_(codes), ScenarioVersion.status == "PUBLISHED")
+            select(
+                ScenarioVersion.scenario_code, ScenarioVersion.version_no,
+                ScenarioVersion.published_at, ScenarioVersion.id,
+            ).join(latest_version, and_(
+                ScenarioVersion.scenario_code == latest_version.c.scenario_code,
+                ScenarioVersion.version_no == latest_version.c.version_no,
+            ))
         ).all():
-            latest = latest_versions.get(scenario_code)
-            if latest is None or version_no > latest[0]:
-                latest_versions[scenario_code] = (version_no, published_at, version_id)
-        published_manifests = dict(db.execute(
-            select(ScenarioVersion.id, ScenarioVersion.manifest_json)
-            .where(ScenarioVersion.id.in_([version[2] for version in latest_versions.values()]))
-        ).all())
+            latest_versions[scenario_code] = (version_no, published_at, version_id)
         for draft in db.scalars(select(ScenarioDraft).where(ScenarioDraft.scenario_code.in_(codes))).all():
             draft_by_code[draft.scenario_code] = draft
         for scenario_code, draft in draft_by_code.items():
@@ -110,6 +119,15 @@ def list_scenarios_page(
                 "field": len(draft.config_json["fields"]),
                 "rule": len(draft.config_json["rules"]),
             }
+        # 有草稿时统计来自草稿；只有没有草稿的场景才需要读发布 manifest。
+        manifest_ids = [
+            latest[2] for code, latest in latest_versions.items() if code not in draft_by_code
+        ]
+        if manifest_ids:
+            published_manifests = dict(db.execute(
+                select(ScenarioVersion.id, ScenarioVersion.manifest_json)
+                .where(ScenarioVersion.id.in_(manifest_ids))
+            ).all())
 
     items = []
     for template in templates:
@@ -159,7 +177,6 @@ def list_admin_scenario_options(db: Session) -> list[dict[str, Any]]:
     if templates:
         for scenario_code, version_no in db.execute(
             select(ScenarioVersion.scenario_code, func.max(ScenarioVersion.version_no))
-            .where(ScenarioVersion.status == "PUBLISHED")
             .group_by(ScenarioVersion.scenario_code)
         ).all():
             latest[scenario_code] = int(version_no)
@@ -193,7 +210,6 @@ def list_scenario_options(db: Session) -> list[dict[str, Any]]:
     if templates:
         for scenario_code, version_no in db.execute(
             select(ScenarioVersion.scenario_code, func.max(ScenarioVersion.version_no))
-            .where(ScenarioVersion.status == "PUBLISHED")
             .group_by(ScenarioVersion.scenario_code)
         ).all():
             latest[scenario_code] = int(version_no)

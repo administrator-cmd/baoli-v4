@@ -31,13 +31,16 @@ const props = defineProps<{
   error?: string | null;
   /** 场景是否配置了风险规则；null 表示尚未读到风险结果。 */
   riskConfigured?: boolean | null;
-  /** 当前风险结果中无法判断的条数。 */
+  /** 当前风险结果中证据不足的条数。 */
   riskUndecidedCount?: number;
 }>();
 const emit = defineEmits<{ "select-report": [reportNo: string] }>();
 
 /** 报告对应的输入修订已过期：报告仍可查看，但不能当作当前结论，也不能下载。 */
 const stale = computed(() => props.report?.current === false);
+
+/** 失效的真实原因由服务端给出；页面不自行推断是输入变化还是重跑未完成。 */
+const staleReason = computed(() => props.report?.stale_reason ?? null);
 
 /** 报告是否已生成且有正文。 */
 const generated = computed(() => Boolean(props.report?.report_generated && props.report?.content));
@@ -61,7 +64,9 @@ const nextAction = computed(() => {
   if (stale.value) {
     return {
       title: "下一步：重新生成报告",
-      description: "当前报告对应的任务输入已变化。请在任务详情的报告输出节点重新执行，生成对应最新输入的报告。",
+      description: staleReason.value
+        ? `${staleReason.value}。请在任务详情的报告输出节点重新执行，生成对应当前执行结果的报告。`
+        : "报告已失效（原因未记录）。请在任务详情的报告输出节点重新执行。",
     };
   }
   if (!scopeComplete.value) {
@@ -86,7 +91,7 @@ const nextAction = computed(() => {
     const undecided = props.riskUndecidedCount ?? 0;
     if (undecided > 0) {
       return {
-        title: "下一步：处理无法判断的风险项",
+        title: "下一步：处理证据不足的风险项",
         description: `已配置风险规则，但仍有 ${undecided} 项证据不足、待复核或未执行；报告不给出「无风险」的判断。请到风险页点击「只看这 ${undecided} 项」查看具体缺项。`,
       };
     }
@@ -143,9 +148,9 @@ const businessSectionCount = computed(() => props.report?.business_section_count
       type="warning"
       show-icon
       :closable="false"
-      title="报告当前无效：对应的任务输入已变化"
+      :title="staleReason ? `报告当前无效：${staleReason}` : '报告当前无效（原因未记录）'"
     >
-      报告生成后任务输入（材料或人工有效值）发生了变化，当前入口返回的报告不再对应当前修订，不能作为当前结论，也不提供下载。
+      当前入口返回的报告不再对应当前执行，不能作为当前结论，也不提供下载。
       请重新执行报告输出节点生成新报告；下方正文只作为历史内容查看。
     </el-alert>
 

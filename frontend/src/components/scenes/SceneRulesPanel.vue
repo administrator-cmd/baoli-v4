@@ -3,14 +3,15 @@ import { computed, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { DraftRuleItem } from "@/api/contracts";
+import type { DraftRuleItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
-import { deleteDraftRule, getSceneConfiguration } from "@/api/scenes";
+import { deleteDraftRule } from "@/api/scenes";
 import { ruleOperatorOptions } from "@/constants/labels";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
 import { sourceSheetLabel, useRuleSourceFilter } from "@/composables/useRuleSourceFilter";
 import { readRuleListPaging, rememberRuleListPaging } from "@/utils/ruleListPaging";
 import { compareNaturalLabels } from "@/utils/naturalSort";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 规则配置面板：业务规则可增删改；自动抽取与报告生成规则由系统派生，只读。
@@ -18,21 +19,24 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
  */
 const props = defineProps<{
   scenarioCode: string | null;
-  /** 由父页面触发的外部刷新（例如发布后）。 */
-  refreshToken?: number;
+  /** 父级持有的同一份场景配置；面板不再各自请求整份配置。 */
+  config: ScenarioConfigurationView | null;
+  configError?: string | null;
+  configLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
   changed: [];
+  refresh: [];
 }>();
 
 const router = useRouter();
 
-const rules = ref<DraftRuleItem[]>([]);
-const loading = ref(false);
-const loadError = ref<string | null>(null);
+/** 数据来自父级唯一的配置请求。 */
+const rules = computed(() => props.config?.rules ?? []);
+const loading = computed(() => props.configLoading === true);
+const loadError = computed(() => props.configError ?? null);
 const saving = ref(false);
-let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 
@@ -100,28 +104,6 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败";
 }
 
-async function load(): Promise<void> {
-  const sequence = ++loadSequence;
-  if (!props.scenarioCode) {
-    rules.value = [];
-    return;
-  }
-  loading.value = true;
-  loadError.value = null;
-  try {
-    const payload = await getSceneConfiguration(props.scenarioCode);
-    if (sequence !== loadSequence) return;
-    rules.value = payload.rules;
-  } catch (error) {
-    if (sequence !== loadSequence) return;
-    rules.value = [];
-    loadError.value = error instanceof Error ? error.message : "规则配置读取失败";
-  } finally {
-    if (sequence === loadSequence) loading.value = false;
-  }
-}
-
-watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immediate: true });
 watch(() => props.scenarioCode, () => {
   resetFilters();
   detailRule.value = null;
@@ -155,7 +137,6 @@ async function removeRule(rule: DraftRuleItem): Promise<void> {
   try {
     await deleteDraftRule(props.scenarioCode, rule.rule_key);
     ElMessage.success("规则已删除");
-    await load();
     emit("changed");
   } catch (error) {
     if (error instanceof ApiError && error.code === "RULE_REFERENCED_BY_RISK") {
@@ -226,16 +207,16 @@ function scopeText(rule: DraftRuleItem): string {
           <span v-if="!loadError" class="text-muted">显示 {{ filteredRules.length }} / {{ rules.length }} 条</span>
         </div>
         <div class="app-toolbar__right">
-          <el-button :loading="loading" @click="load">刷新</el-button>
+          <el-button :loading="loading" @click="$emit('refresh')">刷新</el-button>
         </div>
       </div>
 
       <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="`读取失败：${loadError}`">
-        <el-button size="small" @click="load">重试</el-button>
+        <el-button size="small" @click="$emit('refresh')">重试</el-button>
       </el-alert>
 
       <el-table v-else :data="pagedRules" border stripe class="management-table" v-loading="loading" :empty-text="rules.length ? '未找到匹配的规则' : '暂无规则配置'">
-        <el-table-column label="业务编号" width="120" show-overflow-tooltip align="center">
+        <el-table-column label="业务编号" width="140" show-overflow-tooltip align="center">
           <template #default="{ row }"><span class="mono">{{ row.source_ref || (row.system ? "系统派生" : "未填写") }}</span></template>
         </el-table-column>
         <el-table-column prop="name" label="规则名称" min-width="180" show-overflow-tooltip align="center">
@@ -244,15 +225,15 @@ function scopeText(rule: DraftRuleItem): string {
             <div class="table-note">{{ executionModeLabel(row.execution_mode) }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="来源工作表" width="168" show-overflow-tooltip>
+        <el-table-column label="来源工作表" width="204" show-overflow-tooltip>
           <template #default="{ row }">
             {{ sourceSheetLabel(row.origin) }}
           </template>
         </el-table-column>
-        <el-table-column label="执行能力" width="132" show-overflow-tooltip align="center">
+        <el-table-column label="执行能力" width="152" show-overflow-tooltip align="center">
           <template #default="{ row }">{{ operatorLabel(row.operator) }}</template>
         </el-table-column>
-        <el-table-column label="严重级别" width="96" align="center">
+        <el-table-column label="严重级别" width="140" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.risk_level" type="info" size="small" effect="light" disable-transitions>
               {{ row.risk_level }}
@@ -260,20 +241,20 @@ function scopeText(rule: DraftRuleItem): string {
             <span v-else class="text-hint">非风险规则</span>
           </template>
         </el-table-column>
-        <el-table-column label="适用材料" width="112" show-overflow-tooltip>
+        <el-table-column label="适用材料" width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ scopeText(row) }}</template>
         </el-table-column>
         <el-table-column label="依赖规则" min-width="132" show-overflow-tooltip>
           <template #default="{ row }">{{ row.source_rule_name || "—" }}</template>
         </el-table-column>
-        <el-table-column label="启用状态" width="88" align="center">
+        <el-table-column label="启用状态" width="140" align="center">
           <template #default="{ row }">
             <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
               {{ row.enabled ? "启用" : "停用" }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" :width="canEdit ? 140 : 80" class-name="table-actions" fixed="right" align="center">
+        <el-table-column label="操作" :width="canEdit ? 168 : 96" class-name="table-actions" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="detailRule = row">详情</el-button>
             <template v-if="canEdit && !row.system">
@@ -289,7 +270,7 @@ function scopeText(rule: DraftRuleItem): string {
           :current-page="page"
           :page-size="pageSize"
           :total="filteredRules.length"
-          :page-sizes="[10, 20, 50, 100]"
+          :page-sizes="PAGE_SIZE_OPTIONS"
           layout="total, sizes, prev, pager, next, jumper"
           background
           @current-change="changePage"

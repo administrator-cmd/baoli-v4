@@ -5,7 +5,7 @@ import type { AuditFieldView } from "@/api/audits";
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { fieldStatusTone, statusLabel } from "@/constants/labels";
+import { statusTextOf } from "@/constants/statusVocabulary";
 import { evidenceIsValue, fieldMode, fieldReason, formatFieldValue } from "@/utils/fieldPresentation";
 import { quoteInlineText } from "@/utils/quoteText";
 import { compareNaturalLabels } from "@/utils/naturalSort";
@@ -128,7 +128,7 @@ const emptyDescription = computed(() => {
       type="warning"
       show-icon
       :closable="false"
-      :title="`有 ${uncoveredTotal} 条字段结果的状态不在上面的分档内（${Object.entries(uncoveredStatusCounts).map(([status, count]) => `${statusLabel(status)} ${count} 条`).join('、')}），它们只在「全部」里出现。`"
+      :title="`有 ${uncoveredTotal} 条字段结果的状态不在上面的分档内（${Object.entries(uncoveredStatusCounts).map(([status, count]) => `${statusTextOf('field', status)} ${count} 条`).join('、')}），它们只在「全部」里出现。`"
     />
 
     <el-empty v-if="!rows.length" description="没有符合筛选条件的字段结果">
@@ -136,7 +136,7 @@ const emptyDescription = computed(() => {
     </el-empty>
 
     <el-table v-else :data="rows" border stripe class="audit-result-table field-table" @row-click="(field: AuditFieldView) => detailField = field">
-      <el-table-column label="字段编号" width="120">
+      <el-table-column label="字段编号" width="140">
         <template #default="{ row }">{{ row.source_ref || "—" }}</template>
       </el-table-column>
       <el-table-column label="字段" width="180">
@@ -150,9 +150,9 @@ const emptyDescription = computed(() => {
           <div class="field-value" :class="{ 'field-value--empty': row.normalized_value === null || row.normalized_value === undefined || row.normalized_value === '' }">{{ extractedText(row) }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="112">
+      <el-table-column label="状态" width="140">
         <template #default="{ row }">
-          <StatusBadge :status="row.status" :tone="fieldStatusTone(row.status)" />
+          <StatusBadge domain="field" :status="row.status" />
         </template>
       </el-table-column>
       <el-table-column label="操作" width="88" fixed="right" align="center">

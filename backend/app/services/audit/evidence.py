@@ -101,7 +101,8 @@ def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _resolve_items(db: Session, task: AuditTask, items: list[dict[str, Any]],
-                   seen: frozenset[tuple[str, int]] = frozenset()) -> list[dict[str, Any]]:
+                   seen: frozenset[tuple[str, int]] = frozenset(),
+                   memo: dict[tuple[str, int], list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
     result = []
     for item in items:
         source_key = next((key for key in ("source_field_value_id", "source_rule_result_id") if key in item), None)
@@ -110,13 +111,21 @@ def _resolve_items(db: Session, task: AuditTask, items: list[dict[str, Any]],
             identity = (source_key, record_id)
             if identity in seen:
                 raise _evidence_error("原文依据引用形成循环", record_id=record_id)
+            cached = memo.get(identity) if memo is not None else None
+            if cached is not None:
+                result.extend(cached)
+                continue
             entity = TaskFieldValue if source_key == "source_field_value_id" else RuleResult
             record_type = (task_value_service.RECORD_TASK_FIELD_VALUE if entity is TaskFieldValue
                            else task_value_service.RECORD_RULE_RESULT)
             source = db.get(entity, record_id)
             if source is None or source.audit_task_id != task.id:
                 raise _evidence_error("原文依据引用的来源记录不存在或不属于当前任务", record_id=record_id)
-            result.extend(_resolve_items(db, task, _payload_items(db, task, record_type, record_id), seen | {identity}))
+            resolved = _resolve_items(db, task, _payload_items(db, task, record_type, record_id),
+                                      seen | {identity}, memo)
+            if memo is not None:
+                memo[identity] = resolved
+            result.extend(resolved)
             continue
         upload = db.get(DocumentUpload, item["document_upload_id"])
         if upload is None or upload.audit_task_id != task.id:
@@ -129,20 +138,30 @@ def _resolve_items(db: Session, task: AuditTask, items: list[dict[str, Any]],
     return _dedupe(result)
 
 
-def field_evidence(db: Session, task: AuditTask, field_value_id: int) -> list[dict[str, Any]]:
+def evidence_memo() -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """同一请求内复用已展开的证据链。
+
+    多个结果引用同一条上游时不重复递归读取；不做跨请求缓存，避免复用历史原文。
+    """
+    return {}
+
+
+def field_evidence(db: Session, task: AuditTask, field_value_id: int,
+                   memo: dict[tuple[str, int], list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
     row = db.get(TaskFieldValue, field_value_id)
     if row is None or row.audit_task_id != task.id:
         raise _evidence_error("字段取值不属于当前任务", record_id=field_value_id)
     return _resolve_items(db, task, _payload_items(db, task, task_value_service.RECORD_TASK_FIELD_VALUE, row.id),
-                          frozenset({("source_field_value_id", row.id)}))
+                          frozenset({("source_field_value_id", row.id)}), memo)
 
 
-def rule_evidence(db: Session, task: AuditTask, rule_result_id: int) -> list[dict[str, Any]]:
+def rule_evidence(db: Session, task: AuditTask, rule_result_id: int,
+                  memo: dict[tuple[str, int], list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
     row = db.get(RuleResult, rule_result_id)
     if row is None or row.audit_task_id != task.id:
         raise _evidence_error("规则结果不属于当前任务", record_id=rule_result_id)
     return _resolve_items(db, task, _payload_items(db, task, task_value_service.RECORD_RULE_RESULT, row.id),
-                          frozenset({("source_rule_result_id", row.id)}))
+                          frozenset({("source_rule_result_id", row.id)}), memo)
 
 
 def evidence_source_views(db: Session, task: AuditTask, items: list[dict[str, Any]]) -> list[dict[str, Any]]:

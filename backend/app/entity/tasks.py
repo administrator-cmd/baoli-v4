@@ -30,17 +30,19 @@ class AuditTask(Base, TimestampMixin):
         ForeignKeyConstraint(
             ["scenario_version_id", "current_node"],
             ["scenario_node.scenario_version_id", "scenario_node.node_code"],
+            name="fk_audit_task_current_node",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         Index("idx_audit_task_version_status", "scenario_version_id", "status"),
-        Index("idx_audit_task_status_phase", "status", "current_phase"),
         Index("idx_audit_task_plan", "plan_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     task_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
-    scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id"), nullable=False)
+    scenario_version_id: Mapped[int] = mapped_column(ForeignKey("scenario_version.id", name="fk_audit_task_scenario_version", ondelete="RESTRICT", onupdate="RESTRICT"), nullable=False)
     # 任务创建时使用的审核方案。
-    plan_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("audit_plan.id"))
+    plan_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("audit_plan.id", name="fk_audit_task_plan", ondelete="RESTRICT", onupdate="RESTRICT"))
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 任务备注：属于可编辑的基本资料，不进入执行快照。
     remark: Mapped[str | None] = mapped_column(Text)
@@ -51,11 +53,7 @@ class AuditTask(Base, TimestampMixin):
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 本任务的规则范围（启用/未启用规则与字段清单）。从上面的 manifest 算出。
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    # 当前阶段；节点序号由 current_node 在冻结节点顺序中的位置算出。
-    current_phase: Mapped[str] = mapped_column(
-        String(40), nullable=False, default="AWAITING_CONFIRMATION", server_default=text("'AWAITING_CONFIRMATION'")
-    )
-    # 业务 CSV 清单：format_version、batches（只登记 current/files/record_count）、record_count。
+    # 业务 CSV 清单：format_version、batches（只登记 current/files/record_count）。
     # 由 services.audit.value_store 读写。
     value_file_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 任务输入修订号：首次补传、替换材料和人工有效值变化都会递增。
@@ -69,20 +67,14 @@ class TaskDocument(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("audit_task_id", "material_key"),
         UniqueConstraint("id", "audit_task_id"),
-        ForeignKeyConstraint(
-            ["current_upload_id", "id"],
-            ["document_upload.id", "document_upload.task_document_id"],
-        ),
-        Index("idx_task_document_current_upload", "current_upload_id", "id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     document_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
-    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
+    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id", name="fk_task_document_task", ondelete="RESTRICT", onupdate="RESTRICT"), nullable=False)
     material_key: Mapped[str] = mapped_column(String(40), nullable=False)
     material_name: Mapped[str] = mapped_column(String(255), nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    current_upload_id: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
 
 
@@ -96,6 +88,9 @@ class DocumentUpload(Base, TimestampMixin):
         ForeignKeyConstraint(
             ["task_document_id", "audit_task_id"],
             ["task_document.id", "task_document.audit_task_id"],
+            name="fk_document_upload_task_document_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         CheckConstraint("size_bytes >= 0"),
         CheckConstraint("is_current IN (0, 1)"),
@@ -128,12 +123,15 @@ class DocumentUpload(Base, TimestampMixin):
 class StoredArtifact(Base, TimestampMixin):
     __tablename__ = "stored_artifact"
     __table_args__ = (
-        UniqueConstraint("document_upload_id", "artifact_type", "upload_sha256"),
+        UniqueConstraint("document_upload_id", "artifact_type", name="uq_stored_artifact_upload_type"),
         Index("idx_stored_artifact_content", "document_upload_id", "artifact_type", "content_sha256"),
         UniqueConstraint("id", "audit_task_id"),
         ForeignKeyConstraint(
             ["document_upload_id", "audit_task_id"],
             ["document_upload.id", "document_upload.audit_task_id"],
+            name="fk_stored_artifact_upload_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         Index("idx_stored_artifact_upload_status", "document_upload_id", "status"),
         Index("idx_stored_artifact_status", "status", "updated_at"),
@@ -145,11 +143,8 @@ class StoredArtifact(Base, TimestampMixin):
     audit_task_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     artifact_type: Mapped[str] = mapped_column(String(40), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
-    # 上传身份：这份产物是由哪个上传文件产生的（同一次上传重跑同一产物时不变）。
-    upload_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     # 产物内容版本：产物实际内容的哈希（JSON 规范序列化或二进制字节）。
-    # 它与上传哈希是两件事：同一份 PDF 重新识别后上传哈希不变，但内容可能不同；
-    # 索引必须绑定内容哈希，否则旧主体向量会继续冒充当前产物。
+    # 同一份上传重新识别后内容可能不同，内容哈希用于判断产物是否更新。
     content_sha256: Mapped[str | None] = mapped_column(CHAR(64))
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     # 外部作业号与截止时间；结果未知时保留最后一次已受理的作业。
@@ -185,18 +180,30 @@ class TaskFieldValue(Base, TimestampMixin):
         ForeignKeyConstraint(
             ["audit_task_id", "scenario_version_id"],
             ["audit_task.id", "audit_task.scenario_version_id"],
+            name="fk_task_field_value_task_version",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["audit_task_id", "material_key"],
             ["task_document.audit_task_id", "task_document.material_key"],
+            name="fk_task_field_value_task_material",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["document_upload_id", "audit_task_id"],
             ["document_upload.id", "document_upload.audit_task_id"],
+            name="fk_task_field_value_upload_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["extraction_execution_id", "audit_task_id"],
             ["node_execution.id", "node_execution.audit_task_id"],
+            name="fk_task_field_value_execution_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         Index("idx_task_field_lookup", "audit_task_id", "field_key", "material_key", "document_upload_id"),
         Index("idx_task_field_version", "audit_task_id", "scenario_version_id"),
@@ -261,14 +268,23 @@ class TaskFact(Base, TimestampMixin):
         ForeignKeyConstraint(
             ["audit_task_id", "scenario_version_id"],
             ["audit_task.id", "audit_task.scenario_version_id"],
+            name="fk_task_fact_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["audit_task_id", "material_key"],
             ["task_document.audit_task_id", "task_document.material_key"],
+            name="fk_task_fact_material",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["source_execution_id", "audit_task_id"],
             ["node_execution.id", "node_execution.audit_task_id"],
+            name="fk_task_fact_execution_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         Index(
             "idx_task_fact_lookup",
@@ -296,7 +312,6 @@ class TaskFact(Base, TimestampMixin):
     statement_scope: Mapped[str] = mapped_column(String(20), nullable=False)
     value_type: Mapped[str] = mapped_column(String(20), nullable=False)
     source_execution_id: Mapped[int | None] = mapped_column(BigInteger)
-    calculation_status: Mapped[str | None] = mapped_column(String(30))
     calculation_rule_code: Mapped[str | None] = mapped_column(String(80))
     revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
@@ -327,7 +342,8 @@ class RuleResult(Base, TimestampMixin):
     两者可能重名，结果须结合所属节点执行定位；数据库唯一键为
     (`node_execution_id`, `rule_key`)，不能按裸 `rule_key` 跨节点合并。
 
-    `message` 与 `risk_level` 同时保留为列表索引列；CSV 也有对应的可读业务列。
+    `status`、`message`、`risk_level`、`rule_role` 作为列表与风险筛选的索引列；
+    CSV 只保存处置、建议、依据与展示协议，不重复保存这几项。
     """
 
     __tablename__ = "rule_result"
@@ -337,15 +353,20 @@ class RuleResult(Base, TimestampMixin):
         ForeignKeyConstraint(
             ["node_execution_id", "audit_task_id"],
             ["node_execution.id", "node_execution.audit_task_id"],
+            name="fk_rule_result_execution_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         Index("idx_rule_result_task_status", "audit_task_id", "status"),
         Index("idx_rule_result_task_rule", "audit_task_id", "rule_key"),
         Index("idx_rule_result_task_code", "audit_task_id", "rule_code"),
         Index("idx_rule_result_task_risk_level", "audit_task_id", "risk_level"),
+        # 风险结果列表跨任务筛选角色，规则角色必须做前导列。
+        Index("idx_rule_result_role_task", "rule_role", "audit_task_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
+    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id", name="fk_rule_result_task", ondelete="RESTRICT", onupdate="RESTRICT"), nullable=False)
     node_execution_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     rule_key: Mapped[str] = mapped_column(String(80), nullable=False)
     rule_code: Mapped[str | None] = mapped_column(String(80))
@@ -354,6 +375,9 @@ class RuleResult(Base, TimestampMixin):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     # 风险等级：风险结果列表按它筛选与排序，因此单独成列而不是压进 JSON。
     risk_level: Mapped[str | None] = mapped_column(String(40))
+    # 规则角色 RISK / CHECK：取自任务清单里该条规则的同一判定。
+    # 风险结果列表按它过滤，不必为每一行解析整份 manifest_json。
+    rule_role: Mapped[str] = mapped_column(String(20), nullable=False)
     # 单条规则的模型循环结局与轮次。
     loop_status: Mapped[str | None] = mapped_column(String(30))
     turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
@@ -363,7 +387,7 @@ class RuleResult(Base, TimestampMixin):
 
 
 class ManualReview(Base, TimestampMixin):
-    """一条人工裁决记录。
+    """一条字段人工裁决记录。
 
     system_judgment_json 是提交时的不可变系统快照；人工结论与依据分开保存：
     - decision / business_note / before_value / after_value：真实决定了什么、改了什么；
@@ -374,35 +398,24 @@ class ManualReview(Base, TimestampMixin):
     __tablename__ = "manual_review"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["document_upload_id", "audit_task_id"],
-            ["document_upload.id", "document_upload.audit_task_id"],
-        ),
-        ForeignKeyConstraint(
-            ["rule_result_id", "audit_task_id"],
-            ["rule_result.id", "rule_result.audit_task_id"],
-        ),
-        ForeignKeyConstraint(
             ["field_value_id", "audit_task_id"],
             ["task_field_value.id", "task_field_value.audit_task_id"],
+            name="fk_manual_review_field_value_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         Index("idx_manual_review_task_status", "audit_task_id", "status"),
-        Index("idx_manual_review_upload", "document_upload_id"),
-        Index("idx_manual_review_rule_result", "rule_result_id"),
         Index("idx_manual_review_field_value", "field_value_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     review_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
-    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id"), nullable=False)
-    document_upload_id: Mapped[int | None] = mapped_column(BigInteger)
-    rule_result_id: Mapped[int | None] = mapped_column(BigInteger)
-    field_value_id: Mapped[int | None] = mapped_column(BigInteger)
-    review_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    audit_task_id: Mapped[int] = mapped_column(ForeignKey("audit_task.id", name="fk_manual_review_task", ondelete="RESTRICT", onupdate="RESTRICT"), nullable=False)
+    field_value_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     system_judgment_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     decision: Mapped[str | None] = mapped_column(String(40))
     business_note: Mapped[str | None] = mapped_column(Text)
-    proposed_value: Mapped[str | None] = mapped_column(Text)
     # 修改前后的真实值：只保存数量无法说明人工到底改了什么。
     before_value: Mapped[str | None] = mapped_column(Text)
     after_value: Mapped[str | None] = mapped_column(Text)
@@ -423,10 +436,16 @@ class NodeExecution(Base, TimestampMixin):
         ForeignKeyConstraint(
             ["audit_task_id", "scenario_version_id"],
             ["audit_task.id", "audit_task.scenario_version_id"],
+            name="fk_node_execution_task_version",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["scenario_version_id", "node_code"],
             ["scenario_node.scenario_version_id", "scenario_node.node_code"],
+            name="fk_node_execution_version_node",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         CheckConstraint("sequence_no >= 1"),
         Index("idx_node_execution_task_node", "audit_task_id", "node_code"),

@@ -10,8 +10,6 @@ from ...domain import scenario_schema
 from ...entity.imports import ImportJob
 from ...entity.scenarios import ScenarioVersion
 
-METADATA_SHEET_STATUS = "EXCLUDED"
-
 
 def _job_or_404(db: Session, job_no: str, *, lock: bool = False) -> ImportJob:
     statement = select(ImportJob).where(ImportJob.job_no == job_no)

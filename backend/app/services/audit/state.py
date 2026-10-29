@@ -1,42 +1,18 @@
-"""任务材料状态与执行进度；图恢复数据由 LangGraph 保存，不维护重复检查点表。"""
-
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
+from ...constants.status import TASK_PHASE_AWAITING_CONFIRMATION, TASK_PHASE_COMPLETED, TASK_STATUS_COMPLETED
 from ...domain.audit_vocab import is_type_unavailable
 from ...entity.scenarios import ScenarioVersion
-from ...entity.tasks import AuditTask, NodeExecution
-from .shared import _current_uploads, _scenario, _task_manifest
+from ...entity.tasks import AuditTask, DocumentUpload, TaskDocument
+from .shared import _scenario, _task_manifest
 
 
-def _current_node_executions(db: Session, task: AuditTask) -> dict[str, NodeExecution]:
-    """每个节点的“当前有效执行批次”。
-
-    每个节点只取最新一条未失效的执行。DAG 的 ``depends_on`` 才是执行依据，
-    ``sequence_no`` 只用于展示和确定性排序；如果允许高序号节点先于低序号节点执行，
-    按当前节点序号截断会漏掉真实的依赖结果。因此这里保留任务场景中的所有节点，
-    再按节点实例码选最新批次。
-
-    同一节点被重跑但旧执行尚未失效时也能取到最新批次。最新执行若停留在 RUNNING，
-    仍按该节点没有可用终态结果处理；这是执行中断时的显式状态，不用旧批次冒充当前结果。
-    """
-    _, nodes, _ = _scenario_nodes(db, task)
-    allowed = {item["node_code"] for item in nodes}
-    latest: dict[str, NodeExecution] = {}
-    for execution in db.scalars(
-        select(NodeExecution)
-        .where(NodeExecution.audit_task_id == task.id, NodeExecution.status != "INVALIDATED")
-        .order_by(NodeExecution.id)
-    ).all():
-        if execution.node_code in allowed:
-            latest[execution.node_code] = execution
-    return latest
-
-
-def _material_states(db: Session, task: AuditTask) -> dict[str, str | None]:
+def _material_states(
+    pairs: list[tuple[TaskDocument, DocumentUpload | None]],
+) -> dict[str, str | None]:
     """材料位的当前状态，供算子判断依赖依据是否有效。
 
     TYPE_REVIEW=类型待复核（尚未由人定案）；TYPE_REJECTED=人工已确认与材料位不符；
@@ -48,7 +24,7 @@ def _material_states(db: Session, task: AuditTask) -> dict[str, str | None]:
     照常按材料中的真实原文判定，类型本身另行作为待确认事项暴露。
     """
     states: dict[str, str | None] = {}
-    for document, upload in _current_uploads(db, task):
+    for document, upload in pairs:
         status = document.status
         if is_type_unavailable(status):
             states[document.material_key] = status
@@ -71,14 +47,7 @@ def _scenario_nodes(db: Session, task: AuditTask) -> tuple[ScenarioVersion, list
     return scenario, nodes, current_index
 
 def _task_phase(task: AuditTask) -> str:
-    """任务的当前阶段；节点序号由 current_node 在冻结节点顺序中的位置算出。"""
-    phase = task.current_phase
-    if not isinstance(phase, str) or not phase:
-        raise BusinessError("AUDIT_PROGRESS_MISSING", "任务缺少流程阶段标记", status_code=409)
-    return phase
-
-
-def _set_task_phase(task: AuditTask, phase: str) -> None:
-    if not phase:
-        raise BusinessError("AUDIT_PROGRESS_INVALID", "任务阶段不能为空", status_code=500)
-    task.current_phase = phase
+    """任务的当前阶段；完成状态由任务状态派生，不单独落库。"""
+    if task.status == TASK_STATUS_COMPLETED:
+        return TASK_PHASE_COMPLETED
+    return TASK_PHASE_AWAITING_CONFIRMATION

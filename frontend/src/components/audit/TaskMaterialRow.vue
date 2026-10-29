@@ -161,7 +161,7 @@ async function onFileChange(file: { raw?: File }): Promise<void> {
       <div v-if="artifactAttention" class="material-row__note" :class="artifactAttention.artifact.status === 'FAILED' ? 'text-danger' : ''">
         {{ artifactAttention.label }}：{{ artifactAttention.artifact.message }}
       </div>
-      <div v-if="document.status === 'TYPE_REJECTED'" class="text-danger material-row__note">相关检查将记为无法判断</div>
+      <div v-if="document.status === 'TYPE_REJECTED'" class="text-danger material-row__note">相关检查将记为证据不足</div>
       <div v-if="replacementImpact" class="material-row__note">
         {{ replacementImpact.description || "本次替换已使旧结果失效" }}；{{ impactText }}
       </div>

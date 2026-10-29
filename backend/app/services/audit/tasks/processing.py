@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
-from ....entity.tasks import DocumentUpload, StoredArtifact, TaskDocument
+from ....entity.tasks import StoredArtifact, TaskDocument
+from ..shared import current_upload
 from .lookup import task_or_404
 
 MATERIAL_ARTIFACT_TYPES = ("MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL")
@@ -93,16 +94,13 @@ def external_artifact_status_view(
         "artifact_type": artifact_type,
         "artifact_no": None,
     }
-    if document.current_upload_id is None:
-        return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件"}
-    upload = db.get(DocumentUpload, document.current_upload_id)
+    upload = current_upload(db, document)
     if upload is None:
-        raise BusinessError("TASK_DOCUMENT_UPLOAD_MISSING", "当前上传文件不存在", status_code=500)
+        return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件"}
     artifact = db.scalar(
         select(StoredArtifact).where(
             StoredArtifact.document_upload_id == upload.id,
             StoredArtifact.artifact_type == artifact_type,
-            StoredArtifact.upload_sha256 == upload.sha256,
         )
     )
     if artifact is None:
@@ -142,13 +140,14 @@ def ocr_status_view(db: Session, task_no: str, document_no: str) -> dict[str, An
         "deadline_at": None,
         "submit_attempts": None,
     }
-    if document.current_upload_id is None:
+    upload = current_upload(db, document)
+    if upload is None:
         return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件，没有 OCR 产物"}
     # OCR 正文较大，先取最新记录 ID，再按主键读取，避免 MySQL 对整行 JSON 排序。
     artifact_id = db.scalar(
         select(func.max(StoredArtifact.id))
         .where(
-            StoredArtifact.document_upload_id == document.current_upload_id,
+            StoredArtifact.document_upload_id == upload.id,
             StoredArtifact.artifact_type == "OCR",
         )
     )

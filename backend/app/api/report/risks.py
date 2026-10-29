@@ -15,6 +15,7 @@ risks_router = APIRouter(prefix="/risk-results", tags=["风险结果"])
 def list_risk_results(
     request: Request,
     task_no: str | None = None,
+    task_name: str | None = None,
     scenario_code: str | None = None,
     plan_code: str | None = None,
     risk_level: str | None = None,
@@ -28,6 +29,7 @@ def list_risk_results(
     result = report_risks.list_risk_results_page(
         db,
         task_no=task_no,
+        task_name=task_name,
         scenario_code=scenario_code,
         plan_code=plan_code,
         risk_level=risk_level,

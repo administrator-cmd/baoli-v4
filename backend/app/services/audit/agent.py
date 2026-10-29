@@ -37,6 +37,8 @@ from .prompts import (
     VERDICT_RESPONSE_FORMAT,
     VERDICT_SCHEMA,
 )
+from .shared import _current_uploads, _material_entries
+from .state import _material_states
 from .tools import runtime as tool_service
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,8 @@ def _upstream_result_view(item: dict[str, Any]) -> dict[str, Any]:
         "missing_items": payload.get("missing_items", []),
         "outputs": payload.get("outputs", []),
         # 报告与风险处置需要等级、处置建议和下一步；这些是业务结论，不是执行诊断。
-        "risk_level": payload.get("risk_level"),
+        # 风险等级是数据库索引列，CSV 只保存处置与建议。
+        "risk_level": item.get("risk_level") or payload.get("risk_level"),
         "action": payload.get("action"),
         "next_action": payload.get("next_action") or "",
     }
@@ -373,6 +376,7 @@ def parse_verdict(content: str | None) -> dict[str, Any] | None:
     text = content.strip()
     fenced = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     if fenced is not None:
+        logger.warning("模型结论使用 Markdown 代码块包裹，已剥离围栏后解析")
         text = fenced.group(1).strip()
     try:
         parsed = json.loads(text)
@@ -531,7 +535,6 @@ def validate_verdict(
     tool_results: list[dict[str, Any]],
     facts: list[dict[str, Any]],
     upstream_results: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
     """仅检查结果形状与真实引用；业务判断照模型结果保存。"""
     _assert_verdict_shape(raw)
@@ -583,10 +586,10 @@ def _task_facts(db: Session, task: AuditTask, materials: list[dict[str, Any]], *
     if rule_inputs is not None:
         selected = {r["field_key"] for r in rule_inputs}
         definitions = {k: f for k, f in definitions.items() if k in selected}
-    from .fact_context import extracted_identity_filter, project_task_facts
+    from .fact_context import extracted_identity_filter, fact_owner_field_keys, project_task_facts
     rows = list(db.scalars(select(TaskFact).where(
         TaskFact.audit_task_id == task.id, TaskFact.is_current.is_(True),
-        extracted_identity_filter(definitions),
+        extracted_identity_filter(definitions, owner_keys=fact_owner_field_keys(task)),
     ).order_by(TaskFact.id)))
     return project_task_facts(
         db, task, rows, definitions=definitions,
@@ -596,47 +599,8 @@ def _task_facts(db: Session, task: AuditTask, materials: list[dict[str, Any]], *
 
 def _task_materials(db: Session, task: AuditTask) -> list[dict[str, Any]]:
     """当前任务材料与上传状态，包括尚未上传的材料。"""
-    from sqlalchemy import select
-
-    from ...entity.tasks import DocumentUpload, TaskDocument
-    from .state import _material_states
-
-    states = _material_states(db, task)
-    documents = list(
-        db.scalars(
-            select(TaskDocument)
-            .where(TaskDocument.audit_task_id == task.id)
-            .order_by(TaskDocument.material_key)
-        ).all()
-    )
-    upload_ids = [item.current_upload_id for item in documents if item.current_upload_id]
-    uploads = (
-        {
-            item.id: item
-            for item in db.scalars(select(DocumentUpload).where(DocumentUpload.id.in_(upload_ids))).all()
-        }
-        if upload_ids
-        else {}
-    )
-    materials: list[dict[str, Any]] = []
-    for document in documents:
-        upload = uploads.get(document.current_upload_id)
-        materials.append(
-            {
-                "material_key": document.material_key,
-                "material_name": document.material_name,
-                "required": bool(document.required),
-                "document_status": document.status,
-                "material_state": states.get(document.material_key),
-                "upload_id": upload.id if upload else None,
-                "upload_sha256": upload.sha256 if upload else None,
-                "upload_revision": upload.upload_no if upload else None,
-                "upload_filename": upload.original_filename if upload else None,
-                "upload_content_type": upload.content_type if upload else None,
-                "upload_size_bytes": upload.size_bytes if upload else None,
-            }
-        )
-    return materials
+    pairs = _current_uploads(db, task)
+    return _material_entries(pairs, _material_states(pairs))
 
 
 

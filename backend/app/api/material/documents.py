@@ -15,6 +15,7 @@ router = APIRouter(prefix="/documents", tags=["审核材料"])
 def list_documents(
     request: Request,
     task_no: str | None = None,
+    task_name: str | None = None,
     keyword: str | None = None,
     material_name: str | None = None,
     has_file: bool | None = None,
@@ -27,6 +28,7 @@ def list_documents(
     result = material_documents.list_documents_page(
         db,
         task_no=task_no,
+        task_name=task_name,
         keyword=keyword,
         material_name=material_name,
         has_file=has_file,

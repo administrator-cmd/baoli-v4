@@ -16,12 +16,10 @@ import json
 from typing import Annotated, Any
 
 from langchain_core.tools import InjectedToolArg, tool
-from sqlalchemy import select
 
 from ....common.exceptions import BusinessError
 from ....domain import file_quality, quality_judgement
 from ....domain.rule_library import active
-from ....entity.tasks import DocumentUpload, TaskDocument
 
 
 def _scenario_version_no(db: Any, task: Any) -> int | None:
@@ -122,19 +120,55 @@ def query_rule_library_tool(
     }
 
 
-def _requested_uploads(context: Any, material_keys: list[str]):
+def _material_snapshot(context: Any) -> dict[str, Any]:
+    """任务材料位与当前上传的一次读取结果。
+
+    只读视图、ORM 实例和中文名都从这一份快照派生，工具调用不再重复查询。
+    """
     from ....entity.tasks import AuditTask
+    from ..shared import _current_uploads, _material_entries
+    from ..state import _material_states
+    if context is None or context.database_session is None or context.task_id is None:
+        raise BusinessError("TOOL_CONTEXT_MISSING", "工具调用需要任务与数据库会话")
     task = context.database_session.get(AuditTask, context.task_id)
     if task is None:
         raise BusinessError("TOOL_TASK_MISSING", "工具关联的任务不存在")
-    material_scope(context, material_keys=_scope_materials(context, material_keys))
-    frozen = {m["material_key"]: m for m in _current_materials(context)}
+    pairs = _current_uploads(context.database_session, task)
+    identities = _material_entries(pairs, _material_states(pairs))
+    return {
+        "task": task,
+        "identity": {item["material_key"]: item for item in identities},
+        "documents": {document.material_key: document for document, _ in pairs},
+        "uploads": {document.material_key: upload for document, upload in pairs},
+        "material_names": {document.material_key: document.material_name for document, _ in pairs},
+    }
+
+
+def _scope_view(snapshot: dict[str, Any], *, material_keys: list[str],
+                include_peers: bool = False) -> dict[str, Any]:
+    """从快照中取指定材料位；不属于当前任务的材料明确报错。"""
+    identities, documents, uploads = snapshot["identity"], snapshot["documents"], snapshot["uploads"]
+    wanted = list(dict.fromkeys(material_keys))
+    if include_peers:
+        wanted = sorted({*wanted, *(key for key, item in identities.items() if item.get("upload_id"))})
+    missing = [key for key in wanted if key not in documents]
+    if missing:
+        raise BusinessError("TOOL_MATERIAL_MISSING", "请求的材料不属于当前任务", details={"materials": missing})
+    return {"identity": {key: identities[key] for key in wanted},
+            "uploads": {key: uploads[key] for key in wanted},
+            "documents": {key: documents[key] for key in wanted},
+            "material_names": snapshot["material_names"]}
+
+
+def _requested_uploads(context: Any, material_keys: list[str]):
+    requested = _scope_materials(context, material_keys)
+    snapshot = _material_snapshot(context)
+    uploads = _scope_view(snapshot, material_keys=requested)["uploads"]
     for key in material_keys:
-        identity = frozen[key]
-        upload = context.database_session.get(DocumentUpload, identity.get("upload_id")) if identity.get("upload_id") else None
+        upload = uploads[key]
         if upload is None:
             raise BusinessError("TOOL_DOCUMENT_NOT_UPLOADED", "选定材料没有实际上传", details={"material_key": key})
-        yield task, key, upload
+        yield snapshot["task"], key, upload
 
 
 @tool("TASK_DATA_READ")
@@ -191,41 +225,9 @@ def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, An
     return {"status": "SUCCEEDED", "message": "指定服务已返回实际产物", "items": items}
 
 
-def _current_materials(context: Any) -> list[dict[str, Any]]:
-    from ....entity.tasks import AuditTask
-    from ..agent import _task_materials
-    if context is None or context.database_session is None or context.task_id is None:
-        raise BusinessError("TOOL_CONTEXT_MISSING", "工具调用需要任务与数据库会话")
-    task = context.database_session.get(AuditTask, context.task_id)
-    if task is None:
-        raise BusinessError("TOOL_TASK_MISSING", "工具关联的任务不存在")
-    return _task_materials(context.database_session, task)
-
-
-def _material_names_of(context: Any) -> dict[str, str]:
-    """材料位的中文名。取自任务配置，不由工具编造。"""
-    return {
-        str(item["material_key"]): item.get("material_name") or item["material_key"]
-        for item in _current_materials(context)
-    }
-
-
 def material_scope(context: Any, *, material_keys: list[str], include_peers: bool = False) -> dict[str, Any]:
     """读取任务当前材料；不存在的材料明确报错。"""
-    session = context.database_session
-    identities = {m["material_key"]: m for m in _current_materials(context)}
-    wanted = list(dict.fromkeys(material_keys))
-    if include_peers:
-        wanted = sorted({*wanted, *(k for k, m in identities.items() if m.get("upload_id"))})
-    documents = {d.material_key: d for d in session.scalars(
-        select(TaskDocument).where(TaskDocument.audit_task_id == context.task_id)).all()}
-    missing = [k for k in wanted if k not in documents]
-    if missing:
-        raise BusinessError("TOOL_MATERIAL_MISSING", "请求的材料不属于当前任务", details={"materials": missing})
-    uploads = {k: session.get(DocumentUpload, documents[k].current_upload_id)
-               if documents[k].current_upload_id else None for k in wanted}
-    return {"identity": {k: identities[k] for k in wanted}, "uploads": uploads,
-            "documents": {k: documents[k] for k in wanted}, "material_names": _material_names_of(context)}
+    return _scope_view(_material_snapshot(context), material_keys=material_keys, include_peers=include_peers)
 
 
 def _scope_materials(context: Any, requested: list[str]) -> list[str]:

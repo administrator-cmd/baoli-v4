@@ -5,6 +5,7 @@ import { toQuery } from "./query";
 export interface ReportQuery {
   name?: string;
   task_no?: string;
+  task_name?: string;
   scenario_code?: string;
   plan_code?: string;
   archived?: boolean;
@@ -48,6 +49,7 @@ export function reportDownloadUrl(reportNo: string): string {
 
 export interface RiskQuery {
   task_no?: string;
+  task_name?: string;
   scenario_code?: string;
   plan_code?: string;
   risk_level?: string;

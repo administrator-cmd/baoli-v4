@@ -20,7 +20,8 @@ export interface PlanListItem {
   updated_at: string;
 }
 
-export interface PlanSelection extends ApiResponse {
+/** 方案的基本资料与范围状态；配置视图和生命周期接口共用这一组字段。 */
+export interface PlanStatus {
   plan_code: string;
   plan_name: string;
   scenario_code: string;
@@ -38,6 +39,9 @@ export interface PlanSelection extends ApiResponse {
     published_at: string;
     scenario_name: string;
   } | null;
+}
+
+export interface PlanSelection extends ApiResponse, PlanStatus {
   /** 方案自己的全部规则与启停：这就是「这个方案跑哪些规则」的唯一来源。 */
   rules: Array<{ rule_key: string; name: string; node: string | null; enabled: boolean }>;
   calculation_rules: Array<{ rule_code: string; name: string; enabled: boolean }>;
@@ -46,9 +50,8 @@ export interface PlanSelection extends ApiResponse {
   updated_at: string;
 }
 
-/** 方案的可编辑配置：材料、字段、审核规则、计算定义和报告章节。 */
-export interface PlanConfig extends ApiResponse {
-  plan_code: string;
+/** 方案的可编辑配置：方案状态、材料、字段、审核规则、计算定义和报告章节。 */
+export interface PlanConfig extends ApiResponse, PlanStatus {
   materials: PlanMaterialItem[];
   fields: PlanFieldItem[];
   rules: PlanRuleItem[];
@@ -140,26 +143,6 @@ export interface PlanCalculationParameter {
   source_code: string | null;
   constant_value?: JsonValue;
   [key: string]: unknown;
-}
-
-export interface PlanAdjustmentField {
-  label: string;
-  before: unknown;
-  after: unknown;
-}
-
-export interface PlanAdjustments extends ApiResponse {
-  plan_code: string;
-  plan_name: string;
-  scenario_code: string;
-  base_scenario_version_no: number;
-  items: Array<{
-    category: string;
-    code: string;
-    name: string;
-    change: "ADDED" | "REMOVED" | "MODIFIED";
-    fields: PlanAdjustmentField[];
-  }>;
 }
 
 export interface PlanSectionItem {

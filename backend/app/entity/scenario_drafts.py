@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -33,6 +34,13 @@ class ScenarioDraft(Base, TimestampMixin):
     __tablename__ = "scenario_draft"
     __table_args__ = (
         UniqueConstraint("scenario_code"),
+        ForeignKeyConstraint(
+            ["scenario_code"],
+            ["scenario_template.scenario_code"],
+            name="fk_scenario_draft_template",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
         CheckConstraint("revision_no >= 0"),
         CheckConstraint("base_version_no IS NULL OR base_version_no >= 1"),
     )

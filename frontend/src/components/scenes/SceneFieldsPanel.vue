@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { DraftFieldItem, DraftMaterialItem, ScenarioConfigurationView } from "@/api/contracts";
+import type { DraftFieldItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 import {
   createDraftField,
   deleteDraftField,
-  getSceneConfiguration,
   updateDraftField,
 } from "@/api/scenes";
 import {
@@ -33,21 +32,24 @@ import {
  */
 const props = defineProps<{
   scenarioCode: string | null;
-  /** 由父页面触发的外部刷新（例如发布后）。 */
-  refreshToken?: number;
+  /** 父级持有的同一份场景配置；面板不再各自请求整份配置。 */
+  config: ScenarioConfigurationView | null;
+  configError?: string | null;
+  configLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
   changed: [];
+  refresh: [];
 }>();
 
-const fields = ref<DraftFieldItem[]>([]);
-const materials = ref<DraftMaterialItem[]>([]);
-const draft = ref<ScenarioConfigurationView | null>(null);
-const loading = ref(false);
-const loadError = ref<string | null>(null);
+/** 数据来自父级唯一的配置请求。 */
+const draft = computed(() => props.config);
+const fields = computed(() => props.config?.fields ?? []);
+const materials = computed(() => props.config?.materials ?? []);
+const loading = computed(() => props.configLoading === true);
+const loadError = computed(() => props.configError ?? null);
 const saving = ref(false);
-let loadSequence = 0;
 
 const canEdit = computed(() => Boolean(props.scenarioCode));
 const query = reactive({ material_key: "", name: "" });
@@ -101,34 +103,6 @@ const form = reactive({
 });
 
 const dependencyIssue = ref<{ title: string; entries: string[] } | null>(null);
-
-async function load(): Promise<void> {
-  const sequence = ++loadSequence;
-  if (!props.scenarioCode) {
-    fields.value = [];
-    materials.value = [];
-    draft.value = null;
-    return;
-  }
-  loading.value = true;
-  loadError.value = null;
-  try {
-    const payload = await getSceneConfiguration(props.scenarioCode);
-    if (sequence !== loadSequence) return;
-    draft.value = payload;
-    fields.value = payload.fields;
-    materials.value = payload.materials;
-  } catch (error) {
-    if (sequence !== loadSequence) return;
-    fields.value = [];
-    materials.value = [];
-    loadError.value = error instanceof Error ? error.message : "字段配置读取失败";
-  } finally {
-    if (sequence === loadSequence) loading.value = false;
-  }
-}
-
-watch(() => [props.scenarioCode, props.refreshToken], () => void load(), { immediate: true });
 
 function openCreate(): void {
   editingItem.value = null;
@@ -237,7 +211,6 @@ async function submitForm(): Promise<void> {
       ElMessage.success("字段配置已新增");
     }
     dialogVisible.value = false;
-    await load();
     emit("changed");
   } catch (error) {
     ElMessage.error(describeError(error));
@@ -263,7 +236,6 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
   try {
     await deleteDraftField(props.scenarioCode, item.field_key);
     ElMessage.success("字段配置已删除");
-    await load();
     emit("changed");
   } catch (error) {
     if (error instanceof ApiError && error.code === "FIELD_REFERENCED") {
@@ -307,23 +279,23 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
           <span v-if="canEdit && !materials.length" class="text-hint">先在材料配置中建立材料位，再添加字段。</span>
         </div>
         <div class="app-toolbar__right">
-          <el-button :loading="loading" @click="load">刷新</el-button>
+          <el-button :loading="loading" @click="$emit('refresh')">刷新</el-button>
         </div>
       </div>
 
       <el-alert v-if="loadError" type="error" show-icon :closable="false" :title="`读取失败：${loadError}`">
-        <el-button size="small" @click="load">重试</el-button>
+        <el-button size="small" @click="$emit('refresh')">重试</el-button>
       </el-alert>
 
       <el-table v-else :data="filteredFields" border stripe class="management-table" v-loading="loading" :empty-text="fields.length ? '未找到匹配的字段' : '暂无字段配置'">
-        <el-table-column prop="source_ref" label="字段编号" width="120" align="center">
+        <el-table-column prop="source_ref" label="字段编号" width="140" align="center">
           <template #default="{ row }">
             <span v-if="row.source_ref" class="mono">{{ row.source_ref }}</span>
             <span v-else class="text-hint">未填写</span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="字段名称" min-width="160" show-overflow-tooltip />
-        <el-table-column prop="material_name" label="来源材料" width="112" show-overflow-tooltip />
+        <el-table-column prop="name" label="字段名称" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="material_name" label="来源材料" width="160" show-overflow-tooltip />
         <el-table-column label="数据类型" width="88" align="center">
           <template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template>
         </el-table-column>
@@ -348,10 +320,10 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="是否必填" width="88" align="center">
           <template #default="{ row }">{{ row.required ? "是" : "否" }}</template>
         </el-table-column>
-        <el-table-column label="抽取要求" min-width="200" show-overflow-tooltip>
+        <el-table-column label="抽取要求" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">{{ row.instruction || "—" }}</template>
         </el-table-column>
-        <el-table-column label="规则引用" width="100" align="center">
+        <el-table-column label="规则引用" width="130" align="center">
           <template #default="{ row }">
             <el-tag v-if="referencedFieldKeys.has(row.field_key)" type="info" size="small" effect="plain" disable-transitions>
               已被引用
@@ -359,7 +331,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
             <span v-else class="text-hint">未引用</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="canEdit" label="操作" width="104" class-name="table-actions" fixed="right" align="center">
+        <el-table-column v-if="canEdit" label="操作" width="124" class-name="table-actions" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="removeItem(row)">删除</el-button>

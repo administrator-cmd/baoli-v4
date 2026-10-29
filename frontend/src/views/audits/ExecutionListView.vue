@@ -5,11 +5,11 @@ import { useRouter } from "vue-router";
 import type { ExecutionRow } from "@/api/contracts";
 import { getExecution, listExecutions } from "@/api/executions";
 import { usePagedList } from "@/composables/usePagedList";
-import PageHeader from "@/components/PageHeader.vue";
-import { formatDate, nodeOptions } from "@/constants/labels";
+import { formatDate, formatDuration, nodeOptions, statusFilterOptions } from "@/constants/labels";
 import StatusBadge from "@/components/StatusBadge.vue";
 import ExecutionDetailPanel from "@/components/audit/ExecutionDetailPanel.vue";
-import { executionDuration, executionSummaryText } from "@/utils/executionPresentation";
+import { executionSummaryText } from "@/utils/executionPresentation";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 执行记录：业务节点执行（node_execution）的跨任务列表。
@@ -33,14 +33,7 @@ const list = usePagedList<ExecutionRow, { node_code: string; status: string; sta
 
 const { filters, page, pageSize, total, items, loading, error } = list;
 
-const statusOptions = [
-  { value: "RUNNING", label: "执行中" },
-  { value: "SUCCEEDED", label: "已完成" },
-  { value: "FAILED", label: "失败" },
-  { value: "BLOCKED", label: "已阻断" },
-  { value: "SKIPPED", label: "已跳过" },
-  { value: "INVALIDATED", label: "已失效" },
-];
+const statusOptions = statusFilterOptions(["RUNNING", "SUCCEEDED", "FAILED", "BLOCKED", "SKIPPED", "INVALIDATED"]);
 
 function executionTime(value: string | null | undefined): string {
   return value ? formatDate(value) : "—";
@@ -72,11 +65,6 @@ onMounted(() => {
 
 <template>
   <div class="app-panel">
-    <PageHeader
-      eyebrow="任务管理"
-      title="执行记录"
-      :show-refresh="false"
-    />
     <el-form inline class="app-query" @submit.prevent="list.search()">
       <el-form-item label="执行节点">
         <el-select v-model="filters.node_code" clearable placeholder="全部节点" style="width: 160px">
@@ -105,25 +93,26 @@ onMounted(() => {
     </el-alert>
 
     <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据">
-      <el-table-column label="执行批次" width="88">
+      <el-table-column label="执行批次" width="104">
         <template #default="{ row }">第 {{ row.sequence_no }} 次</template>
       </el-table-column>
-      <el-table-column label="任务" min-width="150" show-overflow-tooltip>
+      <el-table-column label="任务" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="openTask(row)">{{ row.task_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="执行状态" width="112">
+      <el-table-column label="执行状态" width="140">
         <template #default="{ row }"><StatusBadge :status="row.status" /> <el-tag v-if="row.invalidated" type="info" size="small">已失效</el-tag></template>
       </el-table-column>
-      <el-table-column label="开始时间" width="184">
+      <el-table-column label="开始时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ executionTime(row.started_at) }}</span></template>
       </el-table-column>
-      <el-table-column label="结束时间" width="184">
+      <el-table-column label="结束时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ executionTime(row.finished_at) }}</span></template>
       </el-table-column>
-      <el-table-column label="耗时" width="112">
-        <template #default="{ row }">{{ executionDuration(row.duration_ms) }}</template>
+      <!-- 耗时按「N 小时 M 分 S 秒」展示，列宽要放得下完整时长，否则会折成两行。 -->
+      <el-table-column label="耗时" width="200">
+        <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
       </el-table-column>
       <el-table-column label="执行结果" min-width="240">
         <template #default="{ row }">
@@ -131,7 +120,7 @@ onMounted(() => {
           <div v-if="row.failure_message" class="text-danger">{{ row.failure_message }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="136" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="160" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
           <el-button link type="primary" size="small" @click="openTask(row)">查看任务</el-button>
@@ -144,7 +133,7 @@ onMounted(() => {
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="PAGE_SIZE_OPTIONS"
         layout="total, sizes, prev, pager, next, jumper"
         background
         @current-change="list.setPage"

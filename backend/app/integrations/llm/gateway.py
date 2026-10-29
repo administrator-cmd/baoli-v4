@@ -15,8 +15,10 @@ JSON；供应商的地址、密钥、超时与响应格式细节都不外泄。
 本模块不依赖 domain 的规则契约，只做「发请求、取响应」。
 """
 
+import atexit
 import json
 import logging
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -59,7 +61,7 @@ def _request_result_unknown(exc: BaseException) -> BusinessError:
         "LLM_RESULT_UNKNOWN",
         "远程大模型请求结果未知，系统未自动重复提交；请确认服务状态后重新提交",
         status_code=502,
-        details={"service": "LLM", "error_type": type(exc).__name__},
+        details={"service": "LLM", "error_type": type(exc).__name__, "result_unknown": True},
     )
 
 
@@ -134,10 +136,25 @@ def _stream_invalid(reason: str) -> BusinessError:
     )
 
 
-def _sse_data(response: httpx.Response) -> Iterator[str]:
-    """按 SSE 事件边界读取 data，保留多行数据，忽略协议定义的注释与控制字段。"""
+def _sse_data(
+    response: httpx.Response, *, deadline: float, max_seconds: float, attempt: int, started: float,
+) -> Iterator[str]:
+    """按 SSE 事件边界读取 data，保留多行数据，忽略协议定义的注释与控制字段。
+
+    总时限在每一行到达时检查，包括被忽略的心跳注释：只在解析出 data 事件时检查时，
+    持续发送注释心跳的连接可以让读取超时与总时限都不触发。
+    """
     data_lines: list[str] = []
     for line in response.iter_lines():
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "远程大模型流式请求超过总时限 attempt=%s max_seconds=%s elapsed_seconds=%.3f",
+                attempt, max_seconds, time.monotonic() - started,
+            )
+            raise BusinessError(
+                "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
+                details={"service": "LLM", "max_seconds": max_seconds, "result_unknown": True},
+            )
         if not line:
             if data_lines:
                 yield "\n".join(data_lines)
@@ -205,9 +222,13 @@ def _merge_stream_delta(
 
 def _read_stream(
     response: httpx.Response, *, attempt: int, started: float, deadline: float,
-    timeout_seconds: float,
+    max_seconds: float,
 ) -> dict[str, Any]:
-    """接收完整流并还原 Chat Completions 响应；未正常结束的流不能作为业务结果。"""
+    """接收完整流并还原 Chat Completions 响应；未正常结束的流不能作为业务结果。
+
+    总时限由 `_sse_data` 在读取每一行时检查（含被忽略的心跳注释）；只要数据还在到达就继续
+    接收，慢不等于卡住。
+    """
     if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
         raise _stream_invalid("接口未返回 text/event-stream")
     envelope: dict[str, Any] = {}
@@ -215,16 +236,9 @@ def _read_stream(
     tool_calls: dict[int, dict[int, dict[str, Any]]] = {}
     chunks = 0
     done = False
-    for data in _sse_data(response):
-        if time.monotonic() >= deadline:
-            logger.warning(
-                "远程大模型流式请求超过总时限 attempt=%s chunks=%s timeout_seconds=%s elapsed_seconds=%.3f",
-                attempt, chunks, timeout_seconds, time.monotonic() - started,
-            )
-            raise BusinessError(
-                "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
-                details={"service": "LLM", "timeout_seconds": timeout_seconds, "chunks": chunks},
-            )
+    for data in _sse_data(
+        response, deadline=deadline, max_seconds=max_seconds, attempt=attempt, started=started,
+    ):
         if data == "[DONE]":
             done = True
             break
@@ -242,7 +256,11 @@ def _read_stream(
             )
         if "error" in chunk:
             logger.warning("远程大模型流中返回错误 attempt=%s", attempt)
-            raise BusinessError("LLM_EXTERNAL_FAILED", "远程大模型流式响应返回错误", status_code=502)
+            # 请求已被接受并进入流式阶段：是否已生成内容无法确认，不能声称未产生费用。
+            raise BusinessError(
+                "LLM_EXTERNAL_FAILED", "远程大模型流式响应返回错误", status_code=502,
+                details={"service": "LLM", "result_unknown": True},
+            )
         for key in ("id", "model", "created", "system_fingerprint", "usage"):
             if key in chunk and chunk[key] is not None:
                 envelope[key] = chunk[key]
@@ -276,6 +294,7 @@ def _read_stream(
         )
         raise BusinessError(
             "LLM_STREAM_INCOMPLETE", "远程大模型流式响应未完整结束，未保存本次生成结果", status_code=502,
+            details={"service": "LLM", "result_unknown": True},
         )
     if any(choice["finish_reason"] == "length" for choice in choices.values()):
         logger.warning("远程大模型输出被截断 attempt=%s finish_reason=length", attempt)
@@ -318,6 +337,107 @@ def _log_token_usage(
     )
 
 
+_client_lock = threading.Lock()
+_shared_client: httpx.Client | None = None
+
+
+def _http_client() -> httpx.Client:
+    """进程内唯一的 HTTP 客户端：连接池跨规则调用保留，进程退出时关闭。
+
+    httpx.Client 线程安全；每次请求仍按当次剩余时限传 timeout，不受连接复用影响。
+    """
+    global _shared_client
+    with _client_lock:
+        if _shared_client is None:
+            client = httpx.Client()
+            atexit.register(client.close)
+            _shared_client = client
+        return _shared_client
+
+
+@dataclass(frozen=True)
+class ModelProbeResult:
+    """一次真实模型连通探测的结果。
+
+    `ok` 只由本次请求的 HTTP 响应与响应结构决定；配置缺失、超时、鉴权失败和
+    网络错误都保留原始原因，不用「已配置」冒充「已连通」。
+    """
+
+    ok: bool
+    latency_ms: int
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+# 状态页的探测必须快速返回，不能沿用业务请求的长超时；1 个输出 token 足以验证
+# 地址、鉴权、模型名和响应契约。
+LLM_PROBE_TIMEOUT_SECONDS = 10.0
+LLM_PROBE_MAX_TOKENS = 1
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
+def probe_connection(timeout_seconds: float = LLM_PROBE_TIMEOUT_SECONDS) -> ModelProbeResult:
+    """用一次最小 chat 请求验证大模型渠道。
+
+    健康检查只读、可重复、不重试、不流式，也不消耗业务级 token；2xx 且响应
+    含 `choices` 才判定连通。任何失败原样返回错误码与中文原因。
+    """
+    started = time.monotonic()
+    try:
+        baseurl, api_key, model = _require_settings()
+    except BusinessError as exc:
+        return ModelProbeResult(False, _elapsed_ms(started), exc.code, exc.message)
+
+    try:
+        response = _http_client().post(
+            _endpoint(baseurl),
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": LLM_PROBE_MAX_TOKENS,
+                "stream": False,
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+    except httpx.TimeoutException:
+        logger.warning("大模型连通探测超时 timeout_seconds=%s", timeout_seconds)
+        return ModelProbeResult(
+            False, _elapsed_ms(started), "LLM_TIMEOUT",
+            f"连接超时（{timeout_seconds:g} 秒）",
+        )
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code in {401, 403}:
+            code, message = "LLM_AUTH_FAILED", f"鉴权失败（HTTP {status_code}）"
+        else:
+            code, message = "LLM_EXTERNAL_FAILED", f"服务返回 HTTP {status_code}"
+        logger.warning("大模型连通探测失败 code=%s status_code=%s", code, status_code)
+        return ModelProbeResult(False, _elapsed_ms(started), code, message)
+    except httpx.RequestError as exc:
+        logger.warning("大模型连通探测网络失败 error_type=%s", type(exc).__name__)
+        return ModelProbeResult(
+            False, _elapsed_ms(started), "LLM_CONNECTION_FAILED",
+            f"网络请求失败（{type(exc).__name__}）",
+        )
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list) or not payload["choices"]:
+        logger.warning("大模型连通探测响应不符合 chat 完成契约")
+        return ModelProbeResult(
+            False, _elapsed_ms(started), "LLM_CONTRACT_INVALID",
+            "响应不是有效的 chat 完成",
+        )
+    return ModelProbeResult(True, _elapsed_ms(started))
+
+
 def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
     """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。
 
@@ -327,140 +447,151 @@ def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[s
     baseurl, api_key, _ = _require_settings()
     settings = get_settings()
     max_attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
-    # LLM 使用独立的长响应时限；普通外部服务的 request_timeout_seconds 不应截断
-    # 仍在持续返回流式数据的规则库解析。
-    deadline = time.monotonic() + settings.llm_timeout_seconds
-    with httpx.Client(timeout=settings.llm_timeout_seconds) as client:
-        for attempt in range(1, max_attempts + 1):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+    # 总时限只兜住永不结束的流；读取超时按「连续多久收不到数据」判定卡住，
+    # 仍在持续出块的长响应不会被总时长截断。
+    deadline = time.monotonic() + settings.llm_max_seconds
+    client = _http_client()
+    for attempt in range(1, max_attempts + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BusinessError(
+                "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
+                details={"service": "LLM", "max_seconds": settings.llm_max_seconds},
+            )
+        started = time.monotonic()
+        logger.info(
+            "远程大模型开始流式请求 attempt=%s max_attempts=%s read_timeout_seconds=%s max_seconds=%s",
+            attempt, max_attempts, settings.llm_timeout_seconds, settings.llm_max_seconds,
+        )
+        try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "text/event-stream",
+            }
+            if idempotency_key:
+                headers["Idempotency-Key"] = idempotency_key
+            with client.stream(
+                "POST",
+                _endpoint(baseurl),
+                headers=headers,
+                json={
+                    **body,
+                    "stream": True,
+                    # 要求供应商在流末尾返回 usage，用于核对单次输入 token 规模。
+                    "stream_options": {**(body.get("stream_options") or {}), "include_usage": True},
+                },
+                # 读取超时按「连续多久收不到数据」判定卡住，但不超过本次请求剩余的总时限：
+                # 上游长时间不发数据时，等待本身也不会越过总截止时间。
+                timeout=min(settings.llm_timeout_seconds, max(remaining, 0.001)),
+            ) as response:
+                response.raise_for_status()
+                return _read_stream(
+                    response,
+                    attempt=attempt,
+                    started=started,
+                    deadline=deadline,
+                    max_seconds=settings.llm_max_seconds,
+                )
+        except httpx.TimeoutException as exc:
+            if time.monotonic() >= deadline:
+                # 等待本身已经用尽总时限：按总时限暴露，不再重试。
+                # 连接尚未建立时不能断言请求已送达。
+                delivered = not isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout))
                 raise BusinessError(
                     "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
-                    details={"service": "LLM", "timeout_seconds": settings.llm_timeout_seconds},
-                )
-            started = time.monotonic()
-            logger.info(
-                "远程大模型开始流式请求 attempt=%s max_attempts=%s timeout_seconds=%s",
-                attempt, max_attempts, settings.llm_timeout_seconds,
-            )
-            try:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Accept": "text/event-stream",
-                }
-                if idempotency_key:
-                    headers["Idempotency-Key"] = idempotency_key
-                with client.stream(
-                    "POST",
-                    _endpoint(baseurl),
-                    headers=headers,
-                    json={
-                        **body,
-                        "stream": True,
-                        # 要求供应商在流末尾返回 usage，用于核对单次输入 token 规模。
-                        "stream_options": {**(body.get("stream_options") or {}), "include_usage": True},
-                    },
-                    timeout=remaining,
-                ) as response:
-                    response.raise_for_status()
-                    return _read_stream(
-                        response,
-                        attempt=attempt,
-                        started=started,
-                        deadline=deadline,
-                        timeout_seconds=settings.llm_timeout_seconds,
-                    )
-            except httpx.TimeoutException as exc:
-                # 只有尚未建立连接、尚未把请求交给远端的超时才自动重试。
-                # 读/写超时都可能发生在服务端已经接收请求之后，不能盲目再次 POST。
-                safe_to_retry = isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout))
-                if safe_to_retry and attempt < max_attempts and time.monotonic() < deadline:
-                    delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
-                    logger.warning(
-                        "远程大模型请求超时，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
-                        attempt,
-                        max_attempts,
-                        delay,
-                        type(exc).__name__,
-                    )
-                    time.sleep(delay)
-                    continue
-                if not safe_to_retry:
-                    raise _request_result_unknown(exc) from exc
+                    details={"service": "LLM", "max_seconds": settings.llm_max_seconds,
+                             "result_unknown": delivered},
+                ) from exc
+            # 只有尚未建立连接、尚未把请求交给远端的超时才自动重试。
+            # 读/写超时都可能发生在服务端已经接收请求之后，不能盲目再次 POST。
+            safe_to_retry = isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout))
+            if safe_to_retry and attempt < max_attempts and time.monotonic() < deadline:
+                delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                 logger.warning(
-                    "远程大模型请求超时，重试已用尽 attempt=%s retry_count=%s timeout_seconds=%s error_type=%s",
+                    "远程大模型请求超时，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
                     attempt,
-                    len(LLM_RETRY_DELAYS_SECONDS),
-                    settings.llm_timeout_seconds,
+                    max_attempts,
+                    delay,
                     type(exc).__name__,
                 )
-                raise BusinessError(
-                    "LLM_TIMEOUT",
-                    "远程大模型请求超时",
-                    status_code=504,
-                    details={"service": "LLM", "timeout_seconds": settings.llm_timeout_seconds},
-                ) from exc
-            except httpx.HTTPStatusError as exc:
-                status_code = exc.response.status_code
-                if status_code in LLM_RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
-                    delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
-                    logger.warning(
-                        "远程大模型返回可重试 HTTP 错误，将重试 status_code=%s attempt=%s max_attempts=%s delay_seconds=%s",
-                        status_code,
-                        attempt,
-                        max_attempts,
-                        delay,
-                    )
-                    time.sleep(delay)
-                    continue
+                time.sleep(delay)
+                continue
+            if not safe_to_retry:
+                raise _request_result_unknown(exc) from exc
+            logger.warning(
+                "远程大模型请求超时，重试已用尽 attempt=%s retry_count=%s timeout_seconds=%s error_type=%s",
+                attempt,
+                len(LLM_RETRY_DELAYS_SECONDS),
+                settings.llm_timeout_seconds,
+                type(exc).__name__,
+            )
+            raise BusinessError(
+                "LLM_TIMEOUT",
+                "远程大模型请求超时",
+                status_code=504,
+                details={"service": "LLM", "timeout_seconds": settings.llm_timeout_seconds},
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in LLM_RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
+                delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                 logger.warning(
-                    "远程大模型返回 HTTP 错误 status_code=%s attempt=%s retry_count=%s",
+                    "远程大模型返回可重试 HTTP 错误，将重试 status_code=%s attempt=%s max_attempts=%s delay_seconds=%s",
                     status_code,
                     attempt,
-                    attempt - 1,
+                    max_attempts,
+                    delay,
                 )
-                if status_code in {401, 403}:
-                    raise BusinessError(
-                        "LLM_AUTH_FAILED",
-                        "远程大模型鉴权失败",
-                        status_code=502,
-                        details={"service": "LLM"},
-                    ) from exc
+                time.sleep(delay)
+                continue
+            logger.warning(
+                "远程大模型返回 HTTP 错误 status_code=%s attempt=%s retry_count=%s",
+                status_code,
+                attempt,
+                attempt - 1,
+            )
+            if status_code in {401, 403}:
                 raise BusinessError(
-                    "LLM_EXTERNAL_FAILED",
-                    "远程大模型服务返回错误",
+                    "LLM_AUTH_FAILED",
+                    "远程大模型鉴权失败",
                     status_code=502,
                     details={"service": "LLM"},
                 ) from exc
-            except httpx.RequestError as exc:
-                # ConnectError / ProxyError 发生在请求建立前，可以安全重试；
-                # ReadError、WriteError、RemoteProtocolError 等都无法证明远端未处理。
-                safe_to_retry = isinstance(exc, (httpx.ConnectError, httpx.PoolTimeout))
-                if safe_to_retry and attempt < max_attempts and time.monotonic() < deadline:
-                    delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
-                    logger.warning(
-                        "远程大模型网络请求失败，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
-                        attempt,
-                        max_attempts,
-                        delay,
-                        type(exc).__name__,
-                    )
-                    time.sleep(delay)
-                    continue
-                if not safe_to_retry:
-                    raise _request_result_unknown(exc) from exc
+            raise BusinessError(
+                "LLM_EXTERNAL_FAILED",
+                "远程大模型服务返回错误",
+                status_code=502,
+                details={"service": "LLM"},
+            ) from exc
+        except httpx.RequestError as exc:
+            # ConnectError / ProxyError 发生在请求建立前，可以安全重试；
+            # ReadError、WriteError、RemoteProtocolError 等都无法证明远端未处理。
+            safe_to_retry = isinstance(exc, (httpx.ConnectError, httpx.PoolTimeout))
+            if safe_to_retry and attempt < max_attempts and time.monotonic() < deadline:
+                delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                 logger.warning(
-                    "远程大模型网络请求失败，重试已用尽 attempt=%s retry_count=%s error_type=%s",
+                    "远程大模型网络请求失败，将重试 attempt=%s max_attempts=%s delay_seconds=%s error_type=%s",
                     attempt,
-                    len(LLM_RETRY_DELAYS_SECONDS),
+                    max_attempts,
+                    delay,
                     type(exc).__name__,
                 )
-                raise BusinessError(
-                    "LLM_NETWORK_FAILED",
-                    "远程大模型网络请求失败",
-                    status_code=502,
-                    details={"service": "LLM"},
-                ) from exc
+                time.sleep(delay)
+                continue
+            if not safe_to_retry:
+                raise _request_result_unknown(exc) from exc
+            logger.warning(
+                "远程大模型网络请求失败，重试已用尽 attempt=%s retry_count=%s error_type=%s",
+                attempt,
+                len(LLM_RETRY_DELAYS_SECONDS),
+                type(exc).__name__,
+            )
+            raise BusinessError(
+                "LLM_NETWORK_FAILED",
+                "远程大模型网络请求失败",
+                status_code=502,
+                details={"service": "LLM"},
+            ) from exc
 
 
 def call_json(

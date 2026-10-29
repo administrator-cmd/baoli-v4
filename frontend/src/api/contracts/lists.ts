@@ -83,7 +83,6 @@ export interface OperationLogRow {
   result: "SUCCEEDED" | "FAILED" | "ACCEPTED";
   duration_ms: number | null;
   command_no: string | null;
-  detail: Record<string, JsonValue> | null;
   failure_code: string | null;
   failure_message: string | null;
   created_at: string;

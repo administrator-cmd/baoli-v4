@@ -139,7 +139,6 @@ def _business_entry_select():
         # 列位置与命令查询对齐：第 8 列统一是耗时（业务为毫秒，命令为微秒）。
         OperationLog.duration_ms.label("duration_value"),
         OperationLog.command_no.label("command_no"),
-        OperationLog.detail_json.label("detail_json"),
         OperationLog.failure_code.label("failure_code"),
         OperationLog.failure_message.label("failure_message"),
         OperationLog.created_at.label("created_at"),
@@ -175,7 +174,6 @@ def _command_entry_select():
             BackgroundOperation.finished_at,
         ).label("duration_value"),
         BackgroundOperation.operation_no.label("command_no"),
-        BackgroundOperation.result_json.label("detail_json"),
         BackgroundOperation.failure_code.label("failure_code"),
         BackgroundOperation.failure_message.label("failure_message"),
         BackgroundOperation.created_at.label("created_at"),
@@ -209,7 +207,6 @@ def list_operations_page(
             business.c.result,
             business.c.duration_value,
             business.c.command_no,
-            business.c.detail_json,
             business.c.failure_code,
             business.c.failure_message,
             business.c.created_at,
@@ -225,7 +222,6 @@ def list_operations_page(
             command.c.result,
             command.c.duration_value,
             command.c.command_no,
-            command.c.detail_json,
             command.c.failure_code,
             command.c.failure_message,
             command.c.created_at,
@@ -268,7 +264,6 @@ def list_operations_page(
         if raw_duration is not None:
             # 业务日志以毫秒存，命令的列为微秒差；按来源统一换算成毫秒。
             duration_ms = int(raw_duration) // 1000 if row.source == "COMMAND" else int(raw_duration)
-        detail = row.detail_json if isinstance(row.detail_json, dict) else None
         items.append(
             {
                 "entry_no": row.entry_no,
@@ -280,7 +275,6 @@ def list_operations_page(
                 "result": row.result,
                 "duration_ms": duration_ms,
                 "command_no": row.command_no,
-                "detail": detail,
                 "failure_code": row.failure_code,
                 "failure_message": row.failure_message,
                 "created_at": row.created_at,

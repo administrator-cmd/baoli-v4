@@ -21,7 +21,7 @@ defineProps<{
     </el-table-column>
     <el-table-column label="本份判定" width="120">
       <template #default="{ row }">
-        <StatusBadge v-if="row.status" :status="row.status" />
+        <StatusBadge v-if="row.status" domain="rule" :status="row.status" />
         <span v-else>—</span>
       </template>
     </el-table-column>
@@ -50,7 +50,7 @@ defineProps<{
     </el-table-column>
     <el-table-column label="取值状态" width="120">
       <template #default="{ row }">
-        <StatusBadge v-if="row.status" :status="row.status" />
+        <StatusBadge v-if="row.status" domain="field" :status="row.status" />
         <span v-else>—</span>
       </template>
     </el-table-column>

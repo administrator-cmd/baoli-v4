@@ -19,11 +19,10 @@ from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError, exception_summary
 from ...constants.status import (
+    AUDIT_LLM_CHANNEL_UNAVAILABLE,
     FIELD_STATUS_NOT_PRESENT,
     FIELD_STATUS_REVIEWED,
     INTERRUPTED_EXECUTION_FAILURE_CODE,
-    TASK_PHASE_AWAITING_CONFIRMATION,
-    TASK_PHASE_COMPLETED,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_READY,
@@ -48,7 +47,7 @@ from .facts import _current_field_fact_pairs, _write_human_field_fact
 from .flow.errors import fail_running_execution, raise_graph_error
 from .flow.runner import audit_runner
 from .reviews import _decision_command_no, _invalidate_validation_results, _next_node_for_recalculation
-from .shared import _normalize_field_value, _task_field_definitions, _task_manifest
+from .shared import _normalize_field_value, _task_field_definitions, _task_manifest, current_upload
 from .state import _scenario_nodes
 from .tasks.lookup import task_or_404
 
@@ -126,7 +125,6 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
         _, nodes, current_index = _scenario_nodes(db, task)
         task.status = TASK_STATUS_BLOCKED
         task.current_node = nodes[current_index]["node_code"]
-        task.current_phase = TASK_PHASE_AWAITING_CONFIRMATION
         db.flush()
     # 图节点多次提交，最终推进也可能失败；用本次执行身份收尾，不能误伤其他批次。
     attempt = {"task_no": task_no, "execution_id": None}
@@ -138,6 +136,14 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
         if not isinstance(result, dict):
             raise BusinessError("AUDIT_GRAPH_RESULT_MISSING", "审核流程未返回当前节点执行结果", status_code=500,
                                 details={"phase": state.get("phase"), "execution_id": state.get("execution_id")})
+        if result.get("failure_code") == AUDIT_LLM_CHANNEL_UNAVAILABLE:
+            # 暂停不是成功：后台操作按真实失败结束，页面才会提示继续执行而不是「操作已完成」。
+            # 批次保持 BLOCKED 与逐条结果，续跑沿用同一批次。
+            raise BusinessError(
+                AUDIT_LLM_CHANNEL_UNAVAILABLE,
+                str(result.get("failure_message") or "远程大模型渠道不可用，本次执行已暂停"),
+                status_code=502,
+            )
         return result
     except BusinessError as exc:
         if attempt["execution_id"] is not None:
@@ -191,7 +197,15 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
             TaskDocument.material_key == request.material_key,
         )
     )
-    if not document or not document.current_upload_id:
+    if not document:
+        raise BusinessError(
+            "TASK_DOCUMENT_NOT_FOUND",
+            "任务材料位不存在",
+            status_code=404,
+            details={"material_key": request.material_key},
+        )
+    upload = current_upload(db, document)
+    if upload is None:
         raise BusinessError(
             "FIELD_FACT_MISSING",
             "该材料位尚未上传当前文件，没有可纠错的字段事实",
@@ -251,7 +265,7 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         task,
         field_key=request.field_key,
         material_key=request.material_key,
-        document_upload_id=document.current_upload_id,
+        document_upload_id=upload.id,
         status=new_status,
         raw_value=new_raw,
         normalized_value=normalized_value,
@@ -260,12 +274,10 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         review_no=public_no("REV"),
         audit_task_id=task.id,
         field_value_id=new_fact.id,
-        review_type="FIELD_CONFIRMATION",
         status="RESOLVED",
         system_judgment_json=system_judgment,
         decision=request.decision,
         business_note=request.business_note,
-        proposed_value=new_raw,
         before_value=fact_value.get("raw_value"),
         after_value=new_raw,
         basis_type=request.basis_type,
@@ -284,7 +296,6 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         # 没有规则、计算或报告消费该字段，且 DAG 已全部完成：字段事实仍应保存，
         # 不能把“无需重算”当成纠错失败。
         task.status = TASK_STATUS_COMPLETED
-        task.current_phase = TASK_PHASE_COMPLETED
         db.flush()
         db.commit()
         return {
@@ -305,7 +316,6 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
         }
     task.status = TASK_STATUS_READY
     task.current_node = next_node["node_code"]
-    task.current_phase = TASK_PHASE_AWAITING_CONFIRMATION
     db.flush()
     db.commit()
     return {
@@ -337,7 +347,7 @@ def _document_ocr_retry_target(
     ))
     if document is None:
         raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
-    upload = db.get(DocumentUpload, document.current_upload_id) if document.current_upload_id else None
+    upload = current_upload(db, document)
     if upload is None:
         raise BusinessError("OCR_UPLOAD_MISSING", "该材料位没有当前上传文件", status_code=409)
     artifact = _artifact_for_upload(db, upload, "OCR")

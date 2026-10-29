@@ -4,6 +4,7 @@ import { toQuery } from "./query";
 
 export interface DocumentQuery {
   task_no?: string;
+  task_name?: string;
   keyword?: string;
   material_name?: string;
   has_file?: boolean;

@@ -4,7 +4,8 @@ import { computed, ref, watch } from "vue";
 import type { FieldCorrectionRequest, FieldCorrectionResponse } from "@/api/contracts";
 import type { AuditFieldView } from "@/api/audits";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { formatBusinessValue, statusLabel } from "@/constants/labels";
+import { formatBusinessValue } from "@/constants/labels";
+import { statusTextOf } from "@/constants/statusVocabulary";
 
 /**
  * 字段纠错弹窗。
@@ -73,7 +74,7 @@ function submit(): void {
       <el-descriptions-item label="来源材料">{{ field?.material_name || "未关联材料" }}</el-descriptions-item>
       <el-descriptions-item label="当前值">
         {{ currentValue }}
-        <StatusBadge v-if="field" class="block-gap-sm" :status="field.status" />
+        <StatusBadge v-if="field" class="block-gap-sm" domain="field" :status="field.status" />
       </el-descriptions-item>
     </el-descriptions>
 
@@ -114,7 +115,7 @@ function submit(): void {
 
     <template v-else>
       <el-alert class="block-gap" type="success" show-icon :closable="false" title="纠错已提交">
-        新的字段事实版本 {{ result.fact_revision_no }} 已生效，当前状态 {{ statusLabel(result.status) }}。
+        新的字段事实版本 {{ result.fact_revision_no }} 已生效，当前状态 {{ statusTextOf("field", result.status) }}。
       </el-alert>
       <el-descriptions :column="1" size="small" border>
         <el-descriptions-item label="修改前">{{ result.before_value ?? "未提供" }}</el-descriptions-item>

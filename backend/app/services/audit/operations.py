@@ -87,17 +87,40 @@ def submit_node_resume(
     db: Session,
     task: AuditTask,
     *,
-    execution_id: int,
     idempotency_key: str | None,
     input_revision: int | None = None,
 ) -> tuple[Any, bool]:
     """提交「继续执行」：在同一执行批次里重跑未完成规则及其下游。
 
-    与「重新尝试」不同，继续执行不失效旧批次、不重跑不受影响的已有结果；
-    目标批次在受理时确定，后台执行前再校验一次，避免继续过期批次。
+    与「全部重新执行」不同，继续执行不失效旧批次、不重跑不受影响的已有结果。
+    目标批次只在首次受理时确定：同一幂等键的重发沿用原受理记录里的批次，
+    不按提交时的任务状态重新推导，否则响应丢失后的重发会被误判成不可恢复。
     """
     from . import resume as audit_resume
 
+    key = _idempotency_key(idempotency_key)
+    existing = background_service.existing_operation(
+        db, object_type=OBJECT_AUDIT_TASK, object_no=task.task_no,
+        operation_type="NODE_RESUME", idempotency_key=key,
+    )
+    if existing is not None:
+        stored = existing.request_json if isinstance(existing.request_json, dict) else {}
+        execution_id = stored.get("execution_id")
+        if not isinstance(execution_id, int):
+            raise BusinessError(
+                "OPERATION_REQUEST_INVALID", "原续跑命令缺少目标批次，无法按同一请求重放",
+                status_code=500, details={"operation_no": existing.operation_no},
+            )
+    else:
+        state = audit_resume.resume_state_of_task(db, task)
+        if state["execution_id"] is None:
+            raise BusinessError(
+                "AUDIT_EXECUTION_NOT_RESUMABLE",
+                state["blocked_reason"] or "当前没有可继续的未完成批次",
+                status_code=409,
+                details={"task_no": task.task_no, "status": task.status},
+            )
+        execution_id = state["execution_id"]
     request = {"task_no": task.task_no, "execution_id": execution_id, "input_revision": input_revision}
 
     def validate() -> None:
@@ -118,7 +141,7 @@ def submit_node_resume(
         if audit_resume.resumable_execution(task, target) is None:
             raise BusinessError(
                 "AUDIT_EXECUTION_NOT_RESUMABLE",
-                "该执行批次没有可继续的未完成项，请使用「重新尝试」",
+                audit_resume.resume_blocked_reason(task, target) or "该执行批次没有可继续的未完成项",
                 status_code=409,
                 details={"execution_id": execution_id, "status": target.status,
                          "failure_code": target.failure_code},
@@ -139,7 +162,7 @@ def submit_node_resume(
         object_type=OBJECT_AUDIT_TASK,
         object_no=task.task_no,
         operation_type="NODE_RESUME",
-        idempotency_key=_idempotency_key(idempotency_key),
+        idempotency_key=key,
         request=request,
         runner=runner,
         target_node=task.current_node,
@@ -164,7 +187,7 @@ def submit_document_classification(db: Session, task: AuditTask, upload) -> tupl
         document = session.get(TaskDocument, record.task_document_id) if record is not None else None
         if current is None or record is None or document is None or record.audit_task_id != current.id:
             raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "上传分类命令对应的任务文件不存在", status_code=404)
-        if document.current_upload_id != record.id or not record.is_current or current.input_revision != content["input_revision"]:
+        if not record.is_current or current.input_revision != content["input_revision"]:
             raise BusinessError("DOCUMENT_CLASSIFICATION_INPUT_STALE", "分类命令对应的文件版本已失效", status_code=409)
         artifact = _ensure_external_artifact(
             session, current, record, "MATERIAL_CLASSIFY",

@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 from ...common.exceptions import BusinessError
 from ...entity.imports import ImportJob
 from ...entity.operations import BackgroundOperation
-from ..shared.import_cleanup import delete_import_job_entities
+from ..shared.import_cleanup import (
+    delete_import_job_entities,
+    discard_staged_trees,
+    restore_staged_trees,
+)
 from ..system.background import ACTIVE_STATUSES
 from ..system.operation_log import record_operation
 from ..system.operation_types import OBJECT_IMPORT_JOB
@@ -33,8 +37,16 @@ def delete_import_job(db: Session, job_no: str) -> None:
         permanent=True,
         detail={"job_no": job_no},
     )
-    delete_import_job_entities(db, [job])
-    db.commit()
+    staged = []
+    try:
+        staged = delete_import_job_entities(db, [job])
+        db.commit()
+    except Exception:
+        # 先改回目录再回滚：回滚会释放行锁，此时目录不能仍停留在 .deleting-*。
+        restore_staged_trees(staged)
+        db.rollback()
+        raise
+    discard_staged_trees(staged, object_no=job_no)
 
 
 def abort_import_job(db: Session, job_no: str) -> BackgroundOperation:

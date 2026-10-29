@@ -14,6 +14,7 @@ class AuditRunner:
     graph_prepare_materials = staticmethod(context.graph_prepare_materials)
     graph_load_evaluation = staticmethod(context.graph_load_evaluation)
     graph_execute_extraction_batch = staticmethod(extraction_batch.graph_execute_extraction_batch)
+    graph_pause_scheduling = staticmethod(lifecycle.graph_pause_scheduling)
     graph_load_rule_instance = staticmethod(context.graph_load_rule_instance)
     graph_prepare_agent_context = staticmethod(context.graph_prepare_agent_context)
     graph_build_aggregate_verdict = staticmethod(aggregate.graph_build_aggregate_verdict)

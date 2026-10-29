@@ -10,7 +10,7 @@ from ...schema.vo.scenarios import ScenarioConfigurationViewResponse, ScenarioDr
 from ...services.scenario import configuration as scenario_configuration
 from ...services.scenario.configuration import draft_config_view
 from ...services.scenario.lookup import template_or_404
-from .responses import _draft_response
+from .responses import draft_response
 
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 
@@ -29,4 +29,4 @@ def get_scenario_configuration(
 def get_scenario_draft(scenario_code: str, request: Request, db: Session = Depends(get_db)) -> ScenarioDraftViewResponse:
     """场景配置草稿：材料、字段、规则、报告章节与草稿修订号。"""
     template = template_or_404(db, scenario_code)
-    return _draft_response(request, draft_config_view(db, template))
+    return draft_response(request, draft_config_view(db, template))

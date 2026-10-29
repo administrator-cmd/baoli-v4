@@ -1,6 +1,6 @@
 import { ref, type Ref } from "vue";
 
-import type { ApiError } from "@/api/http";
+import { ApiError } from "@/api/http";
 
 export interface RequestRunner {
   pending: Ref<boolean>;
@@ -24,17 +24,19 @@ export function useRequestRunner(): RequestRunner {
   const formMessage = ref("");
 
   function setFailure(error: unknown): void {
-    if (error instanceof Error && "code" in error && "requestId" in error) {
-      failure.value = error as ApiError;
+    if (error instanceof ApiError) {
+      failure.value = error;
       return;
     }
-    failure.value = {
-      name: "ApiError",
-      message: "无法连接到服务",
-      code: "NETWORK_ERROR",
+    // 网络、超时、HTTP 与响应格式错误已由 HTTP 层分成 ApiError；走到这里是页面自身
+    // 处理逻辑抛出的异常，按原样保留原因，不能改写成「无法连接到服务」。
+    const message = error instanceof Error ? error.message : String(error);
+    failure.value = new ApiError({
+      code: "UNEXPECTED_ERROR",
+      message: `页面处理出错：${message}`,
       details: {},
-      requestId: "unknown",
-    } as ApiError;
+      request_id: "",
+    }, null, error);
   }
 
   function clear(): void {

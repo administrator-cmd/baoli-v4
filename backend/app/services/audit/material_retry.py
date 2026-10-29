@@ -5,12 +5,13 @@ from functools import partial
 from sqlalchemy import select
 
 from ...common.exceptions import BusinessError
-from ...entity.tasks import AuditTask, DocumentUpload, TaskDocument
+from ...entity.tasks import AuditTask, TaskDocument
 from ..shared.storage import resolve_storage_path
 from ..system import background
 from ..system.operation_types import OBJECT_AUDIT_TASK
 from .artifacts import _artifact_for_upload, execute_external_artifact_call
 from .document_ports import document_service
+from .shared import current_upload
 
 
 def _target(db, task, document_no, artifact_type, request):
@@ -23,8 +24,8 @@ def _target(db, task, document_no, artifact_type, request):
     document = db.scalar(select(TaskDocument).where(
         TaskDocument.audit_task_id == task.id, TaskDocument.document_no == document_no,
     ))
-    upload = db.get(DocumentUpload, document.current_upload_id) if document and document.current_upload_id else None
-    if upload is None or not upload.is_current or upload.audit_task_id != task.id:
+    upload = current_upload(db, document) if document else None
+    if upload is None:
         raise BusinessError("TASK_DOCUMENT_UPLOAD_MISSING", "材料没有当前上传文件", status_code=409)
     artifact = _artifact_for_upload(db, upload, artifact_type)
     if artifact is None or artifact.artifact_no != request["artifact_no"]:
@@ -32,7 +33,8 @@ def _target(db, task, document_no, artifact_type, request):
     if artifact.status not in {"FAILED", "PROCESSING"}:
         raise BusinessError("ARTIFACT_NOT_RETRYABLE", "仅允许重试失败或结果未知的处理项", status_code=409)
     if artifact.status == "PROCESSING" and not request["resubmit_unknown"]:
-        raise BusinessError("ARTIFACT_RETRY_CONFIRMATION_REQUIRED", "上次处理结果未知，请确认可能重复调用后重试", status_code=409)
+        raise BusinessError("ARTIFACT_RETRY_CONFIRMATION_REQUIRED", "上次处理结果未知，请确认可能重复调用后重试",
+                            status_code=409)
     return upload, artifact
 
 

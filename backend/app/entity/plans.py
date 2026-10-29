@@ -45,10 +45,11 @@ class AuditPlan(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     plan_code: Mapped[str] = mapped_column(String(80), nullable=False)
     plan_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 历史快照：场景删除后方案仍保留，因此不建指向 scenario_template 的外键。
     scenario_code: Mapped[str] = mapped_column(String(80), nullable=False)
     # 这份方案从哪一版场景复制而来。只是溯源：执行与范围都不再读它，
     # 场景后来发布新版本也不会改变本方案（要换基准请另建方案）。
-    scenario_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scenario_version.id"))
+    scenario_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scenario_version.id", name="fk_audit_plan_scenario_version", ondelete="RESTRICT", onupdate="RESTRICT"))
     description: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

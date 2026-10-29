@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { ArrowDown, Edit, Search } from "@element-plus/icons-vue";
 import type {
-  ImportJob, ImportProposalChanges, ImportProposalGroup, ImportProposalStatus,
+  ConfigOrigin, ImportJob, ImportProposalChanges, ImportProposalGroup, ImportProposalStatus,
   ProposalCalculation, ProposalRule,
 } from "@/api/contracts";
 import { updateImportProposal } from "@/api/imports";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
+import PlanConfigList from "@/components/plans/PlanConfigList.vue";
 import { useRequestRunner } from "@/composables/useRequestRunner";
+import { sourceSheetLabel } from "@/composables/useRuleSourceFilter";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
 import { formatBusinessValue, valueTypeLabel } from "@/constants/labels";
 
@@ -17,8 +18,6 @@ const props = defineProps<{ job: ImportJob; readonly: boolean }>();
 const emit = defineEmits<{ saved: [job: ImportJob]; busy: [value: boolean] }>();
 const { pending, failure, run, clear } = useRequestRunner();
 const activeGroup = ref<ImportProposalGroup>("rules");
-const query = ref("");
-const statusFilter = ref("all");
 const savingRef = ref<string | null>(null);
 const editing = ref<ProposalRow | null>(null);
 const editRevision = ref(0);
@@ -29,6 +28,10 @@ interface ProposalRow {
   group: ImportProposalGroup;
   name: string;
   ruleCode?: string | null;
+  /** 来源工作表：与场景、方案配置同一口径。 */
+  origin?: ConfigOrigin | null;
+  /** 适用材料名称，用于材料筛选；筛选下拉也按名称匹配。 */
+  materialKeys?: string[];
   text: string;
   context: string;
   formula?: string;
@@ -47,18 +50,9 @@ interface ProposalRow {
   details: Array<{ label: string; value: string }>;
 }
 
-function proposalRowClass({ row }: { row: ProposalRow }): string {
-  return ["DISABLED", "PENDING"].includes(row.status ?? "") ? "proposal-row--paused" : "";
-}
-
 const groupLabels: Record<ImportProposalGroup, string> = {
   materials: "材料", fields: "字段", rules: "审核规则", calculations: "计算规则", report_sections: "报告章节",
 };
-const tabs = computed(() => (Object.keys(groupLabels) as ImportProposalGroup[]).map((group) => ({
-  group, label: groupLabels[group], count: props.job.proposals?.[group].length ?? 0,
-})));
-const supportsStatus = computed(() => activeGroup.value !== "materials");
-const textLabel = computed(() => ({ materials: "材料说明", fields: "抽取要求", rules: "审核要求", calculations: "业务要求", report_sections: "生成要求" })[activeGroup.value]);
 
 function namesText(names: Array<string | null | undefined>): string {
   return [...new Set(names.filter((name): name is string => Boolean(name)))].join("、");
@@ -69,8 +63,13 @@ function ruleInputs(rule: ProposalRule) {
     ...(rule.comparison.addends ?? [])];
 }
 
+function ruleMaterialNames(rule: ProposalRule): string[] {
+  return [...new Set([...rule.comparison.scope_material_names, ...ruleInputs(rule).map((input) => input?.material_name)]
+    .filter((name): name is string => Boolean(name)))];
+}
+
 function ruleMaterialsText(rule: ProposalRule): string {
-  return namesText([...rule.comparison.scope_material_names, ...ruleInputs(rule).map((input) => input?.material_name)]);
+  return namesText(ruleMaterialNames(rule));
 }
 
 function ruleFieldsText(rule: ProposalRule): string {
@@ -90,16 +89,19 @@ function parametersText(item: ProposalCalculation): string {
   }).join("、");
 }
 
-const rows = computed<ProposalRow[]>(() => {
+function rowsOf(group: ImportProposalGroup): ProposalRow[] {
   const proposals = props.job.proposals;
   if (!proposals) return [];
-  switch (activeGroup.value) {
+  switch (group) {
     case "materials": return proposals.materials.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "materials", name: item.name, text: item.description ?? "",
+      ruleCode: item.source_id ?? null, origin: item.origin,
       context: item.required ? "必传" : "按需上传", required: item.required, status: null, details: [],
     }));
     case "fields": return proposals.fields.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "fields", name: item.name, text: item.instruction,
+      ruleCode: item.source_id ?? null, origin: item.origin,
+      materialKeys: item.material_name ? [item.material_name] : [],
       context: item.material_name ?? "未关联材料",
       fieldType: valueTypeLabel(item.value_type), unit: item.unit ?? "", currency: item.currency ?? "",
       required: item.required, status: item.config_status ?? null,
@@ -109,7 +111,8 @@ const rows = computed<ProposalRow[]>(() => {
     }));
     case "rules": return proposals.rules.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "rules", name: item.name, text: item.requirement,
-      ruleCode: item.rule_code ?? item.source_id ?? null,
+      ruleCode: item.rule_code ?? item.source_id ?? null, origin: item.origin,
+      materialKeys: ruleMaterialNames(item),
       context: ruleRole(item) === "RISK" ? "风险结论" : "普通核查", role: ruleRole(item), mode: item.execution_mode ?? "UNKNOWN", status: item.config_status ?? null,
       materials: ruleMaterialsText(item),
       inputFields: ruleFieldsText(item),
@@ -126,32 +129,37 @@ const rows = computed<ProposalRow[]>(() => {
     }));
     case "calculations": return proposals.calculations.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "calculations", name: item.rule_name, text: item.requirement,
+      ruleCode: item.rule_code, origin: item.origin,
       context: parametersText(item), formula: item.formula, status: item.status,
       fieldType: valueTypeLabel(item.result_type), inputFields: parametersText(item),
       details: [{ label: "参数来源", value: parametersText(item) || "未声明" }],
     }));
     case "report_sections": return proposals.report_sections.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "report_sections", name: item.section_name, text: item.content_instruction,
+      ruleCode: item.report_code ?? null, origin: item.origin,
       context: item.report_name ?? "未命名报告", status: item.config_status ?? null,
       formats: item.formats.join("、"),
       details: [{ label: "输出格式", value: item.formats.join("、") || "未声明" }],
     }));
     default: return [];
   }
-});
+}
 
-const hasOutputFields = computed(() => activeGroup.value === "rules" && rows.value.some((row) => row.outputFields));
+const materialRows = computed(() => rowsOf("materials"));
+const fieldRows = computed(() => rowsOf("fields"));
+const ruleRows = computed(() => rowsOf("rules"));
+const calculationRows = computed(() => rowsOf("calculations"));
+const sectionRows = computed(() => rowsOf("report_sections"));
 
-const filteredRows = computed(() => {
-  const term = query.value.trim().toLocaleLowerCase();
-  return rows.value.filter((row) => {
-    const matchesStatus = !supportsStatus.value || statusFilter.value === "all"
-      || (statusFilter.value === "enabled" && row.status !== "DISABLED" && row.status !== "PENDING")
-      || row.status === statusFilter.value;
-    return matchesStatus && (!term || [row.name, row.ruleCode, row.text, row.context, row.formula, row.materials, row.inputFields,
-      row.sourceRules, row.outputFields, row.fieldType, row.unit, row.currency, row.formats].filter(Boolean).join(" ").toLocaleLowerCase().includes(term));
-  });
-});
+/** 材料筛选按名称匹配：表格里的「适用材料 / 所属材料」显示的就是名称。 */
+const materialOptions = computed(() => (props.job.proposals?.materials ?? [])
+  .map((item) => ({ material_key: item.name, name: item.name })));
+
+function rowSearchText(row: ProposalRow): string {
+  return [row.ruleCode, row.name, row.text, row.context, row.formula, row.materials, row.inputFields,
+    row.sourceRules, row.outputFields, row.fieldType, row.unit, row.currency, row.formats]
+    .filter(Boolean).join(" ");
+}
 
 function statusLabel(status: string | null): string {
   if (status === "DISABLED") return "暂停";
@@ -162,6 +170,12 @@ function statusLabel(status: string | null): string {
 
 function statusTone(status: string | null): "success" | "warning" | "info" {
   return status === "DISABLED" ? "info" : status === "PENDING" ? "warning" : "success";
+}
+
+/** 工具栏右侧的启用统计，与方案配置同一写法。 */
+function statusSummary(rows: ProposalRow[]): string {
+  const enabled = rows.filter((row) => statusLabel(row.status) === "启用").length;
+  return `已启用 ${enabled} 条，未启用 ${rows.length - enabled} 条`;
 }
 
 function openEditor(row: ProposalRow): void {
@@ -192,10 +206,6 @@ async function persist(row: ProposalRow, changes: ImportProposalChanges, revisio
   return saved;
 }
 
-async function changeStatus(row: ProposalRow, status: ImportProposalStatus): Promise<void> {
-  await persist(row, row.group === "calculations" ? { status } : { config_status: status }, props.job.draft_revision);
-}
-
 async function saveEditor(): Promise<void> {
   const row = editing.value;
   if (!row) return;
@@ -217,7 +227,6 @@ async function saveEditor(): Promise<void> {
   if (await persist(row, changes, editRevision.value)) editing.value = null;
 }
 
-watch(activeGroup, () => { query.value = ""; statusFilter.value = "all"; });
 watch(() => props.job.job_no, () => { editing.value = null; clear(); });
 </script>
 
@@ -232,91 +241,163 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
     </div>
 
     <FailureNotice v-if="!editing" :error="failure" @dismiss="failure = null" />
-    <el-tabs v-model="activeGroup" class="proposal-tabs">
-      <el-tab-pane v-for="tab in tabs" :key="tab.group" :name="tab.group">
-        <template #label>
-          <span class="proposal-tab" :class="{ 'proposal-tab--empty': tab.count === 0 }">
-            {{ tab.label }}<span class="proposal-tab__count">{{ tab.count }}</span>
-          </span>
-        </template>
+    <el-tabs v-model="activeGroup">
+      <el-tab-pane :label="`材料（${materialRows.length}）`" name="materials" lazy>
+        <PlanConfigList
+          :items="materialRows" row-key="ref"
+          :number-of="(row: ProposalRow) => row.ruleCode || row.name"
+          :search-text="rowSearchText" :status-text="(row: ProposalRow) => statusLabel(row.status)"
+          keyword-placeholder="材料名称或材料说明" empty-text="本次解析没有材料"
+        >
+          <el-table-column label="材料编号" width="140" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.ruleCode || "未填写" }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="材料名称" width="180" show-overflow-tooltip />
+          <el-table-column label="业务说明" min-width="300" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.text || "未填写" }}</template>
+          </el-table-column>
+          <el-table-column label="必传" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" :loading="savingRef === row.ref" :disabled="pending" @click="openEditor(row)">{{ readonly ? "查看" : "编辑" }}</el-button>
+            </template>
+          </el-table-column>
+        </PlanConfigList>
+      </el-tab-pane>
+
+      <el-tab-pane :label="`字段（${fieldRows.length}）`" name="fields" lazy>
+        <PlanConfigList
+          :items="fieldRows" row-key="ref"
+          :number-of="(row: ProposalRow) => row.ruleCode || row.name"
+          :search-text="rowSearchText" :status-text="(row: ProposalRow) => statusLabel(row.status)"
+          :materials="materialOptions" :material-keys="(row: ProposalRow) => row.materialKeys ?? []"
+          group-label="数据类型" :group-text="(row: ProposalRow) => row.fieldType ?? '未声明'"
+          keyword-placeholder="字段名称、字段编号或抽取要求" empty-text="本次解析没有字段"
+        >
+          <el-table-column label="字段编号" width="140" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.ruleCode || "未填写" }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="字段名称" width="180" show-overflow-tooltip />
+          <el-table-column prop="context" label="所属材料" width="168" show-overflow-tooltip />
+          <el-table-column label="数据类型" width="88"><template #default="{ row }">{{ row.fieldType || "未声明" }}</template></el-table-column>
+          <el-table-column label="必抽" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="提取要求" min-width="300" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.text || "未填写" }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" :loading="savingRef === row.ref" :disabled="pending" @click="openEditor(row)">{{ readonly ? "查看" : "编辑" }}</el-button>
+            </template>
+          </el-table-column>
+        </PlanConfigList>
+      </el-tab-pane>
+
+      <el-tab-pane :label="`审核规则（${ruleRows.length}）`" name="rules" lazy>
+        <PlanConfigList
+          :items="ruleRows" row-key="ref"
+          :number-of="(row: ProposalRow) => row.ruleCode || row.name"
+          :search-text="rowSearchText" :status-text="(row: ProposalRow) => statusLabel(row.status)"
+          :materials="materialOptions" :material-keys="(row: ProposalRow) => row.materialKeys ?? []"
+          group-label="来源工作表" :group-text="(row: ProposalRow) => sourceSheetLabel(row.origin)"
+          :summary="statusSummary(ruleRows)"
+          keyword-placeholder="规则名称、业务编号或审核要求" empty-text="本次解析没有审核规则"
+        >
+          <el-table-column label="业务编号" width="140" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.ruleCode || "未填写" }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="规则名称" min-width="180" show-overflow-tooltip />
+          <el-table-column label="执行方式" width="112">
+            <template #default="{ row }">{{ executionModeLabel(row.mode) }}</template>
+          </el-table-column>
+          <el-table-column label="来源工作表" width="204" show-overflow-tooltip>
+            <template #default="{ row }">{{ sourceSheetLabel(row.origin) }}</template>
+          </el-table-column>
+          <el-table-column label="适用材料" width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.materials || "—" }}</template>
+          </el-table-column>
+          <el-table-column label="审核要求" min-width="340" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.text || "未填写" }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" :loading="savingRef === row.ref" :disabled="pending" @click="openEditor(row)">{{ readonly ? "查看" : "编辑" }}</el-button>
+            </template>
+          </el-table-column>
+        </PlanConfigList>
+      </el-tab-pane>
+
+      <el-tab-pane :label="`计算规则（${calculationRows.length}）`" name="calculations" lazy>
+        <PlanConfigList
+          :items="calculationRows" row-key="ref"
+          :number-of="(row: ProposalRow) => row.ruleCode || row.name"
+          :search-text="rowSearchText" :status-text="(row: ProposalRow) => statusLabel(row.status)"
+          group-label="来源工作表" :group-text="(row: ProposalRow) => sourceSheetLabel(row.origin)"
+          :summary="statusSummary(calculationRows)"
+          keyword-placeholder="指标名称、规则编号或计算方法" empty-text="本次解析没有计算规则"
+        >
+          <el-table-column label="规则编号" width="140" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.ruleCode || "未填写" }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="指标名称" min-width="180" show-overflow-tooltip />
+          <el-table-column label="来源工作表" width="204" show-overflow-tooltip>
+            <template #default="{ row }">{{ sourceSheetLabel(row.origin) }}</template>
+          </el-table-column>
+          <el-table-column label="计算方法" min-width="300" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.formula || "未填写" }}</template>
+          </el-table-column>
+          <el-table-column label="业务要求" min-width="300" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.text || "未填写" }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" :loading="savingRef === row.ref" :disabled="pending" @click="openEditor(row)">{{ readonly ? "查看" : "编辑" }}</el-button>
+            </template>
+          </el-table-column>
+        </PlanConfigList>
+      </el-tab-pane>
+
+      <el-tab-pane :label="`报告章节（${sectionRows.length}）`" name="report_sections" lazy>
+        <PlanConfigList
+          :items="sectionRows" row-key="ref"
+          :number-of="(row: ProposalRow) => row.ruleCode || row.name"
+          :search-text="rowSearchText" :status-text="(row: ProposalRow) => statusLabel(row.status)"
+          group-label="所属报告" :group-text="(row: ProposalRow) => row.context"
+          keyword-placeholder="章节名称、报告编号或生成要求" empty-text="本次解析没有报告章节"
+        >
+          <el-table-column label="报告编号" width="140" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.ruleCode || "未填写" }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="章节名称" width="160" show-overflow-tooltip />
+          <el-table-column prop="context" label="所属报告" width="192" show-overflow-tooltip />
+          <el-table-column label="输出格式" width="140" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.formats || "未声明" }}</template>
+          </el-table-column>
+          <el-table-column label="生成要求" min-width="300" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.text || "未填写" }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" :loading="savingRef === row.ref" :disabled="pending" @click="openEditor(row)">{{ readonly ? "查看" : "编辑" }}</el-button>
+            </template>
+          </el-table-column>
+        </PlanConfigList>
       </el-tab-pane>
     </el-tabs>
-
-    <div class="proposal-toolbar">
-    <el-input v-model="query" size="small" :prefix-icon="Search" clearable :placeholder="`搜索${groupLabels[activeGroup]}名称或要求`" :aria-label="`搜索${groupLabels[activeGroup]}`" class="proposal-search" />
-    <el-select v-if="supportsStatus" v-model="statusFilter" size="small" aria-label="按配置状态筛选" class="proposal-filter">
-      <el-option value="all" label="全部状态" />
-      <el-option value="enabled" label="已启用" />
-      <el-option value="DISABLED" label="已暂停" />
-      <el-option value="PENDING" label="待确认" />
-    </el-select>
-    <span class="proposal-visible">共 {{ filteredRows.length }} 项<template v-if="filteredRows.length !== rows.length">（已筛选，原 {{ rows.length }} 项）</template></span>
-  </div>
-
-    <el-table
-      :data="filteredRows" row-key="ref" size="small" border stripe
-      class="proposal-table" :tooltip-options="{ popperClass: 'proposal-content-tooltip' }"
-      :row-class-name="proposalRowClass"
-      :empty-text="rows.length ? '没有匹配的配置，请调整搜索或筛选条件' : `本次解析没有${groupLabels[activeGroup]}`"
-    >
-      <el-table-column type="index" label="序号" width="52" align="center" />
-      <el-table-column v-if="activeGroup === 'rules'" prop="ruleCode" label="规则 ID" width="130" show-overflow-tooltip>
-        <template #default="{ row }"><span class="mono">{{ row.ruleCode || '未填写' }}</span></template>
-      </el-table-column>
-      <el-table-column prop="name" :label="`${groupLabels[activeGroup]}名称`" min-width="180" show-overflow-tooltip class-name="cell-align-left">
-        <template #default="{ row }">
-          <el-button link class="proposal-name" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button>
-          <div v-if="activeGroup === 'rules'" class="table-note">{{ executionModeLabel(row.mode) }}</div>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'rules'" prop="context" label="规则类型" width="94" />
-      <el-table-column v-if="activeGroup === 'rules'" prop="materials" label="适用材料" min-width="130" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.materials || '—' }}</template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'rules' || activeGroup === 'calculations'" prop="inputFields" :label="activeGroup === 'rules' ? '输入字段' : '参数来源'" min-width="170" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.inputFields || '—' }}</template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'rules'" prop="sourceRules" label="依赖规则 / 计算" min-width="180" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.sourceRules || '—' }}</template>
-      </el-table-column>
-      <el-table-column v-if="hasOutputFields" prop="outputFields" label="输出字段" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.outputFields || '—' }}</template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'materials' || activeGroup === 'fields'" :label="activeGroup === 'materials' ? '上传要求' : '是否必需'" width="90">
-        <template #default="{ row }">{{ row.required ? (activeGroup === 'materials' ? '必传' : '必需') : (activeGroup === 'materials' ? '按需上传' : '非必需') }}</template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'fields' || activeGroup === 'report_sections'" prop="context" :label="activeGroup === 'fields' ? '来源材料' : '所属报告'" min-width="140" show-overflow-tooltip />
-      <el-table-column v-if="activeGroup === 'fields' || activeGroup === 'calculations'" prop="fieldType" :label="activeGroup === 'fields' ? '字段类型' : '结果类型'" width="110" show-overflow-tooltip />
-      <el-table-column v-if="activeGroup === 'fields'" prop="unit" label="单位" width="80" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.unit || '—' }}</template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'fields'" prop="currency" label="币种" width="80" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.currency || '—' }}</template>
-      </el-table-column>
-      <el-table-column v-if="activeGroup === 'calculations'" prop="formula" label="计算方法" min-width="200" show-overflow-tooltip />
-      <el-table-column v-if="activeGroup === 'report_sections'" prop="formats" label="输出格式" min-width="140" show-overflow-tooltip />
-      <el-table-column prop="text" :label="textLabel" min-width="280" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.text || '未填写' }}</template>
-      </el-table-column>
-      <el-table-column v-if="supportsStatus" label="状态" width="142" align="center">
-        <template #default="{ row }">
-          <el-dropdown trigger="click" :disabled="readonly || pending" @command="changeStatus(row, $event)">
-            <el-button link :disabled="readonly || pending" :aria-label="`${row.name}：${statusLabel(row.status)}，修改状态`">
-              <el-tag size="small" :type="statusTone(row.status)" effect="light">{{ statusLabel(row.status) }}</el-tag>
-              <el-icon v-if="!readonly" class="el-icon--right"><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown><el-dropdown-menu>
-              <el-dropdown-item command="CLEAR" :disabled="row.status === 'CLEAR'">启用</el-dropdown-item>
-              <el-dropdown-item command="PENDING" :disabled="row.status === 'PENDING'">待确认（不执行）</el-dropdown-item>
-              <el-dropdown-item command="DISABLED" :disabled="row.status === 'DISABLED'">暂停</el-dropdown-item>
-            </el-dropdown-menu></template>
-          </el-dropdown>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="72" fixed="right" align="center">
-        <template #default="{ row }"><el-button link size="small" type="primary" :icon="readonly ? undefined : Edit" :loading="savingRef === row.ref" :disabled="pending" @click="openEditor(row)">{{ readonly ? '查看' : '编辑' }}</el-button></template>
-      </el-table-column>
-    </el-table>
 
     <DrawerPanel :open="Boolean(editing)" :title="`${readonly ? '查看' : '编辑'}${editing ? groupLabels[editing.group] : ''}`" size="min(640px, 100vw)" @close="editing = null">
       <template v-if="editing">
@@ -354,46 +435,12 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
 .proposal-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .proposal-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .proposal-heading p { margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
-.proposal-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
-.proposal-tabs :deep(.el-tabs__item) { height: 36px; padding: 0 18px; font-size: 14px; }
-.proposal-tab { display: inline-flex; align-items: center; gap: 6px; }
-/* 数量用轻量徽标显示：不撑高标签栏，也不与状态标签混淆。 */
-.proposal-tab__count {
-  min-width: 20px;
-  padding: 0 6px;
-  border-radius: 9px;
-  background: var(--el-fill-color);
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  line-height: 18px;
-  text-align: center;
-}
-.proposal-tab--empty .proposal-tab__count { opacity: 0.6; }
-.proposal-tabs :deep(.el-tabs__item.is-active) .proposal-tab__count {
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
-}
-.proposal-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.proposal-search { width: min(100%, 300px); }
-.proposal-filter { width: 140px; }
-.proposal-visible { margin-left: auto; color: var(--el-text-color-secondary); font-size: 12px; }
-.proposal-table { width: 100%; }
-.proposal-table :deep(th.el-table__cell) { background: var(--el-fill-color-light); color: var(--el-text-color-regular); font-weight: 500; }
-.proposal-table :deep(.el-table__cell) { padding: 8px 0; }
-.proposal-table :deep(.cell) { line-height: 20px; }
-.proposal-name { font-size: 13px; font-weight: 500; }
-.proposal-table :deep(.proposal-row--paused) { color: var(--el-text-color-secondary); }
-.proposal-table :deep(.proposal-row--paused) .proposal-name { color: var(--el-text-color-secondary); }
 .proposal-edit-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .proposal-edit-form :deep(.el-select) { width: 100%; }
 .proposal-context { margin-top: 12px; }
 .proposal-context :deep(.el-descriptions__content) { overflow-wrap: anywhere; white-space: pre-wrap; }
-:global(.proposal-content-tooltip) { max-width: min(560px, calc(100vw - 32px)); max-height: 70vh; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .proposal-heading { align-items: flex-start; }
-  .proposal-filter { flex: 1; }
-  .proposal-search { width: 100%; }
-  .proposal-visible { margin-left: 0; }
   .proposal-edit-meta { grid-template-columns: 1fr; gap: 0; }
 }
 </style>
