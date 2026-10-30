@@ -13,13 +13,22 @@ from ...entity.tasks import RuleResult, TaskFact, TaskFieldValue
 from . import value_store as task_value_service
 
 
-def fact_owner_field_keys(task) -> set[str]:
-    """会形成字段事实的字段：启用规则的产出字段。
+def fact_owner_field_keys(db, task) -> set[str]:
+    """会形成字段事实的字段：启用规则的产出字段，加上已有当前人工事实的字段。
 
-    编译期与运行期都用这一组做事实身份索引。停用/未选字段仍留在定义目录里，
-    用于说明引用与缺项，但不参与事实归属判定。
+    编译期只把启用规则的产出登记为事实身份；人工核对允许给没有自动抽取的字段补值，
+    这类字段一旦存在当前人工事实，就必须同样进入身份索引，否则普通规则读不到，
+    报告规则还会因为事实缺少身份而失败。
     """
-    return enabled_extraction_field_keys(task.manifest_json, task.task_schema_json["enabled_rule_keys"])
+    keys = enabled_extraction_field_keys(
+        task.manifest_json, task.task_schema_json["enabled_rule_keys"],
+    )
+    keys |= set(db.scalars(select(TaskFieldValue.field_key).where(
+        TaskFieldValue.audit_task_id == task.id,
+        TaskFieldValue.is_current.is_(True),
+        TaskFieldValue.origin == ORIGIN_HUMAN_CORRECTION,
+    )))
+    return keys
 
 
 def extracted_identity_filter(definitions, *, owner_keys=None):
@@ -41,9 +50,9 @@ def project_task_facts(db, task, rows, *, definitions=None, material_states=None
                                                                task.task_schema_json["fields"]}
     values = {row.id: task_value_service.value_of(db, task, task_value_service.RECORD_TASK_FACT, row.id) for row in
               rows}
-    # 只有启用规则的产出字段会形成字段事实；身份索引按这一组建立，与编译期同一口径。
+    # 只有启用规则的产出字段和已有人工事实的字段会形成字段事实；身份索引按这一组建立。
     identity_definitions = {
-        key: field for key, field in definitions.items() if key in fact_owner_field_keys(task)
+        key: field for key, field in definitions.items() if key in fact_owner_field_keys(db, task)
     }
     field_values = list(db.scalars(select(TaskFieldValue).where(
         TaskFieldValue.audit_task_id == task.id, TaskFieldValue.is_current.is_(True),
@@ -71,6 +80,12 @@ def project_task_facts(db, task, rows, *, definitions=None, material_states=None
     facts = fact_projection.facts_of_task_fact_rows(
         rows, values=values, field_definitions=identity_definitions, material_states=material_states,
         raw_values=raw_values,
+        # 材料中文名只来自冻结配置，用于比较双方的来源展示，不从字段名或材料键推断。
+        material_names={
+            str(item["material_key"]): str(item.get("name") or item["material_key"])
+            for item in task.manifest_json.get("materials") or []
+            if item.get("material_key")
+        },
     )
     keys = {fact["field_key"] for fact in facts if fact["fact_kind"] == FACT_KIND_EXTRACTED}
     human_keys = set(db.scalars(select(TaskFieldValue.field_key).where(

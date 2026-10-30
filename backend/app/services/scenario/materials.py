@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
 from ...domain.identity import stable_key
-from ...entity.scenario_drafts import ScenarioDraft, ScenarioDraftField, ScenarioDraftMaterial, ScenarioDraftRule
+from ...entity.scenario_drafts import (
+    ScenarioDraft,
+    ScenarioDraftField,
+    ScenarioDraftMaterial,
+    ScenarioDraftRule,
+    ScenarioDraftSection,
+)
 from ..shared import configuration as config_store
 from .common import _item_ref, _normalized_source_ref
 from .draft import _locked_draft, _save_draft, next_sort_no
@@ -88,15 +94,20 @@ def delete_draft_material(db: Session, scenario_code: str, material_key: str) ->
         if material_key in (rule.rule_json or {}).get("materials", [])
         or any(entry.get("material_key") == material_key for entry in (rule.rule_json or {}).get("inputs", []))
     ]
-    if fields or referencing_rules:
+    # 报告章节的材料范围也是真实引用：只按字段与规则检查会留下悬空材料键，
+    # 编译后的报告规则随之出现材料依赖缺失。
+    sections = config_store.rows(db, ScenarioDraftSection, draft.id)
+    referencing_sections = [section.title for section in sections if material_key in (section.material_keys or [])]
+    if fields or referencing_rules or referencing_sections:
         raise BusinessError(
             "MATERIAL_REFERENCED",
-            "该材料仍被以下字段或规则引用，请先在对应配置中移除后再删除",
+            "该材料仍被以下字段、规则或报告章节引用，请先在对应配置中移除后再删除",
             status_code=409,
             details={
                 "material_name": item.name,
                 "field_keys": [f"{field.name}（{field.field_key}）" for field in fields],
                 "rule_keys": referencing_rules,
+                "section_names": referencing_sections,
             },
         )
     config_store.delete(item)

@@ -8,11 +8,12 @@ from ....common.exceptions import BusinessError
 from ....constants.status import LOOP_RUNNING
 from ....domain.execution_mode import EXECUTION_MODES, MODE_UNKNOWN
 from ....entity.tasks import AuditTask, NodeExecution
+from ..field_review import confirmation_is_current, extraction_closed
 from ..shared import _material_names, _task_manifest
 from ..tasks.lookup import task_or_404
 from .errors import agent_step
 from .execution import execution_in_progress
-from .plan import enabled_rules, evaluation_plan
+from .plan import enabled_rules, evaluation_plan, field_review_boundary
 from .shared import agent_module, rule_of_instance
 
 
@@ -78,15 +79,33 @@ def graph_load_evaluation(
     node_code: str,
     execution_id: int | None,
 ) -> dict[str, Any]:
-    """从任务冻结配置生成一次依赖计划；单条执行不重新排序。"""
+    """从任务冻结配置生成一次依赖计划；单条执行不重新排序。
+
+    同时给出字段核对边界：本次计划是否有抽取段、当前字段版本是否已被确认、
+    这一轮允许执行哪些规则。调度与续跑都用这一份判断，不各自推导。
+    """
     with agent_step(db, task_no):
         task = task_or_404(db, task_no, lock=True)
         manifest = _task_manifest(task)
         execution = execution_in_progress(db, task, execution_id)
         _assert_execution_modes(enabled_rules(task, manifest, node_code))
+        plan = evaluation_plan(task, node_code)
+        boundary = field_review_boundary(plan, all_rules=manifest["rules"])
+        confirmed = confirmation_is_current(db, task, execution)
+        closed = extraction_closed(execution)
         return {
             "agent_mode": True,
-            "evaluation_plan": evaluation_plan(task, node_code),
+            "evaluation_plan": plan,
+            "field_review": {
+                "required": boundary.required,
+                "confirmed": confirmed,
+                "extraction_closed": closed,
+                "extraction_rule_count": len(boundary.extraction),
+                "after_review_rule_count": len(boundary.after),
+                "allowed_rule_keys": sorted(
+                    boundary.phase_keys(confirmed=confirmed, extraction_closed=closed)
+                ),
+            },
             "execution_id": execution.id,
             "rule_outcomes": [],
             "loop_count": 0,

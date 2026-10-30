@@ -38,6 +38,7 @@ const statusLabels: Record<string, string> = {
   BLOCKED: "已阻断",
   SKIPPED: "已跳过",
   WAITING_REVIEW: "等待人工复核",
+  WAITING_FIELD_REVIEW: "等待字段核对",
   COMPLETED: "已全部完成",
   INVALIDATED: "已失效",
   WAITING_UPLOAD: "待上传",
@@ -119,6 +120,7 @@ const statusTones: Record<string, StatusTone> = {
   SKIPPED: "neutral",
   INVALIDATED: "neutral",
   WAITING_REVIEW: "warning",
+  WAITING_FIELD_REVIEW: "warning",
   COMPLETED: "success",
 
   // 材料
@@ -183,7 +185,8 @@ const operationPhaseLabels: Record<string, string> = {
   RESULT_UNKNOWN: "外部结果未知",
   BUSINESS_COMMITTED: "业务结果已提交",
   GRAPH_ADVANCED: "流程已推进",
-  INTERRUPT_WAITING: "等待人工复核",
+  INTERRUPT_WAITING: "等待继续执行",
+  FIELD_REVIEW_WAITING: "等待字段核对",
   RESULT_READY: "结果已就绪",
 };
 
@@ -232,6 +235,7 @@ const operationTypeLabels: Record<string, string> = {
   SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
   NODE_EXECUTE: "规则执行",
   NODE_RESUME: "中断恢复",
+  FIELD_REVIEW_CONFIRM: "确认字段核对并继续",
   DOCUMENT_CLASSIFY: "文件自动校验",
   DOCUMENT_ARTIFACT_RETRY: "材料单项重试",
   OCR_DOCUMENT_RETRY: "OCR 单份重试",
@@ -548,6 +552,14 @@ const failureNextSteps: Record<string, string> = {
   TASK_DOCUMENT_REPLACE_CONFIRMATION_REQUIRED: "该材料位已有文件，替换上传需要先明确确认替换。",
   TASK_DOCUMENT_LOCKED: "任务已结束，材料不可再替换；如需继续请新建审核任务。",
   AUDIT_TASK_RUNNING: "任务正在执行当前节点，等待执行结束后再替换材料。",
+  AUDIT_TASK_WAITING_FIELD_REVIEW: "任务正在等待字段核对；请在字段结果页核对后点「确认并继续审核」，不能另建批次绕过核对。",
+  AUDIT_FIELD_REVIEW_NOT_WAITING: "任务已不在字段核对等待点，请刷新任务后查看当前状态。",
+  AUDIT_FIELD_REVIEW_IN_PROGRESS: "任务正在等待字段核对，请直接在字段结果页修改，纠错入口会失效整个执行批次。",
+  FIELD_REVISION_CONFLICT: "字段取值已被其他操作更新，请刷新任务后重新核对。",
+  FIELD_REVIEW_VALUE_INVALID: "核对值不符合该字段声明的类型，请按字段类型填写。",
+  FIELD_REVIEW_MATERIAL_MISSING: "该字段所属材料位还没有上传当前文件，无法补充取值。",
+  AUDIT_FIELD_REVIEW_MISSING_UNACKNOWLEDGED: "字段仍有缺项；确认知悉这些缺项后才能继续，系统不会自动补齐。",
+  AUDIT_FIELD_REVIEW_DEPENDENCY_CONFLICT: "字段抽取依赖了抽取以外的业务规则，无法在一次字段核对里完成；需要先调整规则依赖。",
 
   // 工作表选择错误与历史标准格式错误
   SHEET_ROLE_REQUIRED: "历史标准格式缺少工作表角色；可重新上传规则库，按当前 LLM 流程解析。",

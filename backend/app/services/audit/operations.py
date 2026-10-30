@@ -1,4 +1,4 @@
-"""审核执行、材料核对与 OCR 重试的后台命令提交。"""
+"""审核执行、字段核对确认、材料核对与 OCR 重试的后台命令提交。"""
 
 from typing import Any
 
@@ -6,12 +6,27 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
+from ...constants.status import TASK_STATUS_COMPLETED, TASK_STATUS_WAITING_FIELD_REVIEW
 from ...entity.tasks import AuditTask, NodeExecution
-from ...schema.dto.tasks import ExecuteNodeRequest
+from ...schema.dto.tasks import ExecuteNodeRequest, FieldReviewConfirmRequest
 from ..shared.commands import _idempotency_key, _reject_unsupported_resume
 from ..system import background as background_service
-from ..system.background import PHASE_GRAPH_ADVANCED, PHASE_INTERRUPT_WAITING
+from ..system.background import (
+    PHASE_FIELD_REVIEW_WAITING,
+    PHASE_GRAPH_ADVANCED,
+    PHASE_INTERRUPT_WAITING,
+)
 from ..system.operation_types import OBJECT_AUDIT_TASK
+
+
+def _result_phase(result: dict[str, Any] | None) -> str:
+    """本轮结束时任务停在哪个明确阶段；等待字段核对与等待恢复必须分开显示。"""
+    status = (result or {}).get("task_status")
+    if status == TASK_STATUS_COMPLETED:
+        return PHASE_GRAPH_ADVANCED
+    if status == TASK_STATUS_WAITING_FIELD_REVIEW:
+        return PHASE_FIELD_REVIEW_WAITING
+    return PHASE_INTERRUPT_WAITING
 
 
 def _reject_stale_input_revision(task: AuditTask, input_revision: int | None) -> None:
@@ -47,6 +62,12 @@ def submit_node_execution(
     def validate() -> None:
         if task.status == "COMPLETED":
             raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
+        if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
+            raise BusinessError(
+                "AUDIT_TASK_WAITING_FIELD_REVIEW",
+                "任务正在等待字段核对，请在字段核对中确认后继续审核；不能另建批次绕过核对",
+                status_code=409,
+            )
         if task.status == "RUNNING":
             raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行，不能并发执行或重跑", status_code=409)
         if db.scalar(select(NodeExecution.id).where(
@@ -65,8 +86,8 @@ def submit_node_execution(
             content["task_no"],
             ExecuteNodeRequest(node_code=content["node_code"], input_revision=content.get("input_revision")),
         )
-        # 节点执行后图已推进；任务未结束则重新停在节点确认等待点。
-        command.phase(PHASE_GRAPH_ADVANCED if result.get("task_status") == "COMPLETED" else PHASE_INTERRUPT_WAITING)
+        # 节点执行后图已推进；任务未结束则停在字段核对或恢复等待点。
+        command.phase(_result_phase(result))
         return result
 
     return background_service.submit_operation(
@@ -154,7 +175,7 @@ def submit_node_resume(
         result = audit_resume.resume_interrupted_execution(
             session, content["task_no"], execution_id=content["execution_id"],
         )
-        command.phase(PHASE_GRAPH_ADVANCED if result.get("task_status") == "COMPLETED" else PHASE_INTERRUPT_WAITING)
+        command.phase(_result_phase(result))
         return result
 
     return background_service.submit_operation(
@@ -164,6 +185,152 @@ def submit_node_resume(
         operation_type="NODE_RESUME",
         idempotency_key=key,
         request=request,
+        runner=runner,
+        target_node=task.current_node,
+        input_version=str(task.input_revision),
+        validate=validate,
+    )
+
+
+def _reject_stale_field_versions(
+    db: Session, task: AuditTask, corrections: list[Any],
+) -> None:
+    """页面看到的字段版本必须仍是当前版本，旧页面不能覆盖新输入。"""
+    from .facts import _current_field_fact_pairs
+
+    pairs = _current_field_fact_pairs(db, task)
+    for correction in corrections:
+        current = pairs.get((correction.field_key, correction.material_key))
+        revision = current[0].revision_no if current is not None else None
+        if revision != correction.expected_revision_no:
+            raise BusinessError(
+                "FIELD_REVISION_CONFLICT",
+                "字段取值在核对期间已被其他操作更新，本次提交基于过期页面；请刷新后重新核对",
+                status_code=409,
+                details={
+                    "field_key": correction.field_key,
+                    "material_key": correction.material_key,
+                    "submitted": correction.expected_revision_no,
+                    "current": revision,
+                },
+            )
+
+
+def submit_field_review_confirm(
+    db: Session,
+    task: AuditTask,
+    request: FieldReviewConfirmRequest,
+) -> tuple[Any, bool]:
+    """提交「确认并继续审核」：保存本次剩余修改、记录确认，再受理后续执行。
+
+    同一幂等标识的重发先返回原受理记录，不按当前状态重新推导目标批次：
+    响应丢失后重发必须拿回同一次受理，不能因为任务已进入执行而变成状态错误。
+    """
+    from . import field_review as audit_field_review
+    from .commands import _waiting_review_execution
+
+    key = _idempotency_key(request.idempotency_key)
+    existing = background_service.existing_operation(
+        db, object_type=OBJECT_AUDIT_TASK, object_no=task.task_no,
+        operation_type="FIELD_REVIEW_CONFIRM", idempotency_key=key,
+    )
+    if existing is not None:
+        stored = existing.request_json if isinstance(existing.request_json, dict) else {}
+        execution_id = stored.get("execution_id")
+        if not isinstance(execution_id, int):
+            raise BusinessError(
+                "OPERATION_REQUEST_INVALID", "原确认命令缺少目标批次，无法按同一请求重放",
+                status_code=500, details={"operation_no": existing.operation_no},
+            )
+    else:
+        execution_id = _waiting_review_execution(db, task).id
+    corrections = [correction.model_dump() for correction in request.corrections]
+    payload = {
+        "task_no": task.task_no,
+        "execution_id": execution_id,
+        "input_revision": request.input_revision,
+        "corrections": corrections,
+        "note": request.note,
+    }
+
+    def validate() -> None:
+        if task.status != TASK_STATUS_WAITING_FIELD_REVIEW:
+            raise BusinessError(
+                "AUDIT_FIELD_REVIEW_NOT_WAITING",
+                f"任务当前状态为 {task.status}，不在字段核对等待点，不能确认继续审核",
+                status_code=409,
+                details={"task_no": task.task_no, "status": task.status},
+            )
+        if db.scalar(select(NodeExecution.id).where(
+            NodeExecution.audit_task_id == task.id, NodeExecution.status == "RUNNING",
+        ).limit(1)) is not None:
+            raise BusinessError("AUDIT_NODE_RUNNING", "任务已有执行中的批次，不能重复提交", status_code=409)
+        _reject_stale_input_revision(task, request.input_revision)
+        _reject_stale_field_versions(db, task, request.corrections)
+        # 缺项不阻止继续，但必须由用户明确确认当前情况；不自动补值，也不默认通过。
+        # 缺项按本次修改提交后的事实计算：改值会补上缺项，标记「材料中不存在」会新增缺项，
+        # 后者同样要先让用户看到并确认。
+        remaining_by_key = {
+            (item["field_key"], item["material_key"]): item
+            for item in audit_field_review.missing_fields(db, task)
+        }
+        field_names = {
+            field["field_key"]: str(field.get("name") or field["field_key"])
+            for field in task.task_schema_json["fields"]
+        }
+        for item in request.corrections:
+            field_pair = (item.field_key, item.material_key)
+            if item.decision == "MODIFY_FIELD":
+                if (item.field_value or "").strip():
+                    remaining_by_key.pop(field_pair, None)
+            else:
+                remaining_by_key.setdefault(field_pair, {
+                    "field_key": item.field_key,
+                    "material_key": item.material_key,
+                    "field_name": field_names.get(item.field_key, item.field_key),
+                })
+        remaining = list(remaining_by_key.values())
+        if remaining and not request.acknowledge_missing:
+            names = "、".join(item["field_name"] for item in remaining[:8])
+            raise BusinessError(
+                "AUDIT_FIELD_REVIEW_MISSING_UNACKNOWLEDGED",
+                f"仍有 {len(remaining)} 项字段没有可执行取值（{names}），"
+                "请先核对缺项；确认继续这些字段不会被补齐",
+                status_code=409,
+                details={"missing_fields": remaining},
+            )
+
+    def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
+        from . import commands as audit_commands
+
+        _reject_unsupported_resume(command)
+        content = command.request
+        current = session.scalar(
+            select(AuditTask).where(AuditTask.task_no == content["task_no"]).with_for_update()
+        )
+        if current is None:
+            raise BusinessError("AUDIT_TASK_NOT_FOUND", "审核任务不存在", status_code=404)
+        _reject_stale_input_revision(current, content["input_revision"])
+        from ...schema.dto.tasks import FieldReviewCorrection
+
+        result = audit_commands.confirm_field_review(
+            session,
+            content["task_no"],
+            execution_id=content["execution_id"],
+            corrections=[FieldReviewCorrection(**item) for item in content["corrections"]],
+            note=content.get("note"),
+            operation_no=command.operation_no,
+        )
+        command.phase(_result_phase(result))
+        return result
+
+    return background_service.submit_operation(
+        db,
+        object_type=OBJECT_AUDIT_TASK,
+        object_no=task.task_no,
+        operation_type="FIELD_REVIEW_CONFIRM",
+        idempotency_key=key,
+        request=payload,
         runner=runner,
         target_node=task.current_node,
         input_version=str(task.input_revision),

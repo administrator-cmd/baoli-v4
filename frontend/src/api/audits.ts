@@ -8,6 +8,8 @@ import type {
   ExecutionRow,
   FieldCorrectionRequest,
   FieldCorrectionResponse,
+  FieldReviewCorrection,
+  FieldReviewSaveResult,
   JsonValue,
   OperationAccepted,
   Paged,
@@ -32,6 +34,27 @@ export type AuditFieldView = AuditField & {
   fact_revision_no?: number | null;
   /** 事实来源：人工纠错 / 文档抽取。 */
   origin?: string | null;
+  /** 当前有效值是否由人工修正产生；与抽取原值分开显示。 */
+  corrected?: boolean;
+  /** 原抽取结果：当前有效值是人工值时，这里仍是模型当次抽取到的值。 */
+  extracted_raw_value?: string | null;
+  extracted_normalized_value?: JsonValue;
+  extracted_status?: string | null;
+  /** 该字段最近一次人工记录的修改前后值与说明。 */
+  manual_review?: {
+    review_no: string;
+    decision: string | null;
+    before_value: string | null;
+    after_value: string | null;
+    business_note: string | null;
+    basis_type: string | null;
+    created_at: string | null;
+  } | null;
+  /** 已声明的口径：只显示配置里写明的值，不按字段名称推断。 */
+  unit?: string | null;
+  currency?: string | null;
+  period_scope?: string | null;
+  statement_scope?: string | null;
   /** 抽取规则没有形成字段值时保存的真实执行原因。 */
   extraction_message?: string | null;
   /** 方案冻结的抽取要求；用于解释本次按什么要求检查。 */
@@ -191,6 +214,40 @@ export function resumeAuditTask(
  */
 export function submitFieldCorrections(taskNo: string, payload: FieldCorrectionRequest): Promise<FieldCorrectionResponse> {
   return request<FieldCorrectionResponse>(`/audit-tasks/${encodeURIComponent(taskNo)}/field-corrections`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+/**
+ * 只保存字段核对期间的修改。任务仍停在等待核对，不触发后续规则；
+ * input_revision 与每个字段的 expected_revision_no 由服务端核对，旧页面会被拒绝。
+ */
+export function saveFieldReview(
+  taskNo: string,
+  payload: { input_revision: number; corrections: FieldReviewCorrection[] },
+): Promise<FieldReviewSaveResult> {
+  return request<FieldReviewSaveResult>(`/audit-tasks/${encodeURIComponent(taskNo)}/field-review/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+/**
+ * 确认当前字段版本并继续审核。字段修改与确认在后台命令里先提交，再执行核对后的规则；
+ * 返回 202 只代表已受理，真实结果用 operation_no 查询。
+ */
+export function confirmFieldReview(
+  taskNo: string,
+  payload: {
+    idempotency_key: string;
+    input_revision: number;
+    corrections: FieldReviewCorrection[];
+    acknowledge_missing: boolean;
+    note?: string | null;
+  },
+): Promise<OperationAccepted> {
+  return request<OperationAccepted>(`/audit-tasks/${encodeURIComponent(taskNo)}/field-review/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

@@ -428,6 +428,47 @@ class ManualReview(Base, TimestampMixin):
 
 
 
+class FieldReviewConfirmation(Base, TimestampMixin):
+    """字段核对确认：某一批次在某一版输入上被人工确认继续审核。
+
+    确认不可变：字段事实或材料版本再次变化后，旧确认仍保留为历史，但不再代表新输入。
+    `field_digest` 是确认当时的字段版本摘要（字段、材料、上传版本、事实版本与状态的组合），
+    续跑与任务详情据此判断「当前字段是否已被确认」，不按时间或人工修正标记猜测。
+
+    本次不引入认证能力：没有真实用户身份时 `confirmed_by` 为空，不虚构核对人。
+    """
+
+    __tablename__ = "field_review_confirmation"
+    __table_args__ = (
+        UniqueConstraint("confirmation_no", name="uq_field_review_no"),
+        ForeignKeyConstraint(
+            ["node_execution_id", "audit_task_id"],
+            ["node_execution.id", "node_execution.audit_task_id"],
+            name="fk_field_review_execution_task",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        Index("idx_field_review_task", "audit_task_id", "node_execution_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    confirmation_no: Mapped[str] = mapped_column(String(40), nullable=False)
+    audit_task_id: Mapped[int] = mapped_column(
+        ForeignKey("audit_task.id", name="fk_field_review_task", ondelete="RESTRICT", onupdate="RESTRICT"),
+        nullable=False,
+    )
+    node_execution_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 确认所依据的任务输入修订号；材料版本或人工有效值变化会递增它。
+    input_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    field_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    # 确认时仍未取到值的字段：允许用户明确带缺项继续，但必须记下确认了什么。
+    missing_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    missing_field_keys: Mapped[list[Any] | None] = mapped_column(JSON)
+    note: Mapped[str | None] = mapped_column(Text)
+    # 产生本次确认的后台命令编号，用于把确认与命令对账。
+    operation_no: Mapped[str | None] = mapped_column(String(40))
+
+
 class NodeExecution(Base, TimestampMixin):
     __tablename__ = "node_execution"
     __table_args__ = (

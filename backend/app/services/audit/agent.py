@@ -14,6 +14,7 @@ from ...common.exceptions import BusinessError
 from ...constants.execution import FACT_KIND_DERIVED
 from ...constants.status import LOOP_DONE, MODEL_VERDICT_STATUSES
 from ...domain import fact_projection, tool_catalog
+from ...domain.llm_failure import channel_failure_detail, is_channel_failure
 from ...domain.execution_mode import (
     MODE_AGGREGATE,
     MODE_CALCULATE,
@@ -589,7 +590,7 @@ def _task_facts(db: Session, task: AuditTask, materials: list[dict[str, Any]], *
     from .fact_context import extracted_identity_filter, fact_owner_field_keys, project_task_facts
     rows = list(db.scalars(select(TaskFact).where(
         TaskFact.audit_task_id == task.id, TaskFact.is_current.is_(True),
-        extracted_identity_filter(definitions, owner_keys=fact_owner_field_keys(task)),
+        extracted_identity_filter(definitions, owner_keys=fact_owner_field_keys(db, task)),
     ).order_by(TaskFact.id)))
     return project_task_facts(
         db, task, rows, definitions=definitions,
@@ -696,6 +697,22 @@ def invoke_tool(db: Session, *, call: dict[str, Any], inputs: list[dict[str, Any
             logger.error("工具实现或运行环境错误 tool=%s code=%s message=%s",
                          call["tool_name"], exc.code, exc.message)
             raise
+        if is_channel_failure(exc.code):
+            # 工具内部的大模型请求（如风险判断）遇到渠道故障：作为渠道故障带回，
+            # 由调度方暂停后续请求；不能转成普通工具失败让模型继续尝试，也不能抛异常，
+            # 否则外层会先把批次落成通用失败，走不到渠道故障的暂停流程。
+            logger.warning("工具内部模型渠道故障 tool=%s code=%s message=%s",
+                           call["tool_name"], exc.code, exc.message)
+            return {
+                "status": "FAILED",
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+                "channel_failure": channel_failure_detail(
+                    exc.code, exc.message, rule_key=rule.get("rule_key"),
+                    result_unknown=bool((exc.details or {}).get("result_unknown")),
+                ),
+            }
         logger.warning("工具调用失败 tool=%s code=%s message=%s details=%s",
                        call["tool_name"], exc.code, exc.message, exc.details)
         return {"status": "FAILED", "code": exc.code, "message": exc.message, "details": exc.details}

@@ -18,13 +18,16 @@ from sqlalchemy.orm import Session
 from ...common.exceptions import BusinessError, exception_summary
 from ...constants.status import (
     AUDIT_LLM_CHANNEL_UNAVAILABLE,
+    EXECUTION_STATUS_WAITING_FIELD_REVIEW,
     INTERRUPTED_EXECUTION_FAILURE_CODE,
     TASK_STATUS_RUNNING,
+    TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from ...entity.tasks import AuditTask, NodeExecution, RuleResult
 from ...graphs.audit_graph import collect_agent_summary
 from ...graphs.audit_rule_runner import extraction_group, run_rule_evaluation
 from .execution_scope import latest_execution
+from .field_review import confirmation_is_current, extraction_closed
 from .flow.context import execution_attempt_no, graph_load_evaluation, graph_prepare_materials
 from .flow.errors import fail_running_execution
 from .flow.execution import running_execution
@@ -34,7 +37,13 @@ from .flow.lifecycle import (
     graph_pause_scheduling,
     graph_save_node_result,
 )
-from .flow.plan import assert_results_match_plan, evaluation_plan, rerun_split
+from .flow.plan import (
+    ReviewBoundary,
+    assert_results_match_plan,
+    evaluation_plan,
+    field_review_boundary,
+    rerun_split,
+)
 from .flow.runner import audit_runner
 from .shared import _task_manifest, pending_rerun_keys
 from .tasks.lookup import task_or_404
@@ -59,21 +68,32 @@ RESUMABLE_FAILURE_CODES = frozenset({
 
 @dataclass(frozen=True)
 class ResumePlan:
-    """续跑范围：三类互斥，合计就是本次真正会执行的部分。"""
+    """续跑范围：四类互斥，合计就是当前计划里的全部规则。
+
+    `deferred` 是「本轮不允许执行、留待字段核对确认之后」的规则：它们既没有结果，
+    也不是本次未完成项，报成「补跑」会让用户以为确认后不会再跑。
+    """
 
     unfinished: tuple[str, ...]
     affected: tuple[str, ...]
     preserved: tuple[str, ...]
+    deferred: tuple[str, ...] = ()
 
     @property
     def rerun_keys(self) -> set[str]:
         return {*self.unfinished, *self.affected}
+
+    @property
+    def scope(self) -> set[str]:
+        """本轮允许执行的规则键：保留项与重跑项，不含核对后才执行的项。"""
+        return {*self.preserved, *self.unfinished, *self.affected}
 
     def summary(self) -> dict[str, int]:
         return {
             "preserved": len(self.preserved),
             "pending": len(self.unfinished),
             "dependent": len(self.affected),
+            "waiting_review": len(self.deferred),
         }
 
 
@@ -95,9 +115,9 @@ def resume_blocked_reason(task: AuditTask, execution: NodeExecution | None) -> s
     """
     if execution is None:
         return "当前节点还没有执行批次，无法继续执行"
-    if task.status not in {"BLOCKED", "FAILED"}:
+    if task.status not in {"BLOCKED", "FAILED", TASK_STATUS_WAITING_FIELD_REVIEW}:
         return f"任务当前状态为 {task.status}，不在可恢复状态"
-    if execution.status in {"SUCCEEDED", "BLOCKED"}:
+    if execution.status in {"SUCCEEDED", "BLOCKED", EXECUTION_STATUS_WAITING_FIELD_REVIEW}:
         return None
     if execution.status != "FAILED":
         return f"执行批次状态为 {execution.status}，不能继续执行"
@@ -112,14 +132,20 @@ def resumable_execution(task: AuditTask, execution: NodeExecution | None) -> Nod
     return execution if resume_blocked_reason(task, execution) is None else None
 
 
-def resume_plan(db: Session, task: AuditTask, execution: NodeExecution) -> ResumePlan:
+def resume_plan(
+    db: Session, task: AuditTask, execution: NodeExecution, *,
+    plan: list[dict[str, Any]] | None = None,
+    allowed_keys: set[str] | None = None,
+) -> ResumePlan:
     """当前批次的续跑范围；页面预览、恢复资格与真实续跑共用这一份计算。
 
     范围由已提交结果与持久化的待重跑清单共同决定：清单里的规则即使已有结论，也说明
-    上一轮已判定必须重算，不能再算作可保留结果。两类重跑项与「可保留」互斥。
+    上一轮已判定必须重算，不能再算作可保留结果。`allowed_keys` 是字段核对边界给出的
+    本轮允许范围；范围外的规则记入 `deferred`，不当成保留也不当成待补跑。
     """
-    plan = evaluation_plan(task, task.current_node)
+    plan = evaluation_plan(task, task.current_node) if plan is None else plan
     plan_keys = {entry["rule_key"] for entry in plan}
+    scope = plan_keys if allowed_keys is None else (plan_keys & allowed_keys)
     pending = pending_rerun_keys(execution)
     unknown = sorted(pending - plan_keys)
     if unknown:
@@ -130,48 +156,91 @@ def resume_plan(db: Session, task: AuditTask, execution: NodeExecution) -> Resum
             details={"rule_keys": unknown},
         )
     saved = _saved_results(db, execution)
-    unfinished, affected = rerun_split(plan, saved, all_rules=_task_manifest(task)["rules"])
-    dependent = affected | (pending - unfinished - affected)
-    preserved = plan_keys - unfinished - dependent
+    # 未完成与依赖传播只在允许范围内计算：字段核对已关闭时，抽取段的旧结局不再
+    # 代表本轮输入（人工核对已经接手），不能再用它把核对后的下游判成受影响重跑。
+    scoped_plan = [entry for entry in plan if entry["rule_key"] in scope]
+    unfinished, affected = rerun_split(
+        scoped_plan, saved, all_rules=_task_manifest(task)["rules"],
+    )
+    dependent = (affected | (pending - unfinished - affected)) & scope
+    preserved = scope - unfinished - dependent
     return ResumePlan(
         unfinished=tuple(sorted(unfinished)),
         affected=tuple(sorted(dependent)),
         preserved=tuple(sorted(preserved)),
+        deferred=tuple(sorted(plan_keys - scope)),
     )
 
 
-def resume_state(db: Session, task: AuditTask, execution: NodeExecution | None) -> dict[str, Any]:
+def review_scope(
+    db: Session, task: AuditTask, execution: NodeExecution,
+    plan: list[dict[str, Any]] | None = None,
+) -> tuple[ReviewBoundary, bool, set[str], list[dict[str, Any]]]:
+    """(字段核对边界, 当前字段版本是否已确认, 本轮允许执行范围, 执行计划)。
+
+    任务详情、受理校验与真实续跑都从这里取，避免各自判断「现在该不该再核对一次」。
+    """
+    entries = evaluation_plan(task, task.current_node) if plan is None else plan
+    boundary = field_review_boundary(entries, all_rules=_task_manifest(task)["rules"])
+    confirmed = confirmation_is_current(db, task, execution)
+    allowed = boundary.phase_keys(
+        confirmed=confirmed, extraction_closed=extraction_closed(execution),
+    )
+    return boundary, confirmed, allowed, entries
+
+
+def resume_state(
+    db: Session, task: AuditTask, execution: NodeExecution | None, *,
+    plan: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """统一的恢复判断：能否续跑、不能的原因、续跑范围与渠道故障信息。
 
     任务详情、受理接口与后台执行都以这一份为准，各层不再各自推导重跑范围。
     规则结果已全部提交、只差收尾的批次同样可续跑：续跑会补齐汇总与推进，不重新调用模型。
+    `plan` 允许调用方传入已经算好的执行计划，避免同一请求重复编译整份配置。
     """
     reason = resume_blocked_reason(task, execution)
     if execution is None or reason is not None:
-        return {"execution_id": None, "blocked_reason": reason, "plan": None, "channel_failure": None}
+        return {
+            "execution_id": None, "blocked_reason": reason, "plan": None,
+            "channel_failure": None, "field_review": {"required": False, "confirmed": False},
+        }
     failure_json = (execution.result_json or {}).get("channel_failure")
     channel = failure_json if isinstance(failure_json, dict) else None
     if execution.status == "SUCCEEDED":
         # 业务结果已提交、只差图推进：没有需要重跑的规则。
-        plan = ResumePlan((), (), ())
-    else:
-        try:
-            plan = resume_plan(db, task, execution)
-        except BusinessError as exc:
-            if exc.code != "AUDIT_RESUME_PLAN_MISMATCH":
-                raise
-            # 清单与计划对不上时不能猜一个范围，明确拒绝并交给「全部重新执行」。
-            return {
-                "execution_id": None,
-                "blocked_reason": f"{exc.message}；请使用「全部重新执行」",
-                "plan": None,
-                "channel_failure": channel,
-            }
+        return {
+            "execution_id": execution.id, "blocked_reason": None,
+            "plan": ResumePlan((), (), ()).summary(), "channel_failure": channel,
+            "field_review": {"required": False, "confirmed": False},
+        }
+    try:
+        boundary, confirmed, allowed, entries = review_scope(db, task, execution, plan)
+        plan = resume_plan(db, task, execution, plan=entries, allowed_keys=allowed)
+    except BusinessError as exc:
+        if exc.code not in {"AUDIT_RESUME_PLAN_MISMATCH", "AUDIT_FIELD_REVIEW_DEPENDENCY_CONFLICT"}:
+            raise
+        # 清单与计划对不上时不能猜一个范围，明确拒绝并交给「全部重新执行」；
+        # 抽取依赖了核对后的业务规则时，二者都不是自动能修的，原样说明原因。
+        fallback = "；请使用「全部重新执行」" if exc.code == "AUDIT_RESUME_PLAN_MISMATCH" else ""
+        return {
+            "execution_id": None,
+            "blocked_reason": f"{exc.message}{fallback}",
+            "plan": None,
+            "channel_failure": channel,
+            "field_review": {"required": False, "confirmed": False},
+        }
     return {
         "execution_id": execution.id,
         "blocked_reason": None,
         "plan": plan.summary(),
         "channel_failure": channel,
+        "field_review": {
+            "required": boundary.required,
+            "confirmed": confirmed,
+            "extraction_rule_count": len(boundary.extraction),
+            "after_review_rule_count": len(boundary.after),
+        },
     }
 
 
@@ -277,25 +346,32 @@ def resume_interrupted_execution(db: Session, task_no: str, *, execution_id: int
             graph_save_node_result(db, task_no)
             return advanced["last_execution"]
         # 重跑范围与详情页预览出自同一个函数：待重跑清单、未完成项与依赖下游不再各算一份。
-        resume = resume_plan(db, task, execution)
+        # 字段核对边界同样取自服务端：未确认时本轮只跑抽取段，确认后才是完整计划。
+        loaded = graph_load_evaluation(db, task_no, task.current_node, execution.id)
+        plan = loaded["evaluation_plan"]
+        review = loaded["field_review"]
+        resume = resume_plan(
+            db, task, execution, plan=plan,
+            allowed_keys=set(review["allowed_rule_keys"]),
+        )
         rerun_keys = resume.rerun_keys
+        covered = resume.scope
         if rerun_keys:
             # 没有重跑项时不重复材料前置处理：规则已经跑过，本次只补收尾与推进。
             graph_prepare_materials(db, task_no, execution.id)
-        loaded = graph_load_evaluation(db, task_no, task.current_node, execution.id)
-        plan = loaded["evaluation_plan"]
         saved = _saved_results(db, execution)
         assert_results_match_plan(plan, saved)
-        plan_keys = {entry["rule_key"] for entry in plan}
         # 先落库再逐条执行：上游成功后进程再中断，下游的重算意图仍然保留。
         _save_pending_rerun_keys(db, execution, rerun_keys)
         outcomes: dict[str, dict[str, Any]] = {}
         counted_batches: set[str] = set()
         channel_failure: dict[str, Any] | None = None
+        # 本轮允许执行的计划项：核对后才执行的规则不参与，也不能按「已保存结果」取。
+        scoped = [entry for entry in plan if entry["rule_key"] in covered]
         # 与主执行路径同一套调度：同一材料上相邻的无输入抽取合并为一次模型调用。
         index = 0
-        while index < len(plan):
-            group = extraction_group(plan, index)
+        while index < len(scoped):
+            group = extraction_group(scoped, index)
             index += len(group)
             pending = [entry for entry in group if entry["rule_key"] in rerun_keys]
             for entry in group:
@@ -325,10 +401,13 @@ def resume_interrupted_execution(db: Session, task_no: str, *, execution_id: int
                 channel_failure = failure
                 graph_pause_scheduling(db, task_no, execution.id, failure=failure)
                 break
-        ordered = [outcomes[entry["rule_key"]] for entry in plan if entry["rule_key"] in outcomes]
+        ordered = [outcomes[entry["rule_key"]] for entry in scoped if entry["rule_key"] in outcomes]
         summary = collect_agent_summary(
-            plan_keys, ordered, sum(item["loop_count"] for item in ordered),
+            covered, ordered, sum(item["loop_count"] for item in ordered),
         )
+        if review["required"] and not review["confirmed"] and channel_failure is None:
+            # 抽取段已跑完、字段尚未确认：批次停在核对等待点，后续规则本轮不执行。
+            summary["field_review_paused"] = True
         graph_finalize_node_execution(db, task_no, execution.id, "AGENT", None, summary)
         advanced = graph_advance_workflow(db, task_no, execution.id)
         graph_save_node_result(db, task_no)

@@ -4,7 +4,7 @@ import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
 import type { TaskScope } from "./scenes";
 import type { TaskPlanInfo } from "./plans";
 
-/** 继续执行的范围：三类互斥，数量由服务端按真实重跑计划给出。 */
+/** 继续执行的范围：四类互斥，数量由服务端按真实重跑计划给出。 */
 export interface ResumeScope {
   /** 保留的已完成项。 */
   preserved: number;
@@ -12,6 +12,72 @@ export interface ResumeScope {
   pending: number;
   /** 因上游重跑需要重算的已完成项。 */
   dependent: number;
+  /** 本轮不执行、留待字段核对确认之后才执行的项。 */
+  waiting_review?: number;
+}
+
+/** 字段核对缺项：真实没有可执行取值的字段与原因。 */
+export interface FieldReviewMissing {
+  field_key: string;
+  material_key: string;
+  field_name: string;
+  material_name: string;
+  status: string | null;
+  /** 缺项原因码：材料未上传 / 未启用抽取 / 抽取未完成 / 材料中不存在 / 证据不足。 */
+  reason: string;
+  material_uploaded: boolean;
+}
+
+/** 字段核对状态：由服务端按当前执行批次、输入修订与字段版本算出，页面只展示。 */
+export interface FieldReviewState {
+  /** 本次计划是否存在字段核对等待点；没有抽取段时为 false。 */
+  required: boolean;
+  /** 当前字段版本是否已被确认。 */
+  confirmed: boolean;
+  confirmation_no: string | null;
+  confirmed_at: string | null;
+  confirmed_input_revision: number | null;
+  input_revision: number;
+  missing_field_count: number;
+  missing_fields: FieldReviewMissing[];
+  /** 确认后还要执行多少条规则。 */
+  after_review_rule_count: number;
+  /** 已有确认但输入或字段版本已变化时的原因。 */
+  reconfirm_reason: string | null;
+  /** 任务当前停在该等待点。 */
+  waiting: boolean;
+  /** 无法建立核对边界时的原因（例如抽取依赖了核对后的规则）。 */
+  blocked_reason?: string | null;
+}
+
+/** 字段核对修改：动作、要写入的值，以及页面看到的字段版本。 */
+export interface FieldReviewCorrection {
+  field_key: string;
+  material_key: string;
+  decision: "MODIFY_FIELD" | "MARK_NOT_PRESENT";
+  field_value?: string | null;
+  business_note: string;
+  basis_type?: "HUMAN_STATEMENT" | "DOCUMENT_EVIDENCE" | "UPLOAD_RECORD";
+  /** 页面看到的字段事实版本；没有字段事实（漏抽）时为 null。 */
+  expected_revision_no: number | null;
+}
+
+/** 只保存核对修改的结果；任务仍停在等待核对。 */
+export interface FieldReviewSaveResult extends ApiResponse {
+  task_no: string;
+  input_revision: number;
+  applied: Array<{
+    field_key: string;
+    material_key: string;
+    review_no: string;
+    fact_revision_no: number;
+    previous_revision_no: number | null;
+    before_value: string | null;
+    after_value: string | null;
+    status: string;
+  }>;
+  missing_field_count: number;
+  missing_fields: FieldReviewMissing[];
 }
 
 /** 模型渠道故障：暂停原因，以及这次请求是否可能已经产生费用。 */
@@ -47,6 +113,8 @@ export interface AuditNode {
   resumable_execution_id?: number | null;
   /** 续跑判断与范围；任务还没有执行批次时为 null。 */
   resume?: ResumeState | null;
+  /** 字段核对等待点状态；任务还没有执行批次时为 null。 */
+  field_review?: FieldReviewState | null;
 }
 /**
  * 任务的展示结构：由后端按当前任务的场景配置返回。

@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 from ....common.exceptions import BusinessError
 from ....constants.status import (
     AUDIT_LLM_CHANNEL_UNAVAILABLE,
+    EXECUTION_STATUS_WAITING_FIELD_REVIEW,
     LOOP_BLOCKED,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_READY,
     TASK_STATUS_RUNNING,
+    TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from ....entity.tasks import AuditTask, NodeExecution
 from ..execution_history import invalidate_executions
@@ -25,6 +27,11 @@ from ..state import _scenario_nodes, _task_phase
 from ..tasks.lookup import task_or_404
 from .errors import agent_step, graph_error_state
 from .execution import execution_in_progress, running_execution
+from .plan import (
+    evaluation_plan,
+    field_review_boundary,
+    reviewed_extraction_rule_keys,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +43,12 @@ MODE_AGENT = "AGENT"
 def graph_load_task(db: Session, task_no: str) -> dict[str, Any]:
     """加载任务并校验它确实停在可执行的节点上。"""
     task = task_or_404(db, task_no)
+    if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
+        raise BusinessError(
+            "AUDIT_TASK_WAITING_FIELD_REVIEW",
+            "任务正在等待字段核对，请先确认字段后继续审核；不能另建批次绕过核对",
+            status_code=409,
+        )
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
     _, _, current_index = _scenario_nodes(db, task)
@@ -63,6 +76,12 @@ def graph_execute_current_node(
 ) -> dict[str, Any]:
     """建立本次规则执行记录；实际规则统一由模型与工具循环完成。"""
     task = task_or_404(db, task_no, lock=True)
+    if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
+        raise BusinessError(
+            "AUDIT_TASK_WAITING_FIELD_REVIEW",
+            "任务正在等待字段核对，请先确认字段后继续审核；不能另建批次绕过核对",
+            status_code=409,
+        )
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
     if current_node != task.current_node:
@@ -116,6 +135,12 @@ def _begin_node_execution(
     """
     if task.status == "RUNNING":
         raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能并发执行或重跑", status_code=409)
+    if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
+        raise BusinessError(
+            "AUDIT_TASK_WAITING_FIELD_REVIEW",
+            "任务正在等待字段核对，请先确认字段后继续审核；不能另建批次绕过核对",
+            status_code=409,
+        )
     active_execution = running_execution(db, task)
     if active_execution:
         raise BusinessError("AUDIT_NODE_RUNNING", "当前任务已有执行中的节点，不能并发执行或重跑", status_code=409)
@@ -189,15 +214,26 @@ def _incomplete_reason_counts(failed: list[dict[str, Any]]) -> list[tuple[str, i
 
 
 def incomplete_failure_message(result_json: dict[str, Any] | None) -> str | None:
-    """按逐条结果汇总未完成原因；供执行收尾和读取旧记录共用。"""
+    """按逐条结果汇总未完成原因；供执行收尾和读取旧记录共用。
+
+    停顿等待核对时记录的抽取段规则键（`field_review.extraction_rule_keys`）已经由人工
+    核对接手：判定与提示都用这一份清单排除，提示里的数量与原因不能和失败判定打架。
+    """
     result = result_json if isinstance(result_json, dict) else {}
+    reviewed = {
+        str(key) for key in ((result.get("field_review") or {}).get("extraction_rule_keys") or ())
+    }
     failed = [
         item for item in result.get("rule_outcomes") or []
-        if item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED"
+        if (item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED")
+        and str(item.get("rule_key")) not in reviewed
     ]
-    if result.get("loop_status") != LOOP_BLOCKED and not failed:
+    missing_keys = [
+        key for key in result.get("missing_rule_keys") or [] if str(key) not in reviewed
+    ]
+    if not failed and not missing_keys:
         return None
-    count = len(failed) + len(result.get("missing_rule_keys") or [])
+    count = len(failed) + len(missing_keys)
     reasons = "；".join(
         f"{number} 项为「{reason}」" for reason, number in _incomplete_reason_counts(failed)[:3]
     )
@@ -225,10 +261,36 @@ def graph_finalize_node_execution(
     # 服务重启留下的中断记录由继续执行自己保留（写进 result_json 的
     # recovered_from_interrupted_execution）：批次在这里已经是 RUNNING，看不到原失败码。
     execution.finished_at = datetime.now(UTC)
-    execution.result_json = {**(execution.result_json or {}), **(agent_summary or {})}
+    # 本轮可能只覆盖计划的一部分（停在字段核对等待点）：逐条结果按规则键合并，
+    # 不能用一个空列表把同批次上一轮已经提交的结局抹掉。
+    merged_outcomes = {
+        str(item.get("rule_key")): item
+        for item in (execution.result_json or {}).get("rule_outcomes") or []
+        if isinstance(item, dict)
+    }
+    for item in (agent_summary or {}).get("rule_outcomes") or []:
+        if isinstance(item, dict):
+            merged_outcomes[str(item.get("rule_key"))] = item
+    execution.result_json = {
+        **(execution.result_json or {}),
+        **(agent_summary or {}),
+        "rule_outcomes": list(merged_outcomes.values()),
+    }
+    # 抽取段的结局在核对等待点已经交给人工核对处理：确认后续跑不再执行抽取规则，
+    # 旧抽取失败不会重新产生结果，也不能再拿它把本批次判成阻断。
+    # 规则键随等待点一起落库，收尾判定与失败提示读同一份清单。
+    review_record = (execution.result_json or {}).get("field_review") or {}
+    reviewed_extraction_keys = reviewed_extraction_rule_keys(task, execution)
+    if review_record.get("closed_at") and not review_record.get("extraction_rule_keys"):
+        # 兼容本改动之前已停在等待点的批次：补算后写回，后续请求读到同一份清单。
+        execution.result_json = {
+            **execution.result_json,
+            "field_review": {**review_record, "extraction_rule_keys": sorted(reviewed_extraction_keys)},
+        }
     # 遍历结束不等于执行成功。格式/产出失败在所有规则尝试完后汇总，允许重跑。
     failed = [item for item in execution.result_json.get("rule_outcomes", [])
-              if item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED"]
+              if (item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED")
+              and str(item.get("rule_key")) not in reviewed_extraction_keys]
     # 只认本次执行产生的渠道故障：result_json 里可能还留着上一次暂停的记录，
     # 继续执行成功后不能因为那条旧记录把本批次再判成渠道故障。
     channel_failure = (agent_summary or {}).get("channel_failure")
@@ -241,6 +303,26 @@ def graph_finalize_node_execution(
         execution.failure_code = AUDIT_LLM_CHANNEL_UNAVAILABLE
         execution.failure_message = _channel_failure_message(channel_failure)
         task.status = TASK_STATUS_BLOCKED
+        db.flush()
+    elif (agent_summary or {}).get("field_review_paused"):
+        # 字段核对是正常业务等待点：批次尚未结束，既不是成功也不是失败。
+        # 抽取段自身的未完成项（例如某字段抽取失败）已在逐条结果里，由人工核对处理。
+        execution.status = EXECUTION_STATUS_WAITING_FIELD_REVIEW
+        execution.failure_code = None
+        execution.failure_message = None
+        # 抽取阶段到此结束：后续续跑不再重跑抽取规则，避免覆盖人工补填值。
+        # 抽取段的规则键与关闭时间一起落库：收尾判定、失败提示与续跑范围都据此排除。
+        boundary = field_review_boundary(
+            evaluation_plan(task, task.current_node), all_rules=_task_manifest(task)["rules"],
+        )
+        execution.result_json = {
+            **(execution.result_json or {}),
+            "field_review": {
+                "closed_at": datetime.now(UTC).isoformat(),
+                "extraction_rule_keys": sorted(boundary.extraction),
+            },
+        }
+        task.status = TASK_STATUS_WAITING_FIELD_REVIEW
         db.flush()
     elif execution.result_json.get("loop_status") == LOOP_BLOCKED or failed:
         execution.status = "BLOCKED"
@@ -271,8 +353,45 @@ def graph_advance_workflow(
     nodes = sorted(manifest["nodes"], key=lambda item: item["sequence_no"])
     _, _, current_index = _scenario_nodes(db, task)
     execution = execution_in_progress(db, task, execution_id)
+    if execution.status == EXECUTION_STATUS_WAITING_FIELD_REVIEW:
+        # 停在字段核对等待点：批次没有结束，检查点不动，也不推进任务。
+        return {
+            "current_node": task.current_node,
+            "node_index": current_index,
+            "phase": phase,
+            "last_execution": {
+                "task_no": task.task_no,
+                "node_name": nodes[current_index]["name"],
+                "execution_status": execution.status,
+                "task_status": task.status,
+                "next_node_name": None,
+                "result_summary": execution.result_json,
+                "failure_code": None,
+                "failure_message": None,
+            },
+            "last_error": None,
+        }
     if execution.status == "BLOCKED":
         # 必传材料缺失：任务显式阻断在当前节点，检查点不动，用户补传后可重新执行。
+        return {
+            "current_node": task.current_node,
+            "node_index": current_index,
+            "phase": phase,
+            "last_execution": {
+                "task_no": task.task_no,
+                "node_name": nodes[current_index]["name"],
+                "execution_status": execution.status,
+                "task_status": task.status,
+                "next_node_name": None,
+                "result_summary": execution.result_json,
+                "failure_code": execution.failure_code,
+                "failure_message": execution.failure_message,
+            },
+            "last_error": None,
+        }
+    if execution.status == "FAILED":
+        # 失败批次绝不能被当成收尾成功：保持失败时的阻断状态，由用户处理原因后继续执行，
+        # 不能把未执行完的规则当成已完成。
         return {
             "current_node": task.current_node,
             "node_index": current_index,

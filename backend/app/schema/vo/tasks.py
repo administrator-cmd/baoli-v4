@@ -81,6 +81,16 @@ class FieldCorrectionResponse(ApiResponse):
     invalidated_rule_results: int = 0
     recomputed_rules: list[str] = Field(default_factory=list)
 
+class FieldReviewSaveResponse(ApiResponse):
+    """字段核对保存结果：真实发生的事实版本变化与剩余缺项。"""
+
+    task_no: str
+    input_revision: int
+    applied: list[dict[str, Any]] = Field(default_factory=list)
+    missing_field_count: int = 0
+    missing_fields: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ExternalArtifactStatusResponse(ApiResponse):
     document_no: str
     artifact_type: str

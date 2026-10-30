@@ -58,7 +58,7 @@ const list = usePagedList<AuditTaskRow, {
 const { filters, page, pageSize, total, items, loading, error } = list;
 
 const statusOptions = statusFilterOptions(
-  ["READY", "RUNNING", "WAITING_REVIEW", "BLOCKED", "COMPLETED", "FAILED"],
+  ["READY", "RUNNING", "WAITING_FIELD_REVIEW", "WAITING_REVIEW", "BLOCKED", "COMPLETED", "FAILED"],
   { COMPLETED: "执行已结束" },
 );
 
@@ -93,6 +93,9 @@ interface PrimaryEntry {
 function primaryEntry(row: AuditTaskRow): PrimaryEntry {
   if (row.status === "RUNNING") {
     return { label: "查看进度", tab: "executions" };
+  }
+  if (row.status === "WAITING_FIELD_REVIEW") {
+    return { label: "核对字段", tab: "fields" };
   }
   if (row.status === "WAITING_REVIEW") {
     return { label: "查看记录", tab: "executions" };

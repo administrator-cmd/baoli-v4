@@ -1,4 +1,4 @@
-"""审核任务的风险、报告与字段纠错接口。"""
+"""审核任务的风险、报告、字段纠错与字段核对接口。"""
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -6,11 +6,19 @@ from sqlalchemy.orm import Session
 
 from ...common.exceptions import BusinessError
 from ...core.database import get_db
-from ...schema.dto.tasks import FieldCorrectionRequest
+from ...schema.dto.tasks import (
+    FieldCorrectionRequest,
+    FieldReviewConfirmRequest,
+    FieldReviewSaveRequest,
+)
+from ...schema.vo.operations import OperationAcceptedResponse
 from ...schema.vo.reports import ReportResponse
-from ...schema.vo.tasks import FieldCorrectionResponse, RiskListResponse
-from ...services.audit.commands import correct_field_value
+from ...schema.vo.tasks import FieldCorrectionResponse, FieldReviewSaveResponse, RiskListResponse
+from ...services.audit.commands import correct_field_value, save_field_review
+from ...services.audit.operations import submit_field_review_confirm
+from ...services.audit.tasks.lookup import task_or_404
 from ...services.audit.views import report_view, risks_view
+from ...services.system.background import operation_view
 from ..report.downloads import report_download_response
 
 router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
@@ -51,3 +59,34 @@ def correct_field(
     """对错值/漏值字段发起主动纠错；生成新的字段事实版本并失效下游结果。"""
     result = correct_field_value(db, task_no, payload)
     return FieldCorrectionResponse.model_validate({**result, "request_id": request.state.request_id})
+
+
+@router.post("/{task_no}/field-review/save", response_model=FieldReviewSaveResponse)
+def save_field_review_endpoint(
+    task_no: str,
+    payload: FieldReviewSaveRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> FieldReviewSaveResponse:
+    """只保存等待核对期间的字段修改；任务仍停在等待核对，不触发后续规则。"""
+    result = save_field_review(db, task_no, payload)
+    return FieldReviewSaveResponse.model_validate({**result, "request_id": request.state.request_id})
+
+
+@router.post("/{task_no}/field-review/confirm", response_model=OperationAcceptedResponse, status_code=202)
+def confirm_field_review_endpoint(
+    task_no: str,
+    payload: FieldReviewConfirmRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> OperationAcceptedResponse:
+    """保存本次剩余修改并确认当前字段版本，随后在后台继续审核。
+
+    返回 202 只代表操作已受理：字段修改与确认会在后台命令里先提交再做模型调用，
+    真实结果用 operation_no 查询，或刷新任务详情查看。
+    """
+    task = task_or_404(db, task_no, lock=True)
+    operation, reused = submit_field_review_confirm(db, task, payload)
+    return OperationAcceptedResponse.model_validate(
+        {**operation_view(operation, reused=reused), "request_id": request.state.request_id}
+    )

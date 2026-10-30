@@ -48,6 +48,8 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "task_fact",
     "rule_result",
     "manual_review",
+    # 字段核对确认：绑定执行批次、输入修订与字段版本摘要。
+    "field_review_confirmation",
 )
 
 

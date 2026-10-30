@@ -47,6 +47,7 @@ def graph_execute_tool_calls(
         runtime, result_context = None, {}
         results: list[dict[str, Any]] = []
         unresolved: list[dict[str, Any]] = []
+        channel_failure: dict[str, Any] | None = None
         for call in calls:
             tool_name = str(call.get("tool_name") or "")
             if tool_name not in authorized:
@@ -74,12 +75,19 @@ def graph_execute_tool_calls(
                     }
                 )
             results.append(agent.tool_result_entry(call, result))
+            failure = result.get("channel_failure")
+            if isinstance(failure, dict):
+                # 工具内部的大模型请求遇到渠道故障：本批剩余工具不再执行，
+                # 故障带给调度方，按渠道故障暂停而不是继续请求。
+                channel_failure = failure
+                break
         return {
             "tool_results": results,
             "pending_tool_calls": [],
             # 累积未解决事项：前几轮的失败与待核查不会被本轮覆盖掉。
             "unresolved_items": [*existing_unresolved, *unresolved],
             "last_error": None,
+            **({"channel_failure": channel_failure} if channel_failure is not None else {}),
         }
 
 

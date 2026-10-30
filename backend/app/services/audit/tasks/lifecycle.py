@@ -15,6 +15,7 @@ from ....entity.reports import AuditReport
 from ....entity.tasks import (
     AuditTask,
     DocumentUpload,
+    FieldReviewConfirmation,
     ManualReview,
     NodeExecution,
     RuleResult,
@@ -89,7 +90,7 @@ def delete_task(db: Session, task_no: str) -> None:
                 staged_directories.append((source, staged))
 
         for entity in (
-            ManualReview, TaskFieldValue, TaskFact, AuditReport,
+            FieldReviewConfirmation, ManualReview, TaskFieldValue, TaskFact, AuditReport,
             RuleResult, StoredArtifact, DocumentUpload, TaskDocument, NodeExecution,
         ):
             db.execute(delete(entity).where(entity.audit_task_id == task.id))

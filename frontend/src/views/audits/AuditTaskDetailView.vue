@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, proxyRefs, ref, shallowRef, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type {
@@ -9,6 +9,7 @@ import type {
   ExecutionRow,
   FieldCorrectionRequest,
   FieldCorrectionResponse,
+  FieldReviewCorrection,
   Report,
   RiskList,
 } from "@/api/contracts";
@@ -22,6 +23,7 @@ import {
   type OperationView,
 } from "@/api/http";
 import {
+  confirmFieldReview,
   deleteAuditTask,
   executeAuditNode,
   getAuditTask,
@@ -29,6 +31,7 @@ import {
   getTaskRisks,
   listTaskExecutions,
   resumeAuditTask,
+  saveFieldReview,
   submitFieldCorrections,
   type AuditTaskView,
 } from "@/api/audits";
@@ -36,6 +39,7 @@ import {
 import { getExecution } from "@/api/executions";
 import MaterialProcessingDialog from "@/components/audit/MaterialProcessingDialog.vue";
 import AuditFieldResults from "@/components/audit/AuditFieldResults.vue";
+import AuditFieldReviewPanel from "@/components/audit/AuditFieldReviewPanel.vue";
 import ExecutionDetailPanel from "@/components/audit/ExecutionDetailPanel.vue";
 import { executionSummaryText } from "@/utils/executionPresentation";
 import AuditReportPanel from "@/components/audit/AuditReportPanel.vue";
@@ -229,7 +233,9 @@ const missingRequiredMaterials = computed(
 const extractionFinished = computed(
   () =>
     task.value?.nodes.some(
-      (node) => node.node_type === "RULE_EXECUTION" && node.status === "SUCCEEDED",
+      // 停在字段核对等待点的批次已经跑完抽取段，字段页不应再显示成「尚未执行」。
+      (node) => node.node_type === "RULE_EXECUTION"
+        && (node.status === "SUCCEEDED" || node.status === "WAITING_FIELD_REVIEW"),
     ) ?? false,
 );
 const riskNodeExecuted = computed(() => risks.value?.risk_executed ?? false);
@@ -244,6 +250,107 @@ const riskUndecidedCount = computed(() => {
   );
 });
 const atWaitingReview = computed(() => task.value?.status === "WAITING_REVIEW");
+
+/* 字段核对：抽取完成后的正常等待点，任务停在这里等人工确认字段。 */
+const fieldReview = computed(() => task.value?.current_node.field_review ?? null);
+const atFieldReview = computed(
+  () => task.value?.status === "WAITING_FIELD_REVIEW" && Boolean(fieldReview.value?.required),
+);
+/** 核对区域有未保存修改：切换页签或离开页面时必须明确提示。 */
+const reviewDirty = ref(false);
+const reviewSaving = ref(false);
+const reviewConfirming = ref(false);
+/** 确认请求身份：受理结果未知时保留，重发同一请求由服务端返回原受理记录。 */
+let reviewAttemptKey: string | null = null;
+
+async function submitFieldReviewSave(corrections: FieldReviewCorrection[]): Promise<void> {
+  if (!task.value || !corrections.length) return;
+  const currentTaskNo = task.value.task_no;
+  const inputRevision = task.value.input_revision;
+  const token = stateGeneration;
+  reviewSaving.value = true;
+  try {
+    const result = await saveFieldReview(currentTaskNo, { input_revision: inputRevision, corrections });
+    if (isStale(token, currentTaskNo)) return;
+    await fetchTaskState(currentTaskNo, token);
+    ElMessage.success(`已保存 ${result.applied.length} 项字段修改，任务仍等待核对`);
+  } catch (error) {
+    if (isStale(token, currentTaskNo)) return;
+    setFailure(error);
+  } finally {
+    reviewSaving.value = false;
+  }
+}
+
+async function submitFieldReviewConfirm(payload: {
+  corrections: FieldReviewCorrection[];
+  acknowledgeMissing: boolean;
+  note: string | null;
+}): Promise<void> {
+  if (!task.value) return;
+  const currentTaskNo = task.value.task_no;
+  const inputRevision = task.value.input_revision;
+  const token = stateGeneration;
+  const attemptKey = reviewAttemptKey ?? operationIdempotencyKey("FIELD_REVIEW_CONFIRM", currentTaskNo);
+  reviewAttemptKey = attemptKey;
+  reviewConfirming.value = true;
+  try {
+    const accepted = await confirmFieldReview(currentTaskNo, {
+      idempotency_key: attemptKey,
+      input_revision: inputRevision,
+      corrections: payload.corrections,
+      acknowledge_missing: payload.acknowledgeMissing,
+      note: payload.note,
+    });
+    if (isStale(token, currentTaskNo)) return;
+    trackOperation(accepted, token);
+    await router.replace({
+      name: "audit-task-detail",
+      params: { taskNo: currentTaskNo },
+      query: { ...route.query, operation: accepted.operation_no },
+    });
+  } catch (error) {
+    if (isStale(token, currentTaskNo)) return;
+    // 只有「结果未知」才保留请求身份：明确被服务端拒绝时原命令没有受理，
+    // 保留旧键会让用户改完再提交时被当成「同一标识的不同请求」。
+    if (!(error instanceof ApiError) || (error.code !== "REQUEST_TIMEOUT" && error.code !== "NETWORK_ERROR")) {
+      reviewAttemptKey = null;
+    }
+    setFailure(error);
+    // 受理结果未知时只查询真实状态：详情里的 latest_operation 指向已受理的操作。
+    // 查询返回后要重新校验任务身份：期间切到别的任务时，这次响应不能覆盖当前页面。
+    const latest = await getAuditTask(currentTaskNo);
+    if (isStale(token, currentTaskNo)) return;
+    applyTask(latest);
+    resumeLatestOperation(token);
+  } finally {
+    reviewConfirming.value = false;
+  }
+}
+
+/** 有未保存的核对修改时离开，必须由用户明确选择。 */
+async function confirmLeaveReview(): Promise<boolean> {
+  if (!reviewDirty.value) return true;
+  try {
+    await ElMessageBox.confirm(
+      "字段核对还有未保存的修改，离开后这些修改会丢失。",
+      "放弃未保存的核对修改",
+      { type: "warning", confirmButtonText: "放弃修改并离开", cancelButtonText: "继续核对" },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 返回任务列表、侧边栏和浏览器后退都是单页路由跳转，不触发 beforeunload：
+// 离开本页前同样要确认，未保存的核对修改不能静默丢弃。
+onBeforeRouteLeave(async () => await confirmLeaveReview());
+// 同一路由记录内切换到另一个任务时组件不会卸载，离开守卫不触发；直接换任务同样要确认。
+// 页签切换只改查询参数，由 setTab 自己确认，这里不重复弹窗。
+onBeforeRouteUpdate(async (to) => (
+  to.params.taskNo !== route.params.taskNo ? await confirmLeaveReview() : true
+));
 
 /**
  * 同一任务同一时间只允许一个后台操作：材料分类、处理重试或节点执行进行中时，
@@ -329,7 +436,8 @@ const prerequisites = computed(() => {
 
 const unsatisfiedPrerequisites = computed(() => prerequisites.value.filter((item) => !item.satisfied));
 const canExecuteNode = computed(
-  () => !pending.value && !watching.value && unsatisfiedPrerequisites.value.length === 0 && task.value?.status !== "WAITING_REVIEW",
+  () => !pending.value && !watching.value && unsatisfiedPrerequisites.value.length === 0
+    && task.value?.status !== "WAITING_REVIEW" && task.value?.status !== "WAITING_FIELD_REVIEW",
 );
 
 /** 有未完成规则的批次可以原地继续；为空表示只能全部重新执行。 */
@@ -343,14 +451,18 @@ const canResumeExecution = computed(
 
 /** 继续执行前要展示的范围与费用提示；数量来自服务端计划，页面不自行推导依赖。 */
 const resumeHint = computed(() => {
+  if (atFieldReview.value) return null;
   const state = resumeState.value;
   if (!state || state.execution_id === null || !state.plan) return null;
-  const { preserved, pending: rerunPending, dependent } = state.plan;
-  if (preserved + rerunPending + dependent === 0) {
+  const { preserved, pending: rerunPending, dependent, waiting_review: waitingReview = 0 } = state.plan;
+  if (preserved + rerunPending + dependent + waitingReview === 0) {
     return "继续执行：只补齐本次批次的收尾与流程推进，不重新调用模型。";
   }
-  const parts = [`保留 ${preserved} 项已完成结果，补跑 ${rerunPending} 项未完成规则`];
-  if (dependent > 0) parts.push(`重算 ${dependent} 项受依赖影响的结果`);
+  const parts: string[] = [];
+  if (preserved) parts.push(`保留 ${preserved} 项已完成结果`);
+  if (rerunPending) parts.push(`补跑 ${rerunPending} 项未完成规则`);
+  if (dependent) parts.push(`重算 ${dependent} 项受依赖影响的结果`);
+  if (waitingReview) parts.push(`另有 ${waitingReview} 项要在字段核对确认后才执行`);
   const text = `继续执行：${parts.join("，")}。`;
   return state.channel_failure?.result_unknown
     ? `${text}上一次模型请求结果未知，可能已送达供应商，继续执行可能再次产生费用。`
@@ -360,6 +472,7 @@ const resumeHint = computed(() => {
 const executeDisabledReason = computed(() => {
   if (!task.value) return null;
   if (atWaitingReview.value) return "该任务已停在原人工复核等待点；人工审核暂不启用，请复制为新任务重新执行。";
+  if (atFieldReview.value) return "字段抽取已完成，正在等待人工核对；请核对字段后「确认并继续审核」，不能另建批次绕过核对。";
   if (task.value.status === "COMPLETED") return "任务执行已结束，具体结论见规则结果。";
   if (watching.value) return "正在查询上一次执行的服务端状态，请等待查询结束。";
   if (unsatisfiedPrerequisites.value.length) {
@@ -398,6 +511,10 @@ const primaryAction = computed<PrimaryAction>(() => {
   }
   if (atWaitingReview.value) {
     return { label: "查看执行记录", tab: "executions", disabled: false, reason: null, loading: false };
+  }
+  if (atFieldReview.value) {
+    // 等待核对的唯一下一步是去核对字段：页头只负责把用户带到能操作的地方。
+    return { label: "去核对字段", tab: "fields", disabled: false, reason: null, loading: false };
   }
   if (watching.value || task.value.status === "RUNNING") {
     return { label: "查看执行进度", tab: "executions", disabled: false, reason: null, loading: false };
@@ -546,6 +663,16 @@ const blockers = computed<BlockerItem[]>(() => {
       description: "人工审核暂不启用，已有待办和结论保留；请复制为新任务重新执行。",
     });
   }
+  if (atFieldReview.value && fieldReview.value) {
+    items.push({
+      tone: "warning",
+      title: "字段抽取已完成，等待人工核对",
+      description: `请核对 ${task.value.fields.length} 项字段的取值与原文依据，其中 ${fieldReview.value.missing_field_count} 项没有可执行取值；`
+        + `确认后才会继续执行剩余 ${fieldReview.value.after_review_rule_count} 条规则。`,
+      tab: "fields",
+      tabLabel: "去核对字段",
+    });
+  }
   if (risksError.value) {
     items.push({
       tone: "error",
@@ -578,9 +705,13 @@ const blockers = computed<BlockerItem[]>(() => {
  * 入参放宽为 string，因为 el-tabs 的 v-model 事件载荷是 string | number；
  * 非法值直接忽略，不写入页签状态（与 URL 的处理口径一致）。
  */
-function setTab(next: string | number): void {
+async function setTab(next: string | number): Promise<void> {
   if (!isDetailTab(next)) {
     return;
+  }
+  // 离开字段核对页签前必须让用户明确决定：未保存的修改不会被带走。
+  if (next !== tab.value && tab.value === "fields" && reviewDirty.value) {
+    if (!(await confirmLeaveReview())) return;
   }
   if (tab.value === next && !route.query.tab) {
     // 同一页签重复点击时只确保数据存在，不重复写 URL。
@@ -658,6 +789,10 @@ function resetWorkspace(): void {
   correctionField.value = null;
   correctionResult.value = null;
   correctionPending.value = false;
+  reviewDirty.value = false;
+  reviewSaving.value = false;
+  reviewConfirming.value = false;
+  reviewAttemptKey = null;
   lastOperationType.value = null;
   executionAttemptKey = null;
   resumeAttemptKey = null;
@@ -756,6 +891,7 @@ function trackOperation(value: OperationView, token = stateGeneration): void {
   }
   executionAttemptKey = null;
   resumeAttemptKey = null;
+  reviewAttemptKey = null;
   lastOperationType.value = value.operation_type;
   setExecutionResult(value);
   let lastDetailRefreshAt = 0;
@@ -872,6 +1008,7 @@ async function syncFromRoute(): Promise<void> {
     tab.value = routeTab ?? "materials";
     await loadTask(currentTaskNo);
     if (!task.value) return;
+    if (!routeTab && task.value.status === "WAITING_FIELD_REVIEW") tab.value = "fields";
     if (!routeTab && task.value.status === "COMPLETED") tab.value = "rules";
     await ensureTabLoaded(tab.value, stateGeneration);
     const operationNo = typeof route.query.operation === "string" ? route.query.operation : null;
@@ -926,7 +1063,9 @@ async function executeCurrentNode(): Promise<void> {
       }
       setFailure(error);
       if (error instanceof Error && "code" in error && (error as ApiError).code === "OPERATION_ALREADY_ACTIVE") {
-        applyTask(await getAuditTask(currentTaskNo));
+        const latest = await getAuditTask(currentTaskNo);
+        if (isStale(token, currentTaskNo)) return;
+        applyTask(latest);
         resumeLatestOperation(token);
       }
     }
@@ -961,7 +1100,10 @@ async function resumeInterrupted(): Promise<void> {
       setFailure(error);
       // 受理结果未知时只查询真实状态：任务详情里的 latest_operation 指向已受理的操作，
       // 存在进行中的操作就重新接回轮询。这里不重新提交执行请求。
-      applyTask(await getAuditTask(currentTaskNo));
+      // 查询返回后重新校验任务身份，避免旧任务的响应覆盖当前页面。
+      const latest = await getAuditTask(currentTaskNo);
+      if (isStale(token, currentTaskNo)) return;
+      applyTask(latest);
       resumeLatestOperation(token);
     }
   });
@@ -988,7 +1130,7 @@ async function requestFullRerun(): Promise<void> {
 async function retryOperation(operationType: string): Promise<void> {
   // 有可续跑批次时，失败后的恢复操作同样是继续执行：不能因为操作类型是 NODE_EXECUTE
   // 就悄悄重跑全部规则。只有没有可续跑批次时才给全量重跑入口。
-  if (operationType === "NODE_EXECUTE" || operationType === "NODE_RESUME") {
+  if (operationType === "NODE_EXECUTE" || operationType === "NODE_RESUME" || operationType === "FIELD_REVIEW_CONFIRM") {
     if (resumableExecutionId.value !== null) {
       await resumeInterrupted();
       return;
@@ -1043,6 +1185,8 @@ async function removeTask(): Promise<void> {
   }
   try {
     await deleteAuditTask(task.value.task_no);
+    // 任务已删除，页面上的核对草稿不再有意义，离开时不再提示。
+    reviewDirty.value = false;
     ElMessage.success("任务已永久删除");
     await router.push({ name: "audit-tasks" });
   } catch (error) {
@@ -1068,11 +1212,20 @@ onMounted(() => {
   clockTimer = window.setInterval(() => {
     clock.value = Date.now();
   }, 30_000);
+  window.addEventListener("beforeunload", guardUnload);
 });
 
 onUnmounted(() => {
   if (clockTimer !== undefined) window.clearInterval(clockTimer);
+  window.removeEventListener("beforeunload", guardUnload);
 });
+
+/** 浏览器刷新或关闭时提示未保存的核对修改；只在核对页有草稿时生效。 */
+function guardUnload(event: BeforeUnloadEvent): void {
+  if (!reviewDirty.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
 
 watch(
   () => [route.params.taskNo, route.query.tab, route.query.operation],
@@ -1142,7 +1295,7 @@ watch(
         <OperationPanel v-if="operation && (watching || operation.status !== 'SUCCEEDED' || operation.failure_code || operation.failure_message)"
           class="block-gap-sm" compact :operation="operation" :watching="watching" :label="operation.operation_type === 'DOCUMENT_CLASSIFY' ? '文件已保存，自动校验' : '执行进度'"
           :poll-seconds="pollIntervalSeconds" :can-retry="fullRerunOperation" retry-label="全部重新执行"
-          :can-resume="canResumeExecution"
+          :can-resume="canResumeExecution && !atFieldReview"
           @requery="requery()" @retry="retryOperation" @resume="resumeInterrupted" />
       </template>
     </div>
@@ -1194,7 +1347,20 @@ watch(
           </el-tab-pane>
 
           <el-tab-pane label="字段结果" name="fields">
+            <!-- 等待核对时直接展示核对区域；确认后按核对结果继续执行。 -->
+            <AuditFieldReviewPanel
+              v-if="atFieldReview && fieldReview"
+              :fields="task.fields"
+              :state="fieldReview"
+              :saving="reviewSaving"
+              :confirming="reviewConfirming"
+              :disabled="taskOperationActive"
+              @save="submitFieldReviewSave"
+              @confirm="submitFieldReviewConfirm"
+              @update:dirty="reviewDirty = $event"
+            />
             <AuditFieldResults
+              v-else
               :fields="task.fields"
               :extraction-finished="extractionFinished"
               :correction-enabled="task.status !== 'COMPLETED' && task.status !== 'FAILED'"

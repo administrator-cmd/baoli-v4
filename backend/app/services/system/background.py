@@ -43,6 +43,10 @@ PHASE_GRAPH_ADVANCED = "GRAPH_ADVANCED"
 PHASE_INTERRUPT_WAITING = "INTERRUPT_WAITING"
 
 
+# 字段核对等待点：本次后台操作已正常完成它要做的事，任务停在等待人工核对。
+PHASE_FIELD_REVIEW_WAITING = "FIELD_REVIEW_WAITING"
+
+
 PHASE_RESULT_READY = "RESULT_READY"
 
 
@@ -123,6 +127,9 @@ def operation_view(operation: BackgroundOperation, *, reused: bool = False) -> d
 
 
 def _status_message(operation: BackgroundOperation) -> str:
+    if operation.status == "SUCCEEDED" and operation.phase == PHASE_FIELD_REVIEW_WAITING:
+        # 本次命令要求的动作已经完成，但整批审核没有结束：必须如实说明停在等待点。
+        return "字段抽取已完成，等待人工核对后继续"
     return {
         "PENDING": "操作已受理，等待后台执行",
         "RUNNING": "操作已受理，正在后台执行",

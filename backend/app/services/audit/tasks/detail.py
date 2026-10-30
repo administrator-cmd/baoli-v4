@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ....common.exceptions import BusinessError
-from ....constants.execution import NODE_RULE_EXECUTION
+from ....constants.execution import NODE_RULE_EXECUTION, ORIGIN_HUMAN_CORRECTION
 from ....constants.status import EXECUTABLE_FIELD_STATUSES
 from ....domain.execution_scope import result_state
 from ....domain.manifest import enabled_extraction_field_keys
@@ -25,10 +25,12 @@ from ...system.operation_types import OBJECT_AUDIT_TASK
 from .. import value_store as task_value_service
 from ..artifacts import _material_classify_content
 from ..evidence import evidence_memo, evidence_source_views, field_evidence, result_content_view, rule_evidence
+from ..field_review import confirmation_view, field_review_supplement
 from ..rule_results import restore_diagnostic_inputs
 from ..execution_scope import current_executions, pending_rerun_by_execution
 from ..facts import _current_field_fact_pairs
 from ..flow.lifecycle import incomplete_failure_message
+from ..flow.plan import evaluation_plan, field_review_boundary
 from ..resume import resume_state
 from ..shared import _current_uploads
 from .processing import material_artifacts_summary
@@ -68,6 +70,65 @@ def _named_rule_result(value: dict[str, Any], names: dict[str, str]) -> dict[str
     if isinstance(missing, list):
         result["missing_items"] = [named(item) for item in missing]
     return result
+
+
+def _comparison_sources(
+    result: dict[str, Any], *, task: AuditTask, documents_by_material_key: dict[str, TaskDocument],
+) -> dict[str, Any]:
+    """给比较双方的来源标签补上材料与字段中文名。
+
+    比较结果里的左右下标指向本次真实输入；名称取自任务冻结配置与材料位。
+    早期结果保存时没有带上名称，这里只补展示字段，不改写已经算出的取值与算式。
+    """
+    findings = result.get("tool_findings")
+    if not isinstance(findings, list):
+        return result
+    field_names = {
+        str(field["field_key"]): str(field.get("name") or field["field_key"])
+        for field in task.task_schema_json["fields"]
+    }
+    material_names = {
+        key: str(document.material_name) for key, document in documents_by_material_key.items()
+    }
+    changed = False
+    updated: list[Any] = []
+    for finding in findings:
+        comparison = finding.get("comparison") if isinstance(finding, dict) else None
+        snapshot = finding.get("input_snapshot") if isinstance(finding, dict) else None
+        if not isinstance(comparison, dict) or not isinstance(snapshot, list):
+            updated.append(finding)
+            continue
+        fixed = dict(comparison)
+        for side in ("left", "right"):
+            index = fixed.get(f"{side}_index")
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(snapshot):
+                continue
+            source = snapshot[index] if isinstance(snapshot[index], dict) else {}
+            if not fixed.get(f"{side}_label"):
+                label = " · ".join(name for name in (
+                    material_names.get(str(source.get("material_key") or "")),
+                    field_names.get(str(source.get("field_key") or "")),
+                ) if name)
+                if label:
+                    fixed[f"{side}_label"] = label
+                    changed = True
+            if fixed.get(f"{side}_raw_value") is None and source.get("raw_value") is not None:
+                fixed[f"{side}_raw_value"] = source.get("raw_value")
+                changed = True
+        if fixed.get("addends") and not fixed.get("addend_labels"):
+            # 加总比较的加数按输入顺序排列：第一个输入是左侧合计，其余为加数。
+            labels = [
+                " · ".join(name for name in (
+                    material_names.get(str(source.get("material_key") or "")),
+                    field_names.get(str(source.get("field_key") or "")),
+                ) if name)
+                for source in (item if isinstance(item, dict) else {} for item in snapshot[1:])
+            ]
+            if any(labels):
+                fixed["addend_labels"] = labels
+                changed = True
+        updated.append({**finding, "comparison": fixed})
+    return {**result, "tool_findings": updated} if changed else result
 
 
 def _task_display_structure(task: AuditTask) -> dict[str, Any]:
@@ -142,22 +203,25 @@ def _rule_result_view(
         "status": item.status,
         "message": item.message,
         "turn_count": item.turn_count,
-        "result": _named_rule_result({
-            # 诊断来自数据库，业务结论来自任务 CSV；状态与风险等级只存数据库。
-            **rule_value_of[item.id],
-            "status": item.status,
-            "message": item.message,
-            "risk_level": item.risk_level,
-            **restore_diagnostic_inputs(
-                db, task,
-                result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
-            ),
-            # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
-            # node_code 保留用户配置的实例码，两个字段都不由规则名称推断。
-            "node": node_type_by_code.get(node_code),
-            "node_type": node_type_by_code.get(node_code),
-            "node_code": node_code,
-        }, rule_name_by_key),
+        "result": _comparison_sources(
+            _named_rule_result({
+                # 诊断来自数据库，业务结论来自任务 CSV；状态与风险等级只存数据库。
+                **rule_value_of[item.id],
+                "status": item.status,
+                "message": item.message,
+                "risk_level": item.risk_level,
+                **restore_diagnostic_inputs(
+                    db, task,
+                    result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
+                ),
+                # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
+                # node_code 保留用户配置的实例码，两个字段都不由规则名称推断。
+                "node": node_type_by_code.get(node_code),
+                "node_type": node_type_by_code.get(node_code),
+                "node_code": node_code,
+            }, rule_name_by_key),
+            task=task, documents_by_material_key=documents_by_material_key,
+        ),
         "evidence": rule_sources[item.id],
         # 旧结果没有 standard 快照时，单独返回任务绑定配置的要求，不改写执行结果。
         "configured_requirement": definition.get("requirement"),
@@ -228,15 +292,38 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
     scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
     current_execution = executions.get(current_node_definition["node_code"])
+    # 执行计划在本请求内只编译一次：续跑范围、字段核对边界与页面数字都取自它。
+    plan_entries = evaluation_plan(task, task.current_node)
     # 能否原地继续、继续时保留多少项、重跑多少项，统一由 resume 模块判断；
     # 页面只展示服务端算出的范围，不自行推导依赖关系。
-    resume = resume_state(db, task, current_execution)
+    resume = resume_state(db, task, current_execution, plan=plan_entries)
+    # 字段核对等待点的真实状态：本次计划是否有抽取段、当前字段版本是否已确认、
+    # 还有哪些缺项、确认后还要执行多少条规则。页面据此显示入口，不自行判断。
+    field_review_required = False
+    after_review_rule_count = 0
+    review_blocked_reason = None
+    try:
+        boundary = field_review_boundary(plan_entries, all_rules=manifest.get("rules") or [])
+        field_review_required = boundary.required
+        after_review_rule_count = len(boundary.after)
+    except BusinessError as exc:
+        # 抽取依赖了核对后的业务规则时，这里是唯一能说清原因的地方；
+        # 其他错误照常上抛，不把配置问题伪装成「暂无核对」。
+        if exc.code != "AUDIT_FIELD_REVIEW_DEPENDENCY_CONFLICT":
+            raise
+        review_blocked_reason = exc.message
+    field_review = confirmation_view(
+        db, task, current_execution,
+        required=field_review_required, after_review_rule_count=after_review_rule_count,
+    )
+    field_review["blocked_reason"] = review_blocked_reason
     current_node = {
         **current_node_definition,
         "status": current_execution.status if current_execution else "CURRENT",
         "failure_message": _execution_failure_message(current_execution),
         "resumable_execution_id": resume["execution_id"],
         "resume": resume,
+        "field_review": field_review,
     }
     # 当前事实按字段+材料取 is_current 版本。
     current_field_pairs = _current_field_fact_pairs(db, task)
@@ -318,15 +405,20 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
             extraction_result_by_field.setdefault(str(field_key), result)
     field_view = []
     field_correction_candidates = []
+    # 原抽取值、人工前后值与原文依据归属：核对页按字段展示，不把修正值当成抽取结果。
+    supplements = field_review_supplement(db, task)
     for field in task.task_schema_json["fields"]:
         field_identity = (field["field_key"], field["material_key"])
         fact = current_field_facts.get(field_identity)
         task_fact = current_task_facts.get(field_identity)
         fact_is_current = fact is not None and fact.status != "NOT_EXECUTED"
         document = documents_by_material_key[field["material_key"]]
+        supplement = supplements.get(field_identity, {})
+        # 人工修正值本身不带引文；原文依据仍指向它替代的那一版抽取结果。
+        evidence_value_id = supplement.get("evidence_value_id") if fact_is_current else None
         field_sources = (
-            evidence_source_views(db, task, field_evidence(db, task, fact.id, memo))
-            if fact_is_current else []
+            evidence_source_views(db, task, field_evidence(db, task, evidence_value_id, memo))
+            if evidence_value_id else []
         )
         owner_code = extraction_owner_by_field.get(field["field_key"])
         owner_execution = executions.get(owner_code) if owner_code else None
@@ -369,6 +461,19 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
                 "material_required": document.required,
                 "fact_revision_no": fact.revision_no if fact_is_current else None,
                 "origin": fact.origin if fact_is_current else None,
+                # 人工修正过的事实：页面必须能与原抽取结果分开显示。
+                "corrected": bool(fact_is_current and fact.origin == ORIGIN_HUMAN_CORRECTION),
+                "extracted_raw_value": supplement.get("extracted_raw_value") if fact_is_current else None,
+                "extracted_normalized_value": (
+                    supplement.get("extracted_normalized_value") if fact_is_current else None
+                ),
+                "extracted_status": supplement.get("extracted_status") if fact_is_current else None,
+                "manual_review": supplement.get("manual_review") if fact_is_current else None,
+                # 已声明的口径：单位、币种、取数期间与报表口径都只显示配置里写明的值。
+                "unit": field.get("unit"),
+                "currency": field.get("currency"),
+                "period_scope": field.get("period_scope"),
+                "statement_scope": field.get("statement_scope"),
                 "extraction_message": extraction_result.message if extraction_result is not None else None,
                 "extraction_presentation_version": rule_value_of[extraction_result.id].get("presentation_version") if extraction_result is not None else None,
             }

@@ -530,6 +530,27 @@ CREATE TABLE `manual_review` (
   CONSTRAINT `fk_manual_review_task` FOREIGN KEY (`audit_task_id`) REFERENCES `audit_task` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- 字段核对确认：绑定执行批次、任务输入修订与字段版本摘要；每次确认新增一行，最新一行代表当前输入。
+CREATE TABLE `field_review_confirmation` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `confirmation_no` varchar(40) NOT NULL,
+  `audit_task_id` bigint NOT NULL,
+  `node_execution_id` bigint NOT NULL,
+  `input_revision` int NOT NULL,
+  `field_digest` char(64) NOT NULL,
+  `missing_field_count` int NOT NULL DEFAULT 0,
+  `missing_field_keys` json DEFAULT NULL,
+  `note` text,
+  `operation_no` varchar(40) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_field_review_no` (`confirmation_no`),
+  KEY `idx_field_review_task` (`audit_task_id`,`node_execution_id`),
+  CONSTRAINT `fk_field_review_execution_task` FOREIGN KEY (`node_execution_id`, `audit_task_id`) REFERENCES `node_execution` (`id`, `audit_task_id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  CONSTRAINT `fk_field_review_task` FOREIGN KEY (`audit_task_id`) REFERENCES `audit_task` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 
 -- 8. 结构确认：预期不返回任何行。
 
@@ -553,6 +574,7 @@ SELECT 'scenario_template' AS table_name
     UNION ALL SELECT 'task_fact' AS table_name
     UNION ALL SELECT 'rule_result' AS table_name
     UNION ALL SELECT 'manual_review' AS table_name
+    UNION ALL SELECT 'field_review_confirmation' AS table_name
 ) AS expected
 LEFT JOIN information_schema.tables AS actual
        ON actual.table_schema = DATABASE()
@@ -563,13 +585,13 @@ ORDER BY expected.table_name;
 
 -- 9. 状态取值（取值以代码常量为准）
 --
--- audit_task.status            READY / RUNNING / BLOCKED / FAILED / COMPLETED
+-- audit_task.status            READY / RUNNING / WAITING_FIELD_REVIEW / BLOCKED / FAILED / COMPLETED
 -- background_operation.status  PENDING / RUNNING / SUCCEEDED / FAILED / INTERRUPTED
 -- import_job.status            PARSED / PROPOSED / APPLIED / EXTERNAL_FAILED
 -- task_document.status         WAITING_UPLOAD / UPLOADED / PREPARED
 -- document_upload.status       UPLOADED / SUPERSEDED / REMOVED
 -- stored_artifact.status       PROCESSING / SUBMITTING / PENDING / READY / FAILED / INVALIDATED
--- node_execution.status        RUNNING / SUCCEEDED / BLOCKED / FAILED / SKIPPED / INVALIDATED
+-- node_execution.status        RUNNING / WAITING_FIELD_REVIEW / SUCCEEDED / BLOCKED / FAILED / SKIPPED / INVALIDATED
 -- task_field_value.origin      DOCUMENT_EXTRACTION / HUMAN_CORRECTION
 -- task_field_value.status      PRESENT / NOT_PRESENT / EVIDENCE_INSUFFICIENT / REVIEWED
 -- task_fact.fact_kind          EXTRACTED / DERIVED

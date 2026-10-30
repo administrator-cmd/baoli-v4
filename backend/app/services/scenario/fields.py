@@ -228,9 +228,15 @@ def delete_draft_field(db: Session, scenario_code: str, field_key: str) -> Scena
     template, draft = _locked_draft(db, scenario_code)
     item = _draft_field_or_404(db, draft.id, field_key)
     referencing = _rules_referencing_field(db, draft.id, field_key)
-    calculations = calculations_referencing_field(
-        draft.calculation_json, field_key,
-    )
+    # 计算参数可以按内部字段键或字段的业务编号引用：两种写法都要查，否则按业务编号
+    # 引用的字段会被删掉，计算定义留下无法解析的失效引用。
+    calculations: list[str] = []
+    for code in (field_key, _normalized_source_ref(item.source_ref)):
+        if not code:
+            continue
+        for name in calculations_referencing_field(draft.calculation_json, code):
+            if name not in calculations:
+                calculations.append(name)
     sections = config_store.rows(db, ScenarioDraftSection, draft.id)
     referencing_sections = [section.title for section in sections if field_key in (section.field_keys or [])]
     if referencing or calculations or referencing_sections:

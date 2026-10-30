@@ -31,9 +31,12 @@ class AuditGraphState(TypedDict, total=False):
     execution_failure_code: str | None
     agent_mode: bool
     evaluation_plan: list[dict[str, Any]]
+    field_review: dict[str, Any] | None
     rule_outcomes: list[dict[str, Any]]
     loop_count: int
     channel_failure: dict[str, Any] | None
+    field_review_paused: bool
+    covered_rule_keys: list[str]
 
 
 class AuditNodeRunner(RuleEvaluationRunner, Protocol):
@@ -104,6 +107,7 @@ def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]
     )
     return {
         "agent_mode": loaded["agent_mode"], "evaluation_plan": loaded["evaluation_plan"],
+        "field_review": loaded["field_review"],
         "rule_outcomes": [], "loop_count": 0, "last_error": loaded["last_error"],
     }
 
@@ -114,11 +118,20 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
     合并只发生在连续的、同材料同产物来源的单字段抽取之间：它们互不依赖，逐个执行会把同一份
     正文重复送进模型。每条字段的结果仍各自保存、各自成败，不因同批其他字段失败而连带阻断。
 
+    字段核对边界由执行计划给出：当前字段版本尚未确认时只执行抽取段，执行完即停在核对等待点；
+    已确认时执行核对后的其余规则。两条路径用同一份 allowed_rule_keys，不从入口各自判断。
+
     模型渠道故障是唯一的提前结束：渠道不可用时后续每条规则都会失败，继续请求只会重复排队和
     计费。已经形成的结果按单一规则或按字段逐条提交，未完成的规则留在同一批次里等待继续执行。
     """
+    review = state.get("field_review")
+    if review is None:
+        # 没有核对信息（非当前执行入口）时按完整计划执行；有列表但为空表示本轮不执行任何规则。
+        plan = list(state["evaluation_plan"])
+    else:
+        allowed = set(review.get("allowed_rule_keys") or [])
+        plan = [entry for entry in state["evaluation_plan"] if entry["rule_key"] in allowed]
     outcomes: list[dict[str, Any]] = []
-    plan = state["evaluation_plan"]
     index = 0
     channel_failure: dict[str, Any] | None = None
     while index < len(plan):
@@ -151,6 +164,14 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
         "rule_outcomes": outcomes,
         "loop_count": sum(item["loop_count"] for item in outcomes),
         "channel_failure": channel_failure,
+        # 抽取段跑完就先停在核对等待点；渠道故障优先按失败处理，不写成等待核对。
+        "field_review_paused": bool(
+            review
+            and review.get("required")
+            and not review.get("confirmed")
+            and channel_failure is None
+        ),
+        "covered_rule_keys": [entry["rule_key"] for entry in plan],
     }
 
 
@@ -180,12 +201,19 @@ def collect_agent_summary(
 
 
 def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
-    """遍历完不等于业务通过，未执行项与阻断原因按真实结果汇总。"""
-    return collect_agent_summary(
-        {item["rule_key"] for item in state["evaluation_plan"]},
-        state["rule_outcomes"],
-        state["loop_count"],
+    """遍历完不等于业务通过，未执行项与阻断原因按真实结果汇总。
+
+    本轮只覆盖计划的一部分时（停在字段核对等待点），缺项判定也只按这一部分算：
+    核对后才执行的规则不是「未完成」。
+    """
+    covered = state.get("covered_rule_keys")
+    plan_keys = (
+        {item["rule_key"] for item in state["evaluation_plan"]} if covered is None else set(covered)
     )
+    summary = collect_agent_summary(plan_keys, state["rule_outcomes"], state["loop_count"])
+    if state.get("field_review_paused"):
+        summary["field_review_paused"] = True
+    return summary
 
 
 def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:

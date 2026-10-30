@@ -26,14 +26,21 @@ from ...constants.status import (
     TASK_STATUS_BLOCKED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_READY,
+    TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from ...core.config import get_settings
 from ...domain.identity import public_no
 from ...entity.tasks import AuditTask, DocumentUpload, ManualReview, NodeExecution, StoredArtifact, TaskDocument
 from ...graphs.audit_graph import run_audit_node
-from ...schema.dto.tasks import ExecuteNodeRequest, FieldCorrectionRequest
+from ...schema.dto.tasks import (
+    ExecuteNodeRequest,
+    FieldCorrectionRequest,
+    FieldReviewCorrection,
+    FieldReviewSaveRequest,
+)
 from ..system.background import assert_no_active_operation
 from ..system.operation_types import OBJECT_AUDIT_TASK
+from . import field_review as field_review_service
 from . import value_store as task_value_service
 from .artifacts import (
     _artifact_for_upload,
@@ -63,7 +70,10 @@ def recover_interrupted_executions(db: Session) -> dict[str, int]:
     """
     interrupted = db.scalars(
         select(NodeExecution).join(AuditTask, AuditTask.id == NodeExecution.audit_task_id)
-        .where(NodeExecution.status == "RUNNING", AuditTask.status != "WAITING_REVIEW")
+        .where(
+            NodeExecution.status == "RUNNING",
+            AuditTask.status.not_in(["WAITING_REVIEW", TASK_STATUS_WAITING_FIELD_REVIEW]),
+        )
     ).all()
     for execution in interrupted:
         execution.status = "FAILED"
@@ -106,6 +116,13 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
     task = task_or_404(db, task_no, lock=True)
     if task.status == "COMPLETED":
         raise BusinessError("AUDIT_TASK_FINISHED", "审核任务已结束，不能继续执行", status_code=409)
+    if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
+        # 等待核对是正常等待点：另建批次会重新抽取全部字段，等于绕过核对。
+        raise BusinessError(
+            "AUDIT_TASK_WAITING_FIELD_REVIEW",
+            "任务正在等待字段核对，请在字段核对中确认后继续审核；不能另建批次绕过核对",
+            status_code=409,
+        )
     # 必须在进入图之前就拦住并发，否则第二个请求会与正在执行的图互相覆盖。
     if task.status == "RUNNING":
         raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能并发执行或重跑", status_code=409)
@@ -161,6 +178,118 @@ def execute_current_node(db: Session, task_no: str, request: ExecuteNodeRequest)
         db.info.pop("audit_execution_attempt", None)
 
 
+def _waiting_review_execution(db: Session, task: AuditTask) -> NodeExecution:
+    """任务当前停在字段核对等待点的执行批次。"""
+    execution = db.scalar(
+        select(NodeExecution)
+        .where(
+            NodeExecution.audit_task_id == task.id,
+            NodeExecution.node_code == task.current_node,
+            NodeExecution.status == TASK_STATUS_WAITING_FIELD_REVIEW,
+        )
+        .order_by(NodeExecution.id.desc())
+    )
+    if execution is None:
+        raise BusinessError(
+            "AUDIT_FIELD_REVIEW_NOT_WAITING",
+            "任务当前没有停在字段核对等待点的执行批次，请刷新任务后重试",
+            status_code=409,
+            details={"task_no": task.task_no, "status": task.status},
+        )
+    return execution
+
+
+def _assert_field_review_editable(db: Session, task: AuditTask, input_revision: int) -> NodeExecution:
+    """保存与确认共用的前置校验：只有停在该等待点、且看不到旧输入时才能改。"""
+    assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
+    if task.status != TASK_STATUS_WAITING_FIELD_REVIEW:
+        raise BusinessError(
+            "AUDIT_FIELD_REVIEW_NOT_WAITING",
+            f"任务当前状态为 {task.status}，不在字段核对等待点，不能保存核对修改",
+            status_code=409,
+            details={"task_no": task.task_no, "status": task.status},
+        )
+    if int(input_revision) != int(task.input_revision):
+        raise BusinessError(
+            "INPUT_REVISION_CONFLICT",
+            "任务输入在核对期间已被其他操作更新，本次提交基于过期页面；请刷新后重新核对",
+            status_code=409,
+            details={"submitted": int(input_revision), "current": int(task.input_revision)},
+        )
+    return _waiting_review_execution(db, task)
+
+
+def save_field_review(db: Session, task_no: str, request: FieldReviewSaveRequest) -> dict[str, Any]:
+    """只保存核对修改：任务继续停在等待核对，不触发后续执行。
+
+    与字段纠错不同，这里不失效当前批次、不重算下游：后续规则尚未执行，
+    它们读到的就是核对后的有效值。
+    """
+    task = task_or_404(db, task_no, lock=True)
+    _assert_field_review_editable(db, task, request.input_revision)
+    applied = field_review_service.apply_corrections(db, task, list(request.corrections))
+    db.commit()
+    missing = field_review_service.missing_fields(db, task)
+    return {
+        "task_no": task.task_no,
+        "input_revision": int(task.input_revision),
+        "applied": applied,
+        "missing_field_count": len(missing),
+        "missing_fields": missing,
+    }
+
+
+def confirm_field_review(
+    db: Session, task_no: str, *, execution_id: int, corrections: list[FieldReviewCorrection],
+    note: str | None, operation_no: str,
+) -> dict[str, Any]:
+    """保存本次剩余修改并确认当前字段版本，然后在同一批次里继续审核。
+
+    修改与确认先在同一事务里提交，再调用续跑：模型调用失败或渠道暂停时，
+    已保存的字段值与此前的确认不会丢，重新继续时也不会要求重复核对。
+    """
+    from .resume import resume_interrupted_execution
+
+    task = task_or_404(db, task_no, lock=True)
+    if task.status != TASK_STATUS_WAITING_FIELD_REVIEW:
+        raise BusinessError(
+            "AUDIT_FIELD_REVIEW_NOT_WAITING",
+            f"任务当前状态为 {task.status}，不在字段核对等待点，不能确认继续审核",
+            status_code=409,
+            details={"task_no": task_no, "status": task.status},
+        )
+    execution = db.get(NodeExecution, execution_id)
+    if (
+        execution is None
+        or execution.audit_task_id != task.id
+        or execution.node_code != task.current_node
+    ):
+        raise BusinessError(
+            "AUDIT_EXECUTION_MISSING", "确认对应的执行批次不属于任务当前节点",
+            status_code=409, details={"task_no": task_no, "execution_id": execution_id},
+        )
+    if execution.status != TASK_STATUS_WAITING_FIELD_REVIEW:
+        raise BusinessError(
+            "AUDIT_FIELD_REVIEW_NOT_WAITING",
+            f"执行批次状态为 {execution.status}，不在字段核对等待点",
+            status_code=409,
+            details={"execution_id": execution.id, "status": execution.status},
+        )
+    applied = field_review_service.apply_corrections(
+        db, task, corrections, operation_no=operation_no,
+    )
+    confirmation = field_review_service.record_confirmation(
+        db, task, execution, note=note, operation_no=operation_no,
+    )
+    db.commit()
+    result = resume_interrupted_execution(db, task_no, execution_id=execution.id)
+    return {
+        **result,
+        "field_review_confirmation_no": confirmation.confirmation_no,
+        "field_review_applied": applied,
+    }
+
+
 
 def correct_field_value(db: Session, task_no: str, request: FieldCorrectionRequest) -> dict[str, Any]:
     """主动字段纠错入口：对 PRESENT 错值与 NOT_PRESENT 漏值统一处理。
@@ -171,6 +300,14 @@ def correct_field_value(db: Session, task_no: str, request: FieldCorrectionReque
     """
     task = task_or_404(db, task_no, lock=True)
     assert_no_active_operation(db, OBJECT_AUDIT_TASK, task.task_no)
+    if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
+        # 纠错会失效整个执行批次；等待核对期间改字段必须走核对保存，
+        # 否则用户改一个字段就会被退回重跑全部规则，还要重新核对。
+        raise BusinessError(
+            "AUDIT_FIELD_REVIEW_IN_PROGRESS",
+            "任务正在等待字段核对；请在字段核对区域直接修改并确认继续，纠错入口会失效整个执行批次",
+            status_code=409,
+        )
     if task.status in {"COMPLETED", "FAILED"}:
         raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能发起字段纠错", status_code=409)
     if task.status == "RUNNING":

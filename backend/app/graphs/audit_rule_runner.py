@@ -184,6 +184,12 @@ def run_rule_evaluation(
             )
             result["tool_results"] = [*state["tool_results"], *result["tool_results"]]
             state.update(result)
+            if isinstance(result.get("channel_failure"), dict):
+                # 工具内部的大模型请求（风险判断等）遇到渠道故障：本条按渠道故障结束，
+                # 故障原样带给调度方停止后续请求；这里不抛异常，避免外层先落成通用失败。
+                channel_failure = result["channel_failure"]
+                state["loop_status"] = LOOP_BLOCKED
+                break
             state.update(nodes.graph_append_tool_results(state["messages"], state["tool_results"]))
             continue
 

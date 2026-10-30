@@ -201,6 +201,9 @@ def resolve_rule_inputs(
         common = {
             "field_key": field_key,
             "material_key": material_key,
+            # 展示用的中文名随输入一起传：比较面板据此写明左右两侧分别是谁。
+            "field_name": (fact or {}).get("field_name"),
+            "material_name": (fact or {}).get("material_name"),
             # 事实记录 id 供诊断按历史版本回读取值，不在结果里再复制一份业务值。
             "fact_id": (fact or {}).get("fact_id"),
             "value_type": (fact or {}).get("value_type"),
@@ -257,11 +260,13 @@ def facts_of_task_fact_rows(
     field_definitions: dict[str, dict[str, Any]] | None = None,
     material_states: dict[str, Any] | None = None,
     raw_values: dict[int, Any] | None = None,
+    material_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """把事实索引行与它们的取值投影为模型和工具共用的输入。
 
     `values` 是 `(记录 id → 取值)`：表里只有身份、口径与当前位，取值来自任务 CSV。
     取值已被解码回 Python 类型（金额是 Decimal、日期是 date），这里不重复转换。
+    字段与材料的中文名只用于展示（比较双方的来源说明），不参与任何业务判断。
     """
     index = field_identity_index(field_definitions or {})
     states = material_states or {}
@@ -284,6 +289,8 @@ def facts_of_task_fact_rows(
             "material_key": row.material_key, "period_scope": row.period_scope,
             "statement_scope": row.statement_scope, "entity_scope": row.entity_scope,
             "revision_no": row.revision_no, "value_type": row.value_type,
+            "field_name": ((field_definitions or {}).get(field_key) or {}).get("name"),
+            "material_name": (material_names or {}).get(row.material_key),
             "unit": payload.get("unit"), "currency": payload.get("currency"), "status": row.status,
             "material_state": states.get(row.material_key) if row.material_key else None,
             "raw_value": encode_value((raw_values or {}).get(row.id) if executable else None),

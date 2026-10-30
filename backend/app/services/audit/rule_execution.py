@@ -30,6 +30,7 @@ from ...entity.tasks import RuleResult, TaskDocument, TaskFact, TaskFieldValue
 from . import value_store as task_value_service
 from .agent import _upstream_result_view
 from .execution_scope import latest_execution
+from .flow.plan import reviewed_extraction_rule_keys
 from .shared import current_upload
 
 
@@ -64,8 +65,8 @@ def evaluation_context(db, task, rule) -> dict[str, Any]:
                                          RuleResult.rule_key.in_(selected),
                                          RuleResult.node_execution_id == (current_execution.id if current_execution else None))
     if not report:
-        # 事实身份只按会形成字段事实的定义解析：停用/未选字段不参与归属，与编译期同一口径。
-        fact_query = fact_query.where(or_(extracted_identity_filter(definitions, owner_keys=fact_owner_field_keys(task)),
+        # 事实身份按会形成字段事实的定义解析：启用规则的产出字段，以及已有人工事实的字段。
+        fact_query = fact_query.where(or_(extracted_identity_filter(definitions, owner_keys=fact_owner_field_keys(db, task)),
                                          (TaskFact.fact_kind == FACT_KIND_DERIVED) & TaskFact.fact_code.in_(codes)))
         result_query = result_query.where(or_(RuleResult.rule_key.in_(sources), RuleResult.rule_code.in_(codes)))
     facts = list(db.scalars(fact_query.order_by(TaskFact.id)))
@@ -286,12 +287,16 @@ def save_outputs(db, task, execution, rule, verdict, *, evaluation_id: str | Non
                             RuleResult.rule_key.in_(scope), RuleResult.node_execution_id == execution.id).order_by(RuleResult.id))
         result_by_key = {r.rule_key: r for r in records}
         report_keys = {r["rule_key"] for r in task.manifest_json["rules"] if r.get("kind") == "REPORT"}
+        # 核对等待点已经交给人工核对的抽取规则，不再代表本轮输入：任务收尾与报告完整性
+        # 按同一份清单排除，不能出现任务已完成、报告仍写未完成。
+        reviewed = reviewed_extraction_rule_keys(task, execution)
         # 报告只依赖非报告项；报告自己上一轮的结果不是本轮依据。
         dependency_results = {key: r for key, r in result_by_key.items() if key not in report_keys}
-        unresolved = [{"rule_key": r.rule_key, "status": r.status, "message": r.message} for r in dependency_results.values() if r.status not in COMPLETED_RESULT_STATUSES]
+        unresolved = [{"rule_key": r.rule_key, "status": r.status, "message": r.message} for r in dependency_results.values() if r.status not in COMPLETED_RESULT_STATUSES and r.rule_key not in reviewed]
         unresolved.extend({"rule_key": key, "status": "NOT_EXECUTED", "message": "该生效项尚无本批次执行结果"}
-                          for key in sorted(scope - report_keys - dependency_results.keys()))
-        complete = (scope - report_keys) <= dependency_results.keys() and all(r.status != "NOT_EXECUTED" for r in dependency_results.values())
+                          for key in sorted(scope - report_keys - dependency_results.keys() - reviewed))
+        complete = ((scope - report_keys - reviewed) <= dependency_results.keys()
+                    and all(r.status != "NOT_EXECUTED" for r in dependency_results.values() if r.rule_key not in reviewed))
         formats = report_format_support(rule.get("report_definition", {}).get("formats") or [], report["content_type"])
         unresolved.extend({"status": "NOT_GENERATED", "message": f"报告已保存正文，但尚未生成 {item['format']} 文件"}
                           for item in formats if not item["supported"])

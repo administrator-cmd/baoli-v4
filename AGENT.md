@@ -41,7 +41,7 @@ npm run dev
 
 
 数据库：
-表结构变更使用 Alembic 迁移：先改实体，再在 `backend/` 下执行 `python -m alembic revision --autogenerate -m "..."`，人工审查生成列、唯一键和复合外键后 `upgrade head`，最后从当前库重新导出并更新 `schema.sql`。迁移文件在 `backend/migrations/versions/`，基线为 `0001_baseline`，当前 head 为 `0003_report_and_attempt_backfill`；`schema.sql` 与 head 保持同步。
+表结构变更使用 Alembic 迁移：先改实体，再在 `backend/` 下执行 `python -m alembic revision --autogenerate -m "..."`，人工审查生成列、唯一键和复合外键后 `upgrade head`，最后从当前库重新导出并更新 `schema.sql`。迁移文件在 `backend/migrations/versions/`，基线为 `0001_baseline`，当前 head 为 `0005_field_review_confirmation`；`schema.sql` 与 head 保持同步。
 
 
 系统业务：
@@ -60,5 +60,7 @@ D:\29550\OneDrive\桌面\Agent\baoli_material\baoli-v4 下面的pdf excel 等都
 Excel → LLM 规则库 JSON → 用户方案中的生效规则。LLM 直接抽取、计算和判断，按需调用真实工具；单条无法执行时保存原因，其余继续。不要添加业务合理性校验、预置业务阶段、历史业务协议兼容或模拟成功路径。
 
 RULE_EXECUTION 仅为执行记录技术容器，不是可编排业务节点。rule_key 是当前内部唯一身份，rule_code 保留来源业务编号；任务版本、文件版本、规则结果身份、原文来源属于当前执行功能。执行期不维护独立事实快照、工具调用账本或检索索引，也没有 LangGraph checkpoint；中断恢复基于已提交的规则结果，不恢复模型消息。业务取值和原文依据保存在任务 CSV，数据库保留索引、状态、结论摘要、执行诊断和报告，不再维护独立 Evidence 表或证据编号；审核原始模型响应当前不落盘，新输入摘要只保留引用信息。工具按当前真实目录提供，不存逐规则授权矩阵。
+
+执行计划按显式依赖分成抽取段与核对后段：抽取跑完停在字段核对等待点（任务与批次同为 WAITING_FIELD_REVIEW，不是失败），人工确认字段后才执行计算、检查、风险和报告。核对修改只追加字段事实版本与人工记录，不失效批次、不重抽其他字段；确认记录绑定执行批次、输入修订与字段版本摘要。抽取段结束后不再重跑抽取规则。通用人工裁决流程仍不启用。
 
 按 docs/README.md 选择与任务相关的文档；执行语义以 docs/规则库与审核执行契约.md 为依据，未解决问题和验证边界见 docs/当前状态与问题台账.md。文档维护当前结论，不追加逐轮操作日志，也不把讨论中的方案写成已实现能力。
