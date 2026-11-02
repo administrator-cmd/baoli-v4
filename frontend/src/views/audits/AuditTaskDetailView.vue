@@ -258,6 +258,8 @@ const atFieldReview = computed(
 );
 /** 核对区域有未保存修改：切换页签或离开页面时必须明确提示。 */
 const reviewDirty = ref(false);
+/** 核对面板实例：用户明确放弃修改时由它清空暂存，避免离开后再次提示同一批修改。 */
+const reviewPanel = ref<InstanceType<typeof AuditFieldReviewPanel> | null>(null);
 const reviewSaving = ref(false);
 const reviewConfirming = ref(false);
 /** 确认请求身份：受理结果未知时保留，重发同一请求由服务端返回原受理记录。 */
@@ -337,10 +339,12 @@ async function confirmLeaveReview(): Promise<boolean> {
       "放弃未保存的核对修改",
       { type: "warning", confirmButtonText: "放弃修改并离开", cancelButtonText: "继续核对" },
     );
-    return true;
   } catch {
     return false;
   }
+  // 用户已明确放弃：草稿随面板一起清掉，否则再次离开还会提示同一批修改。
+  reviewPanel.value?.discardDrafts();
+  return true;
 }
 
 // 返回任务列表、侧边栏和浏览器后退都是单页路由跳转，不触发 beforeunload：
@@ -709,10 +713,6 @@ async function setTab(next: string | number): Promise<void> {
   if (!isDetailTab(next)) {
     return;
   }
-  // 离开字段核对页签前必须让用户明确决定：未保存的修改不会被带走。
-  if (next !== tab.value && tab.value === "fields" && reviewDirty.value) {
-    if (!(await confirmLeaveReview())) return;
-  }
   if (tab.value === next && !route.query.tab) {
     // 同一页签重复点击时只确保数据存在，不重复写 URL。
     void ensureTabLoaded(next);
@@ -728,6 +728,20 @@ async function setTab(next: string | number): Promise<void> {
     params: { taskNo: taskNo.value },
     query: { ...route.query, tab: next },
   });
+}
+
+/**
+ * 离开当前页签前的守卫。
+ *
+ * 交给 el-tabs 的 before-leave：返回 false 时页签本身不切换，取消后不会出现
+ * 「页签已跳到别处、页面状态仍停在核对」的错位。
+ */
+function beforeLeaveTab(next: string | number): boolean | Promise<boolean> {
+  if (!isDetailTab(next) || next === tab.value || tab.value !== "fields" || !reviewDirty.value) {
+    return true;
+  }
+  // 离开字段核对页签前必须让用户明确决定：未保存的修改不会被带走。
+  return confirmLeaveReview();
 }
 
 /** URL 里的 tab 只有合法时才生效；非法值不写入页签状态。 */
@@ -884,6 +898,9 @@ async function refreshTask(): Promise<void> {
 }
 
 /* 后台操作查询 */
+/** 执行期间状态会改变任务字段与结果明细的后台操作。 */
+const OPERATION_TYPES_WITH_DETAIL_REFRESH = new Set(["NODE_EXECUTE", "NODE_RESUME", "FIELD_REVIEW_CONFIRM"]);
+
 function trackOperation(value: OperationView, token = stateGeneration): void {
   // 提交后到响应之间可能已经切了任务：代次或对象不符时不得写入本页状态。
   if (token !== stateGeneration || value.object_no !== activeTaskNo.value) {
@@ -898,7 +915,9 @@ function trackOperation(value: OperationView, token = stateGeneration): void {
   track(value, {
     onUpdate: async (current) => {
       if (isStale(token, current.object_no)) return;
-      if (current.operation_type !== "NODE_EXECUTE" && current.operation_type !== "NODE_RESUME") return;
+      // 确认命令会先提交字段修改再继续执行：执行期间同样要读回真实字段版本，
+      // 否则页面会一直把已提交的修改当成「未保存」。
+      if (!OPERATION_TYPES_WITH_DETAIL_REFRESH.has(current.operation_type)) return;
       // 操作状态不含字段/规则明细；执行中每隔至少 5 秒读取一次已提交结果。
       if (Date.now() - lastDetailRefreshAt < 5000) return;
       lastDetailRefreshAt = Date.now();
@@ -1303,7 +1322,7 @@ watch(
     <template v-if="task">
       <!-- 业务结果与材料，完整执行记录按需查看。 -->
       <div class="app-panel audit-results-panel">
-        <el-tabs :model-value="tab" @update:model-value="setTab">
+        <el-tabs :model-value="tab" :before-leave="beforeLeaveTab" @update:model-value="setTab">
           <el-tab-pane label="材料" name="materials">
             <el-alert v-if="materialTypeCatalog.state.error" class="block-gap-sm" type="error" show-icon :closable="false" :title="materialTypeCatalog.state.error">
               <el-button size="small" :loading="materialTypeCatalog.state.loading" @click="materialTypeCatalog.reload">重试读取目录</el-button>
@@ -1347,9 +1366,10 @@ watch(
           </el-tab-pane>
 
           <el-tab-pane label="字段结果" name="fields">
-            <!-- 等待核对时直接展示核对区域；确认后按核对结果继续执行。 -->
+            <!-- 等待核对时直接展示核对区域；配置无法建立核对边界时，原因也只在这里能说清。 -->
             <AuditFieldReviewPanel
-              v-if="atFieldReview && fieldReview"
+              v-if="fieldReview && (atFieldReview || fieldReview.blocked_reason)"
+              ref="reviewPanel"
               :fields="task.fields"
               :state="fieldReview"
               :saving="reviewSaving"
@@ -1360,7 +1380,7 @@ watch(
               @update:dirty="reviewDirty = $event"
             />
             <AuditFieldResults
-              v-else
+              v-if="!atFieldReview"
               :fields="task.fields"
               :extraction-finished="extractionFinished"
               :correction-enabled="task.status !== 'COMPLETED' && task.status !== 'FAILED'"

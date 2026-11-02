@@ -102,6 +102,9 @@ def graph_load_evaluation(
                 "extraction_closed": closed,
                 "extraction_rule_count": len(boundary.extraction),
                 "after_review_rule_count": len(boundary.after),
+                # 确认后才执行的规则键：续跑范围的「等待核对」按这一份统计，
+                # 不能把边界外已结束的抽取段也算进去。
+                "after_rule_keys": sorted(boundary.after),
                 "allowed_rule_keys": sorted(
                     boundary.phase_keys(confirmed=confirmed, extraction_closed=closed)
                 ),

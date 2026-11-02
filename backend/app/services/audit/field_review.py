@@ -106,14 +106,19 @@ def _review_view(review: ManualReview) -> dict[str, Any]:
     }
 
 
-def field_review_supplement(db: Session, task: AuditTask) -> dict[tuple[str, str], dict[str, Any]]:
+def field_review_supplement(
+    db: Session, task: AuditTask,
+    pairs: dict[tuple[str, str], tuple[TaskFieldValue, Any]] | None = None,
+) -> dict[tuple[str, str], dict[str, Any]]:
     """字段核对需要的补充信息：原抽取值、人工前后值与原文依据归属。
 
     当前事实可能是人工修正版本；原抽取值仍按不可变历史读取，绝不被修正值覆盖。
+    调用方已经算过当前字段事实时传 `pairs`，同一请求不再重复配对。
     """
     extracted = _extraction_versions(db, task)
     reviews = _latest_reviews(db, task)
-    pairs = _current_field_fact_pairs(db, task)
+    if pairs is None:
+        pairs = _current_field_fact_pairs(db, task)
     supplement: dict[tuple[str, str], dict[str, Any]] = {}
     for field in task.task_schema_json["fields"]:
         key = (_field_field_key(field), str(field["material_key"]))
@@ -153,9 +158,13 @@ def field_review_supplement(db: Session, task: AuditTask) -> dict[tuple[str, str
     return supplement
 
 
-def missing_fields(db: Session, task: AuditTask) -> list[dict[str, Any]]:
+def missing_fields(
+    db: Session, task: AuditTask,
+    pairs: dict[tuple[str, str], tuple[TaskFieldValue, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """当前仍不能作为下游有效输入的字段：按业务名称与原因列出真实缺项。"""
-    pairs = _current_field_fact_pairs(db, task)
+    if pairs is None:
+        pairs = _current_field_fact_pairs(db, task)
     uploads = _current_upload_map(db, task)
     documents = {item.material_key: item for item in _task_documents(db, task)}
     extracted_keys = {
@@ -185,12 +194,16 @@ def missing_fields(db: Session, task: AuditTask) -> list[dict[str, Any]]:
     return items
 
 
-def field_review_digest(db: Session, task: AuditTask) -> str:
+def field_review_digest(
+    db: Session, task: AuditTask,
+    pairs: dict[tuple[str, str], tuple[TaskFieldValue, Any]] | None = None,
+) -> str:
     """当前字段版本摘要：字段、材料、上传版本、事实版本与状态的确定性组合。
 
     值本身不可变，版本变化一定伴随新的 revision_no，因此不需要把业务取值读进摘要。
     """
-    pairs = _current_field_fact_pairs(db, task)
+    if pairs is None:
+        pairs = _current_field_fact_pairs(db, task)
     parts = [
         "|".join((
             field_key, material_key,
@@ -221,6 +234,7 @@ def latest_confirmation(
 
 def confirmation_is_current(
     db: Session, task: AuditTask, execution: NodeExecution | None,
+    pairs: dict[tuple[str, str], tuple[TaskFieldValue, Any]] | None = None,
 ) -> bool:
     """当前批次是否已在当前输入与字段版本上被确认。"""
     if execution is None:
@@ -230,7 +244,7 @@ def confirmation_is_current(
         return False
     if int(confirmation.input_revision) != int(task.input_revision):
         return False
-    return confirmation.field_digest == field_review_digest(db, task)
+    return confirmation.field_digest == field_review_digest(db, task, pairs)
 
 
 REVIEW_STATE_KEY = "field_review"
@@ -432,15 +446,18 @@ def record_confirmation(
 def confirmation_view(
     db: Session, task: AuditTask, execution: NodeExecution | None, *,
     required: bool, after_review_rule_count: int,
+    pairs: dict[tuple[str, str], tuple[TaskFieldValue, Any]] | None = None,
 ) -> dict[str, Any]:
     """任务详情展示的核对状态；页面只据此显示入口与缺项，不自行推导范围。"""
+    if pairs is None:
+        pairs = _current_field_fact_pairs(db, task)
     confirmation = latest_confirmation(db, task, execution.id if execution is not None else None)
     current = (
         confirmation is not None
         and int(confirmation.input_revision) == int(task.input_revision)
-        and confirmation.field_digest == field_review_digest(db, task)
+        and confirmation.field_digest == field_review_digest(db, task, pairs)
     )
-    missing = missing_fields(db, task) if required else []
+    missing = missing_fields(db, task, pairs) if required else []
     reason = None
     if confirmation is not None and not current:
         reason = "字段版本或材料输入已变化，上一次核对确认不再代表当前输入，需要重新核对"

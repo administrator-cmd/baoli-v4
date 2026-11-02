@@ -71,13 +71,15 @@ class ResumePlan:
     """续跑范围：四类互斥，合计就是当前计划里的全部规则。
 
     `deferred` 是「本轮不允许执行、留待字段核对确认之后」的规则：它们既没有结果，
-    也不是本次未完成项，报成「补跑」会让用户以为确认后不会再跑。
+    也不是本次未完成项，报成「补跑」会让用户以为确认后不会再跑。`closed` 是字段核对
+    边界已经结束、本轮同样不执行但也无需再等的抽取段规则，计入保留而不是等待核对。
     """
 
     unfinished: tuple[str, ...]
     affected: tuple[str, ...]
     preserved: tuple[str, ...]
     deferred: tuple[str, ...] = ()
+    closed: tuple[str, ...] = ()
 
     @property
     def rerun_keys(self) -> set[str]:
@@ -90,7 +92,8 @@ class ResumePlan:
 
     def summary(self) -> dict[str, int]:
         return {
-            "preserved": len(self.preserved),
+            # 已结束的抽取段不会再跑，与已有结果同属「保留」。
+            "preserved": len(self.preserved) + len(self.closed),
             "pending": len(self.unfinished),
             "dependent": len(self.affected),
             "waiting_review": len(self.deferred),
@@ -136,12 +139,14 @@ def resume_plan(
     db: Session, task: AuditTask, execution: NodeExecution, *,
     plan: list[dict[str, Any]] | None = None,
     allowed_keys: set[str] | None = None,
+    deferred_keys: set[str] | None = None,
 ) -> ResumePlan:
     """当前批次的续跑范围；页面预览、恢复资格与真实续跑共用这一份计算。
 
     范围由已提交结果与持久化的待重跑清单共同决定：清单里的规则即使已有结论，也说明
     上一轮已判定必须重算，不能再算作可保留结果。`allowed_keys` 是字段核对边界给出的
-    本轮允许范围；范围外的规则记入 `deferred`，不当成保留也不当成待补跑。
+    本轮允许范围；`deferred_keys` 是其中「确认后才执行」的那一段，范围外只有这一段
+    记入 `deferred`，边界外已经结束的抽取段记入 `closed`。
     """
     plan = evaluation_plan(task, task.current_node) if plan is None else plan
     plan_keys = {entry["rule_key"] for entry in plan}
@@ -164,17 +169,21 @@ def resume_plan(
     )
     dependent = (affected | (pending - unfinished - affected)) & scope
     preserved = scope - unfinished - dependent
+    outside = plan_keys - scope
+    deferred = outside if deferred_keys is None else (outside & deferred_keys)
     return ResumePlan(
         unfinished=tuple(sorted(unfinished)),
         affected=tuple(sorted(dependent)),
         preserved=tuple(sorted(preserved)),
-        deferred=tuple(sorted(plan_keys - scope)),
+        deferred=tuple(sorted(deferred)),
+        closed=tuple(sorted(outside - deferred)),
     )
 
 
 def review_scope(
     db: Session, task: AuditTask, execution: NodeExecution,
     plan: list[dict[str, Any]] | None = None,
+    pairs: dict[tuple[str, str], Any] | None = None,
 ) -> tuple[ReviewBoundary, bool, set[str], list[dict[str, Any]]]:
     """(字段核对边界, 当前字段版本是否已确认, 本轮允许执行范围, 执行计划)。
 
@@ -182,7 +191,7 @@ def review_scope(
     """
     entries = evaluation_plan(task, task.current_node) if plan is None else plan
     boundary = field_review_boundary(entries, all_rules=_task_manifest(task)["rules"])
-    confirmed = confirmation_is_current(db, task, execution)
+    confirmed = confirmation_is_current(db, task, execution, pairs)
     allowed = boundary.phase_keys(
         confirmed=confirmed, extraction_closed=extraction_closed(execution),
     )
@@ -192,12 +201,14 @@ def review_scope(
 def resume_state(
     db: Session, task: AuditTask, execution: NodeExecution | None, *,
     plan: list[dict[str, Any]] | None = None,
+    pairs: dict[tuple[str, str], Any] | None = None,
 ) -> dict[str, Any]:
     """统一的恢复判断：能否续跑、不能的原因、续跑范围与渠道故障信息。
 
     任务详情、受理接口与后台执行都以这一份为准，各层不再各自推导重跑范围。
     规则结果已全部提交、只差收尾的批次同样可续跑：续跑会补齐汇总与推进，不重新调用模型。
-    `plan` 允许调用方传入已经算好的执行计划，避免同一请求重复编译整份配置。
+    `plan` 允许调用方传入已经算好的执行计划，避免同一请求重复编译整份配置；
+    `pairs` 同理，让页面预览与字段核对状态共用一次当前字段事实配对。
     """
     reason = resume_blocked_reason(task, execution)
     if execution is None or reason is not None:
@@ -215,8 +226,11 @@ def resume_state(
             "field_review": {"required": False, "confirmed": False},
         }
     try:
-        boundary, confirmed, allowed, entries = review_scope(db, task, execution, plan)
-        plan = resume_plan(db, task, execution, plan=entries, allowed_keys=allowed)
+        boundary, confirmed, allowed, entries = review_scope(db, task, execution, plan, pairs)
+        plan = resume_plan(
+            db, task, execution, plan=entries, allowed_keys=allowed,
+            deferred_keys=set(boundary.after),
+        )
     except BusinessError as exc:
         if exc.code not in {"AUDIT_RESUME_PLAN_MISMATCH", "AUDIT_FIELD_REVIEW_DEPENDENCY_CONFLICT"}:
             raise
@@ -353,6 +367,7 @@ def resume_interrupted_execution(db: Session, task_no: str, *, execution_id: int
         resume = resume_plan(
             db, task, execution, plan=plan,
             allowed_keys=set(review["allowed_rule_keys"]),
+            deferred_keys=set(review.get("after_rule_keys") or ()),
         )
         rerun_keys = resume.rerun_keys
         covered = resume.scope

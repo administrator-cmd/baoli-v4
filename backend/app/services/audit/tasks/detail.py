@@ -115,8 +115,9 @@ def _comparison_sources(
             if fixed.get(f"{side}_raw_value") is None and source.get("raw_value") is not None:
                 fixed[f"{side}_raw_value"] = source.get("raw_value")
                 changed = True
-        if fixed.get("addends") and not fixed.get("addend_labels"):
+        if fixed.get("addends") and not any(fixed.get("addend_labels") or ()):
             # 加总比较的加数按输入顺序排列：第一个输入是左侧合计，其余为加数。
+            # 早期结果保存的是空字符串占位，列表非空但没有任何可用标签，这里同样补齐。
             labels = [
                 " · ".join(name for name in (
                     material_names.get(str(source.get("material_key") or "")),
@@ -294,9 +295,13 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     current_execution = executions.get(current_node_definition["node_code"])
     # 执行计划在本请求内只编译一次：续跑范围、字段核对边界与页面数字都取自它。
     plan_entries = evaluation_plan(task, task.current_node)
+    # 当前字段事实同样只配对一次：续跑范围、核对状态与字段视图共用这一份。
+    current_field_pairs = _current_field_fact_pairs(db, task)
     # 能否原地继续、继续时保留多少项、重跑多少项，统一由 resume 模块判断；
     # 页面只展示服务端算出的范围，不自行推导依赖关系。
-    resume = resume_state(db, task, current_execution, plan=plan_entries)
+    resume = resume_state(
+        db, task, current_execution, plan=plan_entries, pairs=current_field_pairs,
+    )
     # 字段核对等待点的真实状态：本次计划是否有抽取段、当前字段版本是否已确认、
     # 还有哪些缺项、确认后还要执行多少条规则。页面据此显示入口，不自行判断。
     field_review_required = False
@@ -315,6 +320,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     field_review = confirmation_view(
         db, task, current_execution,
         required=field_review_required, after_review_rule_count=after_review_rule_count,
+        pairs=current_field_pairs,
     )
     field_review["blocked_reason"] = review_blocked_reason
     current_node = {
@@ -326,7 +332,6 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
         "field_review": field_review,
     }
     # 当前事实按字段+材料取 is_current 版本。
-    current_field_pairs = _current_field_fact_pairs(db, task)
     current_field_facts = {key: pair[0] for key, pair in current_field_pairs.items()}
     current_task_facts = {key: pair[1] for key, pair in current_field_pairs.items()}
     # 取值在任务 CSV：字段原文/规范值与规则结论都按记录 id 取。
@@ -406,7 +411,7 @@ def task_view(db: Session, task: AuditTask) -> dict[str, Any]:
     field_view = []
     field_correction_candidates = []
     # 原抽取值、人工前后值与原文依据归属：核对页按字段展示，不把修正值当成抽取结果。
-    supplements = field_review_supplement(db, task)
+    supplements = field_review_supplement(db, task, current_field_pairs)
     for field in task.task_schema_json["fields"]:
         field_identity = (field["field_key"], field["material_key"])
         fact = current_field_facts.get(field_identity)

@@ -155,6 +155,19 @@ function revert(field: AuditFieldView): void {
   drafts.value = next;
 }
 
+/** 用户明确放弃草稿后清空暂存：面板仍挂载，不清会让「离开」反复提示同一批修改。 */
+function discardDrafts(): void {
+  drafts.value = new Map();
+  note.value = "";
+}
+
+defineExpose({ discardDrafts });
+
+/** 材料未上传时字段没有可核对的原文，服务端也会拒绝整批提交。 */
+function materialMissing(field: AuditFieldView): boolean {
+  return field.material_uploaded === false;
+}
+
 function updateDraft(field: AuditFieldView, value: string): void {
   const draft = draftOf(field);
   if (!draft) return;
@@ -380,10 +393,10 @@ function countOf(value: string): number {
               <el-button link type="primary" size="small" @click="revert(row)">撤销</el-button>
             </template>
             <template v-else>
-              <el-button link type="primary" size="small" :disabled="!canSubmit" @click="startEdit(row)">
+              <el-button link type="primary" size="small" :disabled="!canSubmit || materialMissing(row)" @click="startEdit(row)">
                 {{ adoptedText(row) ? "修改" : "补填" }}
               </el-button>
-              <el-button link type="warning" size="small" :disabled="!canSubmit" @click="markMissing(row)">
+              <el-button link type="warning" size="small" :disabled="!canSubmit || materialMissing(row)" @click="markMissing(row)">
                 材料中不存在
               </el-button>
             </template>

@@ -358,6 +358,13 @@ def graph_execute_extraction_batch(
                 )
                 tool_results = [*tool_results, *(executed.get("tool_results") or [])]
                 unresolved = list(executed.get("unresolved_items") or unresolved)
+                failure = executed.get("channel_failure")
+                if isinstance(failure, dict):
+                    # 工具内部的大模型请求遇到渠道故障：本批不再请求模型，未形成结论的
+                    # 字段带着这一原因保存，故障交给调度方暂停调度。
+                    channel_failure = failure
+                    request_blocked = True
+                    break
                 messages = graph_append_tool_results(messages, tool_results)["messages"]
                 continue
             if turn.get("loop_status") == LOOP_BLOCKED:

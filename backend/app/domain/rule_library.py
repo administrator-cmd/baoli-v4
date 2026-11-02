@@ -158,16 +158,15 @@ def _validate_output_producers(rules: list[dict[str, Any]]) -> None:
         )
 
 
-def _validate_field_fact_identity(fields: list[dict[str, Any]], owner_keys: set[str]) -> None:
-    """会形成字段事实的定义，其完整事实身份必须唯一。
+def _validate_field_fact_identity(fields: list[dict[str, Any]]) -> None:
+    """所有字段的完整事实身份必须唯一。
 
-    事实只由启用规则的产出字段形成，因此唯一性只校验这一组：停用/未选字段仍可
-    说明引用与缺项，不参与事实归属。运行期 `field_identity_index` 用同一组判定。
+    人工核对允许给没有自动抽取的字段补值，任何字段都可能形成事实；运行期
+    `_current_field_fact_pairs` 也按全部字段配对。因此唯一性必须覆盖全部字段，
+    只校验启用规则的产出会让重复身份等到写入事实才暴露。
     """
     identities: dict[tuple[Any, ...], str] = {}
     for field in fields:
-        if field["field_key"] not in owner_keys:
-            continue
         identity = fact_projection.field_fact_identity(field)
         if identity in identities:
             raise BusinessError(
@@ -330,10 +329,7 @@ def compile_library(**config: Any) -> dict[str, Any]:
     _validate_calculation_codes(rules)
     _validate_output_producers(rules)
     _validate_execution_modes(rules)
-    _validate_field_fact_identity(
-        fields,
-        {key for rule in rules if rule["enabled"] for key in rule.get("outputs") or []},
-    )
+    _validate_field_fact_identity(fields)
     container = execution_container()
     container["execution_contract"].update(field_keys=list(field_by_key), rule_keys=[i["rule_key"] for i in rules], calculation_rule_codes=[c["rule_code"] for c in calculations])
     manifest = {"manifest_version": "2.0", "execution_contract_version": EXECUTION_VERSION,
