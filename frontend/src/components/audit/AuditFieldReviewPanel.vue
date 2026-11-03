@@ -107,7 +107,7 @@ function scopeText(field: AuditFieldView): string {
   parts.push(`识别口径：${field.actual_statement_scope || '未识别'}`);
   if (field.statement_scope) parts.push(`要求口径：${statementScopeLabel(field.statement_scope)}`);
   parts.push(`识别主体：${field.actual_entity_scope || '未识别'}`);
-  if (field.entity_scope) parts.push(`要求主体：${field.entity_scope}`);
+  if (field.entity_scope && field.entity_scope !== "SELF") parts.push(`要求主体：${field.entity_scope}`);
   return parts.join(" · ");
 }
 

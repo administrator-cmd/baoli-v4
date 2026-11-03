@@ -19,7 +19,7 @@ class AuditReportRisksService:
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
 
-    def list_risk_results_page(self, *,
+    def risk_page_index(self, *,
         task_no: str | None,
         task_name: str | None,
         scenario_code: str | None,
@@ -28,10 +28,9 @@ class AuditReportRisksService:
         status: str | None,
         page: int,
         page_size: int,
-    ) -> dict[str, Any]:
-        """按真实风险结果读取当前有效批次，不依赖业务节点类型。"""
-        # 当前批次口径与任务详情、报告共用一份实现。
-        risk_levels, total, rows, hit_count = crud.AuditReportCRUD(self.db).risk_page_rows(
+    ):
+        """读取风险分页索引；请求层结束该只读事务后再读详情。"""
+        return crud.AuditReportCRUD(self.db).risk_page_rows(
             task_no=task_no,
             task_name=task_name,
             scenario_code=scenario_code,
@@ -41,9 +40,11 @@ class AuditReportRisksService:
             page=page,
             page_size=page_size,
         )
-        # 上面只查询分页索引。结束旧只读快照，锁住本页任务后，再读结论索引和 CSV，
-        # 避免 MySQL REPEATABLE READ 继续把旧清单与已更新的固定文件组合起来。
-        crud.AuditReportCRUD(self.db).rollback()
+
+
+    def list_risk_results_page(self, index, *, page: int, page_size: int) -> dict[str, Any]:
+        """锁住本页文件后读取当前清单，不拼接旧快照与新 CSV。"""
+        risk_levels, total, rows, hit_count = index
         for owner_no in sorted({row.task_no for row in rows}):
             AuditFieldValueFilesService(self.db).lock_task_files( owner_no)
         results_by_id = {result.id: result for result in AuditRuleCRUD(self.db).by_ids([row.id for row in rows])}

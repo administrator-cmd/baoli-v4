@@ -9,14 +9,14 @@ VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "status": {"type": "string", "enum": sorted(MODEL_VERDICT_STATUSES)},
-        "message": {"type": "string", "minLength": 1, "description": "面向审核用户的一句业务结论及直接原因，不含内部身份、工具调用或执行过程"},
+        "message": {"type": "string", "pattern": "\\S", "minLength": 1, "description": "面向审核用户的一句业务结论及直接原因，不含内部身份、工具调用或执行过程"},
         "basis": {"type": "array", "items": {
             "type": "object", "properties": {
-                "label": {"type": "string"}, "value": {},
+                "label": {"type": "string", "pattern": "\\S"}, "value": {},
                 "explanation": {"type": "string"},
             }, "required": ["label", "value", "explanation"], "additionalProperties": False,
         }},
-        "missing_items": {"type": "array", "items": {"type": "string"}},
+        "missing_items": {"type": "array", "items": {"type": "string", "pattern": "\\S"}},
         "next_action": {"type": "string", "description": "本阶段不提供处理建议，填写空字符串"},
         "evidence": {"type": "array", "items": {
             "type": "object",
@@ -38,6 +38,9 @@ VERDICT_SCHEMA: dict[str, Any] = {
                 "quote_label": {"type": "string", "description": "目标值对应的科目、行标签或项目名称的真实原文片段；没有时省略"},
                 "quote_header": {"type": "string", "description": "目标值所在列的表头真实原文片段，例如“期末余额”“本期金额”；没有时省略"},
                 "quote_period": {"type": "string", "description": "目标值对应的期间或时点真实原文片段，例如“2025年6月30日”；没有时省略"},
+                "quote_statement_scope": {"type": "string", "description": "本字段报表口径的原文片段，对应 recognized_statement_scope"},
+                "quote_entity_scope": {"type": "string", "description": "本字段主体范围的原文片段，对应 recognized_entity_scope"},
+                "quote_unit": {"type": "string", "description": "本字段单位的原文片段，对应 recognized_unit"},
                 "output_code": {"type": "string", "description": "该证据直接支持的本规则输出字段；引用上游结果替代字段引文时必须填写，且上游必须有该字段的同一取值"},
                 "field_key": {"type": "string", "description": "字段事实键，不带材料后缀"},
                 "fact_id": {"type": "integer"},
@@ -52,7 +55,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
         }},
         "outputs": {"type": "array", "items": {
             "type": "object",
-            "properties": {"code": {"type": "string"}, "value": {}, "raw_value": {"type": "string", "description": "字段本身的来源原文（含千分位、单位），不填表头、相邻列或整行"},
+            "properties": {"code": {"type": "string", "minLength": 1}, "value": {}, "raw_value": {"type": ["string", "null"], "description": "字段本身的来源原文（含千分位、单位），不填表头、相邻列或整行"},
                            "field_status": {"enum": list(MODEL_FIELD_STATUSES)},
                            "recognized_period": {"type": ["string", "null"], "description": "正文明确写出的期间或时点原文；没有识别到就省略或填 null，不猜"},
                            "recognized_statement_scope": {"type": ["string", "null"], "description": "正文明确写出的报表口径原文，例如合并报表、母公司报表；没有就省略"},
@@ -73,8 +76,8 @@ VERDICT_SCHEMA["properties"]["input_resolutions"] = {
         "type": "object",
         "properties": {
             "input_id": {"type": "string"},
-            "value": {"description": "本项补取得到的真实取值，不得为空"},
-            "raw_value": {"type": "string", "description": "材料原始取值，必须出现在该项 evidence.quote_text 中；事实引用可省略"},
+            "value": {"description": "本项补取的来源值，不得为空；数值须与 raw_value 的数字相同，单位换算在后续计算中完成"},
+            "raw_value": {"type": "string", "description": "材料原始取值，必须出现在该项 evidence.quote_text 中；数值只填数字原文（可含千分位），不带单位，不在此换算；事实引用可省略"},
             "evidence": VERDICT_SCHEMA["properties"]["evidence"]["items"],
         },
         "required": ["input_id", "value", "evidence"],
@@ -180,7 +183,7 @@ PRESENT 的抽取结果必须至少有一条本字段的本次材料产物引文
 业务规则判断另按其原文执行，不用空字符串伪装成已抽取。
 字段缺失原因放 missing_items，真实原文引文放 evidence.quote_text，计算过程放 basis。
 上下文列出的缺失输入按 input_id 逐项补取，在 input_resolutions 中分别返回 value、raw_value、evidence；evidence 为单条真实引用，不填 output_code。
-补取值来自材料时 raw_value 必须出现在该项 quote_text 中；来自事实时使用有有效取值的 fact_id，value 必须与事实一致。规则结论或公式本身不能替代缺失的数值。
+补取值来自材料时 raw_value 必须出现在该项 quote_text 中；数值 raw_value 只填数字原文，value 保留同一数值，原文单位填写 evidence.quote_unit，单位换算放在后续计算和 basis 中说明，不能在补取时改写来源数值；来自事实时使用有有效取值的 fact_id，value 必须与事实一致。规则结论或公式本身不能替代缺失的数值。
 只有全部必要输入补齐才能返回正式结论；无依据的输入保留缺失并返回 EVIDENCE_INSUFFICIENT，不得补零或用一条无关引文放行全部缺项。
 抽取与计算必须返回 outputs，不得只描述已经完成。每项包含 code、value，可选 raw_value；
 code 使用声明的输出字段键或 result_code，value 填真实结果，raw_value 填来源原文或实际计算过程。
@@ -222,6 +225,7 @@ evidence 中每项为引用对象，可填写实际工具结果的 tool_call_id�
 quote_text 必须是读取结果中的原文，不能用抽取值、判断说明或整篇正文代替具体引文。
 quote_text 只取直接支撑本条结论的最小片段：正文取包含目标内容的句子或连续段落，不截取大段上下文。
 表格引文必须让用户能判断科目和期间：quote_text 填目标值所在单元格的真实文本；另用 quote_label 填科目/行标签、quote_header 填列/期间表头、quote_period 填期间原文，每个片段都必须是正文中真实存在的内容，不能把不相邻单元格拼成一条引文。没有表头或科目时省略对应字段，不编造。
+识别口径必须绑定到该字段的 evidence.output_code：recognized_period 对应 quote_period，recognized_statement_scope 对应 quote_statement_scope，recognized_entity_scope 对应 quote_entity_scope，recognized_unit 对应 quote_unit，文本必须相同且来自所引用产物。表格选择的列必须与该字段的期间引文、列头一致，不能引用另一列的期间；无法确定对应关系时不填写该识别口径。
 raw_value 只填字段本身的原始写法（含千分位、单位等），不填表头、相邻列或整行内容。
 value 是标准化后的取值：金额去掉千分位和货币符号，日期使用 YYYY-MM-DD，数值不带单位文字；标准化值必须与引用的原文指向同一处，不得改用相邻列或其他表格的数值。
 同一材料有多个相似数值时，message 说明取值来自哪一处，不能只给数值。

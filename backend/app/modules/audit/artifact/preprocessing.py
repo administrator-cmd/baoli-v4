@@ -15,7 +15,9 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.common.exceptions import BusinessError, exception_summary
+from app.core.transactions import commit_transaction
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
+from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.audit.artifact.model import StoredArtifact
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
 from app.modules.audit.artifact.service.document_ports import document_service
@@ -39,9 +41,8 @@ DEPENDENTS = {
 }
 
 
-
-class AuditArtifactPreprocessingService:
-    """本实体的服务方法；db 由构造时注入。"""
+class ArtifactPreprocessingExecution:
+    """调度独立材料处理工作单元并保存进度。"""
 
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
@@ -62,7 +63,7 @@ class AuditArtifactPreprocessingService:
                 parsed = AuditArtifactCRUD(db).get_of(StoredArtifact, parsed_id)
                 if parsed is None or parsed.document_upload_id != upload.id or parsed.artifact_type != "DOCUMENT_PARSE":
                     raise BusinessError("PROCESSED_ARTIFACT_MISSING", "OCR 缺少当前上传的去章产物", status_code=500)
-                artifact = AuditArtifactArtifactsService(db)._complete_ocr_job( task, upload, AuditArtifactArtifactsService(db)._submit_ocr_job( task, upload, parsed))
+                artifact = ArtifactExecution(db)._complete_ocr_job( task, upload, ArtifactExecution(db)._submit_ocr_job( task, upload, parsed))
             else:
                 port = document_service()
                 kwargs = {
@@ -77,9 +78,9 @@ class AuditArtifactPreprocessingService:
                     call = partial(port.detect_seals, **kwargs)
                 else:
                     raise ValueError(f"未知材料处理步骤：{stage}")
-                artifact = AuditArtifactArtifactsService(db)._ensure_external_artifact( task, upload, stage, call)
+                artifact = ArtifactExecution(db)._ensure_external_artifact( task, upload, stage, call)
             AuditArtifactArtifactsService()._artifact_payload(artifact)
-            AuditArtifactCRUD(db).commit()
+            commit_transaction(db)
             return artifact.id, artifact.artifact_no
 
 
@@ -95,11 +96,11 @@ class AuditArtifactPreprocessingService:
         failures: list[tuple[dict[str, Any], str, Exception]] = []
         runnable = []
         task_id, task_no = task.id, task.task_no
-        sessions = sessionmaker(bind=AuditArtifactCRUD(self.db).bind(), autoflush=False, expire_on_commit=False)
+        sessions = sessionmaker(bind=self.db.get_bind(), autoflush=False, expire_on_commit=False)
 
         def save_progress() -> None:
             execution.result_json = {**(execution.result_json or {}), "preprocessing": deepcopy(progress)}
-            AuditArtifactCRUD(self.db).commit()
+            commit_transaction(self.db)
 
         def fail(item: dict[str, Any], stage: str, exc: Exception) -> None:
             detail = {

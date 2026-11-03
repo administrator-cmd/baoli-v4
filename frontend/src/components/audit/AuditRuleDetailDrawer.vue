@@ -26,6 +26,33 @@ defineEmits<{ close: [] }>();
 const detailRule = computed(() => props.rule);
 
 const detailPayload = computed(() => (detailRule.value ? payloadOf(detailRule.value) : {}));
+const inputResolutions = computed(() => {
+  const items = detailPayload.value.input_resolutions;
+  if (!Array.isArray(items)) return [];
+  return items.filter((item): item is Record<string, JsonValue> => item !== null && typeof item === "object" && !Array.isArray(item))
+    .map((item) => {
+      const reference = item.evidence;
+      const evidence: Record<string, JsonValue> = reference && typeof reference === "object" && !Array.isArray(reference) ? reference : {};
+      const source = detailRule.value?.evidence.find((entry) => evidence.artifact_id != null && entry.artifact_id === evidence.artifact_id);
+      return {
+        label: String(item.missing_input || item.parameter_code || "补取输入"),
+        value: displayInputValue(item.value),
+        rawValue: typeof item.raw_value === "string" ? item.raw_value : "未记录原文值",
+        source: source?.document_name || (evidence.fact_id != null ? "已保存事实" : "未记录来源文件"),
+        evidence,
+      };
+    });
+});
+
+function displayInputValue(value: JsonValue | undefined): string {
+  if (value === null || value === undefined) return "未取得值";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function quoteFragment(evidence: Record<string, JsonValue>, key: string): string | null {
+  return typeof evidence[key] === "string" ? evidence[key] as string : null;
+}
 const detailBasisCount = computed(() => {
   const basis = detailPayload.value.basis;
   return Array.isArray(basis) ? basis.length : 0;
@@ -69,7 +96,7 @@ const detailEvidenceNote = computed(() => (
 ));
 /** 同一上传版本的引用合并成一组；同名文件的不同上传不能合并。 */
 const evidenceGroups = computed(() => {
-  const groups: Array<{ source: string; items: Array<{ key: string; label: string; quote: string; quoteLabel?: string | null; quoteHeader?: string | null; quotePeriod?: string | null; page?: number | null }> }> = [];
+  const groups: Array<{ source: string; items: Array<{ key: string; label: string; quote: string; quoteLabel?: string | null; quoteHeader?: string | null; quotePeriod?: string | null; statementScope?: string | null; entityScope?: string | null; unit?: string | null; page?: number | null }> }> = [];
   const positions = new Map<string, number>();
   for (const item of detailRule.value?.evidence ?? []) {
     const sourceParts = [item.document_name || "来源文件未记录"];
@@ -89,6 +116,9 @@ const evidenceGroups = computed(() => {
       quoteLabel: item.quote_label,
       quoteHeader: item.quote_header,
       quotePeriod: item.quote_period,
+      statementScope: item.quote_statement_scope,
+      entityScope: item.quote_entity_scope,
+      unit: item.quote_unit,
       page: item.artifact_page,
     });
   }
@@ -157,6 +187,31 @@ const hasTechnicalDetail = computed(() => {
         <RuleInputSnapshotTable :material-rows="detailMaterialRows" :values="detailValues" />
       </section>
 
+      <section v-if="inputResolutions.length" class="detail-section">
+        <h4 class="app-section-title">本次补取输入</h4>
+        <el-table :data="inputResolutions" size="small" border>
+          <el-table-column prop="label" label="输入项" min-width="140" />
+          <el-table-column prop="value" label="采用值" min-width="120" />
+          <el-table-column prop="rawValue" label="原文值" min-width="120" />
+          <el-table-column prop="source" label="来源" min-width="180" />
+          <el-table-column label="原文依据" min-width="240">
+            <template #default="{ row }">
+              <QuoteBlock
+                v-if="quoteFragment(row.evidence, 'quote_text')"
+                :text="quoteFragment(row.evidence, 'quote_text')"
+                :label="quoteFragment(row.evidence, 'quote_label')"
+                :header="quoteFragment(row.evidence, 'quote_header')"
+                :period="quoteFragment(row.evidence, 'quote_period')"
+                :statement-scope="quoteFragment(row.evidence, 'quote_statement_scope')"
+                :entity-scope="quoteFragment(row.evidence, 'quote_entity_scope')"
+                :unit="quoteFragment(row.evidence, 'quote_unit')"
+              />
+              <span v-else class="text-muted">引用已保存事实，原文见下方依据</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
+
       <!-- 实际比较：只展示工具实际保存的比较结果 -->
       <template v-for="(finding, index) in detailFindings" :key="index">
         <section v-if="finding.comparison" class="detail-section">
@@ -189,6 +244,9 @@ const hasTechnicalDetail = computed(() => {
                 :label="item.quoteLabel"
                 :header="item.quoteHeader"
                 :period="item.quotePeriod"
+                :statement-scope="item.statementScope"
+                :entity-scope="item.entityScope"
+                :unit="item.unit"
                 :page="item.page"
               />
               <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>

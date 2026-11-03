@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from app.common.response import ResponseSchema, ok
 from app.core.base_schema import ItemsResponse, PagedResponse
 from app.core.database import get_db
-from app.modules.audit.task.crud import AuditTaskCRUD
 from app.modules.audit.task.dto import TaskCopyRequest, TaskUpdateRequest
 from app.modules.audit.task.schema import AuditTaskResponse, TaskOptionItem
 from app.modules.audit.task.service import copying as task_command_service
@@ -32,7 +31,7 @@ def list_tasks(
 ) -> ResponseSchema[PagedResponse]:
     """审核任务分页列表。"""
     result = tasks_query.AuditTaskQueryService(db).list_tasks_page(
-        
+
         name=search.name,
         scenario_code=search.scenario_code,
         plan_code=search.plan_code,
@@ -62,8 +61,6 @@ def get_task(task_no: str, request: Request, db: Session = Depends(get_db)) -> R
 def update_task(task_no: str, payload: TaskUpdateRequest, request: Request, db: Session = Depends(get_db)) -> ResponseSchema[AuditTaskResponse]:
     """编辑任务基本资料（名称、备注）；执行快照不随重命名与方案升级变化。"""
     tasks_lifecycle.AuditTaskLifecycleService(db).update_task( task_no, payload.model_dump(exclude_unset=True))
-    # 名称修改已提交；结束服务末尾 refresh 建立的只读快照，再读取同版数据库与 CSV。
-    AuditTaskCRUD(db).rollback()
     return ok(AuditTaskResponse.model_validate(AuditTaskDetailService(db).task_view( AuditTaskLookupService(db).task_or_404( task_no, values=True))), request)
 
 
@@ -76,7 +73,7 @@ def copy_task_endpoint(task_no: str, payload: TaskCopyRequest, request: Request,
     任务、命令成功状态与操作日志在同一次提交落库。
     """
     copied = task_command_service.AuditTaskCopyingService(db).copy_audit_task(
-        
+
         task_no,
         task_name=payload.task_name,
         idempotency_key=payload.idempotency_key,

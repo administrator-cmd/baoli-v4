@@ -19,6 +19,7 @@ from app.constants.status import (
     FIELD_STATUS_NOT_PRESENT,
     FIELD_STATUS_REVIEWED,
 )
+from app.domain.field_review import reviewed_extraction_keys
 from app.domain.identity import public_no
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.field.crud import AuditFieldCRUD
@@ -46,28 +47,7 @@ MISSING_NOT_PRESENT = "NOT_PRESENT"
 MISSING_INSUFFICIENT = "EVIDENCE_INSUFFICIENT"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 REVIEW_STATE_KEY = "field_review"
-
 
 
 class AuditFieldReviewService:
@@ -262,8 +242,9 @@ class AuditFieldReviewService:
         """
         if execution is None:
             return False
+        reviewed_extraction_keys(execution.result_json or {}, waiting=execution.status == "WAITING_FIELD_REVIEW")
         state = (execution.result_json or {}).get(REVIEW_STATE_KEY)
-        return isinstance(state, dict) and bool(state.get("closed_at"))
+        return execution.status == "WAITING_FIELD_REVIEW" or (isinstance(state, dict) and bool(state.get("closed_at")))
 
 
     def _check_correction_shape(self, field: dict[str, Any], correction: Any) -> None:
@@ -380,7 +361,7 @@ class AuditFieldReviewService:
                 if current is not None else None
             )
             new_fact, previous_revision_no, _invalidated = AuditFieldFactsService(self.db)._write_human_field_fact(
-                
+
                 task,
                 field_key=correction.field_key,
                 material_key=correction.material_key,

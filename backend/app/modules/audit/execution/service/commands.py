@@ -1,13 +1,4 @@
-"""审核的对外命令入口：节点执行、人工复核提交、字段纠错、单份 OCR 重试、中断恢复。
-
-这些是 API 与后台操作调用的唯一入口；每个入口在进入图之前先完成并发与状态校验
-（任务已结束 / 正在执行 / 节点不一致 / 输入修订过期都明确拒绝），
-再走「恢复图等待点」的路径，不留下绕开图的旁路。
-
-失败语义：图运行时异常会把任务标记为 FAILED 并返回带摘要的错误，不自动重试；
-用户可在处理原因后主动重试，沿用原材料与冻结配置，创建新执行批次并保留旧失败记录。
-checkpoint 存储暂时不可达保留确认/复核等待状态；若本次节点已经开始执行，则明确记录
-执行中断并置 BLOCKED，不能留下没有实际执行过程的 RUNNING。"""
+"""审核命令编排：后台执行按阶段提交，HTTP 字段编辑由请求层提交。"""
 
 import logging
 from datetime import UTC, datetime, timedelta
@@ -28,9 +19,12 @@ from app.constants.status import (
     TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from app.core.config import get_settings
+from app.core.transactions import commit_transaction
+from app.domain.field_review import reviewed_extraction_keys
 from app.domain.identity import public_no
 from app.graphs.audit_graph import run_audit_node
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
+from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.audit.artifact.model import StoredArtifact
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
 from app.modules.audit.execution.crud import AuditExecutionCRUD
@@ -56,7 +50,6 @@ from app.modules.system.operation.service.background import OperationBackgroundS
 from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TASK
 
 logger = logging.getLogger(__name__)
-
 
 
 class AuditExecutionCommandsService:
@@ -94,7 +87,7 @@ class AuditExecutionCommandsService:
             artifact.failure_code = "OCR_RETRY_INTERRUPTED"
             artifact.failure_message = "服务重启导致 OCR 重新提交结果未知，请确认后重试"
             interrupted_ocr_retries += 1
-        AuditExecutionCRUD(self.db).commit()
+        AuditExecutionCRUD(self.db).flush()
         return {
             "interrupted_executions": len(interrupted),
             "blocked_tasks": len(running_tasks),
@@ -134,7 +127,7 @@ class AuditExecutionCommandsService:
             AuditExecutionCRUD(self.db).flush()
         # 图节点多次提交，最终推进也可能失败；用本次执行身份收尾，不能误伤其他批次。
         attempt = {"task_no": task_no, "execution_id": None}
-        AuditExecutionCRUD(self.db).session_info()["audit_execution_attempt"] = attempt
+        self.db.info["audit_execution_attempt"] = attempt
         try:
             state = run_audit_node(task.task_no, self.db, audit_runner)
             raise_graph_error(state)
@@ -164,7 +157,7 @@ class AuditExecutionCommandsService:
             raise BusinessError("AUDIT_GRAPH_RUNTIME_FAILED", "审核流程执行失败，具体原因见执行记录和服务日志",
                                 status_code=500, details={"reason": exception_summary(exc)}) from exc
         finally:
-            AuditExecutionCRUD(self.db).session_info().pop("audit_execution_attempt", None)
+            self.db.info.pop("audit_execution_attempt", None)
 
 
     def _waiting_review_execution(self, task: AuditTask) -> NodeExecution:
@@ -197,7 +190,9 @@ class AuditExecutionCommandsService:
                 status_code=409,
                 details={"submitted": int(input_revision), "current": int(task.input_revision)},
             )
-        return self._waiting_review_execution( task)
+        execution = self._waiting_review_execution(task)
+        reviewed_extraction_keys(execution.result_json or {}, waiting=True)
+        return execution
 
 
     def save_field_review(self, task_no: str, request: FieldReviewSaveRequest) -> dict[str, Any]:
@@ -209,7 +204,7 @@ class AuditExecutionCommandsService:
         task = AuditTaskLookupService(self.db).task_or_404( task_no, lock=True)
         self._assert_field_review_editable( task, request.input_revision)
         applied = field_review_service.AuditFieldReviewService(self.db).apply_corrections(task, list(request.corrections))
-        AuditExecutionCRUD(self.db).commit()
+        AuditExecutionCRUD(self.db).flush()
         missing = field_review_service.AuditFieldReviewService(self.db).missing_fields(task)
         return {
             "task_no": task.task_no,
@@ -255,11 +250,12 @@ class AuditExecutionCommandsService:
                 status_code=409,
                 details={"execution_id": execution.id, "status": execution.status},
             )
+        reviewed_extraction_keys(execution.result_json or {}, waiting=True)
         applied = field_review_service.AuditFieldReviewService(self.db).apply_corrections(task, corrections, operation_no=operation_no,
         )
         confirmation = field_review_service.AuditFieldReviewService(self.db).record_confirmation(task, execution, note=note, operation_no=operation_no,
         )
-        AuditExecutionCRUD(self.db).commit()
+        commit_transaction(self.db)
         result = AuditExecutionResumeService(self.db).resume_interrupted_execution( task_no, execution_id=execution.id)
         return {
             **result,
@@ -370,7 +366,7 @@ class AuditExecutionCommandsService:
             "source_field_value_id": fact.id,
         }
         new_fact, previous_revision_no, invalidated_reviews = AuditFieldFactsService(self.db)._write_human_field_fact(
-            
+
             task,
             field_key=request.field_key,
             material_key=request.material_key,
@@ -406,7 +402,6 @@ class AuditExecutionCommandsService:
             # 不能把“无需重算”当成纠错失败。
             task.status = TASK_STATUS_COMPLETED
             AuditExecutionCRUD(self.db).flush()
-            AuditExecutionCRUD(self.db).commit()
             return {
                 "task_no": task.task_no,
                 "field_key": request.field_key,
@@ -426,7 +421,6 @@ class AuditExecutionCommandsService:
         task.status = TASK_STATUS_READY
         task.current_node = next_node["node_code"]
         AuditExecutionCRUD(self.db).flush()
-        AuditExecutionCRUD(self.db).commit()
         return {
             "task_no": task.task_no,
             "field_key": request.field_key,
@@ -479,7 +473,7 @@ class AuditExecutionCommandsService:
              task, document_no, artifact_no, resubmit_unknown=resubmit_unknown,
         )
         if artifact is None:
-            artifact = AuditArtifactArtifactsService(self.db)._submit_ocr_job( task, upload, parsed)
+            artifact = ArtifactExecution(self.db)._submit_ocr_job( task, upload, parsed)
         elif artifact.status in {"FAILED", "SUBMITTING"}:
             metadata = dict(artifact.metadata_json or {})
             attempts = list(metadata.pop("submit_attempts", []) or [])
@@ -498,13 +492,13 @@ class AuditExecutionCommandsService:
             artifact.status = "SUBMITTING"
             artifact.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting"
             artifact.metadata_json = {**metadata, "submit_attempts": [*attempts, attempt]}
-            AuditExecutionCRUD(self.db).commit()  # 新提交意图和旧作业记录先保存，重复点击不会再提交。
+            commit_transaction(self.db)  # 新提交意图和旧作业记录先保存，重复点击不会再提交。
             try:
-                artifact = AuditArtifactArtifactsService(self.db)._submit_authorized_ocr_retry(
+                artifact = ArtifactExecution(self.db)._submit_authorized_ocr_retry(
                      task, upload, parsed, artifact, idempotency_key=operation_no,
                 )
             except Exception:
-                AuditExecutionCRUD(self.db).commit()  # 保留真实的提交失败或结果未知状态，后台异常继续上抛。
+                commit_transaction(self.db)  # 保留真实的提交失败或结果未知状态，后台异常继续上抛。
                 raise
         elif artifact.status == "PENDING":
             _, old_deadline = AuditArtifactArtifactsService()._ocr_job_metadata(artifact)
@@ -515,15 +509,15 @@ class AuditExecutionCommandsService:
                 "previous_deadline_at": old_deadline.isoformat(),
                 "resumed_at": resumed_at.isoformat(), "resume_operation_no": operation_no,
             }
-            AuditExecutionCRUD(self.db).commit()  # 只延长这次用户主动续查的等待时间，不创建远端作业。
-        artifact = AuditArtifactArtifactsService(self.db)._complete_ocr_job( task, upload, artifact)
+            commit_transaction(self.db)  # 只延长这次用户主动续查的等待时间，不创建远端作业。
+        artifact = ArtifactExecution(self.db)._complete_ocr_job( task, upload, artifact)
         AuditArtifactArtifactsService()._artifact_payload(artifact)
         stages = [AuditArtifactArtifactsService(self.db)._artifact_for_upload( upload, stage) for stage in ("MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "SEAL", "OCR")]
         if all(item is not None and item.status == "READY" for item in stages):
             for item in stages:
                 AuditArtifactArtifactsService()._artifact_payload(item)
             document.status = "PREPARED"
-        AuditExecutionCRUD(self.db).commit()
+        commit_transaction(self.db)
         return {
             "document_no": document.document_no, "artifact_no": artifact.artifact_no,
             "status": artifact.status, "document_status": document.status,

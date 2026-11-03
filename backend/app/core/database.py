@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from contextlib import contextmanager
 
 import pymysql
 from sqlalchemy import create_engine, text
@@ -6,6 +7,7 @@ from sqlalchemy.exc import DBAPIError, DisconnectionError, InterfaceError, Opera
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings, validated_database_url
+from app.core.transactions import commit_transaction, rollback_transaction
 
 
 class Base(DeclarativeBase):
@@ -44,16 +46,21 @@ def is_storage_unavailable(exc: Exception) -> bool:
     ) or (isinstance(exc, DBAPIError) and exc.connection_invalidated)
 
 
+@contextmanager
+def request_session() -> Generator[Session, None, None]:
+    """普通接口的整个业务请求共用一次提交或回滚。"""
+    with SessionLocal() as session:
+        try:
+            yield session
+            commit_transaction(session)
+        except Exception:
+            rollback_transaction(session)
+            raise
+
+
 def get_db() -> Generator[Session, None, None]:
-    session = SessionLocal()
-    try:
+    with request_session() as session:
         yield session
-    except Exception:
-        # 未提交的变更必须显式回滚，例如发布场景中途失败时不能残留半成品版本。
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 def check_database_connection() -> None:

@@ -15,14 +15,15 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from app.core.transactions import commit_transaction
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.modules.audit.rule.service.result_contract import validate_result_shape
 from app.constants.execution import ORIGIN_HUMAN_CORRECTION
 from app.constants.status import LOOP_BLOCKED, LOOP_DONE
 from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
 from app.integrations.llm.gateway import RequestLogContext
-from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.context import execution_attempt_no
 from app.modules.audit.execution.service.flow.errors import agent_step
@@ -98,7 +99,7 @@ def _record_blocked(
     if channel_failure is not None:
         # 同批其他字段已经各自保存；这条字段的未完成原因是渠道故障，交给调度方停止后续请求。
         outcome["channel_failure"] = channel_failure
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)
     return outcome
 
 
@@ -111,7 +112,7 @@ def _sample_field_verdict(item: dict[str, Any], field_key: str) -> dict[str, Any
     被当成非字段证据。
     """
     evidence = []
-    for entry in item.get("evidence") or []:
+    for entry in item["evidence"]:
         if isinstance(entry, dict) and (
             entry.get("tool_call_id") or entry.get("artifact_id") is not None
         ):
@@ -121,9 +122,9 @@ def _sample_field_verdict(item: dict[str, Any], field_key: str) -> dict[str, Any
     return {
         "status": item.get("status"),
         "message": item.get("message"),
-        "basis": item.get("basis") or [],
-        "missing_items": item.get("missing_items") or [],
-        "next_action": item.get("next_action") or "",
+        "basis": item.get("basis", []),
+        "missing_items": item.get("missing_items", []),
+        "next_action": item.get("next_action", ""),
         "evidence": evidence,
         "outputs": [{
             "code": field_key,
@@ -177,6 +178,7 @@ def _validate_field(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """校验一个字段的结论与产出；错误交调用方决定是让模型修正还是记未执行。"""
     field_key = str((rule.get("output_definitions") or [{}])[0].get("field_key"))
+    validate_result_shape(item, batch_field=True)
     raw = _sample_field_verdict(item, field_key)
     verdict, _, unresolved = agent.validate_verdict(
         raw, rule=rule, tool_results=tool_results, facts=context["upstream_facts"],
@@ -185,7 +187,6 @@ def _validate_field(
         human_field_keys=human_field_keys,
         inputs=[],
     )
-    AuditRuleExecutionService().validate_outputs(rule, raw)
     return verdict, list(unresolved)
 
 
@@ -283,7 +284,7 @@ def _save_field(
                       unresolved=list(unresolved), batch_size=batch_size, counted_turns=counted_turns)
     # 字段结果与它的待重跑标记同一事务提交：再次中断时不会重复请求已经完成的字段。
     _clear_pending_key(execution, rule["rule_key"])
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)
     return outcome
 
 

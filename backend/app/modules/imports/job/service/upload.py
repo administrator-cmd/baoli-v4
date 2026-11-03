@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
+from app.core.transactions import after_rollback
 from app.domain import scenario_schema
 from app.domain.identity import public_no
 from app.modules.imports.job import crud
@@ -64,37 +65,41 @@ class ImportsJobUploadService:
             allowed_extensions=RULEBOOK_EXTENSIONS,
             max_bytes=settings.max_rulebook_bytes,
         )
-        try:
-            workbook_ir = ImportsJobWorkbookService().read_workbook_ir(
-                resolve_storage_path(relative_path),
-                workbook_id=public_no("wb"),
-                source_filename=upload.filename or f"规则库{suffix}",
-                source_size=size,
-                source_sha256=sha256,
-                profile_version=schema["profile_version"],
-                scenario_code=scenario_code,
-                schema_key=schema["schema_key"],
-                schema_version=schema["schema_version"],
-            )
-            job = ImportJob(
-                job_no=job_no,
-                source_filename=upload.filename or f"规则库{suffix}",
-                source_path=relative_path,
-                source_sha256=sha256,
-                source_size=size,
-                # 记录当前执行契约版本，不约束上传文件的业务表头。
-                profile_version=workbook_ir.profile_version,
-                # 上传入口的场景身份：作业明确属于哪个场景，不从 Excel 内容猜。
-                scenario_code=scenario_code,
-                schema_key=schema["schema_key"],
-                schema_version=schema["schema_version"],
-                schema_json=schema,
-                status="PARSED",
-            )
-            crud.ImportsJobCRUD(self.db).add(job)
-            crud.ImportsJobCRUD(self.db).commit()
-            crud.ImportsJobCRUD(self.db).refresh(job)
-            return job
-        except Exception:
-            crud.ImportsJobCRUD(self.db).rollback()
-            raise
+        bind = self.db.get_bind()
+
+        def discard_unreferenced_source() -> None:
+            with Session(bind=bind) as verification:
+                if crud.ImportsJobCRUD(verification).by_no(job_no) is None:
+                    resolve_storage_path(relative_path).unlink(missing_ok=True)
+
+        after_rollback(self.db, discard_unreferenced_source)
+        workbook_ir = ImportsJobWorkbookService().read_workbook_ir(
+            resolve_storage_path(relative_path),
+            workbook_id=public_no("wb"),
+            source_filename=upload.filename or f"规则库{suffix}",
+            source_size=size,
+            source_sha256=sha256,
+            profile_version=schema["profile_version"],
+            scenario_code=scenario_code,
+            schema_key=schema["schema_key"],
+            schema_version=schema["schema_version"],
+        )
+        job = ImportJob(
+            job_no=job_no,
+            source_filename=upload.filename or f"规则库{suffix}",
+            source_path=relative_path,
+            source_sha256=sha256,
+            source_size=size,
+            # 记录当前执行契约版本，不约束上传文件的业务表头。
+            profile_version=workbook_ir.profile_version,
+            # 上传入口的场景身份：作业明确属于哪个场景，不从 Excel 内容猜。
+            scenario_code=scenario_code,
+            schema_key=schema["schema_key"],
+            schema_version=schema["schema_version"],
+            schema_json=schema,
+            status="PARSED",
+        )
+        crud.ImportsJobCRUD(self.db).add(job)
+        crud.ImportsJobCRUD(self.db).flush()
+        crud.ImportsJobCRUD(self.db).refresh(job)
+        return job

@@ -5,9 +5,11 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
+from app.core.transactions import commit_transaction, rollback_transaction
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.domain.field_review import reviewed_extraction_keys
 from app.constants.status import (
     AUDIT_LLM_CHANNEL_UNAVAILABLE,
     EXECUTION_STATUS_WAITING_FIELD_REVIEW,
@@ -28,6 +30,7 @@ from app.modules.audit.execution.service.flow.plan import (
     reviewed_extraction_rule_keys,
 )
 from app.modules.audit.execution.service.state import _scenario_nodes, _task_phase
+from app.modules.audit.field.service.field_review import AuditFieldReviewService
 from app.modules.audit.field.service.reviews import AuditFieldReviewsService
 from app.modules.audit.shared import _task_manifest
 from app.modules.audit.task.model import AuditTask
@@ -105,9 +108,9 @@ def graph_execute_current_node(
         if attempt is not None and attempt["task_no"] == task_no:
             attempt["execution_id"] = execution.id
     except BusinessError as exc:
-        AuditExecutionCRUD(db).rollback()
+        rollback_transaction(db)
         return graph_error_state(db, task_no, current_node, exc)
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)
     return {
         "executed_node": current_node,
         "current_node": task.current_node,
@@ -197,7 +200,7 @@ def graph_pause_scheduling(
             **(execution.result_json or {}),
             "channel_failure": failure,
         }
-        AuditExecutionCRUD(db).commit()
+        commit_transaction(db)
         return {"last_error": None}
 
 
@@ -220,9 +223,7 @@ def incomplete_failure_message(result_json: dict[str, Any] | None) -> str | None
     核对接手：判定与提示都用这一份清单排除，提示里的数量与原因不能和失败判定打架。
     """
     result = result_json if isinstance(result_json, dict) else {}
-    reviewed = {
-        str(key) for key in ((result.get("field_review") or {}).get("extraction_rule_keys") or ())
-    }
+    reviewed = reviewed_extraction_keys(result)
     failed = [
         item for item in result.get("rule_outcomes") or []
         if (item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED")
@@ -279,14 +280,7 @@ def graph_finalize_node_execution(
     # 抽取段的结局在核对等待点已经交给人工核对处理：确认后续跑不再执行抽取规则，
     # 旧抽取失败不会重新产生结果，也不能再拿它把本批次判成阻断。
     # 规则键随等待点一起落库，收尾判定与失败提示读同一份清单。
-    review_record = (execution.result_json or {}).get("field_review") or {}
-    reviewed_extraction_keys = reviewed_extraction_rule_keys(task, execution)
-    if review_record.get("closed_at") and not review_record.get("extraction_rule_keys"):
-        # 兼容本改动之前已停在等待点的批次：补算后写回，后续请求读到同一份清单。
-        execution.result_json = {
-            **execution.result_json,
-            "field_review": {**review_record, "extraction_rule_keys": sorted(reviewed_extraction_keys)},
-        }
+    reviewed_extraction_keys = reviewed_extraction_rule_keys(execution)
     # 遍历结束不等于执行成功。格式/产出失败在所有规则尝试完后汇总，允许重跑。
     failed = [item for item in execution.result_json.get("rule_outcomes", [])
               if (item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED")
@@ -307,21 +301,23 @@ def graph_finalize_node_execution(
     elif (agent_summary or {}).get("field_review_paused"):
         # 字段核对是正常业务等待点：批次尚未结束，既不是成功也不是失败。
         # 抽取段自身的未完成项（例如某字段抽取失败）已在逐条结果里，由人工核对处理。
+        extraction_already_closed = AuditFieldReviewService().extraction_closed(execution)
         execution.status = EXECUTION_STATUS_WAITING_FIELD_REVIEW
         execution.failure_code = None
         execution.failure_message = None
         # 抽取阶段到此结束：后续续跑不再重跑抽取规则，避免覆盖人工补填值。
         # 抽取段的规则键与关闭时间一起落库：收尾判定、失败提示与续跑范围都据此排除。
-        boundary = field_review_boundary(
-            evaluation_plan(task, task.current_node), all_rules=_task_manifest(task)["rules"],
-        )
-        execution.result_json = {
-            **(execution.result_json or {}),
-            "field_review": {
-                "closed_at": datetime.now(UTC).isoformat(),
-                "extraction_rule_keys": sorted(boundary.extraction),
-            },
-        }
+        if not extraction_already_closed:
+            boundary = field_review_boundary(
+                evaluation_plan(task, task.current_node), all_rules=_task_manifest(task)["rules"],
+            )
+            execution.result_json = {
+                **(execution.result_json or {}),
+                "field_review": {
+                    "closed_at": datetime.now(UTC).isoformat(),
+                    "extraction_rule_keys": sorted(boundary.extraction),
+                },
+            }
         task.status = TASK_STATUS_WAITING_FIELD_REVIEW
         AuditExecutionCRUD(db).flush()
     elif execution.result_json.get("loop_status") == LOOP_BLOCKED or failed:
@@ -332,7 +328,7 @@ def graph_finalize_node_execution(
         AuditExecutionCRUD(db).flush()
     else:
         execution.status = "SUCCEEDED"
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)
     return {
         "execution_status": execution.status,
         "execution_failure_code": execution.failure_code,
@@ -416,7 +412,7 @@ def graph_advance_workflow(
         execution.failure_message = exc.message
         task.status = TASK_STATUS_BLOCKED
         AuditExecutionCRUD(db).flush()
-        AuditExecutionCRUD(db).commit()
+        commit_transaction(db)
         return {
             "current_node": task.current_node,
             "node_index": current_index,
@@ -439,7 +435,7 @@ def graph_advance_workflow(
     else:
         task.status = TASK_STATUS_COMPLETED
     AuditExecutionCRUD(db).flush()
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)
     return {
         "current_node": task.current_node,
         "node_index": _index_of(nodes, task.current_node) if next_node else current_index,
@@ -473,7 +469,7 @@ def graph_save_node_result(db: Session, task_no: str) -> dict[str, Any]:
     task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
     phase = _task_phase(task)
     AuditExecutionCRUD(db).flush()
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)
     _, _, current_index = _scenario_nodes(db, task)
     return {
         "current_node": task.current_node,

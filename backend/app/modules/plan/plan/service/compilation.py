@@ -160,7 +160,10 @@ class PlanCompilationService:
             row = existing.get(rule_code)
             if row is None:
                 next_sort_no += 1
-                row = PlanRule(plan_id=plan.id, sort_no=next_sort_no)
+                row = PlanRule(
+                    plan_id=plan.id, sort_no=next_sort_no, rule_key=item["rule_key"], name=item["name"],
+                    node_code=item["node_code"], operator_code=item["operator_code"], rule_json=item["rule_json"],
+                )
                 row = config_store.add(self.db, row)
             row.rule_key = item["rule_key"]
             row.name = item["name"]

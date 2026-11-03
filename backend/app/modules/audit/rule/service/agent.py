@@ -10,12 +10,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.modules.audit.rule.service.result_contract import validate_result_shape
 from app.constants.execution import FACT_KIND_DERIVED
 from app.constants.status import (
     EXECUTABLE_FIELD_STATUSES,
     FIELD_STATUS_PRESENT,
     LOOP_DONE,
-    MODEL_VERDICT_STATUSES,
 )
 from app.domain import fact_projection, tool_catalog
 from app.domain.execution_mode import (
@@ -121,21 +121,10 @@ class AuditRuleAgentService:
 
     def _artifact_content_text(self, item: dict[str, Any]) -> str:
         """预读产物正文：OCR 按页输出，其他产物按原始结构输出。"""
-        content = item.get("content")
-        if item.get("artifact_type") == "OCR" and isinstance(content, dict):
-            pages = content.get("pages")
-            if isinstance(pages, list) and pages:
-                rendered = []
-                for page in pages:
-                    if not isinstance(page, dict):
-                        continue
-                    text = page.get("text")
-                    if not isinstance(text, str):
-                        continue
-                    number = page.get("page")
-                    rendered.append(f"--- 第 {number} 页 ---\n{text}" if number is not None else text)
-                return "\n\n".join(rendered)
-        return json.dumps(content, ensure_ascii=False, default=str)
+        content = item["content"]
+        if item["artifact_type"] == "OCR":
+            return "\n\n".join(f"--- 第 {page['page_no']} 页 ---\n{page['text']}" for page in content["pages"])
+        return json.dumps(content, ensure_ascii=False)
 
 
     def _preloaded_artifact_lines(self, artifacts: list[dict[str, Any]] | None,
@@ -149,8 +138,6 @@ class AuditRuleAgentService:
             "不要再调用 TASK_DATA_READ，也不要为字段重复读取同一产物：",
         ]
         for item in artifacts:
-            if not isinstance(item, dict):
-                continue
             material_key = str(item.get("material_key") or "")
             material_name = material_names.get(material_key, material_key)
             artifact_type = str(item.get("artifact_type") or "")
@@ -574,37 +561,6 @@ class AuditRuleAgentService:
         return BusinessError("AGENT_VERDICT_INVALID", message, details=details)
 
 
-    def _assert_verdict_shape(self, verdict: dict[str, Any]) -> None:
-        """核对结果结构；格式错误交回模型修正。"""
-        missing = [key for key in VERDICT_SCHEMA["required"] if key not in verdict]
-        if missing:
-            raise self._schema_error("候选结论缺少必填字段，本次未采信", missing=missing)
-        status = verdict.get("status")
-        if not isinstance(status, str) or status not in MODEL_VERDICT_STATUSES:
-            raise self._schema_error(
-                "候选结论的状态不在允许范围内，本次未采信",
-                status=status,
-                allowed=sorted(MODEL_VERDICT_STATUSES),
-            )
-        message = verdict.get("message")
-        if not isinstance(message, str) or not message.strip():
-            raise self._schema_error("候选结论必须给出非空的判断说明，本次未采信")
-        if not isinstance(verdict.get("evidence"), list):
-            raise self._schema_error("候选结论的 evidence 必须是数组，本次未采信")
-        basis = verdict.get("basis")
-        if not isinstance(basis, list) or any(
-            not isinstance(item, dict) or set(item) != {"label", "value", "explanation"}
-            or not isinstance(item["label"], str) or not item["label"].strip()
-            or not isinstance(item["explanation"], str) for item in basis
-        ):
-            raise self._schema_error("basis 必须为包含中文业务 label、value 和 explanation 的对象数组")
-        missing_items = verdict.get("missing_items")
-        if not isinstance(missing_items, list) or any(not isinstance(item, str) or not item.strip() for item in missing_items):
-            raise self._schema_error("missing_items 必须为最终业务缺项的非空字符串数组")
-        if not isinstance(verdict.get("next_action"), str):
-            raise self._schema_error("next_action 必须为字符串，无处理建议时填空字符串")
-
-
     def _allowed_artifact_materials(self, rule: dict[str, Any]) -> set[str]:
         return {str(item) for item in rule.get("materials") or [] if item}
 
@@ -621,7 +577,8 @@ class AuditRuleAgentService:
         from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
         texts = AuditFieldEvidenceService().artifact_content_texts(content)
         checked: dict[str, str] = {}
-        for key in ("quote_text", "quote_label", "quote_header", "quote_period"):
+        for key in ("quote_text", "quote_label", "quote_header", "quote_period",
+                    "quote_statement_scope", "quote_entity_scope", "quote_unit"):
             value = self._quote_fragment(item, key)
             if value is None:
                 continue
@@ -643,7 +600,7 @@ class AuditRuleAgentService:
                 continue
             text = page.get("text")
             if isinstance(text, str) and quoted in _locatable_text(text):
-                number = page.get("page")
+                number = page.get("page_no")
                 return number if isinstance(number, int) and not isinstance(number, bool) else None
         return None
 
@@ -861,42 +818,43 @@ class AuditRuleAgentService:
 
 
     def _assert_recognized_scope(self, raw: dict[str, Any], *, rule: dict[str, Any],
-                                 preloaded_artifacts: list[dict[str, Any]] | None,
-                                 tool_results: list[dict[str, Any]]) -> None:
-        """实际识别到的期间/口径/主体/单位必须能在读取正文中找到，不能凭字段名猜。"""
-        if str(rule.get("execution_mode") or "") != MODE_EXTRACT:
+                                 refs: list[dict[str, Any]], facts: list[dict[str, Any]],
+                                 upstream_results: list[dict[str, Any]]) -> None:
+        """识别口径必须绑定本字段的已校验引文或同值事实。"""
+        if rule.get("execution_mode") != MODE_EXTRACT:
             return
-        from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
-        texts: list[str] = []
-        for artifact in preloaded_artifacts or []:
-            if isinstance(artifact, dict) and artifact.get("content") is not None:
-                texts.extend(AuditFieldEvidenceService().artifact_content_texts(artifact["content"]))
-        for call in tool_results:
-            if not isinstance(call, dict) or call.get("tool_name") != "TASK_DATA_READ":
-                continue
-            result = call.get("result") if isinstance(call.get("result"), dict) else {}
-            for item in result.get("items") or []:
-                if isinstance(item, dict) and item.get("content") is not None:
-                    texts.extend(AuditFieldEvidenceService().artifact_content_texts(item["content"]))
-        if not texts:
-            return
-        labels = {
-            "recognized_period": "期间",
-            "recognized_statement_scope": "报表口径",
-            "recognized_entity_scope": "主体范围",
-            "recognized_unit": "单位",
+        scopes = {
+            "recognized_period": ("期间", "quote_period", "actual_period_scope"),
+            "recognized_statement_scope": ("报表口径", "quote_statement_scope", "actual_statement_scope"),
+            "recognized_entity_scope": ("主体范围", "quote_entity_scope", "actual_entity_scope"),
+            "recognized_unit": ("单位", "quote_unit", "actual_unit"),
         }
-        for item in raw.get("outputs") or []:
-            if not isinstance(item, dict):
-                continue
-            for key, label in labels.items():
-                value = item.get(key)
-                if not isinstance(value, str) or not value.strip():
+        fact_index = {fact.get("fact_id"): fact for fact in facts}
+        result_index = {item.get("rule_result_id"): item for item in upstream_results}
+        for output in raw["outputs"]:
+            field_refs = [ref for ref in refs if ref.get("output_code") == output["code"]]
+            for key, (label, fragment, fact_key) in scopes.items():
+                value = output.get(key)
+                if not value:
                     continue
-                if AuditFieldEvidenceService()._check_evidence_content(texts, value) != "FOUND":
+                supported = False
+                for ref in field_refs:
+                    if ref.get("artifact_id") is not None:
+                        supported = _locatable_text(value) == _locatable_text(ref.get(fragment) or "")
+                    elif ref.get("fact_id") is not None:
+                        supported = value == fact_index[ref["fact_id"]].get(fact_key)
+                    elif ref.get("rule_result_id") is not None:
+                        upstream = result_index[ref["rule_result_id"]]
+                        supported = any(
+                            item.get("code") == output["code"] and item.get(key) == value
+                            for item in (upstream.get("result") or upstream).get("outputs") or []
+                        )
+                    if supported:
+                        break
+                if not supported:
                     raise self._schema_error(
-                        f"字段识别到的{label}在读取的材料正文中找不到，不能作为实际口径",
-                        output_code=item.get("code"), field=key, value=value,
+                        f"字段识别到的{label}缺少本字段对应的原文依据", output_code=output["code"],
+                        field=key, required_quote=fragment, value=value,
                     )
 
     def _assert_extraction_evidence(self, raw: dict[str, Any], refs: list[dict[str, Any]], *,
@@ -909,9 +867,7 @@ class AuditRuleAgentService:
             return
         human = set(human_field_keys or ())
         artifact_refs = [reference for reference in refs if reference.get("artifact_id") is not None]
-        for item in raw.get("outputs") or []:
-            if not isinstance(item, dict):
-                continue
+        for item in raw["outputs"]:
             code = item.get("code")
             if not isinstance(code, str) or code not in definitions:
                 continue
@@ -944,7 +900,9 @@ class AuditRuleAgentService:
         inputs: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
         """仅检查结果形状与真实引用；业务判断照模型结果保存。"""
-        self._assert_verdict_shape(raw)
+        validate_result_shape(raw)
+        from app.modules.audit.rule.service.rule_execution import AuditRuleExecutionService
+        AuditRuleExecutionService().validate_outputs(rule, raw)
         refs = self._evidence_refs(
             raw, rule=rule, tool_results=tool_results, facts=facts, upstream_results=upstream_results,
             preloaded_artifacts=preloaded_artifacts,
@@ -955,9 +913,6 @@ class AuditRuleAgentService:
                 candidate, rule=rule, tool_results=tool_results, facts=facts,
                 upstream_results=upstream_results, preloaded_artifacts=preloaded_artifacts,
             ),
-        )
-        self._assert_recognized_scope(
-            raw, rule=rule, preloaded_artifacts=preloaded_artifacts, tool_results=tool_results,
         )
         definitions = {field["field_key"]: field for field in rule.get("output_definitions") or []}
         # 单字段抽取只有一处可归属的字段：模型漏填 output_code 时按声明补齐，
@@ -989,12 +944,15 @@ class AuditRuleAgentService:
                 if reference.get("artifact_id") is None:
                     output = next((
                         item for item in raw.get("outputs") or []
-                        if isinstance(item, dict) and item.get("code") == code
+                        if item["code"] == code
                     ), None)
                     if (output is None or not self._has_matching_field_source(
                         [reference], output, definitions[code], facts, upstream_results,
                     )):
                         raise self._schema_error("字段取值与所引用的事实或上游产出不一致", output_code=code)
+        self._assert_recognized_scope(
+            raw, rule=rule, refs=refs, facts=facts, upstream_results=upstream_results,
+        )
         self._assert_extraction_evidence(
             raw, refs, rule=rule, definitions=definitions,
             human_field_keys=human_field_keys,
@@ -1102,7 +1060,6 @@ class AuditRuleAgentService:
                                          runtime=None if query_tool else runtime, context=context)
             if not query_tool:
                 result = {**result, **result_context}
-            AuditRuleCRUD(self.db).commit()
             return result
         except BusinessError as exc:
             if exc.code in _TOOL_PROGRAM_ERRORS:

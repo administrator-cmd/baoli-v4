@@ -235,6 +235,9 @@ const emptyState = computed(() => {
             :label="source.quote_label"
             :header="source.quote_header"
             :period="source.quote_period"
+            :statement-scope="source.quote_statement_scope"
+            :entity-scope="source.quote_entity_scope"
+            :unit="source.quote_unit"
             :page="source.artifact_page"
           />
           <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>

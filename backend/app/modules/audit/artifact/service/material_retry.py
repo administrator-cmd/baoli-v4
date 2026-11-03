@@ -5,6 +5,7 @@ from functools import partial
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
 from app.modules.audit.artifact.service.document_ports import document_service
 from app.modules.audit.shared import current_upload
@@ -65,9 +66,8 @@ class AuditArtifactMaterialRetryService:
                 call = partial(port.process_document, **kwargs)
             else:
                 call = partial(port.detect_seals, **kwargs)
-            AuditArtifactArtifactsService(session).execute_external_artifact_call( current, upload, artifact, call,
+            ArtifactExecution(session).execute_external_artifact_call( current, upload, artifact, call,
                                            operation_no=command.operation_no, resubmit_unknown=content["resubmit_unknown"])
-            session.commit()
             return {"task_no": current.task_no, "document_no": content["document_no"], "artifact_no": artifact.artifact_no}
 
         return background.OperationBackgroundService(self.db).submit_operation(object_type=OBJECT_AUDIT_TASK, object_no=task.task_no, operation_type="DOCUMENT_ARTIFACT_RETRY",

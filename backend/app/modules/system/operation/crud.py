@@ -24,15 +24,16 @@ class SystemOperationCRUD(CRUDBase):
             select(BackgroundOperation).where(BackgroundOperation.id == operation_id).with_for_update()
         )
 
-    def deletion_log_id(self, *, object_type: str, object_no: str, operation_type: str) -> int | None:
-        return self.db.scalar(
-            select(OperationLog.id).where(
-                OperationLog.object_type == object_type,
-                OperationLog.object_no == object_no,
-                OperationLog.operation_type == operation_type,
-                OperationLog.permanent.is_(True),
-            ).limit(1)
-        )
+    def deletion_log_id(self, *, object_type: str, object_no: str, operation_type: str, lock: bool = False) -> int | None:
+        statement = select(OperationLog.id).where(
+            OperationLog.object_type == object_type,
+            OperationLog.object_no == object_no,
+            OperationLog.operation_type == operation_type,
+            OperationLog.permanent.is_(True),
+        ).limit(1)
+        if lock:
+            statement = statement.with_for_update()
+        return self.db.scalar(statement)
 
     def running_for_object(self, *, object_type: str, object_no: str) -> BackgroundOperation | None:
         return self.db.scalar(
@@ -85,14 +86,15 @@ class SystemOperationCRUD(CRUDBase):
             select(BackgroundOperation).where(BackgroundOperation.status.in_(statuses))
         ).all())
 
-    def idempotency_record(self, *, object_type: str, operation_type: str, idempotency_key: str) -> OperationLog | None:
-        return self.db.scalar(
-            select(OperationLog).where(
-                OperationLog.object_type == object_type,
-                OperationLog.operation_type == operation_type,
-                OperationLog.idempotency_key == idempotency_key,
-            )
+    def idempotency_record(self, *, object_type: str, operation_type: str, idempotency_key: str, lock: bool = False) -> OperationLog | None:
+        statement = select(OperationLog).where(
+            OperationLog.object_type == object_type,
+            OperationLog.operation_type == operation_type,
+            OperationLog.idempotency_key == idempotency_key,
         )
+        if lock:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return self.db.scalar(statement)
 
     def operations_for_jobs(self, object_type: str, job_nos: list[str], *, lock: bool = False) -> list[BackgroundOperation]:
         statement = select(BackgroundOperation).where(
@@ -238,12 +240,14 @@ class SystemOperationCRUD(CRUDBase):
 
     def background_by_operation_key(
         self, *, object_type: str, object_no: str, operation_type: str, idempotency_key: str,
+        lock: bool = False,
     ) -> BackgroundOperation | None:
-        return self.db.scalar(
-            select(BackgroundOperation).where(
-                BackgroundOperation.object_type == object_type,
-                BackgroundOperation.object_no == object_no,
-                BackgroundOperation.operation_type == operation_type,
-                BackgroundOperation.idempotency_key == idempotency_key,
-            )
+        statement = select(BackgroundOperation).where(
+            BackgroundOperation.object_type == object_type,
+            BackgroundOperation.object_no == object_no,
+            BackgroundOperation.operation_type == operation_type,
+            BackgroundOperation.idempotency_key == idempotency_key,
         )
+        if lock:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return self.db.scalar(statement)

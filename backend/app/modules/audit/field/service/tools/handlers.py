@@ -20,6 +20,7 @@ from langchain_core.tools import InjectedToolArg, tool
 from app.common.exceptions import BusinessError
 from app.domain import file_quality, quality_judgement
 from app.domain.rule_library import active
+from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD
 
 
@@ -219,12 +220,12 @@ def process_documents_tool(parameters: dict[str, Any], inputs: list[dict[str, An
             parsed = AuditArtifactArtifactsService(db)._artifact_for_upload( upload, "DOCUMENT_PARSE")
             if parsed is None or parsed.status != "READY":
                 raise BusinessError("PROCESSED_ARTIFACT_MISSING", "OCR需要文件处理产物；请先明确调用DOCUMENT_PARSE", details={"material_key": key})
-            artifact = AuditArtifactArtifactsService(db)._complete_ocr_job( task, upload, AuditArtifactArtifactsService(db)._submit_ocr_job( task, upload, parsed))
+            artifact = ArtifactExecution(db)._complete_ocr_job( task, upload, ArtifactExecution(db)._submit_ocr_job( task, upload, parsed))
         else:
             functions = {"DOCUMENT_PARSE": document_service().process_document, "SEAL": document_service().detect_seals, "MATERIAL_CLASSIFY": document_service().validate_material_type}
             if service == "MATERIAL_CLASSIFY":
                 kwargs["material_type"] = upload.declared_material_type
-            artifact = AuditArtifactArtifactsService(db)._ensure_external_artifact( task, upload, service, lambda: functions[service](**kwargs))
+            artifact = ArtifactExecution(db)._ensure_external_artifact( task, upload, service, lambda: functions[service](**kwargs))
         items.append({"material_key": key, "upload_id": upload.id, "artifact_id": artifact.id, "artifact_type": service, "content": AuditArtifactArtifactsService()._artifact_payload(artifact).content})
     return {"status": "SUCCEEDED", "message": "指定服务已返回实际产物", "items": items}
 
@@ -346,5 +347,3 @@ def check_file_quality_tool(
         "per_material": per_material,
         "status_counts": {value: statuses.count(value) for value in sorted(set(statuses))},
     }
-
-

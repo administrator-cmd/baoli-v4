@@ -1,6 +1,6 @@
 """CRUD 基类：绑定一个模型与一个会话，子类只写本实体的查询。
 
-事务边界仍在 HTTP 层（get_db 负责提交/回滚）；CRUD 只执行语句，不 commit。
+普通请求与后台执行编排管理事务；CRUD 只查询、写入和 flush。
 """
 
 from collections.abc import Sequence
@@ -69,27 +69,6 @@ class CRUDBase[ModelType]:
 
     def refresh(self, obj: ModelType) -> None:
         self.db.refresh(obj)
-
-    def commit(self) -> None:
-        self.db.commit()
-
-    def rollback(self) -> None:
-        self.db.rollback()
-
-    def bind(self):
-        return self.db.get_bind()
-
-    def in_transaction(self) -> bool:
-        return self.db.in_transaction()
-
-    def begin(self):
-        return self.db.begin()
-
-    def session_info(self) -> dict:
-        return self.db.info
-
-    def current_transaction(self):
-        return self.db.get_nested_transaction() or self.db.get_transaction()
 
     def delete(self, obj: ModelType) -> None:
         self.db.delete(obj)

@@ -22,6 +22,23 @@ class ExternalEvidence(BaseModel):
     quote_text: str = Field(min_length=1)
 
 
+class OcrPage(BaseModel):
+    """归一化 OCR 页面；空白页的 text 可以为空字符串。"""
+
+    model_config = ConfigDict(strict=True, extra="allow")
+
+    page_no: int
+    text: str
+
+
+class OcrContent(BaseModel):
+    """OCR 内容入口契约；页面损坏时拒绝读取，不跳过坏页。"""
+
+    model_config = ConfigDict(strict=True, extra="allow")
+
+    pages: list[OcrPage]
+
+
 class ExternalArtifact(BaseModel):
     """产物信封：状态、结构化内容与证据条目。供应商载荷不逐字保存。"""
 

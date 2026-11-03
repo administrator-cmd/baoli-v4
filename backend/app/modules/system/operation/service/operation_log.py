@@ -41,12 +41,14 @@ class OperationLogService:
         object_type: str,
         operation_type: str,
         idempotency_key: str,
+        lock: bool = False,
     ) -> OperationLog | None:
         """按对象、操作类型与幂等标识查找原操作记录；没有则返回 None。"""
         return crud.SystemOperationCRUD(self.db).idempotency_record(
             object_type=object_type,
             operation_type=operation_type,
             idempotency_key=idempotency_key,
+            lock=lock,
         )
 
 
@@ -55,6 +57,7 @@ class OperationLogService:
         operation_type: str,
         idempotency_key: str | None,
         request: dict[str, Any],
+        lock: bool = False,
     ) -> tuple[OperationLog | None, str]:
         """幂等命令的统一入口。
 
@@ -65,10 +68,10 @@ class OperationLogService:
         if not idempotency_key:
             return None, request_hash
         existing = self.find_by_idempotency(
-        
             object_type=object_type,
             operation_type=operation_type,
             idempotency_key=idempotency_key,
+            lock=lock,
         )
         if existing is None:
             return None, request_hash

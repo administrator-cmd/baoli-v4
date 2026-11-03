@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from sqlalchemy import text
 from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
 from sqlalchemy.engine import Dialect
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 
@@ -26,13 +26,6 @@ class UTCDateTime(TypeDecorator[datetime]):
         return value.replace(tzinfo=UTC)
 
 
-class ConfigurationShape(DeclarativeBase):
-    """编辑器 JSON 属性形状；不属于数据库 Base，不创建或读写明细表。
-
-    services.shared.configuration 只使用列名和默认值构造 JSON，实例不会加入 Session。
-    """
-
-
 class TimestampMixin:
     # 数据库会话时区固定 UTC（见 core/database.py），CURRENT_TIMESTAMP 因此写入 UTC；
     # 读取时统一按 UTC 解释，前端无需再猜时区。
@@ -45,4 +38,3 @@ class TimestampMixin:
         server_onupdate=text("CURRENT_TIMESTAMP(6)"),
         nullable=False,
     )
-

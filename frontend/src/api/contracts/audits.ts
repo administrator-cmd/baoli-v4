@@ -195,6 +195,9 @@ export interface AuditField {
     quote_label?: string | null;
     quote_header?: string | null;
     quote_period?: string | null;
+    quote_statement_scope?: string | null;
+    quote_entity_scope?: string | null;
+    quote_unit?: string | null;
     /** OCR 产物内页码；只表示产物位置，不冒充原 PDF 页码。 */
     artifact_page?: number | null;
     field_path?: string | null;

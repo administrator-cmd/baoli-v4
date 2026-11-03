@@ -209,12 +209,8 @@ class AuditRuleExecutionService:
         return output
 
 
-    def validate_outputs(self, rule, verdict):
-        outputs = verdict.get("outputs", [])
-        if not isinstance(outputs, list) or any(not isinstance(item, dict) or "code" not in item or "value" not in item for item in outputs):
-            raise BusinessError("RULE_OUTPUT_STRUCTURE_INVALID", "outputs必须为包含code和value的对象数组")
-        if any(not isinstance(item["code"], str) or not item["code"] for item in outputs):
-            raise BusinessError("RULE_OUTPUT_STRUCTURE_INVALID", "outputs的code必须为非空字符串")
+    def validate_outputs(self, rule: dict[str, Any], verdict: dict[str, Any]) -> None:
+        outputs = verdict["outputs"]
         definitions = {f["field_key"]: f for f in rule.get("output_definitions") or []}
         if rule.get("result_code"):
             definitions[rule["result_code"]] = rule["calculation_definition"]
@@ -240,15 +236,6 @@ class AuditRuleExecutionService:
                             "RULE_OUTPUT_RAW_VALUE_MISSING",
                             "字段已取到值，但没有返回原文写法（raw_value）",
                             details={"output": item["code"]},
-                        )
-                for key in ("recognized_period", "recognized_statement_scope",
-                            "recognized_entity_scope", "recognized_unit"):
-                    value = item.get(key)
-                    if value is not None and not isinstance(value, str):
-                        raise BusinessError(
-                            "RULE_OUTPUT_STRUCTURE_INVALID",
-                            "字段识别到的期间、口径、主体或单位必须是字符串或空值",
-                            details={"output": item["code"], "field": key},
                         )
             if not field_output and item["value"] is None and verdict["status"] in PRODUCED_RESULT_STATUSES:
                 raise BusinessError("RULE_OUTPUT_MISSING", "模型声明已执行，但实际输出值为空")
@@ -366,7 +353,7 @@ class AuditRuleExecutionService:
             report_keys = {r["rule_key"] for r in task.manifest_json["rules"] if r.get("kind") == "REPORT"}
             # 核对等待点已经交给人工核对的抽取规则，不再代表本轮输入：任务收尾与报告完整性
             # 按同一份清单排除，不能出现任务已完成、报告仍写未完成。
-            reviewed = reviewed_extraction_rule_keys(task, execution)
+            reviewed = reviewed_extraction_rule_keys(execution)
             # 报告只依赖非报告项；报告自己上一轮的结果不是本轮依据。
             dependency_results = {key: r for key, r in result_by_key.items() if key not in report_keys}
             unresolved = [{"rule_key": r.rule_key, "status": r.status, "message": r.message} for r in dependency_results.values() if r.status not in COMPLETED_RESULT_STATUSES and r.rule_key not in reviewed]

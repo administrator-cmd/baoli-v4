@@ -13,6 +13,7 @@ from typing import Any
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED
+from app.domain.field_review import reviewed_extraction_keys
 from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
 from app.domain.rule_library import active, dependency_indexes, execution_order, rule_dependencies
 from app.modules.audit.rule.model import RuleResult
@@ -208,21 +209,13 @@ def field_review_boundary(
     return ReviewBoundary(extraction=tuple(sorted(before)), after=tuple(after))
 
 
-def reviewed_extraction_rule_keys(task: AuditTask, execution: Any) -> set[str]:
-    """核对等待点已经交给人工核对的抽取段规则键。
-
-    优先读批次落库的清单；本改动之前停下的批次没有清单，按当前执行计划补算。
-    收尾判定、失败提示与报告完整性都按这一份排除，同一批次的结论口径保持一致。
-    """
-    result = getattr(execution, "result_json", None) if execution is not None else None
-    record = (result or {}).get("field_review") or {} if isinstance(result, dict) else {}
-    keys = {str(key) for key in record.get("extraction_rule_keys") or ()}
-    if keys or not record.get("closed_at"):
-        return keys
-    boundary = field_review_boundary(
-        evaluation_plan(task, task.current_node), all_rules=_task_manifest(task)["rules"],
+def reviewed_extraction_rule_keys(execution: Any) -> set[str]:
+    """只读取本批次已保存的核对清单，不按当前配置推算。"""
+    if execution is None:
+        return set()
+    return reviewed_extraction_keys(
+        execution.result_json or {}, waiting=execution.status == "WAITING_FIELD_REVIEW",
     )
-    return set(boundary.extraction)
 
 
 def assert_results_match_plan(plan: list[dict[str, Any]], saved: dict[str, RuleResult]) -> None:

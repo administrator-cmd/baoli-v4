@@ -30,14 +30,15 @@ class AuditTaskCommandRecordsService:
         request_hash: str,
         task_no: str,
     ) -> tuple[BackgroundOperation, bool]:
-        """Reserve the command before creating a task; the first checkpoint commit saves both."""
+        """创建任务前占用幂等键；命令与任务由请求层一并提交。"""
 
-        def existing_command() -> BackgroundOperation | None:
+        def existing_command(*, lock: bool = False) -> BackgroundOperation | None:
             return SystemOperationCRUD(self.db).background_by_operation_key(
                 object_type=object_type,
                 object_no=operation_type,
                 operation_type=operation_type,
                 idempotency_key=idempotency_key,
+                lock=lock,
             )
 
         def checked(command: BackgroundOperation) -> tuple[BackgroundOperation, bool]:
@@ -56,7 +57,7 @@ class AuditTaskCommandRecordsService:
         command = BackgroundOperation(
             operation_no=public_no("OP"),
             object_type=object_type,
-            # The operation_log key is global within a command type, not per plan/task.
+            # 幂等键按命令类型唯一，不按方案或任务隔离。
             object_no=operation_type,
             operation_type=operation_type,
             idempotency_key=idempotency_key,
@@ -67,10 +68,11 @@ class AuditTaskCommandRecordsService:
             result_json={"task_no": task_no},
         )
         try:
-            SystemOperationCRUD(self.db).add(command)
+            with self.db.begin_nested():
+                SystemOperationCRUD(self.db).add(command)
         except IntegrityError:
-            SystemOperationCRUD(self.db).rollback()
-            existing = existing_command()
+            # 唯一键冲突后读取最新提交记录，不沿用冲突前的快照。
+            existing = existing_command(lock=True)
             if existing is None:
                 raise
             return checked(existing)
@@ -80,13 +82,14 @@ class AuditTaskCommandRecordsService:
     def task_of_command(self, command: BackgroundOperation) -> AuditTask:
         detail = command.result_json if isinstance(command.result_json, dict) else {}
         task_no = detail.get("task_no")
-        task = AuditTaskCRUD(self.db).by_no(task_no) if task_no else None
+        task = AuditTaskCRUD(self.db).by_no(task_no, lock=True, values=True) if task_no else None
         if task is None:
             # 创建/复制命令保留幂等历史，重发旧命令不能重新创建已经被用户删除的任务。
             deletion = SystemOperationCRUD(self.db).deletion_log_id(
                 object_type=OBJECT_AUDIT_TASK,
                 object_no=task_no,
                 operation_type="DELETE",
+                lock=True,
             ) if task_no else None
             if deletion is not None:
                 raise BusinessError(
@@ -110,7 +113,7 @@ class AuditTaskCommandRecordsService:
         object_name: str,
         detail: dict[str, Any],
     ) -> bool:
-        """Complete the command and append its immutable audit log in one transaction."""
+        """完成命令并记录日志，不提前提交请求事务。"""
         locked = SystemOperationCRUD(self.db).lock_by_id(command.id)
         if locked is None:
             raise BusinessError("TASK_COMMAND_MISSING", "任务命令记录不存在", status_code=500)
@@ -119,7 +122,7 @@ class AuditTaskCommandRecordsService:
         if locked.status != "PENDING":
             raise BusinessError("TASK_COMMAND_FAILED", "任务等待点初始化失败，不能返回创建成功", status_code=409)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=locked.object_type,
             object_no=object_no,
             object_name=object_name,
@@ -131,7 +134,7 @@ class AuditTaskCommandRecordsService:
         locked.status = "SUCCEEDED"
         locked.phase = "INTERRUPT_WAITING"
         locked.finished_at = datetime.now(UTC)
-        SystemOperationCRUD(self.db).commit()
+        SystemOperationCRUD(self.db).flush()
         return False
 
 
@@ -148,7 +151,7 @@ class AuditTaskCommandRecordsService:
         if locked.phase == "FAILURE_LOGGED":
             return
         OperationLogService(self.db).record_operation(
-            
+
             object_type=locked.object_type,
             object_no=object_no,
             object_name=object_name,
@@ -161,4 +164,4 @@ class AuditTaskCommandRecordsService:
             failure_message=locked.failure_message,
         )
         locked.phase = "FAILURE_LOGGED"
-        SystemOperationCRUD(self.db).commit()
+        SystemOperationCRUD(self.db).flush()

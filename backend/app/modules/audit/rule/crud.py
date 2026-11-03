@@ -118,7 +118,7 @@ class AuditRuleCRUD(CRUDBase):
     def by_ids(self, result_ids: list[int]) -> list[RuleResult]:
         if not result_ids:
             return []
-        return list(self.db.scalars(select(RuleResult).where(RuleResult.id.in_(result_ids))).all())
+        return list(self.db.scalars(select(RuleResult).where(RuleResult.id.in_(result_ids)).execution_options(populate_existing=True)).all())
 
     def results_for_task(self, task_id: int, execution_ids, rule_keys=None) -> list[RuleResult]:
         query = select(RuleResult).where(

@@ -74,59 +74,55 @@ class ImportsJobDraftService:
         if not job.proposals_json:
             raise BusinessError("PROPOSALS_MISSING", "规则尚未转换", status_code=409)
         proposals = ImportsJobLookupService()._saved_proposals(job)
-        try:
-            draft = ScenarioDraftCRUD(self.db).by_code(template.scenario_code)
-            actual_revision = draft.revision_no if draft is not None else None
-            if actual_revision != expected_scene_revision:
-                raise BusinessError(
-                    "SCENARIO_DRAFT_REVISION_CONFLICT", "场景草稿在本次确认期间已修改，请重新核对后再写入",
-                    status_code=409,
-                    details={"scenario_code": template.scenario_code, "expected": expected_scene_revision, "actual": actual_revision},
-                )
-            draft = ScenarioDraftService(self.db).ensure_draft( template)
-            if (
-                draft.schema_json != job_schema
-                or draft.schema_key != job.schema_key
-                or draft.schema_version != job.schema_version
-            ):
-                raise BusinessError(
-                    "IMPORT_DRAFT_SCHEMA_MISMATCH",
-                    "场景草稿的导入协议与当前作业不一致，请重新导入规则库",
-                    status_code=409,
-                    details={"job_no": job.job_no, "scenario_code": job.scenario_code},
-                )
-            config = draft_config_of_import(
-                proposals=proposals,
-                namespace=template.scenario_code,
+        draft = ScenarioDraftCRUD(self.db).by_code(template.scenario_code)
+        actual_revision = draft.revision_no if draft is not None else None
+        if actual_revision != expected_scene_revision:
+            raise BusinessError(
+                "SCENARIO_DRAFT_REVISION_CONFLICT", "场景草稿在本次确认期间已修改，请重新核对后再写入",
+                status_code=409,
+                details={"scenario_code": template.scenario_code, "expected": expected_scene_revision, "actual": actual_revision},
             )
-            ScenarioDraftService(self.db).load_import_config_into_draft( draft, config, profile_version=job.profile_version)
-            draft.config_json = {**draft.config_json, "import_proposals": job.proposals_json,
-                                 "import_job_no": job.job_no}
-            draft.source = "EXCEL"
-            latest = ScenarioTemplateLookupService(self.db).find_latest_published_version( template.scenario_code)
-            if latest is not None and draft.base_version_no is None:
-                draft.base_version_no = latest.version_no
-            ScenarioDraftService()._bump_draft(draft)
-            job.status = "APPLIED"
-            OperationLogService(self.db).record_operation(
-                
-                object_type=OBJECT_IMPORT_JOB,
-                object_no=job.job_no,
-                object_name=job.source_filename,
-                operation_type="APPLY_DRAFT",
-                detail={"job_no": job.job_no, "scenario_code": template.scenario_code},
+        draft = ScenarioDraftService(self.db).ensure_draft( template)
+        if (
+            draft.schema_json != job_schema
+            or draft.schema_key != job.schema_key
+            or draft.schema_version != job.schema_version
+        ):
+            raise BusinessError(
+                "IMPORT_DRAFT_SCHEMA_MISMATCH",
+                "场景草稿的导入协议与当前作业不一致，请重新导入规则库",
+                status_code=409,
+                details={"job_no": job.job_no, "scenario_code": job.scenario_code},
             )
-            OperationLogService(self.db).record_operation(
-                
-                object_type=OBJECT_SCENARIO,
-                object_no=template.scenario_code,
-                object_name=template.scenario_name,
-                operation_type="IMPORT_APPLY",
-                detail={"job_no": job.job_no, "scenario_code": template.scenario_code},
-            )
-            ScenarioDraftService(self.db)._commit_config_change( template, draft)
-        except Exception:
-            crud.ImportsJobCRUD(self.db).rollback()
-            raise
+        config = draft_config_of_import(
+            proposals=proposals,
+            namespace=template.scenario_code,
+        )
+        ScenarioDraftService(self.db).load_import_config_into_draft( draft, config, profile_version=job.profile_version)
+        draft.config_json = {**draft.config_json, "import_proposals": job.proposals_json,
+                             "import_job_no": job.job_no}
+        draft.source = "EXCEL"
+        latest = ScenarioTemplateLookupService(self.db).find_latest_published_version( template.scenario_code)
+        if latest is not None and draft.base_version_no is None:
+            draft.base_version_no = latest.version_no
+        ScenarioDraftService()._bump_draft(draft)
+        job.status = "APPLIED"
+        OperationLogService(self.db).record_operation(
+
+            object_type=OBJECT_IMPORT_JOB,
+            object_no=job.job_no,
+            object_name=job.source_filename,
+            operation_type="APPLY_DRAFT",
+            detail={"job_no": job.job_no, "scenario_code": template.scenario_code},
+        )
+        OperationLogService(self.db).record_operation(
+
+            object_type=OBJECT_SCENARIO,
+            object_no=template.scenario_code,
+            object_name=template.scenario_name,
+            operation_type="IMPORT_APPLY",
+            detail={"job_no": job.job_no, "scenario_code": template.scenario_code},
+        )
+        ScenarioDraftService(self.db)._clear_sync_error( template, draft)
         crud.ImportsJobCRUD(self.db).refresh(job)
         return job

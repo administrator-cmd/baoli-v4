@@ -180,7 +180,7 @@ class ScenarioDraftService:
     ) -> ScenarioDraft:
         """记录配置修改并保存草稿；不自动生成场景版本。"""
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_SCENARIO,
             object_no=template.scenario_code,
             object_name=object_name,
@@ -189,11 +189,11 @@ class ScenarioDraftService:
         )
         self._bump_draft(draft)
         ScenarioDraftCRUD(self.db).flush()
-        self._commit_config_change( template, draft)
+        self._clear_sync_error( template, draft)
         return draft
 
 
-    def _commit_config_change(self, template: ScenarioTemplate, draft: ScenarioDraft) -> None:
-        """提交草稿；完整编译只在展示派生项或实际发布时执行。"""
+    def _clear_sync_error(self, template: ScenarioTemplate, draft: ScenarioDraft) -> None:
+        """清除草稿编译诊断；完整编译在展示派生项或发布时执行。"""
         draft.sync_error = None
-        ScenarioDraftCRUD(self.db).commit()
+        ScenarioDraftCRUD(self.db).flush()

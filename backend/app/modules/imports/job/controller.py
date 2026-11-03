@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.common.response import ResponseSchema, ok
 from app.core.base_schema import PagedResponse
-from app.core.database import SessionLocal, get_db
+from app.core.database import get_db, request_session
 from app.modules.imports.job.dto import (
     ApplyImportDraftRequest,
     ImportConversionRequest,
@@ -67,7 +67,7 @@ def list_jobs_page(
 ) -> ResponseSchema[PagedResponse]:
     """导入作业分页列表：可限定所属场景，total 与列表使用同一筛选范围。"""
     result = imports_query.ImportsJobQueryService(db).list_import_jobs_page(
-        
+
         scenario_code=search.scenario_code,
         filename=search.filename,
         status=search.status,
@@ -109,7 +109,7 @@ def create_job(
     场景不由 Excel 表头推断。此时还没有规则配置，解析时使用全部非空工作表。
     """
     # 同步路由由 FastAPI 放入工作线程，Session 与文件解析在同一线程内完成。
-    with SessionLocal() as db:
+    with request_session() as db:
         job = ImportsJobUploadService(db).create_import_job( file, scenario_code=scenario_code)
         return ok(ImportJobResponse.model_validate(ImportsJobQueryService(db).import_job_view( job)), request)
 
@@ -163,7 +163,7 @@ def retry_job(
     """
     job = imports_lookup.ImportsJobLookupService(db)._job_or_404( job_no, lock=True)
     operation, reused = ImportsJobOperationsService(db).submit_conversion(
-        
+
         job,
         idempotency_key=payload.idempotency_key if payload else None,
         mode=payload.mode if payload else "FULL",

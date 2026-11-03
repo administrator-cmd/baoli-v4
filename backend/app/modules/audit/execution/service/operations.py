@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import TASK_STATUS_COMPLETED, TASK_STATUS_WAITING_FIELD_REVIEW
+from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.dto import ExecuteNodeRequest
 from app.modules.audit.field.dto import FieldReviewConfirmRequest
@@ -323,33 +324,7 @@ class AuditExecutionOperationsService:
         request = {"task_no": task.task_no, "upload_id": upload.id, "input_revision": task.input_revision}
 
         def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
-            from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
-            from app.modules.audit.artifact.service.document_ports import document_service
-            from app.modules.material.document.crud import MaterialDocumentCRUD
-            from app.modules.material.document.model import DocumentUpload, TaskDocument
-            from app.services.shared.storage import resolve_storage_path
-
-            content = command.request
-            current = AuditTaskCRUD(session).by_no(content["task_no"])
-            record = MaterialDocumentCRUD(session).get_of(DocumentUpload, content["upload_id"])
-            document = (
-                MaterialDocumentCRUD(session).get_of(TaskDocument, record.task_document_id)
-                if record is not None else None
-            )
-            if current is None or record is None or document is None or record.audit_task_id != current.id:
-                raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "上传分类命令对应的任务文件不存在", status_code=404)
-            if not record.is_current or current.input_revision != content["input_revision"]:
-                raise BusinessError("DOCUMENT_CLASSIFICATION_INPUT_STALE", "分类命令对应的文件版本已失效", status_code=409)
-            artifact = AuditArtifactArtifactsService(session)._ensure_external_artifact(
-                 current, record, "MATERIAL_CLASSIFY",
-                lambda: document_service().validate_material_type(
-                    file_path=resolve_storage_path(record.relative_path), filename=record.original_filename,
-                    content_type=record.content_type, material_type=record.declared_material_type,
-                ),
-            )
-            session.commit()
-            command.phase(background_service.PHASE_RESULT_READY)
-            return {"task_no": current.task_no, "document_no": document.document_no, "artifact_no": artifact.artifact_no}
+            return ArtifactExecution(session).classify_upload(command)
 
         return background_service.OperationBackgroundService(self.db).submit_operation(object_type=OBJECT_AUDIT_TASK, object_no=task.task_no,
             operation_type="DOCUMENT_CLASSIFY", idempotency_key=upload.upload_no,

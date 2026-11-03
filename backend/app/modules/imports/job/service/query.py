@@ -43,7 +43,7 @@ class ImportsJobQueryService:
         # 场景名一次查出，逐行查会让列表页变成 N+1 次查询。
         scenario_names = crud.ImportsJobCRUD(self.db).scenario_names( sorted({row.scenario_code for row in rows if row.scenario_code})
         )
-        # 转换期间的作业状态不会变（retry_conversion 全程持有作业行锁、结束时才提交），
+        # 模型请求期间不持有作业行锁；转换状态以后台命令记录为准，
         # 所以「有没有未结束的后台操作」只能问 background_operation，不能靠作业状态猜。
         active_operation_counts = crud.ImportsJobCRUD(self.db).active_operation_counts( [row.job_no for row in rows])
         published_versions = crud.ImportsJobCRUD(self.db).published_versions( [row.id for row in rows])

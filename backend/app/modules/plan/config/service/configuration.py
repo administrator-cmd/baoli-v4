@@ -1,6 +1,7 @@
 """方案定制配置的校验与保存。"""
 
 from copy import deepcopy
+from dataclasses import fields as config_fields
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -151,7 +152,7 @@ class PlanConfigConfigurationService:
         extensions = {}
         for rows, model, identity in zip(previous, (PlanMaterial, PlanField, PlanRule, PlanSection),
                                          ("material_key", "field_key", "rule_key", "section_key"), strict=True):
-            columns = {column.key for column in model.__table__.columns}
+            columns = {item.name for item in config_fields(model)}
             extensions[model.__name__] = {getattr(row, identity): deepcopy({key: value for key, value in row.data.items() if key not in columns}) for row in rows}
         for items, model, identity in ((materials, PlanMaterial, "material_key"), (fields, PlanField, "field_key"),
                                         (sections, PlanSection, "section_key")):
@@ -292,7 +293,7 @@ class PlanConfigConfigurationService:
         # 配置改完立刻重算：范围与「能不能用」在同一次提交里确定。
         PlanCompilationService(self.db)._recompile_plan( plan)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_PLAN,
             object_no=plan_code,
             object_name=plan.plan_name,
@@ -308,7 +309,7 @@ class PlanConfigConfigurationService:
                 "effective": plan.sync_error is None,
             },
         )
-        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).flush()
         PlanCRUD(self.db).refresh(plan)
         return PlanConfigViewsService(self.db).plan_config_view( plan)
 

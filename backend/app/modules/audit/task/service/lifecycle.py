@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.core.transactions import after_commit, before_rollback
 from app.modules.audit.field.service.value_files import AuditFieldValueFilesService
 from app.modules.audit.task import crud
 from app.modules.audit.task.model import AuditTask
@@ -18,7 +19,6 @@ from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TA
 from app.services.shared.storage import resolve_storage_path
 
 logger = logging.getLogger(__name__)
-
 
 
 class AuditTaskLifecycleService:
@@ -45,14 +45,14 @@ class AuditTaskLifecycleService:
             remark = payload.get("remark")
             task.remark = (str(remark).strip() or None) if remark is not None else None
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_AUDIT_TASK,
             object_no=task.task_no,
             object_name=task.task_name,
             operation_type="UPDATE",
             detail={"task_no": task.task_no},
         )
-        crud.AuditTaskCRUD(self.db).commit()
+        crud.AuditTaskCRUD(self.db).flush()
         crud.AuditTaskCRUD(self.db).refresh(task)
         return task
 
@@ -76,44 +76,31 @@ class AuditTaskLifecycleService:
         if task_directory.parent != task_root:
             raise BusinessError("STORAGE_PATH_INVALID", "任务文件目录不安全", status_code=500)
         staged_directories: list[tuple[Path, Path]] = []
-        try:
-            for source, prefix in ((task_directory, f"tasks/.deleting-{task.task_no}-{uuid4().hex}"),):
-                if source.exists():
-                    staged = resolve_storage_path(prefix)
-                    source.rename(staged)
-                    staged_directories.append((source, staged))
 
-            crud.AuditTaskCRUD(self.db).delete_task_data(task.id, task.task_no)
-            # 创建/复制命令按命令类型占位，不属于任务执行记录；保留它们用于旧请求幂等识别。
-            OperationLogService(self.db).record_operation(
-                
-                object_type=OBJECT_AUDIT_TASK,
-                object_no=task.task_no,
-                object_name=task.task_name,
-                operation_type="DELETE",
-                permanent=True,
-                detail={"task_no": task.task_no},
-            )
-            crud.AuditTaskCRUD(self.db).delete(task)
-            crud.AuditTaskCRUD(self.db).commit()
-        except Exception:
-            # 先恢复目录再回滚事务：回滚会释放任务文件锁，若此时目录仍在 .deleting-*，
-            # 并发读取会看到已恢复的任务行却没有文件。
-            try:
-                for original, staged in reversed(staged_directories):
-                    staged.rename(original)
-            finally:
-                crud.AuditTaskCRUD(self.db).rollback()
-            raise
+        def restore_files() -> None:
+            for original, staged in reversed(staged_directories):
+                staged.rename(original)
 
-        for _original, staged in staged_directories:
-            try:
-                shutil.rmtree(staged)
-            except OSError as exc:
-                logger.exception("任务数据已删除，但文件清理失败 task_no=%s path=%s", task_no, staged)
-                raise BusinessError(
-                    "TASK_FILE_CLEANUP_FAILED",
-                    "任务数据已永久删除，但文件清理失败，请根据剩余目录排查",
-                    status_code=500,
-                    details={"task_no": task_no, "task_deleted": True, "remaining_directory": str(staged)},
-                ) from exc
+        def discard_files() -> None:
+            for _original, staged in staged_directories:
+                try:
+                    shutil.rmtree(staged)
+                except OSError as exc:
+                    raise BusinessError(
+                        "TASK_FILE_CLEANUP_FAILED", "任务数据已永久删除，但文件清理失败",
+                        status_code=500, details={"task_no": task_no, "task_deleted": True,
+                                                  "remaining_directory": str(staged)},
+                    ) from exc
+
+        before_rollback(self.db, restore_files)
+        after_commit(self.db, discard_files)
+        if task_directory.exists():
+            staged = resolve_storage_path(f"tasks/.deleting-{task.task_no}-{uuid4().hex}")
+            task_directory.rename(staged)
+            staged_directories.append((task_directory, staged))
+        crud.AuditTaskCRUD(self.db).delete_task_data(task.id, task.task_no)
+        OperationLogService(self.db).record_operation(
+            object_type=OBJECT_AUDIT_TASK, object_no=task.task_no, object_name=task.task_name,
+            operation_type="DELETE", permanent=True, detail={"task_no": task.task_no},
+        )
+        crud.AuditTaskCRUD(self.db).delete(task)

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from app.common.exceptions import BusinessError
 from app.core.database import SessionLocal
+from app.core.transactions import commit_transaction
 from app.modules.system.operation.crud import SystemOperationCRUD
 from app.services.shared.storage import resolve_storage_path
 
@@ -28,4 +29,4 @@ def save_raw_response(operation_no: str, content: str, *, stage: str) -> None:
         # 文件先写完；数据库写入失败时，日志仍能定位已保存的原文，异常正常向外传播。
         logger.info("规则库模型原始返回已保存 operation_no=%s stage=%s path=%s", operation_no, stage, relative_path)
         operation.raw_response_path = relative_path
-        SystemOperationCRUD(session).commit()
+        commit_transaction(session)

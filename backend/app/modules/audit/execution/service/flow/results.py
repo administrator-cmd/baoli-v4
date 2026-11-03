@@ -5,12 +5,12 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from app.core.transactions import commit_transaction
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING, PRODUCED_RESULT_STATUSES
 from app.domain.rule_library import is_risk_rule
-from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
 from app.modules.audit.execution.service.flow.shared import agent_module, rule_of_instance
@@ -93,7 +93,6 @@ def graph_produce_candidate_verdict(
         try:
             if raw is None:
                 raise BusinessError("VERDICT_UNPARSEABLE", "模型没有返回可解析的最终结论 JSON 对象")
-            from app.modules.audit.rule.service.rule_execution import AuditRuleExecutionService
             verdict, status, extra = agent.validate_verdict(
                 raw,
                 rule=rule,
@@ -104,7 +103,6 @@ def graph_produce_candidate_verdict(
                 human_field_keys=set(instance.get("human_field_keys") or ()),
                 inputs=list(instance.get("inputs") or []),
             )
-            AuditRuleExecutionService().validate_outputs(rule, raw)
         except BusinessError as exc:
             # 原返回与接口错误交回同一条规则的模型上下文，不猜测状态或丢弃产出。
             # 下一次调用仍走既有模型/工具循环及其配置，不另设重试上限。
@@ -263,7 +261,7 @@ def graph_save_evaluation_result(
                 "pending_rerun_keys": sorted(pending_rerun_keys(execution) - {rules[0]["rule_key"]}),
             }
         outcome["status"] = saved_result.status
-        AuditExecutionCRUD(db).commit()
+        commit_transaction(db)
         return {
             "rule_outcome": outcome,
             "unresolved_items": [],

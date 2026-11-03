@@ -25,7 +25,6 @@ from app.modules.system.operation.service.operation_types import OBJECT_SCENARIO
 logger = logging.getLogger(__name__)
 
 
-
 class ScenarioTemplatePublishingService:
     """本实体的服务方法；db 由构造时注入。"""
 
@@ -172,7 +171,7 @@ class ScenarioTemplatePublishingService:
                 details={"scenario_code": scenario_code, "expected": int(expected_revision), "actual": draft.revision_no},
             )
         manifest = self.assess_publish(
-        
+
             template,
             draft,
         )
@@ -182,7 +181,7 @@ class ScenarioTemplatePublishingService:
         ScenarioDraftCRUD(self.db).delete(draft)
         if not reused:
             OperationLogService(self.db).record_operation(
-                
+
                 object_type=OBJECT_SCENARIO,
                 object_no=scenario_code,
                 object_name=template.scenario_name,
@@ -196,6 +195,6 @@ class ScenarioTemplatePublishingService:
                     "rule_count": len(manifest["rules"]),
                 },
             )
-        ScenarioTemplateCRUD(self.db).commit()
+        ScenarioTemplateCRUD(self.db).flush()
         ScenarioTemplateCRUD(self.db).refresh(version)
         return version, reused

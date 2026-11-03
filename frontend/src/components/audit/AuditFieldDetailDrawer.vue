@@ -87,7 +87,9 @@ function hasNormalizedValue(field: AuditFieldView): boolean {
 
 /** 原始值与标准化结果文本相同时只保留一个区块，避免重复展示。 */
 function showRawSection(field: AuditFieldView): boolean {
-  if (field.corrected || field.origin === "HUMAN_CORRECTION") return true;
+  if (field.corrected || field.origin === "HUMAN_CORRECTION") {
+    return !(hasNormalizedValue(field) && rawText(field) === normalizedText(field));
+  }
   if (mode.value !== "VALUE" && mode.value !== "UNNORMALIZED") return false;
   return !(mode.value === "VALUE" && hasNormalizedValue(field) && rawText(field) === normalizedText(field));
 }
@@ -167,6 +169,9 @@ function recognizedScopeText(field: AuditFieldView): string {
               :label="item.quote_label"
               :header="item.quote_header"
               :period="item.quote_period"
+              :statement-scope="item.quote_statement_scope"
+              :entity-scope="item.quote_entity_scope"
+              :unit="item.quote_unit"
               :page="item.artifact_page"
             />
           </div>

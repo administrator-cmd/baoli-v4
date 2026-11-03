@@ -30,32 +30,27 @@ class PlanLifecycleService:
         request = {name: value for name, value in payload.items() if name != "idempotency_key"}
         request["plan_name"] = str(request.get("plan_name") or "").strip()
         request["description"] = str(request.get("description") or "").strip() or None
-        replay, request_hash = OperationLogService(self.db).require_idempotent_replay(object_type=OBJECT_PLAN, operation_type="CREATE", idempotency_key=key, request=request,
+        replay, request_hash = OperationLogService(self.db).require_idempotent_replay(
+            object_type=OBJECT_PLAN, operation_type="CREATE", idempotency_key=key, request=request,
         )
         if replay is not None:
             return PlanLookupService(self.db).plan_or_404( replay.object_no, include_deleted=True)
         try:
-            return self._create_plan( request, idempotency_key=key, request_hash=request_hash)
+            with self.db.begin_nested():
+                return self._create_plan(request, idempotency_key=key, request_hash=request_hash)
         except IntegrityError:
-            # 冲突事务中的方案、配置、日志一起回滚；只回放已提交的同一请求。
-            PlanCRUD(self.db).rollback()
-            replay, _ = OperationLogService(self.db).require_idempotent_replay(object_type=OBJECT_PLAN, operation_type="CREATE", idempotency_key=key, request=request,
+            # 保存点保留外层事务；锁定读避免旧快照遗漏并发请求刚提交的结果。
+            replay, _ = OperationLogService(self.db).require_idempotent_replay(
+                object_type=OBJECT_PLAN, operation_type="CREATE", idempotency_key=key,
+                request=request, lock=True,
             )
             if replay is None:
                 raise
-            return PlanLookupService(self.db).plan_or_404( replay.object_no, include_deleted=True)
+            return PlanLookupService(self.db).plan_or_404(replay.object_no, include_deleted=True, lock=True)
 
 
     def _create_plan(self, payload: dict[str, Any], *, idempotency_key: str, request_hash: str) -> AuditPlan:
-        """创建方案：把钉住的那一版场景配置整份复制成方案自己的配置，并立即编译一次。
-
-        版本号与当前可用的最新已发布版本不一致时明确返回 `PLAN_VERSION_CHANGED`，
-        不静默改取「当前最新版本」。复制与编译在同一次提交里完成，不会先建一个空方案、
-        失败后留下没有配置的半成品。
-
-        过去返回的第二项是「指向不存在规则、已被移除的条目名」——方案现在持有自己的配置，
-        不存在「引用了不存在的规则」这条路，因此不再返回它。
-        """
+        """复制指定发布版本并编译；配置、范围和操作日志在同一请求事务中保存。"""
         name = str(payload.get("plan_name") or "").strip()
         if not name:
             raise BusinessError("PLAN_NAME_REQUIRED", "方案名称不能为空", status_code=400)
@@ -93,7 +88,7 @@ class PlanLifecycleService:
                 status_code=409,
             )
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_PLAN,
             object_no=plan.plan_code,
             object_name=name,
@@ -107,7 +102,7 @@ class PlanLifecycleService:
                 "effective": plan.sync_error is None,
             },
         )
-        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).flush()
         PlanCRUD(self.db).refresh(plan)
         return plan
 
@@ -126,14 +121,14 @@ class PlanLifecycleService:
         if "enabled" in payload and payload["enabled"] is not None:
             plan.enabled = bool(payload["enabled"])
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_PLAN,
             object_no=plan_code,
             object_name=plan.plan_name,
             operation_type="UPDATE",
             detail={"plan_code": plan_code},
         )
-        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).flush()
         PlanCRUD(self.db).refresh(plan)
         return plan
 
@@ -143,14 +138,14 @@ class PlanLifecycleService:
         plan = PlanLookupService(self.db).plan_or_404( plan_code, lock=True)
         plan.enabled = enabled
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_PLAN,
             object_no=plan_code,
             object_name=plan.plan_name,
             operation_type="ENABLE" if enabled else "DISABLE",
             detail={"plan_code": plan_code},
         )
-        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).flush()
         PlanCRUD(self.db).refresh(plan)
         return plan
 
@@ -162,14 +157,14 @@ class PlanLifecycleService:
             raise BusinessError("PLAN_ALREADY_DELETED", "该方案已在已删除列表中", status_code=409)
         plan.deleted_at = datetime.now(UTC)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_PLAN,
             object_no=plan_code,
             object_name=plan.plan_name,
             operation_type="DELETE",
             detail={"plan_code": plan_code},
         )
-        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).flush()
         PlanCRUD(self.db).refresh(plan)
         return plan
 
@@ -181,14 +176,14 @@ class PlanLifecycleService:
             raise BusinessError("PLAN_NOT_DELETED", "该方案未被删除，无需恢复", status_code=409)
         plan.deleted_at = None
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_PLAN,
             object_no=plan_code,
             object_name=plan.plan_name,
             operation_type="RESTORE",
             detail={"plan_code": plan_code},
         )
-        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).flush()
         PlanCRUD(self.db).refresh(plan)
         return plan
 

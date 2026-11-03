@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.status import TASK_STATUS_READY
 from app.core.config import get_settings
+from app.core.transactions import after_rollback
 from app.domain.identity import public_no
 from app.domain.rule_library import execution_container_of
 from app.integrations.documents.material_classify import list_material_types
@@ -24,14 +25,12 @@ from app.modules.audit.task.model import AuditTask
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
 from app.modules.material.document.crud import MaterialDocumentCRUD
 from app.modules.material.document.model import DocumentUpload, TaskDocument
-from app.modules.system.operation.crud import SystemOperationCRUD
 from app.modules.system.operation.model import BackgroundOperation
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TASK
 from app.services.shared.storage import DOCUMENT_EXTENSIONS, resolve_storage_path, save_upload_sync
 
 logger = logging.getLogger(__name__)
-
 
 
 class AuditTaskDocumentsService:
@@ -191,71 +190,46 @@ class AuditTaskDocumentsService:
             max_bytes=settings.max_document_bytes,
         )
         task_id = task.id
-        try:
-            MaterialDocumentCRUD(self.db).invalidate_current(document.id)
-            record = DocumentUpload(
-                upload_no=upload_no,
-                task_document_id=document.id,
-                audit_task_id=task.id,
-                original_filename=upload.filename or f"材料{suffix}",
-                relative_path=relative_path,
-                content_type=upload.content_type or "application/octet-stream",
-                declared_material_type=declared_material_type,
-                size_bytes=size,
-                sha256=sha256,
-                status="UPLOADED",
-                is_current=True,
-            )
-            MaterialDocumentCRUD(self.db).add(record)
-            # 首次上传且任务尚未越过起始节点时没有失效范围；其余情况给出真实影响范围供页面展示。
-            impact: dict[str, Any] | None = None
-            if input_changed:
-                # 补传/替换文件是明确的新版本输入：受影响的处理产物、字段事实、后续结果与报告一起失效。
-                impact = self._invalidate_for_input_change(
-                
-                    task,
-                    document,
-                    previous_upload_id,
-                    action_label="已替换" if previous_upload_id else "已补传此前缺失的",
-                )
-            document.status = "UPLOADED"
+        bind = self.db.get_bind()
 
-            # 文件保存、输入失效和分类命令一起提交；活跃命令占位消除提交后的替换/执行竞态。
-            from app.modules.audit.execution.service.operations import AuditExecutionOperationsService
-            try:
-                operation, _ = AuditExecutionOperationsService(self.db).submit_document_classification( task, record)
-            except BusinessError as exc:
-                if exc.code != "OPERATION_DISPATCH_FAILED":
-                    raise
-                # 调度失败时文件已提交：响应明确携带 FAILED 分类状态，不能把整个上传报成失败。
-                operation = SystemOperationCRUD(self.db).background_by_operation_key(
-                    object_type=OBJECT_AUDIT_TASK,
-                    object_no=task.task_no,
-                    operation_type="DOCUMENT_CLASSIFY",
-                    idempotency_key=record.upload_no,
-                )
-                if operation is None or operation.status != "FAILED":
-                    raise
-                logger.error("文件已保存但分类调度失败 upload_no=%s operation_no=%s", record.upload_no, operation.operation_no)
-            return document, record, impact, operation
-        except Exception:
-            self._remove_uncommitted_upload( task_id, upload_no, relative_path)
-            raise
-
-
-    def _remove_uncommitted_upload(self, task_id, upload_no, relative_path):
-        """确认事务未留下上传记录后，只删除本次落盘文件。"""
-        try:
-            AuditTaskCRUD(self.db).rollback()
-            with Session(bind=AuditTaskCRUD(self.db).bind()) as verification:
-                # 先等原任务写事务结束，再确认提交响应丢失时是否已经保存了上传记录。
+        def discard_unreferenced_upload() -> None:
+            with Session(bind=bind) as verification:
                 AuditTaskCRUD(verification).lock_row_id(task_id)
-                saved = MaterialDocumentCRUD(verification).upload_by_no(upload_no)
-                if saved is None:
+                if MaterialDocumentCRUD(verification).upload_by_no(upload_no) is None:
                     resolve_storage_path(relative_path).unlink(missing_ok=True)
-        except Exception:
-            # 数据库不可达时不能确认文件未被引用；保留文件并记录清理错误，原上传错误继续抛出。
-            logger.exception("无法确认上传文件的事务引用或清理文件，已保留以便核查 upload_no=%s path=%s", upload_no, relative_path)
+
+        after_rollback(self.db, discard_unreferenced_upload)
+        MaterialDocumentCRUD(self.db).invalidate_current(document.id)
+        record = DocumentUpload(
+            upload_no=upload_no,
+            task_document_id=document.id,
+            audit_task_id=task.id,
+            original_filename=upload.filename or f"材料{suffix}",
+            relative_path=relative_path,
+            content_type=upload.content_type or "application/octet-stream",
+            declared_material_type=declared_material_type,
+            size_bytes=size,
+            sha256=sha256,
+            status="UPLOADED",
+            is_current=True,
+        )
+        MaterialDocumentCRUD(self.db).add(record)
+        # 首次上传且任务尚未越过起始节点时没有失效范围；其余情况给出真实影响范围供页面展示。
+        impact: dict[str, Any] | None = None
+        if input_changed:
+            # 补传/替换文件是明确的新版本输入：受影响的处理产物、字段事实、后续结果与报告一起失效。
+            impact = self._invalidate_for_input_change(
+
+                task,
+                document,
+                previous_upload_id,
+                action_label="已替换" if previous_upload_id else "已补传此前缺失的",
+            )
+        document.status = "UPLOADED"
+        # 文件保存、输入失效和分类命令一起提交；活跃命令占位消除提交后的替换/执行竞态。
+        from app.modules.audit.execution.service.operations import AuditExecutionOperationsService
+        operation, _ = AuditExecutionOperationsService(self.db).submit_document_classification(task, record)
+        return document, record, impact, operation
 
 
     def remove_current_document_file(self, task_no: str,
@@ -283,12 +257,12 @@ class AuditTaskDocumentsService:
         MaterialDocumentCRUD(self.db).invalidate_upload(previous_upload_id)
         document.status = "WAITING_UPLOAD"
         impact = self._invalidate_for_input_change(
-        
+
             task,
             document,
             previous_upload_id,
             action_label="已移除",
         )
-        AuditTaskCRUD(self.db).commit()
+        AuditTaskCRUD(self.db).flush()
         AuditTaskCRUD(self.db).refresh(document)
         return document, impact

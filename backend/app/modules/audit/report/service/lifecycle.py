@@ -26,14 +26,14 @@ class AuditReportLifecycleService:
         report.remark = (str(remark).strip() or None) if remark is not None else None
         task = AuditTaskCRUD(self.db).get_of(AuditTask, report.audit_task_id)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_REPORT,
             object_no=report.report_no,
             object_name=report.report_name,
             operation_type="REPORT_REMARK",
             detail={"report_no": report.report_no, "task_no": task.task_no if task else None},
         )
-        AuditReportCRUD(self.db).commit()
+        AuditReportCRUD(self.db).flush()
         AuditReportCRUD(self.db).refresh(report)
         return report
 
@@ -48,13 +48,13 @@ class AuditReportLifecycleService:
         report.archived_at = datetime.now(UTC) if archived else None
         task = AuditTaskCRUD(self.db).get_of(AuditTask, report.audit_task_id)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_REPORT,
             object_no=report.report_no,
             object_name=report.report_name,
             operation_type="REPORT_ARCHIVE" if archived else "REPORT_UNARCHIVE",
             detail={"report_no": report.report_no, "task_no": task.task_no if task else None},
         )
-        AuditReportCRUD(self.db).commit()
+        AuditReportCRUD(self.db).flush()
         AuditReportCRUD(self.db).refresh(report)
         return report

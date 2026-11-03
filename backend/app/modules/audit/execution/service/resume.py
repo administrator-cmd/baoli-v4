@@ -22,6 +22,7 @@ from app.constants.status import (
     TASK_STATUS_RUNNING,
     TASK_STATUS_WAITING_FIELD_REVIEW,
 )
+from app.core.transactions import commit_transaction
 from app.graphs.audit_graph import collect_agent_summary
 from app.graphs.audit_rule_runner import extraction_group, run_rule_evaluation
 from app.modules.audit.execution.crud import AuditExecutionCRUD
@@ -45,6 +46,7 @@ from app.modules.audit.execution.service.flow.plan import (
     assert_results_match_plan,
     evaluation_plan,
     field_review_boundary,
+    reviewed_extraction_rule_keys,
     rerun_split,
 )
 from app.modules.audit.execution.service.flow.runner import audit_runner
@@ -105,7 +107,6 @@ class ResumePlan:
             "dependent": len(self.affected),
             "waiting_review": len(self.deferred),
         }
-
 
 
 class AuditExecutionResumeService:
@@ -200,7 +201,13 @@ class AuditExecutionResumeService:
         任务详情、受理校验与真实续跑都从这里取，避免各自判断「现在该不该再核对一次」。
         """
         entries = evaluation_plan(task, task.current_node) if plan is None else plan
-        boundary = field_review_boundary(entries, all_rules=_task_manifest(task)["rules"])
+        if AuditFieldReviewService().extraction_closed(execution):
+            extraction = reviewed_extraction_rule_keys(execution)
+            boundary = ReviewBoundary(tuple(sorted(extraction)), tuple(
+                entry["rule_key"] for entry in entries if entry["rule_key"] not in extraction
+            ))
+        else:
+            boundary = field_review_boundary(entries, all_rules=_task_manifest(task)["rules"])
         confirmed = AuditFieldReviewService(self.db).confirmation_is_current( task, execution, pairs)
         allowed = boundary.phase_keys(
             confirmed=confirmed, extraction_closed=AuditFieldReviewService().extraction_closed(execution),
@@ -241,7 +248,7 @@ class AuditExecutionResumeService:
                 deferred_keys=set(boundary.after),
             )
         except BusinessError as exc:
-            if exc.code not in {"AUDIT_RESUME_PLAN_MISMATCH", "AUDIT_FIELD_REVIEW_DEPENDENCY_CONFLICT"}:
+            if exc.code not in {"AUDIT_RESUME_PLAN_MISMATCH", "AUDIT_FIELD_REVIEW_DEPENDENCY_CONFLICT", "AUDIT_EXTRACTION_RULE_LIST_MISSING"}:
                 raise
             # 清单与计划对不上时不能猜一个范围，明确拒绝并交给「全部重新执行」；
             # 抽取依赖了核对后的业务规则时，二者都不是自动能修的，原样说明原因。
@@ -301,7 +308,7 @@ class AuditExecutionResumeService:
 
     def _save_pending_rerun_keys(self, execution: NodeExecution, keys: set[str]) -> None:
         execution.result_json = {**(execution.result_json or {}), "pending_rerun_keys": sorted(keys)}
-        AuditExecutionCRUD(self.db).commit()
+        commit_transaction(self.db)
 
 
     def resume_interrupted_execution(self, task_no: str, *, execution_id: int) -> dict[str, Any]:
@@ -355,7 +362,7 @@ class AuditExecutionResumeService:
             execution.failure_code = None
             execution.failure_message = None
         task.status = TASK_STATUS_RUNNING
-        AuditExecutionCRUD(self.db).commit()
+        commit_transaction(self.db)
 
         try:
             if advance_only:

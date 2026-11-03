@@ -1,6 +1,7 @@
 """场景与方案的 JSON 配置读写；编辑器使用属性视图，不再读写业务明细表。"""
 
 from copy import deepcopy
+from dataclasses import asdict, fields
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -10,18 +11,6 @@ from app.common.exceptions import BusinessError
 from app.core.base_crud import SessionCRUD
 from app.modules.plan.plan.model import AuditPlan
 from app.modules.scenario.draft.model import ScenarioDraft
-
-SECTIONS = {
-    "ScenarioDraftNode": "nodes",
-    "ScenarioDraftMaterial": "materials",
-    "ScenarioDraftField": "fields",
-    "ScenarioDraftRule": "rules",
-    "ScenarioDraftSection": "sections",
-    "PlanMaterial": "materials",
-    "PlanField": "fields",
-    "PlanRule": "rules",
-    "PlanSection": "sections",
-}
 
 
 class ConfigItem:
@@ -46,7 +35,7 @@ class ConfigItem:
 
 
 def _owner(db: Session, model: type, owner_id: int) -> Any:
-    owner_type = ScenarioDraft if model.__name__.startswith("ScenarioDraft") else AuditPlan
+    owner_type = ScenarioDraft if model.owner_key == "draft_id" else AuditPlan
     owner = SessionCRUD(db).get_of(owner_type, owner_id)
     if owner is None:
         raise BusinessError("CONFIG_OWNER_MISSING", "配置所属的场景草稿或方案不存在", status_code=404)
@@ -57,7 +46,7 @@ def _owner(db: Session, model: type, owner_id: int) -> Any:
 
 def rows(db: Session, model: type, owner_id: int) -> list[ConfigItem]:
     owner = _owner(db, model, owner_id)
-    section = SECTIONS[model.__name__]
+    section = model.section
     items = [ConfigItem(owner, section, item) for item in owner.config_json[section]]
     order_key = "sequence_no" if section == "nodes" else "sort_no"
     return sorted(items, key=lambda item: (getattr(item, order_key), item.id))
@@ -66,20 +55,10 @@ def rows(db: Session, model: type, owner_id: int) -> list[ConfigItem]:
 def add(db: Session, item: Any) -> ConfigItem:
     """将编辑器配置对象写进 JSON；属性形状不属于数据库元数据或会话。"""
     model = type(item)
-    owner_key = "draft_id" if model.__name__.startswith("ScenarioDraft") else "plan_id"
+    owner_key = model.owner_key
     owner = _owner(db, model, getattr(item, owner_key))
-    section = SECTIONS[model.__name__]
-    data: dict[str, Any] = {}
-    for column in model.__table__.columns:
-        key = column.key
-        if key in {"created_at", "updated_at"}:
-            continue
-        value = getattr(item, key)
-        if value is None and column.default is not None and column.default.is_scalar:
-            value = deepcopy(column.default.arg)
-        if value is None and column.default is not None and column.default.is_callable:
-            value = column.default.arg(None)
-        data[key] = deepcopy(value)
+    section = model.section
+    data = asdict(item)
     data["id"] = max((entry["id"] for entry in owner.config_json[section]), default=0) + 1
     owner.config_json[section].append(data)
     flag_modified(owner, "config_json")
@@ -97,8 +76,8 @@ def next_sort_no(db: Session, model: type, owner_id: int) -> int:
 
 def add_mapping(db: Session, model: type, owner_id: int, payload: dict[str, Any], sort_no: int) -> ConfigItem:
     """编辑器协议提供已知属性形状，其余场景 JSON 元数据原样保留。"""
-    owner_key = "draft_id" if model.__name__.startswith("ScenarioDraft") else "plan_id"
-    columns = {column.key for column in model.__table__.columns}
+    owner_key = model.owner_key
+    columns = {item.name for item in fields(model)}
     item = model(**{key: value for key, value in payload.items() if key in columns and key not in {"id", owner_key, "sort_no"}},
                  **{owner_key: owner_id, "sort_no": sort_no})
     row = add(db, item)

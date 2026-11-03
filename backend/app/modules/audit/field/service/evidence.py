@@ -68,7 +68,7 @@ class AuditFieldEvidenceService:
         if not isinstance(item, dict):
             raise self._evidence_error("原文依据必须是对象")
         allowed = {"document_upload_id", "artifact_id", "quote_text", "quote_label", "quote_header",
-                   "quote_period", "artifact_page", "field_path",
+                   "quote_period", "quote_statement_scope", "quote_entity_scope", "quote_unit", "artifact_page", "field_path",
                    "source_field_value_id", "source_rule_result_id"}
         if set(item) - allowed:
             raise self._evidence_error("原文依据包含未声明字段", fields=sorted(set(item) - allowed))
@@ -89,7 +89,7 @@ class AuditFieldEvidenceService:
         if not isinstance(quote, str):
             raise self._evidence_error("quote_text 必须是字符串")
         result = {"document_upload_id": upload_id, "artifact_id": artifact_id, "quote_text": quote}
-        for key in ("quote_label", "quote_header", "quote_period"):
+        for key in ("quote_label", "quote_header", "quote_period", "quote_statement_scope", "quote_entity_scope", "quote_unit"):
             if key in item:
                 value = item[key]
                 if value is not None and not isinstance(value, str):
@@ -290,7 +290,7 @@ class AuditFieldEvidenceService:
                 raise BusinessError("RULE_EVIDENCE_ARTIFACT_INVALID", "引用的产物不属于当前任务的成功产物", status_code=500)
             item = {"document_upload_id": artifact.document_upload_id, "artifact_id": artifact.id,
                     "quote_text": reference.get("quote_text") or ""}
-            for key in ("quote_label", "quote_header", "quote_period", "artifact_page"):
+            for key in ("quote_label", "quote_header", "quote_period", "quote_statement_scope", "quote_entity_scope", "quote_unit", "artifact_page"):
                 if reference.get(key) is not None:
                     item[key] = reference[key]
             code = reference.get("output_code")

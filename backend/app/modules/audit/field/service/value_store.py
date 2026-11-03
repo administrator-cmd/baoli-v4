@@ -57,23 +57,10 @@ _ENTITIES = {RECORD_TASK_FIELD_VALUE: TaskFieldValue, RECORD_TASK_FACT: TaskFact
 _CACHE_KEY = "task_value_records"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 _MAIN_RECORD_TYPES = {
     "values.csv": {RECORD_TASK_FIELD_VALUE, RECORD_TASK_FACT},
     "rule_results.csv": {RECORD_RULE_RESULT},
 }
-
 
 
 class AuditFieldValueStoreService:
@@ -197,7 +184,7 @@ class AuditFieldValueStoreService:
         if len(identities) != len(set(identities)):
             raise ValueError("同一次取值写入包含重复记录身份")
         batches = self._batches(task)
-        cache = AuditFieldCRUD(self.db).session_info().setdefault(TABLE_CACHE, {})
+        cache = self.db.info.setdefault(TABLE_CACHE, {})
         cached = cache.get(task.id)
         if cached is not None and cached["metadata"] is task.value_file_json:
             # 同一事务内刚写过这批文件：内容由本进程写入并已落地，不再整表重读解析。
@@ -356,7 +343,7 @@ class AuditFieldValueStoreService:
 
     def values_of(self, task: AuditTask) -> dict[tuple[str, int], dict[str, Any]]:
         """缓存任务取值；固定 current 批次在清单变化后整体重读。"""
-        cached = AuditFieldCRUD(self.db).session_info().get(_CACHE_KEY, {}).get(task.id)
+        cached = self.db.info.get(_CACHE_KEY, {}).get(task.id)
         if cached is not None and cached["metadata"] is task.value_file_json:
             return cached["records"]
         with AuditFieldValueFilesService(self.db).read_task_files( task.task_no):
@@ -364,7 +351,7 @@ class AuditFieldValueStoreService:
 
 
     def _cached_values(self, task: AuditTask) -> dict[tuple[str, int], dict[str, Any]]:
-        cache = AuditFieldCRUD(self.db).session_info().setdefault(_CACHE_KEY, {})
+        cache = self.db.info.setdefault(_CACHE_KEY, {})
         cached = cache.get(task.id)
         metadata = task.value_file_json
         if cached is not None and cached["metadata"] is metadata:

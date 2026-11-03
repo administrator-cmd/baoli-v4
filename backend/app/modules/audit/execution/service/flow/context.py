@@ -11,7 +11,7 @@ from app.domain.execution_mode import EXECUTION_MODES, MODE_EXTRACT, MODE_UNKNOW
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
-from app.modules.audit.execution.service.flow.plan import enabled_rules, evaluation_plan, field_review_boundary
+from app.modules.audit.execution.service.flow.plan import ReviewBoundary, enabled_rules, evaluation_plan, field_review_boundary, reviewed_extraction_rule_keys
 from app.modules.audit.execution.service.flow.preload import (
     extraction_artifact_requests,
     preload_extraction_artifacts,
@@ -72,11 +72,11 @@ def _rule_instance_id(node_code: str, rule_identity: str, execution_id: int) -> 
 def graph_prepare_materials(db: Session, task_no: str, execution_id: int | None) -> dict[str, Any]:
     """程序完成全部材料前置处理，再进入规则与模型循环。"""
     with agent_step(db, task_no):
-        from app.modules.audit.artifact.service.preprocessing import AuditArtifactPreprocessingService
+        from app.modules.audit.artifact.preprocessing import ArtifactPreprocessingExecution
 
         task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
         execution = execution_in_progress(db, task, execution_id)
-        AuditArtifactPreprocessingService(db).prepare_task_materials( task, execution)
+        ArtifactPreprocessingExecution(db).prepare_task_materials( task, execution)
         return {"last_error": None}
 
 
@@ -97,9 +97,15 @@ def graph_load_evaluation(
         execution = execution_in_progress(db, task, execution_id)
         _assert_execution_modes(enabled_rules(task, manifest, node_code))
         plan = evaluation_plan(task, node_code)
-        boundary = field_review_boundary(plan, all_rules=manifest["rules"])
-        confirmed = AuditFieldReviewService(db).confirmation_is_current( task, execution)
         closed = AuditFieldReviewService().extraction_closed(execution)
+        if closed:
+            extraction = reviewed_extraction_rule_keys(execution)
+            boundary = ReviewBoundary(tuple(sorted(extraction)), tuple(
+                entry["rule_key"] for entry in plan if entry["rule_key"] not in extraction
+            ))
+        else:
+            boundary = field_review_boundary(plan, all_rules=manifest["rules"])
+        confirmed = AuditFieldReviewService(db).confirmation_is_current(task, execution)
         return {
             "agent_mode": True,
             "evaluation_plan": plan,

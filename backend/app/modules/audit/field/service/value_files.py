@@ -11,7 +11,6 @@ from uuid import uuid4
 from sqlalchemy import event
 from sqlalchemy.orm import Session
 
-from app.modules.audit.field.crud import AuditFieldCRUD
 from app.services.shared.file_lock import FileLock
 from app.services.shared.storage import resolve_storage_path
 
@@ -66,10 +65,9 @@ class AuditFieldValueFilesService:
 
     def lock_task_files(self, task_no: str) -> None:
         """在读取任务清单之前持锁，直到最外层事务结束（包括回滚恢复）。"""
-        crud = AuditFieldCRUD(self.db)
-        if not crud.in_transaction():
-            crud.begin()
-        locks = crud.session_info().setdefault(_LOCKS, {})
+        if not self.db.in_transaction():
+            self.db.begin()
+        locks = self.db.info.setdefault(_LOCKS, {})
         if task_no not in locks:
             lock = _file_lock(task_no)
             lock.acquire()
@@ -78,7 +76,7 @@ class AuditFieldValueFilesService:
     @contextmanager
     def read_task_files(self, task_no: str):
         """只读调用只在加载四表时持锁；已有事务锁时复用，不提前释放。"""
-        info = AuditFieldCRUD(self.db).session_info()
+        info = self.db.info
         if task_no in info.get(_LOCKS, {}):
             yield
             return
@@ -91,11 +89,10 @@ class AuditFieldValueFilesService:
 
     def snapshot_files(self, targets: dict[str, Path]) -> None:
         """每层事务首次改写时各留一份；保存点成功不能删除外层快照。"""
-        crud = AuditFieldCRUD(self.db)
-        transaction = crud.current_transaction()
+        transaction = self.db.get_nested_transaction() or self.db.get_transaction()
         if transaction is None:
             raise RuntimeError("取值文件写入必须属于数据库事务")
-        snapshots = crud.session_info().setdefault(_SNAPSHOTS, {})
+        snapshots = self.db.info.setdefault(_SNAPSHOTS, {})
         while transaction is not None:
             if transaction.parent is None or transaction.nested:
                 files = snapshots.setdefault(transaction, {})

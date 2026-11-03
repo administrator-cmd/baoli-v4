@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.transactions import commit_transaction
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.shared import agent_module, rule_of_instance
 from app.modules.audit.shared import _scenario, _task_manifest
@@ -64,6 +65,7 @@ def graph_execute_tool_calls(
                 call=call, inputs=inputs, context=context, runtime=runtime,
                 result_context=result_context, rule=rule, manifest=manifest,
             )
+            commit_transaction(db)
             if result.get("status") in {"NEEDS_RECONCILE", "FAILED"}:
                 unresolved.append(
                     {

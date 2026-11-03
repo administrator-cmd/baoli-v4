@@ -1,5 +1,6 @@
 """缺失输入的声明与补取校验；不执行公式或业务判断。"""
 
+import re
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -31,10 +32,10 @@ def missing_rule_inputs(
     """上下文与保存校验共用同一份缺项身份。"""
     calculation = rule.get("calculation_definition") or {}
     parameters = calculation.get("parameters") or []
-    by_field = {
-        (item.get("resolved_field_key"), item.get("resolved_material_key")): item
-        for item in parameters if item.get("source_type") == "FIELD"
-    }
+    by_field: dict[tuple[str | None, str | None], list[dict[str, Any]]] = {}
+    for parameter in parameters:
+        if parameter.get("source_type") == "FIELD":
+            by_field.setdefault((parameter.get("resolved_field_key"), parameter.get("resolved_material_key")), []).append(parameter)
     missing: list[dict[str, Any]] = []
     if rule.get("execution_mode") in {MODE_CALCULATE, MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE}:
         for item in inputs:
@@ -43,13 +44,15 @@ def missing_rule_inputs(
                 continue
             if item.get("status") in EXECUTABLE_FIELD_STATUSES and item.get("normalized_value") is not None:
                 continue
-            parameter = by_field.get((item.get("field_key"), item.get("material_key")), {})
-            missing.append({
-                "kind": "FIELD", "parameter_code": parameter.get("parameter_code"),
-                "field_key": item.get("field_key"), "material_key": item.get("material_key"),
-                "missing_input": item.get("field_name") or item.get("field_key"),
-                "status": item.get("status") or "NOT_EXECUTED",
-            })
+            bound_parameters = by_field.get((item.get("field_key"), item.get("material_key")), [{}])
+            for parameter in bound_parameters:
+                missing.append({
+                    "kind": "FIELD", "parameter_code": parameter.get("parameter_code"),
+                    "field_key": item.get("field_key"), "material_key": item.get("material_key"),
+                    "missing_input": item.get("field_name") or item.get("field_key"),
+                    "value_type": item.get("value_type"),
+                    "status": item.get("status") or "NOT_EXECUTED",
+                })
     if rule.get("execution_mode") == MODE_CALCULATE:
         derived = {item.get("fact_code"): item for item in facts if item.get("fact_kind") == FACT_KIND_DERIVED}
         for parameter in parameters:
@@ -71,10 +74,17 @@ def missing_rule_inputs(
         })
     unique: dict[tuple[Any, ...], dict[str, Any]] = {}
     for item in missing:
-        identity = tuple(item.get(key) for key in (
+        parameter_code = item.get("parameter_code")
+        identity = ("PARAMETER", parameter_code) if parameter_code else tuple(item.get(key) for key in (
             "kind", "parameter_code", "field_key", "material_key", "missing_input", "reason",
         ))
-        unique.setdefault(identity, item)
+        existing = unique.get(identity)
+        if existing is None:
+            unique[identity] = item
+        elif item.get("reason"):
+            reasons = existing.setdefault("binding_reasons", [])
+            if item["reason"] not in reasons:
+                reasons.append(item["reason"])
     return [{"input_id": f"input-{index}", **item} for index, item in enumerate(unique.values(), 1)]
 
 
@@ -95,6 +105,21 @@ def _validate_resolution_source(
         if (not isinstance(raw_value, str) or not _locatable_text(raw_value)
                 or not isinstance(quote, str) or _locatable_text(raw_value) not in _locatable_text(quote)):
             raise _invalid("补取输入的 raw_value 必须出现在该输入的真实引文中", input_id=input_id)
+        # 仅核对数字写法；单位换算属于模型的计算过程，不在补取时改写来源值。
+        numeric_text = raw_value.strip().replace("，", ",")
+        numeric_pattern = r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+        if (requirement.get("value_type") in {"DECIMAL", "AMOUNT", "PERCENT", "INTEGER"}
+                or isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+                or isinstance(value, str) and (
+                    re.fullmatch(numeric_pattern, value) or re.fullmatch(numeric_pattern, numeric_text))):
+            if not re.fullmatch(numeric_pattern, numeric_text):
+                raise _invalid("数值补取的 raw_value 必须填写引文中的数字原文，单位和换算写入计算依据", input_id=input_id)
+            try:
+                number = Decimal(str(value))
+            except ArithmeticError as exc:
+                raise _invalid("补取值必须与数字原文一致", input_id=input_id) from exc
+            if not number.is_finite() or number != Decimal(numeric_text.replace(",", "")):
+                raise _invalid("补取值与数字原文不一致；单位换算应在计算步骤中完成", input_id=input_id)
         return
     fact = next((item for item in facts if item.get("fact_id") == reference.get("fact_id")), None)
     if fact is None:

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError, exception_summary
 from app.constants.status import TASK_STATUS_BLOCKED
+from app.core.transactions import commit_transaction, rollback_transaction
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.service.flow.execution import running_execution
 from app.modules.audit.execution.service.state import _scenario_nodes, _task_phase
@@ -103,7 +104,7 @@ def fail_running_execution(
     Agent 单步和整个图的收尾共用此处。指定批次时也覆盖已提交 SUCCEEDED、
     但任务仍为 RUNNING 的推进失败。已阻断、已完成或不属于本次调用的任务不改写。
     """
-    AuditExecutionCRUD(db).rollback()
+    rollback_transaction(db)
     task = AuditTaskCRUD(db).lock_by_no(task_no)
     execution = (AuditExecutionCRUD(db).by_id(execution_id) if execution_id is not None
                  else running_execution(db, task) if task is not None else None)
@@ -122,4 +123,4 @@ def fail_running_execution(
     execution.failure_message = message
     task.status = TASK_STATUS_BLOCKED
     AuditExecutionCRUD(db).flush()
-    AuditExecutionCRUD(db).commit()
+    commit_transaction(db)

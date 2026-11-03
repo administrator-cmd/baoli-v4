@@ -37,7 +37,7 @@ npm run dev
 
 仅在用户明确要求时运行测试、类型检查、构建、浏览器、服务、数据库、模型或外部接口；未授权时只做静态核对。
 
-后端按实体组织在 `app/modules/<业务>/<实体>/`，每个实体包含 `controller.py`、`dto.py`、`schema.py`、`model.py`、`crud.py` 和 `service/`。路由汇总在 `app/api/routes.py`；配置、数据库会话、CRUD 基类、ORM 基类和响应基类放在 `app/core/`；跨业务共用能力放在 `app/services/shared/`。数据库操作只写在 crud，service 不直接查库。包目录不写 `__init__.py`，调用方从具体模块导入，不做符号重导出。目录导航见 `docs/后端分层约定.md`。
+后端按实体组织在 `app/modules/<业务>/<实体>/`，每个实体包含 `controller.py`、`dto.py`、`schema.py`、`model.py`、`crud.py` 和 `service/`。路由汇总在 `app/api/routes.py`；配置、数据库会话、CRUD 基类、ORM 基类和响应基类放在 `app/core/`；跨业务共用能力放在 `app/services/shared/`。SQL 只写在 crud，service 不直接查库。普通接口由请求层管理事务；后台任务由执行编排层按工作单元管理事务，业务 Service 和 CRUD 不自行提交。包目录不写 `__init__.py`，调用方从具体模块导入，不做符号重导出。目录导航见 `docs/后端分层约定.md`。
 
 
 数据库：

@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.core.transactions import after_commit, before_rollback
 from app.domain import scenario_schema
 from app.domain.identity import public_no
 from app.modules.scenario.draft.crud import ScenarioDraftCRUD
@@ -67,14 +68,14 @@ class ScenarioTemplateLifecycleService:
         # 创建仅保存空草稿；配置编译由读取派生项或显式发布时执行。
         draft.sync_error = None
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_SCENARIO,
             object_no=scenario_code,
             object_name=name,
             operation_type="CREATE",
             detail={"scenario_code": scenario_code},
         )
-        ScenarioDraftCRUD(self.db).commit()
+        ScenarioDraftCRUD(self.db).flush()
         ScenarioTemplateCRUD(self.db).refresh(template)
         return template
 
@@ -123,7 +124,7 @@ class ScenarioTemplateLifecycleService:
             ScenarioDraftService()._bump_draft(draft)
             ScenarioDraftCRUD(self.db).flush()
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_SCENARIO,
             object_no=scenario_code,
             object_name=template.scenario_name,
@@ -131,9 +132,9 @@ class ScenarioTemplateLifecycleService:
             detail={"scenario_code": scenario_code},
         )
         if config_changed:
-            ScenarioDraftService(self.db)._commit_config_change( template, draft)
+            ScenarioDraftService(self.db)._clear_sync_error( template, draft)
         else:
-            ScenarioDraftCRUD(self.db).commit()
+            ScenarioDraftCRUD(self.db).flush()
         ScenarioTemplateCRUD(self.db).refresh(template)
         return template
 
@@ -143,14 +144,14 @@ class ScenarioTemplateLifecycleService:
         template = ScenarioTemplateLookupService(self.db).template_or_404( scenario_code, lock=True)
         template.enabled = enabled
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_SCENARIO,
             object_no=scenario_code,
             object_name=template.scenario_name,
             operation_type="ENABLE" if enabled else "DISABLE",
             detail={"scenario_code": scenario_code},
         )
-        ScenarioDraftCRUD(self.db).commit()
+        ScenarioDraftCRUD(self.db).flush()
         ScenarioTemplateCRUD(self.db).refresh(template)
         return template
 
@@ -161,7 +162,7 @@ class ScenarioTemplateLifecycleService:
         draft = ScenarioDraftCRUD(self.db).by_code(scenario_code, lock=True)
         import_jobs = ScenarioDraftCRUD(self.db).import_jobs_by_scenario(scenario_code, lock=True)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_SCENARIO,
             object_no=scenario_code,
             object_name=template.scenario_name,
@@ -176,15 +177,9 @@ class ScenarioTemplateLifecycleService:
         # 导入作业、后台转换和 LLM 原始响应属于该场景的临时验证数据，随场景删除。
         # 活跃转换会在共享清理函数中明确拒绝，避免后台线程在删除后继续写回。
         # 文件目录只改名暂存，提交成功后再清理，提交失败原样改回。
-        staged = []
-        try:
-            staged = delete_import_job_entities(self.db, import_jobs)
-            if draft is not None:
-                ScenarioDraftCRUD(self.db).delete(draft)
-            ScenarioTemplateCRUD(self.db).delete(template)
-            ScenarioDraftCRUD(self.db).commit()
-        except Exception:
-            restore_staged_trees(staged)
-            ScenarioDraftCRUD(self.db).rollback()
-            raise
-        discard_staged_trees(staged, object_no=scenario_code)
+        staged = delete_import_job_entities(self.db, import_jobs)
+        before_rollback(self.db, lambda: restore_staged_trees(staged))
+        after_commit(self.db, lambda: discard_staged_trees(staged, object_no=scenario_code))
+        if draft is not None:
+            ScenarioDraftCRUD(self.db).delete(draft)
+        ScenarioTemplateCRUD(self.db).delete(template)

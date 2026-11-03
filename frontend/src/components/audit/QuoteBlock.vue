@@ -18,11 +18,14 @@ const props = defineProps<{
   header?: string | null;
   /** 目标值对应的期间原文。 */
   period?: string | null;
+  statementScope?: string | null;
+  entityScope?: string | null;
+  unit?: string | null;
   /** OCR 产物内页码；只表示产物位置。 */
   page?: number | null;
 }>();
 
-const hasContext = computed(() => Boolean(props.label || props.header || props.period || (props.page !== null && props.page !== undefined)));
+const hasContext = computed(() => Boolean(props.label || props.header || props.period || props.statementScope || props.entityScope || props.unit || (props.page !== null && props.page !== undefined)));
 
 /** 单格「表格」没有行列结构可还原，按普通文本展示，否则只剩一个无边框的居中单元格。 */
 const rows = computed(() => {
@@ -38,6 +41,9 @@ const plain = computed(() => quoteBlockText(props.text));
       <template v-if="label"><dt>科目 / 行</dt><dd>{{ label }}</dd></template>
       <template v-if="header"><dt>表头 / 列</dt><dd>{{ header }}</dd></template>
       <template v-if="period"><dt>期间</dt><dd>{{ period }}</dd></template>
+      <template v-if="statementScope"><dt>报表口径</dt><dd>{{ statementScope }}</dd></template>
+      <template v-if="entityScope"><dt>主体</dt><dd>{{ entityScope }}</dd></template>
+      <template v-if="unit"><dt>单位</dt><dd>{{ unit }}</dd></template>
       <template v-if="page !== null && page !== undefined"><dt>产物位置</dt><dd>第 {{ page }} 页</dd></template>
     </dl>
     <div v-if="rows" class="quote-table-scroll" tabindex="0" aria-label="引用原文表格，可横向滚动">

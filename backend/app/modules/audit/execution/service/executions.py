@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.domain.field_review import reviewed_extraction_keys
 from app.common.pagination import PageResult, page_result
 from app.constants.status import AUDIT_LLM_CHANNEL_UNAVAILABLE, LOOP_BLOCKED
 from app.modules.audit.execution.crud import AuditExecutionCRUD
@@ -39,13 +40,8 @@ class AuditExecutionExecutionsService:
 
     def _reviewed_extraction_keys(self, result_json: dict[str, Any]) -> set[str]:
         """字段核对点已经交给人工接手的抽取规则键；它们不再属于当前执行阻断。"""
-        review = result_json.get("field_review") or {}
-        if not isinstance(review, dict) or not review.get("closed_at"):
-            return set()
-        keys = review.get("extraction_rule_keys")
-        if not isinstance(keys, list):
-            return set()
-        return {str(key) for key in keys}
+        return reviewed_extraction_keys(result_json)
+
 
     def _model_turn_stats(self, results: list[RuleResult]) -> dict[str, Any]:
         """模型请求轮次：同一 evaluation_id 的字段共享请求，只计一次。

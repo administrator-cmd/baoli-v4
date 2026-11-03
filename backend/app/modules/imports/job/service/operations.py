@@ -68,7 +68,7 @@ class ImportsJobOperationsService:
                 )
 
         def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
-            from app.modules.imports.job.service import conversion as imports_conversion
+            from app.modules.imports.job.execution import ImportConversionExecution
 
             # 导入图的推进与业务写入在同一服务函数内，无法只补齐图推进，明确拒绝而不是重做写入。
             _reject_unsupported_resume(command)
@@ -78,7 +78,7 @@ class ImportsJobOperationsService:
                 raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": content["job_no"]})
             self._assert_import_command_current(current, content)
             command.phase(PHASE_LLM_REQUEST)
-            converted = imports_conversion.ImportsJobConversionService(session).retry_conversion(content["job_no"], operation_no=command.operation_no,
+            converted = ImportConversionExecution(session).retry_conversion(content["job_no"], operation_no=command.operation_no,
                 mode=content.get("mode", CONVERSION_MODE_FULL),
             )
             # 导入解析完成后图直接结束，没有业务裁决等待点。

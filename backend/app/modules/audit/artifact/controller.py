@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from app.common.response import ResponseSchema, ok
-from app.core.database import SessionLocal, get_db
+from app.core.database import get_db, request_session
 from app.modules.audit.artifact.dto import DocumentArtifactRetryRequest, DocumentOcrRetryRequest
 from app.modules.audit.artifact.schema import (
     DocumentRemoveResponse,
@@ -39,7 +39,7 @@ def upload_task_document(
     材料位配置不代替本次文件的类型声明，因此这里不能留空。
     """
     # 同步入口由 FastAPI 放入工作线程；Session 在执行它的线程创建和关闭。
-    with SessionLocal() as db:
+    with request_session() as db:
         document, record, impact, operation = AuditTaskDocumentsService(db).upload_document(
              task_no, document_no, file, material_type=material_type, replace=replace
         )
@@ -130,5 +130,3 @@ def retry_document_artifact_endpoint(task_no: str, document_no: str, artifact_ty
          task, document_no=document_no, artifact_type=artifact_type, payload=payload,
     )
     return ok(OperationAcceptedResponse.model_validate(OperationBackgroundService().operation_view(operation, reused=reused)), request)
-
-

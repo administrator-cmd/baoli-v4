@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.core.transactions import after_commit, before_rollback
 from app.modules.imports.job import crud
 from app.modules.imports.job.service.lookup import ImportsJobLookupService
 from app.modules.system.operation.crud import SystemOperationCRUD
@@ -35,7 +36,7 @@ class ImportsJobLifecycleService:
         if not job:
             raise BusinessError("IMPORT_JOB_NOT_FOUND", "导入作业不存在", status_code=404, details={"job_no": job_no})
         OperationLogService(self.db).record_operation(
-            
+
             object_type="IMPORT_JOB",
             object_no=job_no,
             object_name=job.source_filename,
@@ -43,16 +44,9 @@ class ImportsJobLifecycleService:
             permanent=True,
             detail={"job_no": job_no},
         )
-        staged = []
-        try:
-            staged = delete_import_job_entities(self.db, [job])
-            crud.ImportsJobCRUD(self.db).commit()
-        except Exception:
-            # 先改回目录再回滚：回滚会释放行锁，此时目录不能仍停留在 .deleting-*。
-            restore_staged_trees(staged)
-            crud.ImportsJobCRUD(self.db).rollback()
-            raise
-        discard_staged_trees(staged, object_no=job_no)
+        staged = delete_import_job_entities(self.db, [job])
+        before_rollback(self.db, lambda: restore_staged_trees(staged))
+        after_commit(self.db, lambda: discard_staged_trees(staged, object_no=job_no))
 
 
     def abort_import_job(self, job_no: str) -> BackgroundOperation:
@@ -83,13 +77,13 @@ class ImportsJobLifecycleService:
         operation.failure_message = "该操作已被人工中止，可重新发起转换"
         operation.finished_at = datetime.now(UTC)
         OperationLogService(self.db).record_operation(
-            
+
             object_type=OBJECT_IMPORT_JOB,
             object_no=job_no,
             object_name=job.source_filename,
             operation_type="ABORT",
             detail={"job_no": job_no, "operation_no": operation.operation_no, "previous_status": previous_status},
         )
-        crud.ImportsJobCRUD(self.db).commit()
+        crud.ImportsJobCRUD(self.db).flush()
         SystemOperationCRUD(self.db).refresh(operation)
         return operation

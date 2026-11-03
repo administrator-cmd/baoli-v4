@@ -35,7 +35,7 @@ class PlanTasksService:
 
         task_no = public_no("TASK")
         command, reused = AuditTaskCommandRecordsService(self.db).claim_task_command(
-            
+
             object_type=OBJECT_PLAN,
             operation_type="TASK_CREATE",
             idempotency_key=payload["idempotency_key"],
@@ -78,29 +78,16 @@ class PlanTasksService:
 
         plan = PlanLookupService(self.db).plan_or_404( plan_code)
         task = AuditTaskCreationService(self.db).create_task_from_plan(
-            
+
             plan,
             task_name=payload["task_name"],
             remark=payload.get("remark"),
             task_no=task_no,
             expected_scope_hash=payload["expected_scope_hash"],
         )
-        try:
-            AuditTaskCRUD(self.db).flush()
-        except BusinessError:
-            AuditTaskCRUD(self.db).rollback()
-            failed = AuditTaskCRUD(self.db).by_no(task_no)
-            if failed is not None and failed.status == "FAILED":
-                AuditTaskCommandRecordsService(self.db).record_failed_task_command(
-                    
-                    command,
-                    object_no=plan_code,
-                    object_name=plan.plan_name,
-                    detail={"task_no": task_no, "plan_code": plan_code},
-                )
-            raise
+        AuditTaskCRUD(self.db).flush()
         was_reused = AuditTaskCommandRecordsService(self.db).finish_task_command(
-            
+
             command,
             object_no=plan_code,
             object_name=plan.plan_name,

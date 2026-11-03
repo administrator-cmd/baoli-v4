@@ -55,11 +55,7 @@ class ImportsJobProposalsService:
             item["operator"] = OPERATOR_LLM_EXECUTE
         job.proposals_json = proposals
         job.draft_revision += 1
-        try:
-            crud.ImportsJobCRUD(self.db).commit()
-        except Exception:
-            crud.ImportsJobCRUD(self.db).rollback()
-            raise
+        crud.ImportsJobCRUD(self.db).flush()
         crud.ImportsJobCRUD(self.db).refresh(job)
         return job
 

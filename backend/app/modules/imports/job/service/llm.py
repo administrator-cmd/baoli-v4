@@ -16,7 +16,7 @@ from app.domain.workbook_proposals import PreparedSheet, WorkbookInventory, Work
 from app.integrations.llm.gateway import call_json
 from app.modules.imports.job.service.prompts import CONVERSION_PROMPT, REFINEMENT_PROMPT
 from app.modules.imports.job.service.stage_cache import ImportsJobStageCacheService
-from app.services.shared.llm_responses import save_raw_response
+from app.modules.imports.job.response_execution import save_raw_response
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ CONVERSION_MODE_RESUME = "RESUME_REFINEMENT"
 
 
 class ImportsJobLlmService:
-    """本实体的服务方法；db 由构造时注入。"""
+    """调用模型生成规则配置，并核对结构与引用。"""
 
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
@@ -99,6 +99,8 @@ class ImportsJobLlmService:
         for calculation in result.get("calculations") or []:
             owner = calculation.get("candidate_ref")
             for parameter in calculation.get("parameters") or []:
+                if not isinstance(parameter.get("parameter_code"), str) or not parameter["parameter_code"].strip():
+                    problems.append({"owner": owner, "kind": "calculation.parameter.parameter_code"})
                 source_type = parameter.get("source_type")
                 if source_type not in {"FIELD", "CALC_RESULT", "CONSTANT"}:
                     problems.append({
@@ -156,175 +158,34 @@ class ImportsJobLlmService:
                 identities[identity] = owner
 
 
-    def _has_cjk(self, value: str) -> bool:
-        return any("一" <= char <= "鿿" for char in value)
-
-    def _name_text(self, value: str) -> str:
-        """业务名称比较文本：去掉空白和常见分隔符，不做同义词改写。"""
-        return "".join(char for char in value if not char.isspace() and char not in "（）()【】[]、，,；;：:/·-_")
-
-    def _expected_period(self, parameter_code: str) -> str | None:
-        """从参数名的期间字面推导规范期间；只用于核对声明，不解释公式业务。"""
-        mapping = (
-            ("本期", "CURRENT"), ("上期", "PRIOR"), ("去年同期", "PRIOR"),
-            ("期初", "OPENING"), ("年初", "OPENING"),
-            ("期末", "CLOSING"), ("年末", "CLOSING"),
-            ("平均", "AVERAGE_OPENING_CLOSING"),
-        )
-        for hint, expected in mapping:
-            if hint in parameter_code:
-                return expected
-        return None
-
     def _binding_gaps(self, result: dict[str, Any], problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """汇总模型声明的输入缺项，并补充程序可确认的重复绑定。
-
-        程序只检查引用身份与参数结构，不解释公式或财务科目；业务含义仍由第二轮
-        模型逐项核对。缺项只暴露配置不完整，不改变任何对象的启用状态。
-        """
-        fields: dict[str, dict[str, Any]] = {}
-        for field in result.get("fields") or []:
-            for key in (field.get("candidate_ref"), field.get("source_id")):
-                if key:
-                    fields[str(key)] = field
-        gaps: list[dict[str, Any]] = []
-
-        def add(gap: dict[str, Any]) -> None:
-            gaps.append(gap)
-
-        for calculation in result.get("calculations") or []:
-            owner_ref = str(calculation.get("candidate_ref") or "")
-            owner_name = calculation.get("rule_name")
-            requirement = calculation.get("requirement") or calculation.get("formula") or ""
-            parameters = calculation.get("parameters") or []
-            if not parameters:
-                add({
-                    "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                    "parameter_code": None, "missing_input": "全部计算输入",
-                    "reason": "公式没有声明任何输入参数，无法核对实际取数绑定",
-                    "original_requirement": requirement,
-                })
-            by_source: dict[str, list[dict[str, Any]]] = {}
-            for parameter in parameters:
-                if parameter.get("source_type") != "FIELD":
-                    continue
-                code = str(parameter.get("source_code") or "")
-                by_source.setdefault(code, []).append(parameter)
-                if not parameter.get("parameter_code"):
-                    problems.append({
-                        "owner": owner_ref, "kind": "calculation.parameter.parameter_code",
-                        "reference": code,
-                    })
-            for code, items in by_source.items():
-                parameter_codes = {str(item.get("parameter_code") or "") for item in items}
-                if len(items) <= 1 or len(parameter_codes) <= 1:
-                    continue
-                field = fields.get(code) or {}
-                add({
-                    "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                    "parameter_code": "、".join(sorted(parameter_codes)),
-                    "missing_input": str(field.get("name") or code),
-                    "reason": "同一字段被多个不同参数引用；每个公式输入必须有独立来源，不能只改参数名称",
-                    "original_requirement": requirement,
-                })
-            for code, items in by_source.items():
-                field = fields.get(code) or {}
-                field_name = str(field.get("name") or "").strip()
-                for parameter in items:
-                    parameter_code = str(parameter.get("parameter_code") or "").strip()
-                    if not parameter_code or not field_name:
-                        continue
-                    # 只比较中文业务名称；英文内部参数名不作为业务含义依据。
-                    if not self._has_cjk(parameter_code) or not self._has_cjk(field_name):
-                        continue
-                    left = self._name_text(parameter_code)
-                    right = self._name_text(field_name)
-                    if left not in right and right not in left:
-                        add({
-                            "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                            "parameter_code": parameter_code,
-                            "missing_input": field_name,
-                            "reason": "参数名称与绑定字段名称不一致，需确认取的是同一科目，不能用相近科目替代",
-                            "original_requirement": requirement,
-                        })
-                    if any(hint in parameter_code for hint in ("本期", "上期", "期初", "期末", "年初", "年末", "平均", "去年同期", "近两年", "一年内", "一年以内", "到期")) and field.get("period_scope") in (None, "", "NOT_APPLICABLE"):
-                        add({
-                            "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                            "parameter_code": parameter_code,
-                            "missing_input": field_name,
-                            "reason": "参数含期间限定，但绑定字段未声明取数期间，无法区分为哪一期",
-                            "original_requirement": requirement,
-                        })
-                    expected_period = self._expected_period(parameter_code)
-                    field_period = str(field.get("period_scope") or "").upper()
-                    if (expected_period and field_period in {
-                        "CURRENT", "PRIOR", "OPENING", "CLOSING", "AVERAGE_OPENING_CLOSING",
-                    } and field_period != expected_period):
-                        add({
-                            "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                            "parameter_code": parameter_code,
-                            "missing_input": field_name,
-                            "reason": f"参数期间与字段声明的取数期间不一致（字段为 {field_period}）",
-                            "original_requirement": requirement,
-                        })
-                    if any(hint in parameter_code for hint in ("合并", "母公司", "个别报表")) and field.get("statement_scope") in (None, "", "NOT_APPLICABLE"):
-                        add({
-                            "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                            "parameter_code": parameter_code,
-                            "missing_input": field_name,
-                            "reason": "参数含报表口径限定，但绑定字段未声明报表口径",
-                            "original_requirement": requirement,
-                        })
+        """保留模型声明的缺项，仅核对归属引用，不推断业务含义。"""
+        gaps = []
+        for calculation in result["calculations"]:
             for gap in calculation.get("input_gaps") or []:
-                add({
-                    "owner_group": "calculations", "owner_ref": owner_ref, "owner_name": owner_name,
-                    "parameter_code": gap.get("parameter_code"),
-                    "missing_input": gap.get("missing_input"),
-                    "reason": gap.get("reason"),
-                    "original_requirement": gap.get("original_requirement") or requirement,
+                gaps.append({
+                    "owner_group": "calculations", "owner_ref": calculation["candidate_ref"],
+                    "owner_name": calculation["rule_name"], **gap,
                 })
-        rule_refs = {str(item.get("candidate_ref")) for item in result.get("rules") or []}
-        calculation_refs = {str(item.get("candidate_ref")) for item in result.get("calculations") or []}
-        for rule in result.get("rules") or []:
-            mode = str(rule.get("execution_mode") or "UNKNOWN")
-            if mode not in {"VALUE_COMPARE", "CROSS_SCOPE_COMPARE", "CALCULATE"}:
-                continue
-            has_refs = bool(rule.get("inputs") or rule.get("source_rule_refs") or rule.get("source_rule_ref"))
-            parameters = rule.get("parameters") if isinstance(rule.get("parameters"), dict) else {}
-            has_parameters = any(
-                key in parameters for key in ("field_ref", "field_key", "source_code", "material_ref", "input_field")
-            )
-            if has_refs or has_parameters:
-                continue
-            add({
-                "owner_group": "rules", "owner_ref": str(rule.get("candidate_ref") or ""),
-                "owner_name": rule.get("name"), "parameter_code": None,
-                "missing_input": "比较或计算所需的输入",
-                "reason": f"执行方式为 {mode}，但没有声明任何字段、来源规则或参数输入",
-                "original_requirement": rule.get("requirement") or "",
-            })
-        for gap in result.get("binding_gaps") or []:
-            group = gap.get("owner_group")
-            owner_ref = str(gap.get("owner_ref") or "")
-            allowed = rule_refs if group == "rules" else calculation_refs if group == "calculations" else set()
-            if owner_ref not in allowed:
+        owners = {
+            "rules": {item["candidate_ref"] for item in result["rules"]},
+            "calculations": {item["candidate_ref"] for item in result["calculations"]},
+        }
+        for gap in result["binding_gaps"]:
+            if gap["owner_ref"] not in owners[gap["owner_group"]]:
                 problems.append({
-                    "owner": owner_ref or gap.get("owner_name"), "kind": "binding_gap.owner_ref",
-                    "reference": {"owner_group": group, "owner_ref": owner_ref},
+                    "owner": gap["owner_ref"], "kind": "binding_gap.owner_ref",
+                    "reference": {key: gap[key] for key in ("owner_group", "owner_ref")},
                 })
-                continue
-            add(dict(gap))
-        deduped: list[dict[str, Any]] = []
-        seen: set[tuple[Any, ...]] = set()
+            else:
+                gaps.append(dict(gap))
+        unique = {}
         for gap in gaps:
-            identity = (
-                gap.get("owner_group"), gap.get("owner_ref"), gap.get("parameter_code"),
-                gap.get("missing_input"), gap.get("reason"),
-            )
-            if identity not in seen:
-                seen.add(identity)
-                deduped.append(gap)
-        return deduped
+            identity = tuple(gap.get(key) for key in (
+                "owner_group", "owner_ref", "parameter_code", "missing_input", "reason",
+            ))
+            unique.setdefault(identity, gap)
+        return list(unique.values())
 
 
     def initial_fingerprint(self, profile_version: str, schema_key: str, schema_version: str, source_sha256: str,
