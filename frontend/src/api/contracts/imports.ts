@@ -1,6 +1,6 @@
 /** 规则库导入：解析结果、业务配置调整与草稿写入。 */
 
-import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
+import type { JsonValue, OperationAccepted } from "./common";
 import type { ConfigOrigin } from "./scenes";
 
 export type ImportProposalStatus = "CLEAR" | "PENDING" | "DISABLED";
@@ -88,6 +88,10 @@ export interface ProposalField {
   unit: string | null;
   /** 币种；留空表示未声明，不表示人民币。 */
   currency?: string | null;
+  /** 字段自身声明的期间、报表口径与主体范围；同名不同口径必须是不同字段。 */
+  period_scope?: string | null;
+  statement_scope?: string | null;
+  entity_scope?: string | null;
   required: boolean;
   instruction: string;
   /** 字段的补充业务事实，不参与抽取动作；没有时为空对象。 */
@@ -95,6 +99,17 @@ export interface ProposalField {
   material_ref: string;
   material_name: string | null;
   config_status?: string | null;
+}
+
+/** 第二轮核对后仍未建立绑定的输入；只提示配置完整性，不改变启用状态。 */
+export interface ProposalBindingGap {
+  owner_group: "rules" | "calculations";
+  owner_ref: string;
+  owner_name?: string | null;
+  parameter_code?: string | null;
+  missing_input: string;
+  reason: string;
+  original_requirement?: string;
 }
 
 export interface ProposalRule {
@@ -135,9 +150,15 @@ export interface ProposalCalculation {
   result_type: string;
   status: string;
   parameters: Array<Record<string, JsonValue>>;
+  input_gaps?: Array<{
+    parameter_code?: string | null;
+    missing_input: string;
+    reason: string;
+    original_requirement?: string;
+  }>;
 }
 
-export interface ImportJob extends ApiResponse {
+export interface ImportJob {
   job_no: string;
   source_filename: string;
   status: string;
@@ -154,6 +175,7 @@ export interface ImportJob extends ApiResponse {
     rules: ProposalRule[];
     calculations: ProposalCalculation[];
     report_sections: ProposalReportSection[];
+    binding_gaps?: ProposalBindingGap[];
   } | null;
   /** 草稿修订号：解析结果变更时递增。 */
   draft_revision: number;
@@ -164,7 +186,7 @@ export interface ImportJob extends ApiResponse {
   created_at: string;
 }
 
-export interface ImportJobSummary extends ApiResponse {
+export interface ImportJobSummary {
   job_no: string;
   source_filename: string;
   status: string;

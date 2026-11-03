@@ -28,9 +28,9 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.database import SessionLocal  # noqa: E402
 from app.domain import fact_projection  # noqa: E402
-from app.entity.scenarios import ScenarioVersion  # noqa: E402
-from app.entity.tasks import AuditTask  # noqa: E402
-from app.services.audit.tasks.detail import task_view  # noqa: E402
+from app.modules.audit.task.model import AuditTask  # noqa: E402
+from app.modules.audit.task.service.detail import AuditTaskDetailService  # noqa: E402
+from app.modules.scenario.template.model import ScenarioVersion  # noqa: E402
 
 SUMMARY_KEYS = {"preserved", "pending", "dependent", "waiting_review"}
 
@@ -69,7 +69,7 @@ def check_task_views(db) -> list[str]:
     tasks = db.scalars(select(AuditTask).order_by(AuditTask.id)).all()
     for task in tasks:
         try:
-            view = task_view(db, task)
+            view = AuditTaskDetailService(db).task_view(task)
         except Exception as exc:  # noqa: BLE001 - 只读巡检需要报告每个任务的真实失败原因
             problems.append(f"任务 {task.task_no} 详情组装失败：{exc}")
             continue

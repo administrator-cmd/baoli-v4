@@ -5,30 +5,31 @@
 
 from fastapi import APIRouter
 
-from .audit import documents as audit_documents
-from .audit import executions as audit_executions
-from .audit import history as audit_history
-from .audit import results as audit_results
-from .audit import tasks as audit_tasks
-from .imports import jobs as import_jobs
-from .material import documents as material_documents
-from .plan import configuration as plan_configuration
-from .plan import lifecycle as plan_lifecycle
-from .plan import tasks as plan_tasks
-from .report import reports as report_reports
-from .report import risks as report_risks
-from .scenario import calculations as scenario_calculations
-from .scenario import configuration as scenario_configuration
-from .scenario import fields as scenario_fields
-from .scenario import lifecycle as scenario_lifecycle
-from .scenario import materials as scenario_materials
-from .scenario import publishing as scenario_publishing
-from .scenario import rules as scenario_rules
-from .scenario import sections as scenario_sections
-from .system import catalogs as system_catalogs
-from .system import logs as system_logs
-from .system import operations as system_operations
-from .system import status as system_status
+from app.modules.audit.artifact import controller as audit_documents
+from app.modules.audit.execution import controller as audit_executions
+from app.modules.audit.execution import history_controller as audit_history
+from app.modules.audit.field import controller as audit_fields
+from app.modules.audit.report import controller as audit_report
+from app.modules.audit.report import report_controller as report_reports
+from app.modules.audit.report import risk_controller as report_risks
+from app.modules.audit.task import controller as audit_tasks
+from app.modules.imports.job import controller as import_jobs
+from app.modules.material.document import controller as material_documents
+from app.modules.plan.config import controller as plan_configuration
+from app.modules.plan.plan import controller as plan_lifecycle
+from app.modules.plan.plan import task_controller as plan_tasks
+from app.modules.scenario.draft import calculations_controller as scenario_calculations
+from app.modules.scenario.draft import fields_controller as scenario_fields
+from app.modules.scenario.draft import materials_controller as scenario_materials
+from app.modules.scenario.draft import rules_controller as scenario_rules
+from app.modules.scenario.draft import sections_controller as scenario_sections
+from app.modules.scenario.template import configuration_controller as scenario_configuration
+from app.modules.scenario.template import controller as scenario_lifecycle
+from app.modules.scenario.template import publishing_controller as scenario_publishing
+from app.modules.system.console import catalogs_controller as system_catalogs
+from app.modules.system.console import operations_controller as system_operations
+from app.modules.system.console import status_controller as system_status
+from app.modules.system.operation import controller as system_logs
 
 ROUTERS: tuple[APIRouter, ...] = (
     system_status.router,
@@ -50,7 +51,8 @@ ROUTERS: tuple[APIRouter, ...] = (
     audit_tasks.router,
     audit_executions.router,
     audit_documents.router,
-    audit_results.router,
+    audit_report.router,
+    audit_fields.router,
     audit_history.executions_router,
     material_documents.router,
     report_reports.router,

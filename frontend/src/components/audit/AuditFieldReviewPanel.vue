@@ -5,9 +5,10 @@ import { ElMessageBox } from "element-plus";
 import type { AuditFieldView } from "@/api/audits";
 import type { FieldReviewCorrection, FieldReviewMissing, FieldReviewState } from "@/api/contracts";
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
+import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { formatBusinessValue } from "@/constants/labels";
-import { formatFieldValue } from "@/utils/fieldPresentation";
+import { formatBusinessValue, periodScopeLabel, statementScopeLabel } from "@/constants/labels";
+import { fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /**
@@ -28,12 +29,14 @@ const props = defineProps<{
   confirming?: boolean;
   /** 任务有进行中的后台操作或已不在等待点。 */
   disabled?: boolean;
+  filter?: string;
 }>();
 
 const emit = defineEmits<{
   save: [corrections: FieldReviewCorrection[]];
   confirm: [payload: { corrections: FieldReviewCorrection[]; acknowledgeMissing: boolean; note: string | null }];
   "update:dirty": [dirty: boolean];
+  "update:filter": [value: string];
 }>();
 
 interface Draft {
@@ -69,10 +72,10 @@ function currentText(field: AuditFieldView): string {
   return formatBusinessValue(value);
 }
 
-/** 值本身是对象的字段按 JSON 编辑；判定只看当前取值形状，不按字段名猜。 */
+/** 对象和数组均按 JSON 编辑，避免把结构化值转换成不可还原的展示文本。 */
 function isStructured(field: AuditFieldView): boolean {
   const value = field.normalized_value;
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null;
 }
 
 /** 列表展示的采用值：数值按字段类型加千分位，人工标记为不存在的单独说明。 */
@@ -93,14 +96,23 @@ function extractedText(field: AuditFieldView): string {
   return "未取到取值";
 }
 
-/** 已声明的单位、币种与口径：只显示配置里写明的值，不按字段名称推断。 */
+/** 区分正文识别值与配置要求，不按字段名称推断。 */
 function scopeText(field: AuditFieldView): string {
   const parts: string[] = [];
-  if (field.unit) parts.push(`单位：${field.unit}`);
+  parts.push(`识别单位：${field.actual_unit || '未识别'}`);
+  if (field.unit) parts.push(`要求单位：${field.unit}`);
   if (field.currency) parts.push(`币种：${field.currency}`);
-  if (field.period_scope && field.period_scope !== "NOT_APPLICABLE") parts.push(`取数期间：${field.period_scope}`);
-  if (field.statement_scope && field.statement_scope !== "NOT_APPLICABLE") parts.push(`报表口径：${field.statement_scope}`);
+  parts.push(`识别期间：${field.actual_period_scope || '未识别'}`);
+  if (field.period_scope) parts.push(`要求期间：${periodScopeLabel(field.period_scope)}`);
+  parts.push(`识别口径：${field.actual_statement_scope || '未识别'}`);
+  if (field.statement_scope) parts.push(`要求口径：${statementScopeLabel(field.statement_scope)}`);
+  parts.push(`识别主体：${field.actual_entity_scope || '未识别'}`);
+  if (field.entity_scope) parts.push(`要求主体：${field.entity_scope}`);
   return parts.join(" · ");
+}
+
+function sourceFilesText(field: AuditFieldView): string {
+  return fieldSourceFiles(field).join("、") || "未记录来源文件";
 }
 
 const missingByKey = computed(() => {
@@ -160,8 +172,6 @@ function discardDrafts(): void {
   drafts.value = new Map();
   note.value = "";
 }
-
-defineExpose({ discardDrafts });
 
 /** 材料未上传时字段没有可核对的原文，服务端也会拒绝整批提交。 */
 function materialMissing(field: AuditFieldView): boolean {
@@ -244,10 +254,27 @@ const noteRequired = computed(() => dirty.value && !note.value.trim());
 
 const filters = [
   { value: "ALL", label: "全部" },
+  { value: "EXTRACTED", label: "有有效值" },
+  { value: "NO_VALUE", label: "无有效值" },
   { value: "MISSING", label: "未取到值" },
   { value: "FAILED", label: "抽取失败" },
   { value: "EDITED", label: "已修改" },
 ];
+
+watch(() => props.filter, (value) => {
+  if (value && filters.some((item) => item.value === value)) statusFilter.value = value;
+}, { immediate: true });
+watch(statusFilter, (value) => emit("update:filter", value));
+
+function applyFilter(value: string): void {
+  search.value = "";
+  statusFilter.value = value;
+}
+defineExpose({ discardDrafts, applyFilter });
+
+watch(() => props.fields, (fields) => {
+  if (detailField.value) detailField.value = fields.find((field) => keyOf(field) === keyOf(detailField.value!)) ?? null;
+});
 
 const MISSING_STATUSES = new Set([
   "NOT_PRESENT", "EVIDENCE_INSUFFICIENT", "EVIDENCE_UNCLEAR",
@@ -256,6 +283,10 @@ const MISSING_STATUSES = new Set([
 
 function matchesFilterValue(field: AuditFieldView, value: string): boolean {
   switch (value) {
+    case "EXTRACTED":
+      return hasEffectiveFieldValue(field);
+    case "NO_VALUE":
+      return field.status !== "NOT_APPLICABLE" && !hasEffectiveFieldValue(field);
     case "MISSING":
       return stillMissing(field) || MISSING_STATUSES.has(field.status);
     case "FAILED":
@@ -268,7 +299,7 @@ function matchesFilterValue(field: AuditFieldView, value: string): boolean {
 }
 
 function searchText(field: AuditFieldView): string {
-  return [field.source_ref, field.name, field.material_name, extractedText(field), currentText(field)]
+  return [field.source_ref, field.name, field.material_name, ...fieldSourceFiles(field), field.actual_period_scope, field.actual_unit, field.actual_statement_scope, field.actual_entity_scope, extractedText(field), currentText(field)]
     .join(" ").toLocaleLowerCase();
 }
 
@@ -317,7 +348,7 @@ function countOf(value: string): number {
       </div>
 
       <div class="field-toolbar">
-        <el-input v-model="search" clearable placeholder="搜索字段、材料或取值" aria-label="搜索字段" class="field-search" />
+        <el-input v-model="search" clearable placeholder="搜索字段、文件或取值" aria-label="搜索字段" class="field-search" />
         <el-select v-model="statusFilter" aria-label="按核对范围筛选" class="field-status-filter">
           <el-option v-for="filter in filters" :key="filter.value" :value="filter.value"
             :label="`${filter.label}（${countOf(filter.value)}）`" />
@@ -330,8 +361,8 @@ function countOf(value: string): number {
       </el-empty>
 
       <el-table v-else :data="rows" border stripe class="audit-result-table field-table" :row-key="keyOf">
-        <el-table-column label="材料" width="150" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.material_name }}</template>
+        <el-table-column label="来源文件" min-width="210" show-overflow-tooltip>
+          <template #default="{ row }">{{ sourceFilesText(row) }}</template>
         </el-table-column>
         <el-table-column label="字段" width="190">
           <template #default="{ row }">
@@ -341,7 +372,7 @@ function countOf(value: string): number {
         </el-table-column>
         <el-table-column label="抽取原始值" min-width="220">
           <template #default="{ row }">
-            <div class="field-value" :class="{ 'field-value--empty': !row.extracted_raw_value }">{{ extractedText(row) }}</div>
+            <div class="field-value" :class="{ 'field-value--empty': row.extracted_raw_value === null || row.extracted_raw_value === undefined || row.extracted_raw_value === '' }">{{ extractedText(row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="本次采用值" min-width="220">

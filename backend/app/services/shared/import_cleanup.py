@@ -6,15 +6,15 @@ from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...common.exceptions import BusinessError
-from ...entity.imports import ImportJob
-from ...entity.operations import BackgroundOperation
-from ...entity.scenarios import ScenarioVersion
-from ..system.operation_types import OBJECT_IMPORT_JOB
-from .storage import resolve_storage_path
+from app.common.exceptions import BusinessError
+from app.modules.imports.job.crud import ImportsJobCRUD
+from app.modules.imports.job.model import ImportJob
+from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD
+from app.modules.system.operation.crud import SystemOperationCRUD
+from app.modules.system.operation.service.operation_types import OBJECT_IMPORT_JOB
+from app.services.shared.storage import resolve_storage_path
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +75,7 @@ def delete_import_job_entities(db: Session, jobs: Sequence[ImportJob]) -> list[t
         return []
     job_nos = [job.job_no for job in jobs]
     job_ids = [job.id for job in jobs]
-    operations = db.scalars(
-        select(BackgroundOperation)
-        .where(
-            BackgroundOperation.object_type == OBJECT_IMPORT_JOB,
-            BackgroundOperation.object_no.in_(job_nos),
-        )
-        .with_for_update()
-    ).all()
+    operations = SystemOperationCRUD(db).operations_for_jobs(OBJECT_IMPORT_JOB, job_nos, lock=True)
     active = [operation for operation in operations if operation.status in ACTIVE_OPERATION_STATUSES]
     if active:
         raise BusinessError(
@@ -95,11 +88,7 @@ def delete_import_job_entities(db: Session, jobs: Sequence[ImportJob]) -> list[t
             },
         )
 
-    versions = db.scalars(
-        select(ScenarioVersion)
-        .where(ScenarioVersion.import_job_id.in_(job_ids))
-        .with_for_update()
-    ).all()
+    versions = ScenarioTemplateCRUD(db).versions_by_import_jobs(job_ids, lock=True)
     for version in versions:
         # 发布版本是独立快照，解除来源引用后继续保留。
         version.import_job_id = None
@@ -118,9 +107,9 @@ def delete_import_job_entities(db: Session, jobs: Sequence[ImportJob]) -> list[t
                 staged.append(item)
 
         for operation in operations:
-            db.delete(operation)
+            SystemOperationCRUD(db).delete(operation)
         for job in jobs:
-            db.delete(job)
+            ImportsJobCRUD(db).delete(job)
     except Exception:
         restore_staged_trees(staged)
         raise

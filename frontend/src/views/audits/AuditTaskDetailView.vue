@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, proxyRefs, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, proxyRefs, ref, shallowRef, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
@@ -36,12 +36,10 @@ import {
   type AuditTaskView,
 } from "@/api/audits";
 
-import { getExecution } from "@/api/executions";
 import MaterialProcessingDialog from "@/components/audit/MaterialProcessingDialog.vue";
 import AuditFieldResults from "@/components/audit/AuditFieldResults.vue";
 import AuditFieldReviewPanel from "@/components/audit/AuditFieldReviewPanel.vue";
-import ExecutionDetailPanel from "@/components/audit/ExecutionDetailPanel.vue";
-import { executionSummaryText } from "@/utils/executionPresentation";
+import ExecutionRecordsTable from "@/components/audit/ExecutionRecordsTable.vue";
 import AuditReportPanel from "@/components/audit/AuditReportPanel.vue";
 import AuditRiskResults from "@/components/audit/AuditRiskResults.vue";
 import AuditRuleResults from "@/components/audit/AuditRuleResults.vue";
@@ -59,13 +57,11 @@ import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { isDetailTab, type DetailTab } from "@/constants/auditWorkspaces";
 import { COMPLETED_RESULT_STATUSES } from "@/constants/auditStatus";
+import { hasEffectiveFieldValue } from "@/utils/fieldPresentation";
 import {
-  formatDate,
-  formatDuration,
   nodeLabel,
   operationTypeLabel,
   parseServerTime,
-  statusTone,
 } from "@/constants/labels";
 
 /**
@@ -108,7 +104,15 @@ let reportRequestGeneration = 0;
 const lastExecution = ref<ExecuteNodeResponse | null>(null);
 const executingNode = ref<{ code: string; name: string } | null>(null);
 const tab = ref<DetailTab>("materials");
-/** 规则结果页的校验阶段筛选；由工作区入口设置，不由当前节点隐式改写。 */
+/** 字段/规则页的筛选：由顶栏统计入口设置，页内改选后同步回来。 */
+const fieldFilter = ref("ALL");
+const ruleFilter = ref("ALL");
+const fieldResultsPanel = ref<InstanceType<typeof AuditFieldResults> | null>(null);
+const ruleResultsPanel = ref<InstanceType<typeof AuditRuleResults> | null>(null);
+watch(taskNo, () => {
+  fieldFilter.value = "ALL";
+  ruleFilter.value = "ALL";
+});
 const loadingTask = ref(false);
 const correctionField = ref<AuditField | null>(null);
 const correctionResult = ref<FieldCorrectionResponse | null>(null);
@@ -148,11 +152,6 @@ const {
 const executions = ref<ExecutionRow[]>([]);
 const executionsError = ref<string | null>(null);
 const executionsLoading = ref(false);
-const executionDetail = ref<Awaited<ReturnType<typeof getExecution>> | null>(null);
-const executionDetailVisible = ref(false);
-const executionDetailError = ref<string | null>(null);
-/** 执行详情请求代次：切换批次或任务后，旧响应不得写回当前抽屉。 */
-let executionDetailRequest = 0;
 
 async function loadExecutions(token: number): Promise<void> {
   const currentTaskNo = taskNo.value;
@@ -168,22 +167,6 @@ async function loadExecutions(token: number): Promise<void> {
     executionsError.value = error instanceof Error ? error.message : "执行记录读取失败";
   } finally {
     if (!isStale(token, currentTaskNo)) executionsLoading.value = false;
-  }
-}
-
-async function openExecutionDetail(row: ExecutionRow): Promise<void> {
-  const request = ++executionDetailRequest;
-  executionDetailVisible.value = true;
-  executionDetail.value = null;
-  executionDetailError.value = null;
-  try {
-    const payload = await getExecution(row.execution_id);
-    // 先打开的批次晚返回时不能覆盖后选中的那一份。
-    if (request !== executionDetailRequest) return;
-    executionDetail.value = payload;
-  } catch (error) {
-    if (request !== executionDetailRequest) return;
-    executionDetailError.value = error instanceof Error ? error.message : "执行详情读取失败";
   }
 }
 
@@ -242,13 +225,6 @@ const riskNodeExecuted = computed(() => risks.value?.risk_executed ?? false);
 const riskConfigured = computed(
   () => risks.value?.risk_configured ?? false,
 );
-const riskUndecidedCount = computed(() => {
-  const counts = risks.value?.status_counts ?? {};
-  return ["EVIDENCE_INSUFFICIENT", "PENDING_REVIEW", "NOT_EXECUTED"].reduce(
-    (sum, status) => sum + (counts[status] ?? 0),
-    0,
-  );
-});
 const atWaitingReview = computed(() => task.value?.status === "WAITING_REVIEW");
 
 /* 字段核对：抽取完成后的正常等待点，任务停在这里等人工确认字段。 */
@@ -475,7 +451,7 @@ const resumeHint = computed(() => {
 
 const executeDisabledReason = computed(() => {
   if (!task.value) return null;
-  if (atWaitingReview.value) return "该任务已停在原人工复核等待点；人工审核暂不启用，请复制为新任务重新执行。";
+  if (atWaitingReview.value) return "该任务停在历史人工复核等待点；当前未提供人工审核入口。";
   if (atFieldReview.value) return "字段抽取已完成，正在等待人工核对；请核对字段后「确认并继续审核」，不能另建批次绕过核对。";
   if (task.value.status === "COMPLETED") return "任务执行已结束，具体结论见规则结果。";
   if (watching.value) return "正在查询上一次执行的服务端状态，请等待查询结束。";
@@ -664,7 +640,7 @@ const blockers = computed<BlockerItem[]>(() => {
     items.push({
       tone: "warning",
       title: "该任务已停在原人工复核等待点",
-      description: "人工审核暂不启用，已有待办和结论保留；请复制为新任务重新执行。",
+      description: "当前未提供人工审核入口，已有待办和结论仅作历史记录保留。",
     });
   }
   if (atFieldReview.value && fieldReview.value) {
@@ -713,6 +689,8 @@ async function setTab(next: string | number): Promise<void> {
   if (!isDetailTab(next)) {
     return;
   }
+  // 顶部统计和提示也会切换页签，必须经过与标签栏相同的未保存修改确认。
+  if (next !== tab.value && tab.value === "fields" && !await confirmLeaveReview()) return;
   if (tab.value === next && !route.query.tab) {
     // 同一页签重复点击时只确保数据存在，不重复写 URL。
     void ensureTabLoaded(next);
@@ -753,12 +731,36 @@ function tabFromRoute(): DetailTab | null {
 /* 关键统计 */
 
 const fieldExtractedCount = computed(
-  () => task.value?.fields.filter((field) => field.status === "PRESENT" || field.status === "REVIEWED").length ?? 0,
+  () => task.value?.fields.filter(hasEffectiveFieldValue).length ?? 0,
 );
 const ruleAbnormalCount = computed(() => task.value?.rules.filter((rule) => rule.status === "ABNORMAL").length ?? 0);
+const ruleEvidenceInsufficientCount = computed(
+  () => task.value?.rules.filter((rule) => rule.status === "EVIDENCE_INSUFFICIENT").length ?? 0,
+);
 const unresolvedRuleCount = computed(
   () => task.value?.rules.filter((rule) => !COMPLETED_RESULT_STATUSES.has(rule.status)).length ?? 0,
 );
+const fieldNoValueCount = computed(
+  () => task.value?.fields.filter((field) => field.status !== "NOT_APPLICABLE"
+    && !hasEffectiveFieldValue(field)).length ?? 0,
+);
+
+async function openFieldFilter(value: string): Promise<void> {
+  await setTab("fields");
+  if (tab.value !== "fields") return;
+  fieldFilter.value = value;
+  await nextTick();
+  if (atFieldReview.value) reviewPanel.value?.applyFilter(value);
+  else fieldResultsPanel.value?.applyFilter(value);
+}
+
+async function openRuleFilter(value: string): Promise<void> {
+  await setTab("rules");
+  if (tab.value !== "rules") return;
+  ruleFilter.value = value;
+  await nextTick();
+  ruleResultsPanel.value?.applyFilter(value);
+}
 const reportDownloadUrl = computed(() => {
   if (!task.value || !report.value?.content || !report.value.report_generated || !report.value.current) return null;
   return apiFileUrl(`/audit-tasks/${task.value.task_no}/reports/download?report_no=${encodeURIComponent(report.value.report_no ?? '')}`);
@@ -813,10 +815,6 @@ function resetWorkspace(): void {
   executions.value = [];
   executionsError.value = null;
   executionsLoading.value = false;
-  executionDetailRequest += 1;
-  executionDetail.value = null;
-  executionDetailError.value = null;
-  executionDetailVisible.value = false;
   /* 抽屉与弹窗 */
   resetMaterialProcessing();
   formMessage.value = "";
@@ -1285,17 +1283,23 @@ watch(
 
       <template v-if="task">
         <div class="task-summary" aria-label="任务结果概览">
-          <button type="button" class="summary-item" @click="setTab('rules')">
+          <button type="button" class="summary-item" @click="openRuleFilter('ALL')">
             <span class="summary-label">审核事项</span><strong>{{ task.rules.length }}</strong>
           </button>
-          <button type="button" class="summary-item" :class="{ 'summary-item--warning': unresolvedRuleCount > 0 }" @click="setTab('rules')">
-            <span class="summary-label">未形成结论</span><strong>{{ unresolvedRuleCount }}</strong>
+          <button type="button" class="summary-item" :class="{ 'summary-item--warning': unresolvedRuleCount > 0 }" @click="openRuleFilter('INCOMPLETE')">
+            <span class="summary-label">未完成 / 未确认</span><strong>{{ unresolvedRuleCount }}</strong>
           </button>
-          <button type="button" class="summary-item" :class="{ 'summary-item--danger': ruleAbnormalCount > 0 }" @click="setTab('rules')">
+          <button type="button" class="summary-item" :class="{ 'summary-item--warning': ruleEvidenceInsufficientCount > 0 }" @click="openRuleFilter('EVIDENCE_INSUFFICIENT')">
+            <span class="summary-label">证据不足</span><strong>{{ ruleEvidenceInsufficientCount }}</strong>
+          </button>
+          <button type="button" class="summary-item" :class="{ 'summary-item--danger': ruleAbnormalCount > 0 }" @click="openRuleFilter('ABNORMAL')">
             <span class="summary-label">发现异常</span><strong>{{ ruleAbnormalCount }}</strong>
           </button>
-          <button type="button" class="summary-item" @click="setTab('fields')">
-            <span class="summary-label">字段已抽取</span><strong>{{ fieldExtractedCount }}<small> / {{ task.fields.length }}</small></strong>
+          <button type="button" class="summary-item" @click="openFieldFilter('EXTRACTED')">
+            <span class="summary-label">字段有有效值</span><strong>{{ fieldExtractedCount }}<small> / {{ task.fields.length }}</small></strong>
+          </button>
+          <button type="button" class="summary-item" :class="{ 'summary-item--warning': fieldNoValueCount > 0 }" @click="openFieldFilter('NO_VALUE')">
+            <span class="summary-label">字段无有效值</span><strong>{{ fieldNoValueCount }}</strong>
           </button>
           <button type="button" class="summary-item" @click="setTab('materials')">
             <span class="summary-label">材料已上传</span><strong>{{ uploadedDocumentCount }}<small> / {{ task.documents.length }}</small></strong>
@@ -1369,7 +1373,9 @@ watch(
             <!-- 等待核对时直接展示核对区域；配置无法建立核对边界时，原因也只在这里能说清。 -->
             <AuditFieldReviewPanel
               v-if="fieldReview && (atFieldReview || fieldReview.blocked_reason)"
+              :key="task.task_no"
               ref="reviewPanel"
+              v-model:filter="fieldFilter"
               :fields="task.fields"
               :state="fieldReview"
               :saving="reviewSaving"
@@ -1381,6 +1387,9 @@ watch(
             />
             <AuditFieldResults
               v-if="!atFieldReview"
+              :key="task.task_no"
+              ref="fieldResultsPanel"
+              v-model:filter="fieldFilter"
               :fields="task.fields"
               :extraction-finished="extractionFinished"
               :correction-enabled="task.status !== 'COMPLETED' && task.status !== 'FAILED'"
@@ -1389,7 +1398,7 @@ watch(
           </el-tab-pane>
 
           <el-tab-pane label="规则结果" name="rules">
-            <AuditRuleResults :rules="task.rules" />
+            <AuditRuleResults :key="task.task_no" ref="ruleResultsPanel" v-model:filter="ruleFilter" :rules="task.rules" />
           </el-tab-pane>
 
           <el-tab-pane label="风险" name="risks">
@@ -1409,8 +1418,6 @@ watch(
               :running="watching"
               :loading="reportLoading"
               :error="reportError"
-              :risk-configured="risks ? riskConfigured : null"
-              :risk-undecided-count="riskUndecidedCount"
               @select-report="(reportNo: string) => loadReport(taskNo, stateGeneration, reportNo)"
             />
           </el-tab-pane>
@@ -1419,47 +1426,12 @@ watch(
             <el-alert v-if="executionsError" type="error" show-icon :closable="false" :title="`执行记录读取失败：${executionsError}`">
               <el-button size="small" @click="retryLoadExecutions()">重试</el-button>
             </el-alert>
-            <el-table
+            <ExecutionRecordsTable
               v-else
-              :data="executions"
-              class="management-table"
-              border
-              stripe
-              size="small"
-              v-loading="executionsLoading"
+              :rows="executions"
+              :loading="executionsLoading"
               empty-text="暂无执行记录"
-            >
-              <el-table-column label="执行批次" width="104">
-                <template #default="{ row }">第 {{ row.sequence_no }} 次</template>
-              </el-table-column>
-              <el-table-column label="执行状态" width="140">
-                <template #default="{ row }">
-                  <StatusBadge :status="row.status" :tone="statusTone(row.status)" />
-                  <el-tag v-if="row.invalidated" type="info" size="small">已失效</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="开始时间" width="200">
-                <template #default="{ row }"><span class="table-nowrap">{{ row.started_at ? formatDate(row.started_at) : "—" }}</span></template>
-              </el-table-column>
-              <el-table-column label="结束时间" width="200">
-                <template #default="{ row }"><span class="table-nowrap">{{ row.finished_at ? formatDate(row.finished_at) : "—" }}</span></template>
-              </el-table-column>
-              <!-- 耗时按「N 小时 M 分 S 秒」展示，列宽要放得下完整时长，否则会折成两行。 -->
-              <el-table-column label="耗时" width="200">
-                <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
-              </el-table-column>
-              <el-table-column label="执行结果" min-width="300">
-                <template #default="{ row }">
-                  <div class="execution-result-summary"><span v-for="part in executionSummaryText(row).split(' · ')" :key="part">{{ part }}</span></div>
-                  <div v-if="row.failure_message" class="text-danger">{{ row.failure_message }}</div>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="80" class-name="table-actions" fixed="right">
-                <template #default="{ row }">
-                  <el-button link type="primary" size="small" @click="openExecutionDetail(row)">详情</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
+            />
           </el-tab-pane>
         </el-tabs>
       </div>
@@ -1473,10 +1445,6 @@ watch(
       @close="closeCorrection"
       @submit="submitCorrection"
     />
-
-    <el-drawer v-model="executionDetailVisible" title="执行详情" size="min(960px, 100vw)">
-      <ExecutionDetailPanel :detail="executionDetail" :error="executionDetailError" />
-    </el-drawer>
 
     <MaterialProcessingDialog
       :state="processingState"
@@ -1494,7 +1462,7 @@ watch(
 
 .task-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   margin-top: 20px;
   border-top: 1px solid var(--el-border-color-lighter);
   padding-top: 16px;
@@ -1503,7 +1471,7 @@ watch(
 .summary-item {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   border: 0;
   border-right: 1px solid var(--el-border-color-lighter);
@@ -1511,15 +1479,15 @@ watch(
   color: var(--el-text-color-primary);
   padding: 0 20px;
   font: inherit;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
-.summary-item:first-child { padding-left: 0; }
 .summary-item:last-child { border-right: 0; }
 .summary-item:hover { background: var(--el-fill-color-light); }
 .summary-item:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
 .summary-label { color: var(--el-text-color-secondary); font-size: 13px; }
+
 .summary-item strong { font-size: 26px; line-height: 1.2; font-weight: 600; }
 .summary-item small { font-size: 14px; font-weight: 400; color: var(--el-text-color-secondary); }
 .summary-item--warning strong { color: var(--el-color-warning-dark-2); }

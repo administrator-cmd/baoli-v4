@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, DisconnectionError, InterfaceError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from .config import get_settings, validated_database_url
+from app.core.config import get_settings, validated_database_url
 
 
 class Base(DeclarativeBase):

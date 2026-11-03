@@ -196,8 +196,8 @@ onMounted(async () => {
       <el-table-column label="当前状态" width="140">
         <template #default="{ row }"><StatusBadge domain="risk" :status="row.status" /></template>
       </el-table-column>
-      <el-table-column label="处理建议" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.suggestion || "—" }}</template>
+      <el-table-column label="判断说明" min-width="240" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.message || "未记录判断说明" }}</template>
       </el-table-column>
       <el-table-column label="创建时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
@@ -234,7 +234,6 @@ onMounted(async () => {
           <StatusBadge domain="risk" :status="detail.status" />
           <div class="text-muted block-gap-sm">{{ detail.message }}</div>
         </el-descriptions-item>
-        <el-descriptions-item label="处理建议">{{ detail.suggestion || "—" }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
       </el-descriptions>
       <div class="app-toolbar">

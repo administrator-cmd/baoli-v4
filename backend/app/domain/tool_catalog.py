@@ -9,29 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..common.exceptions import BusinessError
-from ..constants.status import OPERATOR_RESULT_STATUSES
-from . import file_quality
-from .parameter_contract import (
-    DATE_COMPARE_OPERATORS,
-    DATE_THRESHOLD_UNIT,
-    DECIMAL_COMPARE_OPERATORS,
-    DECIMAL_SUM_COMPARE_OPERATORS,
-)
+from app.common.exceptions import BusinessError
+from app.domain import file_quality
 
 # 工具的名称、输出与描述元数据；输入参数以本文件的 JSON Schema 为准。
 KIND_OPERATOR = "OPERATOR"
 KIND_QUALITY_ITEM = "QUALITY_ITEM"
 INPUT_NONE = "NONE"
-INPUT_FIELD_ONE = "FIELD_ONE"
-INPUT_FIELD_PAIR = "FIELD_PAIR"
-INPUT_FIELD_LIST = "FIELD_LIST"
-INPUT_FIELD_SET = "FIELD_SET"
-INPUT_OUTPUT_FIELDS = "OUTPUT_FIELDS"
 INPUT_MATERIAL_SCOPE = "MATERIAL_SCOPE"
 JUDGE_PROGRAM = "PROGRAM"
 JUDGE_LLM = "LLM"
-JUDGE_HUMAN = "HUMAN_REVIEW"
 
 
 @dataclass(frozen=True)
@@ -51,114 +38,6 @@ class _ToolMetadata:
 
 
 _OPERATOR_METADATA: tuple[_ToolMetadata, ...] = (
-    _ToolMetadata(
-        tool_id="MATERIAL_EXISTS",
-        label="材料是否齐全",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_MATERIAL_SCOPE,
-        statuses=frozenset({"PASSED", "ABNORMAL", "NOT_APPLICABLE", "EVIDENCE_INSUFFICIENT"}),
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("applicability", "standard", "comparison", "missing_material_keys", "missing_material_names", "checked_material_keys"),
-        # 这些项由 `quality_judgement.material_exists_result` 在每条返回路径上给出：
-        # 节点实现与 Agent adapter 都调它，因此「保证出现」是可核对的。
-        required_output_keys=("applicability", "standard", "comparison", "missing_material_keys", "missing_material_names", "checked_material_keys"),
-        note="按规则声明的材料位逐项核对是否已上传；比较对象是「已上传的材料位」与「本检查声明的材料位」。",
-    ),
-    _ToolMetadata(
-        tool_id="FIELD_EQUAL",
-        version="2",
-        label="字段是否一致",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_PAIR,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison",),
-    ),
-    _ToolMetadata(
-        tool_id="FIELD_NOT_EQUAL",
-        version="2",
-        label="字段应当不同",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_PAIR,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison",),
-    ),
-    _ToolMetadata(
-        tool_id="DATE_COMPARE",
-        label="日期先后比较",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_PAIR,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison",),
-        note="日期标准化当前只认 YYYY-MM-DD / YYYY/M/D / YYYY.M.D / YYYY年M月D日 这几种原文写法。",
-    ),
-    _ToolMetadata(
-        tool_id="DECIMAL_COMPARE",
-        version="3",
-        label="数值比较",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_PAIR,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison",),
-    ),
-    _ToolMetadata(
-        tool_id="DECIMAL_SUM_COMPARE",
-        version="3",
-        label="数值加总比较",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_LIST,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison", "sum_value"),
-    ),
-    _ToolMetadata(
-        tool_id="DECIMAL_CN_EQUAL",
-        label="大小写金额一致性",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_PAIR,
-        statuses=frozenset({"EVIDENCE_INSUFFICIENT", "PENDING_REVIEW"}),
-        # 该工具尚无确定性换算实现，调用时返回具体不可执行原因。
-        # 此限制仅描述工具，不限制模型直接按规则原文执行。
-        implemented=False,
-        unimplemented_reason=(
-            "把大写金额换算成有证据的数值需要业务先确认金额单位、币种与大写金额换算口径；"
-            "系统不代填默认口径，本项当前不可判定"
-        ),
-        judge=JUDGE_HUMAN,
-        output_keys=("extracted_values",),
-        note="换算口径确认后接入真实换算实现；在此之前规则可以配置，但不能作为可执行结论。",
-    ),
-    _ToolMetadata(
-        tool_id="FIELD_NOT_EMPTY",
-        label="字段非空",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_ONE,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison",),
-        note="只判断有效事实是否存在且非空；抽取失败与未执行都不等于「为空」。",
-    ),
-    _ToolMetadata(
-        tool_id="CLAUSE_ABSENT",
-        label="条款不应存在",
-        kind=KIND_OPERATOR,
-        input_kind=INPUT_FIELD_ONE,
-        statuses=OPERATOR_RESULT_STATUSES,
-        implemented=True,
-        judge=JUDGE_PROGRAM,
-        output_keys=("comparison", "clause_exists"),
-        note="判断条款本身是否存在，不按「抽取到的文字是否非空」判断；只能引用条款类型字段。",
-    ),
     _ToolMetadata(
         tool_id="RISK_TRIGGER",
         version="2",
@@ -200,41 +79,19 @@ _QUALITY_METADATA: tuple[_ToolMetadata, ...] = tuple(
 )
 
 _TOOL_METADATA = {item.tool_id: item for item in (*_OPERATOR_METADATA, *_QUALITY_METADATA)}
-OPERATOR_LABELS = {item.tool_id: item.label for item in _TOOL_METADATA.values()}
 
 
-# handler 所在的模块与函数。解析在 services.audit.tools.runtime 里完成：
+# handler 所在的模块与函数。解析在 modules.audit.field.service.tools.runtime 里完成：
 # domain 层不导入 operators 与 services，避免领域层依赖执行层。
 _OPERATOR_MODULE = "app.operators.registry"
 _OPERATOR_FUNCTION = "execute_operator"
-# 需要任务上下文与数据库会话的工具（材料存在性、文件质量）走 adapter 模块。
+# 需要任务上下文与数据库会话的文件质量检查走 adapter 模块。
 # adapter 不含判定逻辑：它把上下文转成共享领域服务的输入，然后调同一个实现。
-_ADAPTER_MODULE = "app.services.audit.tools.handlers"
+_ADAPTER_MODULE = "app.modules.audit.field.service.tools.handlers"
 
 # 当前可独立调用的算子工具：原函数签名为 `(parameters, inputs) -> dict`，
 # 标准 @tool 对象保存在 operators.registry.REGISTRY 中，调用通过 .invoke() 完成。
-_CALLABLE_OPERATORS: tuple[str, ...] = (
-    "FIELD_EQUAL",
-    "FIELD_NOT_EQUAL",
-    "DATE_COMPARE",
-    "DECIMAL_COMPARE",
-    "DECIMAL_SUM_COMPARE",
-    "FIELD_NOT_EMPTY",
-    "CLAUSE_ABSENT",
-    "RISK_TRIGGER",
-    # 大小写金额一致性：判定口径未确认，但工具入口存在且会如实返回
-    # 「不可判定 + 缺哪条口径」。这与「没有实现、调不了」是两件事：
-    # Agent 需要能调用它并拿到「这项做不了、因为口径未确认」这个真实结论，
-    # 而不是在目录里看到一个不存在的工具。
-    "DECIMAL_CN_EQUAL",
-)
-
-# 需要任务上下文与数据库会话的工具 → adapter 函数名。
-# 它们使用 `domain/quality_judgement.py` 的判定实现。
-_CONTEXT_TOOLS: dict[str, str] = {
-    "MATERIAL_EXISTS": "check_materials_tool",
-    "FILE_QUALITY_CHECK": "check_file_quality_tool",
-}
+_CALLABLE_OPERATORS: tuple[str, ...] = ("RISK_TRIGGER",)
 
 # 工具输入只提交身份引用，真实取值由系统按身份读取。
 _INPUT_ITEM_SCHEMA: dict[str, Any] = {
@@ -256,84 +113,8 @@ def _inputs_schema(*, min_items: int, max_items: int | None = None) -> dict[str,
     return schema
 
 
-# 每个可调用工具的真实参数 Schema；枚举取自 parameter_contract。
+# 每个可调用工具的真实参数 Schema；风险来源由调用方按编号注入。
 _OPERATOR_ARGUMENT_SCHEMAS: dict[str, dict[str, Any]] = {
-    "FIELD_EQUAL": {
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=2, max_items=2),
-    },
-    "FIELD_NOT_EQUAL": {
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=2, max_items=2),
-    },
-    "DATE_COMPARE": {
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "operator": {"type": "string", "enum": sorted(DATE_COMPARE_OPERATORS)},
-                # 非负整数天；单位只能是「天」。填写差值时必须同时给单位，
-                # 参数由工具实现按实际调用核对。
-                "threshold": {"type": "number", "minimum": 0},
-                "threshold_unit": {"type": "string", "enum": [DATE_THRESHOLD_UNIT]},
-            },
-            "required": ["operator"],
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=2, max_items=2),
-    },
-    "DECIMAL_COMPARE": {
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "operator": {"type": "string", "enum": sorted(DECIMAL_COMPARE_OPERATORS)},
-                "threshold": {"type": "number", "minimum": 0},
-                "threshold_unit": {"type": "string", "minLength": 1},
-            },
-            "required": ["operator"],
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=2, max_items=2),
-    },
-    "DECIMAL_SUM_COMPARE": {
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "operator": {"type": "string", "enum": sorted(DECIMAL_SUM_COMPARE_OPERATORS)},
-                # 加总比较的允许差值必须显式配置：缺省不能当作 0，
-                # 工具不得把缺失参数当作业务默认值。
-                "threshold": {"type": "number", "minimum": 0},
-                "threshold_unit": {"type": "string", "minLength": 1},
-            },
-            "required": ["operator", "threshold"],
-            "additionalProperties": False,
-        },
-        # 左侧待核对总额 + 至少一个加数。
-        "inputs": _inputs_schema(min_items=2),
-    },
-    "FIELD_NOT_EMPTY": {
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=1, max_items=1),
-    },
-    "CLAUSE_ABSENT": {
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=1, max_items=1),
-    },
     "RISK_TRIGGER": {
         "parameters": {
             "type": "object",
@@ -353,31 +134,6 @@ _OPERATOR_ARGUMENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
         # 风险不直接吃字段输入：来源检查的当前有效结果由调用方按 source_rule_codes 解析。
-        "inputs": {"type": "array", "items": _INPUT_ITEM_SCHEMA, "maxItems": 0},
-    },
-    # 大小写金额一致性：需要左右两个字段的原文（大写金额、小写金额）。
-    "DECIMAL_CN_EQUAL": {
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        "inputs": _inputs_schema(min_items=2, max_items=2),
-    },
-    # 材料存在性：模型只声明要核对哪些材料位（业务口径），实传情况由运行时读取。
-    "MATERIAL_EXISTS": {
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "material_refs": {
-                    "type": "array",
-                    "items": {"type": "string", "minLength": 1},
-                    "minItems": 1,
-                },
-            },
-            "required": ["material_refs"],
-            "additionalProperties": False,
-        },
         "inputs": {"type": "array", "items": _INPUT_ITEM_SCHEMA, "maxItems": 0},
     },
 }
@@ -411,15 +167,6 @@ _RUNTIME_KEYS: dict[str, dict[str, str]] = {
         "source_results": "各来源检查和计算的真实结果、字段输入及判断依据，按来源引用顺序给出",
         "risk_condition": "风险成立条件完整原文，来自已发布配置",
         "requirement": "风险业务要求原文，来自已发布配置",
-    },
-    # 材料存在性检查的「适用条件」与「检查口径原文」是已发布配置事实，
-    # 不是模型能填的业务参数：模型填一个适用条件就等于它自己决定这条规则适不适用。
-    # 注入后由 `quality_judgement.material_exists_result` 使用同一份实现组装结果，
-    # 目录声明的 applicability / standard 因此在 Agent 路径上也真实存在。
-    "MATERIAL_EXISTS": {
-        "applicability": "本规则的适用条件（kind / label / material_keys），来自已发布配置",
-        "requirement": "本条检查的审核要求原文，来自已发布配置的规则行",
-        "check_level": "本条检查的检查等级原文，来自已发布配置的规则行",
     },
 }
 
@@ -549,12 +296,7 @@ def _output_schema_of(metadata: _ToolMetadata) -> dict[str, Any]:
 
 def _input_count_text(metadata: _ToolMetadata) -> str:
     return {
-        INPUT_FIELD_ONE: "恰好一个字段输入",
-        INPUT_FIELD_PAIR: "恰好两个字段输入，顺序为左侧在前、右侧在后",
-        INPUT_FIELD_LIST: "左侧待核对总额 + 至少一个加数",
-        INPUT_FIELD_SET: "业务规则声明的一个或多个字段输入",
         INPUT_NONE: "无字段输入",
-        INPUT_OUTPUT_FIELDS: "产出字段",
         INPUT_MATERIAL_SCOPE: "按材料位判定",
     }.get(metadata.input_kind, metadata.input_kind)
 
@@ -570,8 +312,6 @@ def _description_of(metadata: _ToolMetadata) -> str:
                  "真实取值由系统按字段事实解析，不要传入金额或日期文本。")
     if metadata.judge == JUDGE_PROGRAM:
         parts.append("判定由确定性程序完成，结果不可被模型改写。")
-    elif metadata.judge == JUDGE_HUMAN:
-        parts.append("本项需要人工裁决，工具只返回证据。")
     return " ".join(part for part in parts if part)
 
 
@@ -587,20 +327,13 @@ def _agent_unselectable_reason(metadata: _ToolMetadata) -> str:
 
 
 def _handler_ref_of(tool_id: str) -> dict[str, str] | None:
-    """工具的真实 handler 引用；不可调用时为 None。
+    """算子工具的真实 handler 引用；不可调用时为 None。
 
-    两种工具引用：
-
-    - 算子工具：保留 `execute_operator` 分发引用与算子码；工具服务按算子码取得
-      `operators.registry.REGISTRY` 中的标准工具对象，由工具服务按调用参数执行；
-    - 上下文工具：`services.audit.tools.handlers` 的标准工具对象，原函数接收
-      `(parameters, inputs, *, context)`，使用 `domain/quality_judgement` 的判定实现。
+    标准 @tool 对象保存在 `operators.registry.REGISTRY` 中，由工具服务按算子码执行。
+    文件质量与数据读取工具在各自的 ToolSpec 中直接声明 adapter，不经过这里。
     """
     if tool_id in _CALLABLE_OPERATORS:
         return {"module": _OPERATOR_MODULE, "function": _OPERATOR_FUNCTION, "operator": tool_id}
-    adapter = _CONTEXT_TOOLS.get(tool_id)
-    if adapter is not None:
-        return {"module": _ADAPTER_MODULE, "function": adapter, "context": "true"}
     return None
 
 
@@ -608,7 +341,6 @@ def _build_operator_tool(metadata: _ToolMetadata) -> ToolSpec:
     schema = _OPERATOR_ARGUMENT_SCHEMAS[metadata.tool_id]
     handler_ref = _handler_ref_of(metadata.tool_id)
     # handler 决定能否调用；判定能力由 judgement_supported 独立表达。
-    # 大小写金额工具可如实返回不可判定原因，不能因此宣称已有换算能力。
     callable_now = handler_ref is not None
     reason = "" if callable_now else metadata.unimplemented_reason
     selectable = callable_now and _agent_selectable_of(metadata)

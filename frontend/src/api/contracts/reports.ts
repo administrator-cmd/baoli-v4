@@ -1,12 +1,20 @@
 /** 报告与风险结果：报告正文、结论、格式支持与风险列表。 */
 
-import type { ApiResponse, JsonValue } from "./common";
+import type { JsonValue } from "./common";
 
-export interface Report extends ApiResponse {
+export interface Report {
   task_no: string;
   report_no: string | null;
   report_name: string | null;
-  reports: Array<{ report_no: string; report_name: string; current: boolean }>;
+  reports: Array<{
+    report_no: string;
+    report_name: string;
+    current: boolean;
+    /** 每份报告的生成、覆盖与缺项口径分开给出。 */
+    report_generated?: boolean;
+    scope_execution_complete?: boolean;
+    unresolved_count?: number;
+  }>;
   status: "COMPLETE" | "INCOMPLETE" | "NOT_GENERATED";
   content_type: "text/markdown" | "text/plain" | "text/html";
   content: string | null;
@@ -87,7 +95,7 @@ export interface ReportRow {
   remark: string | null;
 }
 
-export interface ReportDetail extends ApiResponse {
+export interface ReportDetail {
   report_no: string;
   report_name: string;
   task_no: string | null;

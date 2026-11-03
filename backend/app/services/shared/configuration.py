@@ -6,9 +6,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from ...common.exceptions import BusinessError
-from ...entity.plans import AuditPlan
-from ...entity.scenario_drafts import ScenarioDraft
+from app.common.exceptions import BusinessError
+from app.core.base_crud import SessionCRUD
+from app.modules.plan.plan.model import AuditPlan
+from app.modules.scenario.draft.model import ScenarioDraft
 
 SECTIONS = {
     "ScenarioDraftNode": "nodes",
@@ -46,7 +47,7 @@ class ConfigItem:
 
 def _owner(db: Session, model: type, owner_id: int) -> Any:
     owner_type = ScenarioDraft if model.__name__.startswith("ScenarioDraft") else AuditPlan
-    owner = db.get(owner_type, owner_id)
+    owner = SessionCRUD(db).get_of(owner_type, owner_id)
     if owner is None:
         raise BusinessError("CONFIG_OWNER_MISSING", "配置所属的场景草稿或方案不存在", status_code=404)
     if not isinstance(owner.config_json, dict):

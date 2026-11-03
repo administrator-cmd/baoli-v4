@@ -55,6 +55,17 @@ export type AuditFieldView = AuditField & {
   currency?: string | null;
   period_scope?: string | null;
   statement_scope?: string | null;
+  entity_scope?: string | null;
+  /** 模型从正文实际识别到的期间、口径、主体和单位；未识别时为空。 */
+  actual_period_scope?: string | null;
+  actual_statement_scope?: string | null;
+  actual_entity_scope?: string | null;
+  actual_unit?: string | null;
+  /** 该结果实际证据对应的上传文件名；不是材料位当前文件名。 */
+  source_files?: string[];
+  source_file?: string | null;
+  /** 取值方式：文档抽取 / 人工纠错。 */
+  value_source?: string | null;
   /** 抽取规则没有形成字段值时保存的真实执行原因。 */
   extraction_message?: string | null;
   /** 方案冻结的抽取要求；用于解释本次按什么要求检查。 */
@@ -93,7 +104,20 @@ export type AuditTaskView = AuditTask & {
   latest_operation?: OperationView | null;
   nodes: AuditNodeView[];
   fields: AuditFieldView[];
-
+  /** 字段结果统计与按材料/期间/单位汇总的缺项；服务端统一计算。 */
+  field_summary?: {
+    total: number;
+    valid: number;
+    missing: number;
+    not_executed: number;
+    gap_groups: Array<{
+      material_name: string;
+      period: string;
+      unit: string;
+      field_names: string[];
+      affected_rules: string[];
+    }>;
+  } | null;
 };
 /** 替换上传的真实影响范围：由服务端计算，页面只负责显示。 */
 export interface ReplacementImpact {

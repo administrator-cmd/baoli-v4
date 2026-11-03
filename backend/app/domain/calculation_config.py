@@ -3,7 +3,7 @@
 from copy import deepcopy
 from typing import Any
 
-from ..common.exceptions import BusinessError
+from app.common.exceptions import BusinessError
 
 
 def calculation_store(raw: Any) -> list[dict[str, Any]]:

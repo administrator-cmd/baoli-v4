@@ -18,7 +18,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
- * 审核报告：真实报告输出节点生成的快照。
+ * 审核报告：真实报告生成项产生的快照。
  * 三个信号（报告已生成 / 范围执行完整 / 风险可判定）分别展示；备注可编辑、正文不可手改；
  * 重新生成是新快照，历史快照保留；归档只改归档状态。
  */
@@ -150,7 +150,7 @@ const detailReasons = computed(() => {
     risk_inconclusive: "已配置的风险规则尚未全部形成可用结论",
     missing_rule_keys: "有已启用规则尚未形成任何结果",
     missing_required_materials: "存在尚未上传的必传材料",
-    failed_nodes: "存在执行失败或被阻断的审核节点",
+    failed_nodes: "存在失败或被阻断的执行批次",
   };
   return Object.entries(detail.value.reasons ?? {})
     .filter(([, value]) => (Array.isArray(value) ? value.length > 0 : Boolean(value)))

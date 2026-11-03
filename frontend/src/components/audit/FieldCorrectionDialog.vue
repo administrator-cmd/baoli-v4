@@ -122,9 +122,9 @@ function submit(): void {
         <el-descriptions-item label="修改后">{{ result.after_value ?? "未提供" }}</el-descriptions-item>
         <el-descriptions-item label="失效复核">{{ result.invalidated_reviews }} 项</el-descriptions-item>
         <el-descriptions-item label="失效规则结果">{{ result.invalidated_rule_results }} 条</el-descriptions-item>
-        <el-descriptions-item label="需要重算的规则">
+        <el-descriptions-item label="重算状态">
           <span v-if="result.recomputed_rules.length">{{ result.recomputed_rules.join("、") }}</span>
-          <span v-else class="text-muted">没有需要重算的规则。</span>
+          <span v-else class="text-muted">本次仅保存纠错，未自动重新执行审核。</span>
         </el-descriptions-item>
       </el-descriptions>
     </template>

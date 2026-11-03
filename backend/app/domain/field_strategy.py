@@ -13,8 +13,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
-from ..common.exceptions import BusinessError
-from ..constants.status import SCOPE_NOT_APPLICABLE
+from app.common.exceptions import BusinessError
+from app.constants.status import SCOPE_NOT_APPLICABLE
 
 RAW_TEXT = "RAW_TEXT"
 DETERMINISTIC = "DETERMINISTIC"

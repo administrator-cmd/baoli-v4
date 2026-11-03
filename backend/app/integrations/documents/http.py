@@ -17,8 +17,8 @@ from typing import Any
 import httpx
 import requests
 
-from ...common.exceptions import BusinessError
-from ...core.config import get_settings
+from app.common.exceptions import BusinessError
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 

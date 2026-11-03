@@ -2,10 +2,10 @@
 import { computed } from "vue";
 
 import type { ApiError } from "@/api/http";
-import { failureNextStep } from "@/constants/labels";
 
 /**
- * 统一错误提示：中文业务原因 + 错误码 + 可执行的下一步。
+ * 统一错误提示：服务端原因、字段错误与诊断信息。
+ * 具体操作由调用页面按实际状态提供，不根据错误码拼接通用建议。
  * 请求编号等排查信息放在折叠区，不占主要位置。
  *
  * 一个页面只挂一处；AppShell 不重复显示页面已经显示过的错误。
@@ -19,8 +19,6 @@ const props = defineProps<{
 defineEmits<{
   dismiss: [];
 }>();
-
-const nextStep = computed(() => failureNextStep(props.error?.code));
 
 /** 后端可能把补充说明放在 details 里；这里只显示可读的标量项。 */
 const detailEntries = computed(() => {
@@ -55,7 +53,6 @@ const fieldErrors = computed(() => {
     </template>
     <div class="failure-notice__body">
       <p>错误码：{{ error.code }}</p>
-      <p>{{ nextStep }}</p>
       <div v-for="(entry, index) in fieldErrors" :key="index">
         {{ entry.field }}：{{ entry.message }}
       </div>

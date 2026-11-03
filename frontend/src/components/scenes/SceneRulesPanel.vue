@@ -310,7 +310,7 @@ function scopeText(rule: DraftRuleItem): string {
               {{ detailRule.source_rule_name }}
             </el-descriptions-item>
             <el-descriptions-item v-if="detailRule.risk_level" label="风险等级">{{ detailRule.risk_level }}</el-descriptions-item>
-            <el-descriptions-item v-if="detailRule.risk_action" label="处理建议">{{ detailRule.risk_action }}</el-descriptions-item>
+            <el-descriptions-item v-if="detailRule.risk_action" label="规则配置的处置要求">{{ detailRule.risk_action }}</el-descriptions-item>
             <el-descriptions-item label="启用状态">{{ detailRule.enabled ? "启用" : "停用" }}</el-descriptions-item>
           </el-descriptions>
         </template>

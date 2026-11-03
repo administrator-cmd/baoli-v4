@@ -144,7 +144,6 @@ const elapsedText = computed(() => {
           <span class="mono">{{ operation.operation_no }}</span>
         </el-descriptions-item>
         <el-descriptions-item v-if="operation.failure_code" label="错误码">{{ operation.failure_code }}</el-descriptions-item>
-        <el-descriptions-item v-if="operation.request_id" label="请求编号"><span class="mono">{{ operation.request_id }}</span></el-descriptions-item>
       </el-descriptions>
     </details>
 
@@ -184,7 +183,6 @@ const elapsedText = computed(() => {
       <template v-if="!compact">
         <div>错误码：{{ operation.failure_code ?? "未提供错误码" }}</div>
         <div class="mono">操作编号：{{ operation.operation_no }}</div>
-        <div v-if="operation.request_id" class="mono">请求编号：{{ operation.request_id }}</div>
       </template>
     </el-alert>
   </el-card>

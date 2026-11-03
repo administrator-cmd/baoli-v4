@@ -1,7 +1,7 @@
 """业务命令共用的幂等标识与恢复状态处理。"""
 
-from ...common.exceptions import BusinessError
-from ..system import background as background_service
+from app.common.exceptions import BusinessError
+from app.modules.system.operation.service import background as background_service
 
 
 def _idempotency_key(provided: str | None) -> str:
@@ -10,7 +10,7 @@ def _idempotency_key(provided: str | None) -> str:
     这样同一对象的并发提交由活跃操作互斥拦下（明确 409），而不是被误当成同一请求复用。
     调用方提供标识时（前端每次点击生成一个），重复请求才会返回已有操作。
     """
-    from ...domain.identity import public_no
+    from app.domain.identity import public_no
 
     return (provided or "").strip() or public_no("IDEM")
 

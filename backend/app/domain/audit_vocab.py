@@ -6,7 +6,7 @@
 
 from typing import Any
 
-from ..constants.status import (
+from app.constants.status import (
     FIELD_STATUS_LABELS,
     MATERIAL_TYPE_UNAVAILABLE_STATUSES,
     RISK_STATUS_LABELS,

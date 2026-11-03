@@ -5,12 +5,13 @@ import type { AuditFieldView } from "@/api/audits";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import QuoteBlock from "@/components/audit/QuoteBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { factOriginLabel } from "@/constants/labels";
+import { factOriginLabel, periodScopeLabel, statementScopeLabel } from "@/constants/labels";
 import {
   evidenceNote,
   evidenceTitle,
   fieldMode,
   fieldReason,
+  fieldSourceFiles,
   formatFieldValue,
   reasonTitle,
   type FieldMode,
@@ -34,19 +35,13 @@ const reason = computed(() => {
   if (!field) return "";
   return mode.value === "UNNORMALIZED" ? normalizedText(field) : fieldReason(field);
 });
-const showResultInfo = computed(() => {
-  const field = props.field;
-  if (!field) return false;
-  return Boolean(
-    field.origin
-    || field.instruction
-    || (mode.value === "VALUE" && field.extraction_message)
-    || mode.value === "NOT_RUN",
-  );
-});
 
 /** 原文内容。没有原文时说明属于哪一种缺失，不留空白。 */
 function rawText(field: AuditFieldView): string {
+  if (field.corrected || field.origin === "HUMAN_CORRECTION") {
+    return field.extracted_raw_value !== null && field.extracted_raw_value !== undefined && field.extracted_raw_value !== ""
+      ? field.extracted_raw_value : "原抽取未取得原始值";
+  }
   if (field.raw_value !== null && field.raw_value !== undefined && field.raw_value !== "") {
     return field.raw_value;
   }
@@ -90,27 +85,42 @@ function hasNormalizedValue(field: AuditFieldView): boolean {
   return field.normalized_value !== null && field.normalized_value !== undefined && field.normalized_value !== "";
 }
 
-/**
- * 人工已确认的有效值。
- *
- * 只认服务端返回的事实：事实来源为人工纠错，或状态已复核。服务端没有给出人工
- * 确认标志时不做前端推断——那会把系统抽取值说成人工确认过的值。
- */
-function humanConfirmedText(field: AuditFieldView): string | null {
-  if (field.origin !== "HUMAN_CORRECTION" && field.status !== "REVIEWED") {
-    return null;
-  }
-  const raw = field.raw_value;
-  if (raw !== null && raw !== undefined && raw !== "") {
-    return raw;
-  }
-  return "人工已确认该字段在材料中不存在";
+/** 原始值与标准化结果文本相同时只保留一个区块，避免重复展示。 */
+function showRawSection(field: AuditFieldView): boolean {
+  if (field.corrected || field.origin === "HUMAN_CORRECTION") return true;
+  if (mode.value !== "VALUE" && mode.value !== "UNNORMALIZED") return false;
+  return !(mode.value === "VALUE" && hasNormalizedValue(field) && rawText(field) === normalizedText(field));
 }
 
 function reasonTone(current: FieldMode): string {
   if (current === "FAILED") return "detail-block--danger";
   if (current === "NOT_FOUND" || current === "UNCERTAIN" || current === "UNNORMALIZED") return "detail-block--warning";
   return "detail-block--muted";
+}
+
+/** 来源文件只取该结果实际证据对应的上传文件，不用材料位名称冒充。 */
+function sourceFilesText(field: AuditFieldView): string {
+  return fieldSourceFiles(field).join("、") || "未记录来源文件";
+}
+
+/** 配置声明与正文实际识别到的期间/单位分开显示；未识别不写成“不适用”。 */
+function declaredScopeText(field: AuditFieldView): string {
+  const parts: string[] = [];
+  parts.push(`期间 ${periodScopeLabel(field.period_scope)}`);
+  parts.push(`报表口径 ${statementScopeLabel(field.statement_scope)}`);
+  if (field.entity_scope && field.entity_scope !== "SELF") parts.push(`主体 ${field.entity_scope}`);
+  if (field.unit) parts.push(`单位 ${field.unit}`);
+  if (field.currency) parts.push(`币种 ${field.currency}`);
+  return parts.join(" · ");
+}
+
+function recognizedScopeText(field: AuditFieldView): string {
+  const parts: string[] = [];
+  if (field.actual_period_scope) parts.push(`期间 ${field.actual_period_scope}`);
+  if (field.actual_statement_scope) parts.push(`报表口径 ${field.actual_statement_scope}`);
+  if (field.actual_entity_scope) parts.push(`主体 ${field.actual_entity_scope}`);
+  if (field.actual_unit) parts.push(`单位 ${field.actual_unit}`);
+  return parts.join(" · ") || "未识别";
 }
 </script>
 
@@ -120,17 +130,11 @@ function reasonTone(current: FieldMode): string {
       <div class="field-detail-meta">
         <StatusBadge domain="field" :status="field.status" />
         <span v-if="field.source_ref" class="text-muted">字段编号：{{ field.source_ref }}</span>
-        <span class="field-detail-meta__material">{{ field.material_name }}</span>
         <span v-if="field.fact_revision_no" class="text-muted">第 {{ field.fact_revision_no }} 版</span>
       </div>
 
-      <section v-if="mode === 'VALUE' && humanConfirmedText(field)" class="detail-section">
-        <h4 class="detail-section__title">人工确认值</h4>
-        <div class="detail-block detail-block--accent">{{ humanConfirmedText(field) }}</div>
-      </section>
-
       <section v-if="mode === 'VALUE'" class="detail-section">
-        <h4 class="detail-section__title">标准化结果</h4>
+        <h4 class="detail-section__title">{{ field.origin === 'HUMAN_CORRECTION' || field.status === 'REVIEWED' ? '人工确认结果' : '取值结果' }}</h4>
         <div
           class="detail-block detail-block--accent field-result-value"
           :class="{ 'detail-block--muted': !hasNormalizedValue(field) }"
@@ -139,7 +143,7 @@ function reasonTone(current: FieldMode): string {
         </div>
       </section>
 
-      <section v-if="mode === 'VALUE' || mode === 'UNNORMALIZED'" class="detail-section">
+      <section v-if="showRawSection(field)" class="detail-section">
         <h4 class="detail-section__title">抽取原始值</h4>
         <div class="detail-block">{{ rawText(field) }}</div>
       </section>
@@ -155,22 +159,37 @@ function reasonTone(current: FieldMode): string {
         <div v-if="field.evidence.length" class="evidence-list">
           <div v-for="(item, index) in field.evidence" :key="index" class="evidence-item">
             <div class="evidence-source">
-              <span>{{ item.material_name || field.material_name }}</span>
-              <span v-if="item.document_name"> · {{ item.document_name }}</span>
+              <span>{{ item.document_name || "来源文件未记录" }}</span>
               <span v-if="item.field_path"> · {{ item.field_path }}</span>
             </div>
-            <QuoteBlock :text="item.quote_text" />
+            <QuoteBlock
+              :text="item.quote_text"
+              :label="item.quote_label"
+              :header="item.quote_header"
+              :period="item.quote_period"
+              :page="item.artifact_page"
+            />
           </div>
         </div>
         <div v-else class="detail-block detail-block--muted">未记录原文片段</div>
       </section>
 
-      <section v-if="showResultInfo" class="detail-section">
+      <section class="detail-section">
         <h4 class="detail-section__title">结果信息</h4>
         <dl class="detail-facts">
-          <template v-if="field.origin">
-            <dt>事实来源</dt>
-            <dd>{{ factOriginLabel(field.origin) }}</dd>
+          <template v-if="field.value_source || field.origin">
+            <dt>取值方式</dt>
+            <dd>{{ factOriginLabel(field.value_source || field.origin) }}</dd>
+          </template>
+          <dt>来源文件</dt>
+          <dd>{{ sourceFilesText(field) }}</dd>
+          <dt>识别口径</dt>
+          <dd>{{ recognizedScopeText(field) }}</dd>
+          <dt>配置口径</dt>
+          <dd>{{ declaredScopeText(field) }}</dd>
+          <template v-if="field.manual_review?.business_note">
+            <dt>人工说明</dt>
+            <dd>{{ field.manual_review.business_note }}</dd>
           </template>
           <template v-if="field.instruction">
             <dt>抽取要求</dt>
@@ -182,9 +201,9 @@ function reasonTone(current: FieldMode): string {
           </template>
           <template v-if="mode === 'NOT_RUN'">
             <dt>自动抽取</dt>
-            <dd>{{ field.extraction_enabled === false ? "未启用" : "已启用" }}</dd>
+            <dd>{{ field.extraction_enabled === undefined ? "未记录" : field.extraction_enabled ? "已启用" : "未启用" }}</dd>
             <dt>材料状态</dt>
-            <dd>{{ field.material_uploaded === false ? "未上传" : "已上传" }}</dd>
+            <dd>{{ field.material_uploaded === undefined ? "未记录" : field.material_uploaded ? "已上传" : "未上传" }}</dd>
           </template>
         </dl>
       </section>
@@ -213,11 +232,6 @@ function reasonTone(current: FieldMode): string {
   align-items: center;
   gap: 10px;
   margin-bottom: 20px;
-}
-
-.field-detail-meta__material {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
 }
 
 .detail-section + .detail-section {
@@ -304,6 +318,7 @@ function reasonTone(current: FieldMode): string {
   background: var(--el-fill-color-lighter);
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .detail-facts {

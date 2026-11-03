@@ -4,15 +4,16 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
-from ..common.exceptions import BusinessError
-from ..constants.execution import NODE_RULE_EXECUTION
-from ..constants.status import SCOPE_NOT_APPLICABLE
-from . import field_strategy, tool_catalog
-from .field_strategy import normalize_field_scope
-from .identity import stable_key
-from .proposals import FieldProposal, MaterialProposal, ReportSectionProposal, RuleProposal
-from .report_data import report_data_refs
-from .rule_library import active, is_risk_rule
+from app.common.exceptions import BusinessError
+from app.constants.execution import NODE_RULE_EXECUTION
+from app.constants.status import SCOPE_NOT_APPLICABLE
+from app.domain import field_strategy
+from app.domain.field_strategy import normalize_field_scope
+from app.domain.identity import stable_key
+from app.domain.parameter_contract import OPERATOR_LABELS
+from app.domain.proposals import FieldProposal, MaterialProposal, ReportSectionProposal, RuleProposal
+from app.domain.report_data import report_data_refs
+from app.domain.rule_library import active, is_risk_rule
 
 
 def _proposal_context(item: dict[str, Any], model: type) -> dict[str, Any]:
@@ -21,16 +22,14 @@ def _proposal_context(item: dict[str, Any], model: type) -> dict[str, Any]:
                      **{key: value for key, value in item.items() if key not in model.model_fields}})
 
 
-# 参数契约常量见文件顶部从 `parameter_contract` 的导入（叶子模块，避免成环）。
+# 参数契约常量见文件顶部从 `parameter_contract` 的导入。
 # 历史条件码仅用于展示标签；当前条件可为完整业务原文，不限制为这两种。
 RISK_CONDITION_LABELS = {
     "ANY_ABNORMAL": "任一关联检查不合格",
     "ALL_ABNORMAL": "全部关联检查不合格",
 }
 # 算子与比较方式的业务中文口径，供页面展示"实际比较对象和比较方式"。
-# 工具标签取自统一工具目录。
-OPERATOR_LABELS = tool_catalog.OPERATOR_LABELS
-
+# 算子标签来自参数契约常量，不依赖工具目录。
 DATE_COMPARISON_LABELS = {"EQ": "同一天", "GTE": "不早于", "LTE": "不晚于", "GT": "晚于", "LT": "早于"}
 DECIMAL_COMPARISON_LABELS = {"EQ": "等于", "GTE": "不小于", "LTE": "不大于", "ABS_DIFF_LTE": "绝对差不超过"}
 DECIMAL_SUM_COMPARISON_LABELS = {"EQ": "等于", "GTE": "不小于", "LTE": "不大于"}
@@ -113,6 +112,9 @@ def rule_comparison_view(
             "value_type": meta.get(item.get("field_ref"), {}).get("value_type"),
             "unit": meta.get(item.get("field_ref"), {}).get("unit"),
             "currency": meta.get(item.get("field_ref"), {}).get("currency"),
+            "period_scope": meta.get(item.get("field_ref"), {}).get("period_scope"),
+            "statement_scope": meta.get(item.get("field_ref"), {}).get("statement_scope"),
+            "entity_scope": meta.get(item.get("field_ref"), {}).get("entity_scope"),
         }
         for item in rule.get("inputs", [])
     ]
@@ -203,7 +205,7 @@ def draft_config_of_import(
     namespace: str,
 ) -> dict[str, Any]:
     """将模型业务配置投影为草稿，保留原始业务编号与来源。"""
-    from .rule_library import EXECUTION_VERSION, execution_container
+    from app.domain.rule_library import EXECUTION_VERSION, execution_container
 
     resolved = deepcopy(proposals)
     materials = resolved["materials"]
@@ -211,6 +213,27 @@ def draft_config_of_import(
     rules = resolved["rules"]
     sections = resolved["report_sections"]
     calculations = resolved["calculations"]
+    gaps_by_owner: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for gap in resolved.get("binding_gaps") or []:
+        gaps_by_owner.setdefault(
+            (str(gap.get("owner_group") or ""), str(gap.get("owner_ref") or "")), [],
+        ).append(gap)
+    for calculation in calculations:
+        owned = gaps_by_owner.get(("calculations", str(calculation.get("candidate_ref") or "")), [])
+        merged = list(calculation.get("input_gaps") or [])
+        seen = {
+            (item.get("parameter_code"), item.get("missing_input"), item.get("reason"))
+            for item in merged
+        }
+        for gap in owned:
+            identity = (gap.get("parameter_code"), gap.get("missing_input"), gap.get("reason"))
+            if identity not in seen:
+                seen.add(identity)
+                merged.append({
+                    key: value for key, value in gap.items()
+                    if key not in {"owner_group", "owner_ref", "owner_name"}
+                })
+        calculation["input_gaps"] = merged
     # 同一 Excel 业务行可以拆出多个材料位，共享 source_id。内部身份使用候选引用，
     # source_id 仅保留为来源编号，不能让资产负债表、利润表等不同材料生成同一个键。
     material_keys = {
@@ -286,6 +309,7 @@ def draft_config_of_import(
             "structure_schema": item.get("structure_schema"),
             "period_scope": item.get("period_scope") or SCOPE_NOT_APPLICABLE,
             "statement_scope": item.get("statement_scope") or SCOPE_NOT_APPLICABLE,
+            "entity_scope": item.get("entity_scope") or "SELF",
             "required": item["required"],
             "instruction": item["instruction"],
             "source_ref": item.get("source_id"),
@@ -335,6 +359,12 @@ def draft_config_of_import(
             "risk_level_value": item.get("risk_level_value"),
             "risk_condition": item.get("risk_condition"),
             "config_status": item.get("config_status"),
+            # 第二轮识别出的未绑定输入：执行时据此拒绝把缺项当 0 或用相近科目替代。
+            "input_gaps": [
+                {key: value for key, value in gap.items()
+                 if key not in {"owner_group", "owner_ref", "owner_name"}}
+                for gap in gaps_by_owner.get(("rules", str(item["candidate_ref"])), [])
+            ],
             "source_ref": item.get("rule_code") or item.get("source_id"),
             "origin": deepcopy(item.get("origin")),
         })
@@ -384,7 +414,7 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
 
     返回的每项都是不含归属 id 的字典；`rules` 不跳过系统派生规则，是否保留由调用方决定。
     """
-    from .rule_library import execution_container_of
+    from app.domain.rule_library import execution_container_of
     execution_container_of(manifest)
 
     def applicability_of(rule: dict[str, Any]) -> dict[str, Any]:
@@ -440,6 +470,7 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
             # 取数期间与报表口径：计算参数按它们定位字段事实。
             "period_scope": normalize_field_scope(field, "period_scope"),
             "statement_scope": normalize_field_scope(field, "statement_scope"),
+            "entity_scope": field.get("entity_scope") or "SELF",
             "required": bool(field.get("required")),
             "instruction": str(field.get("instruction") or ""),
             "source_ref": field.get("source_ref"),
@@ -656,6 +687,7 @@ def compile_inputs_of_config(
                 # 口径只在业务实际涉及时由配置声明；缺省在进入 manifest 前归一为不适用。
                 "period_scope": _config_value(item, "period_scope") or SCOPE_NOT_APPLICABLE,
                 "statement_scope": _config_value(item, "statement_scope") or SCOPE_NOT_APPLICABLE,
+                "entity_scope": _config_value(item, "entity_scope") or "SELF",
                 "required": bool(_config_value(item, "required")),
                 "instruction": str(_config_value(item, "instruction") or ""),
                 "source_ref": _config_value(item, "source_ref"),
@@ -771,5 +803,5 @@ def compile_form_manifest(
     source_kind: str = "FORM",
 ) -> dict[str, Any]:
     """只组织规则库执行项，不编译九类业务节点或固定算子路径。"""
-    from .rule_library import compile_library
+    from app.domain.rule_library import compile_library
     return compile_library(**locals())

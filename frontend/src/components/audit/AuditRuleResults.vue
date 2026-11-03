@@ -6,7 +6,7 @@ import AuditRuleDetailDrawer from "@/components/audit/AuditRuleDetailDrawer.vue"
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { isOutputRule, isOutputRuleGroup, ruleGroupOf } from "@/constants/auditRuleGroups";
-import { auditResultSummary, AUDIT_RESULT_CATEGORIES, UNDECIDED_RESULT_STATUSES } from "@/constants/auditStatus";
+import { auditResultSummary, AUDIT_RESULT_CATEGORIES, COMPLETED_RESULT_STATUSES } from "@/constants/auditStatus";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
 import {
   categoryLabel,
@@ -19,6 +19,7 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
 import {
   formatInputValue,
   materialsOf,
+  sourceFilesOf,
   payloadOf,
   ruleCodeOf,
   standardText,
@@ -26,7 +27,8 @@ import {
 } from "@/utils/auditRulePresentation";
 
 /** 规则结果列表：详情内容与纯展示投影分别维护。 */
-const props = defineProps<{ rules: AuditRule[] }>();
+const props = defineProps<{ rules: AuditRule[]; filter?: string }>();
+const emit = defineEmits<{ "update:filter": [value: string] }>();
 
 /* 筛选 */
 
@@ -54,6 +56,8 @@ interface RuleFilter {
   value: string;
   label: string;
   categories: string[];
+  /** 精确到状态码的筛选（例如只看 ABNORMAL）；与类别筛选二选一。 */
+  statuses?: string[];
 }
 
 /**
@@ -64,6 +68,9 @@ interface RuleFilter {
  */
 const filters = computed<RuleFilter[]>(() => [
   { value: "ALL", label: "全部", categories: [] },
+  { value: "ABNORMAL", label: "异常", categories: [], statuses: ["ABNORMAL"] },
+  { value: "EVIDENCE_INSUFFICIENT", label: "证据不足", categories: [], statuses: ["EVIDENCE_INSUFFICIENT"] },
+  { value: "INCOMPLETE", label: "未完成 / 未确认", categories: [] },
   { value: "DECIDED", label: categoryLabel("DECIDED") ?? "已判定", categories: ["DECIDED"] },
   { value: "COMPUTED", label: categoryLabel("COMPUTED") ?? "已产出（无结论）", categories: ["COMPUTED"] },
   { value: "UNDECIDED", label: categoryLabel("UNDECIDED") ?? "尚未判定", categories: ["UNDECIDED"] },
@@ -83,8 +90,18 @@ function categoryOf(rule: AuditRule): string {
 }
 
 function matchesFilter(rule: AuditRule, filter: RuleFilter): boolean {
-  return filter.value === "ALL" || filter.categories.includes(categoryOf(rule));
+  if (filter.value === "ALL") return true;
+  if (filter.value === "INCOMPLETE") return !COMPLETED_RESULT_STATUSES.has(rule.status);
+  if (filter.statuses?.length) return filter.statuses.includes(rule.status);
+  return filter.categories.includes(categoryOf(rule));
 }
+
+watch(() => props.filter, (value) => {
+  if (value && filters.value.some((item) => item.value === value)) {
+    statusFilter.value = value;
+  }
+}, { immediate: true });
+watch(statusFilter, (value) => emit("update:filter", value));
 
 /** 目录中没有记录的规则状态码计数：新增状态出现时必须看得见，不能静默消失。 */
 const unknownStatusCounts = computed(() => {
@@ -117,7 +134,7 @@ const rows = computed(() => {
         item.message,
         formatInputValue(item),
       ]),
-      ...rule.evidence.flatMap((item) => [item.material_name, item.document_name, quoteInlineText(item.quote_text)]),
+      ...rule.evidence.flatMap((item) => [item.material_name, item.document_name, item.quote_label, item.quote_header, item.quote_period, quoteInlineText(item.quote_text)]),
     ]
       .join(" ")
       .toLocaleLowerCase();
@@ -136,6 +153,12 @@ function clearFilters(): void {
   modeFilter.value = "";
   sheetFilter.value = "";
 }
+
+function applyFilter(value: string): void {
+  clearFilters();
+  statusFilter.value = value;
+}
+defineExpose({ applyFilter });
 
 /* 分组：按任务冻结的来源工作表，不写死场景或规则编号 */
 
@@ -158,7 +181,7 @@ const groups = computed<RuleGroupView[]>(() =>
         label,
         rows: matched,
         abnormal: judged.filter((rule) => rule.status === "ABNORMAL").length,
-        undecided: judged.filter((rule) => UNDECIDED_RESULT_STATUSES.has(rule.status)).length,
+        undecided: judged.filter((rule) => categoryOf(rule) === "UNDECIDED").length,
         riskOnly: judged.length > 0 && judged.every((rule) => rule.is_risk_rule),
       };
     })
@@ -180,7 +203,7 @@ function defaultExpandedGroups(): string[] {
 const expandedGroups = ref<string[]>(defaultExpandedGroups());
 const filtering = computed(() => Boolean(search.value.trim()) || statusFilter.value !== "ALL" || Boolean(modeFilter.value) || Boolean(sheetFilter.value));
 
-watch([search, statusFilter, modeFilter, sheetFilter], () => {
+watch([search, statusFilter, modeFilter, sheetFilter, () => props.rules], () => {
   expandedGroups.value = filtering.value
     ? groups.value.map((group) => group.label)
     : defaultExpandedGroups();
@@ -189,6 +212,10 @@ watch([search, statusFilter, modeFilter, sheetFilter], () => {
 /* 详情抽屉 */
 
 const detailRule = ref<AuditRule | null>(null);
+
+watch(() => props.rules, (rules) => {
+  if (detailRule.value) detailRule.value = rules.find((rule) => rule.rule_key === detailRule.value?.rule_key) ?? null;
+});
 
 function openDetail(rule: AuditRule): void {
   detailRule.value = rule;
@@ -261,8 +288,8 @@ function openDetail(rule: AuditRule): void {
             </template>
           </el-table-column>
 
-          <el-table-column label="关联材料" width="128" align="center">
-            <template #default="{ row }">{{ materialsOf(row) || '—' }}</template>
+          <el-table-column label="来源文件" min-width="200" show-overflow-tooltip>
+            <template #default="{ row }">{{ sourceFilesOf(row).join('、') || '未记录来源文件' }}</template>
           </el-table-column>
 
           <!-- 结论列要容纳最长的状态文案「已产出（无结论）」，列宽不足时标签会向右溢出压到列边界。 -->

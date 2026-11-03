@@ -45,8 +45,8 @@ export function listScenes(query: ScenarioQuery): Promise<Paged<ScenarioListItem
  *
  * 方案与任务的场景选择器用它：草稿、未发布、停用或已删除的场景不出现。
  */
-export function listSceneOptions(): Promise<{ request_id: string; items: ScenarioOption[] }> {
-  return request<{ request_id: string; items: ScenarioOption[] }>("/scenarios/options");
+export function listSceneOptions(): Promise<{ items: ScenarioOption[] }> {
+  return request<{ items: ScenarioOption[] }>("/scenarios/options");
 }
 
 /**
@@ -54,8 +54,8 @@ export function listSceneOptions(): Promise<{ request_id: string; items: Scenari
  *
  * 场景管理页与导入页在发布前就要选中场景，因此不能使用只返回已发布场景的业务接口。
  */
-export function listAdminSceneOptions(): Promise<{ request_id: string; items: ScenarioOption[] }> {
-  return request<{ request_id: string; items: ScenarioOption[] }>("/scenarios/admin-options");
+export function listAdminSceneOptions(): Promise<{ items: ScenarioOption[] }> {
+  return request<{ items: ScenarioOption[] }>("/scenarios/admin-options");
 }
 
 export interface ScenarioPayload {
@@ -166,6 +166,7 @@ export interface DraftFieldPayload {
    */
   period_scope?: string;
   statement_scope?: string;
+  entity_scope?: string;
   required: boolean;
   instruction: string;
 }
@@ -269,7 +270,6 @@ export interface DraftCalculationPayload {
 
 /** 新增或编辑计算只更新场景草稿，发布后供新方案使用。 */
 export interface DraftCalculationMutation {
-  request_id: string;
   scenario_code: string;
   revision_no: number;
 }

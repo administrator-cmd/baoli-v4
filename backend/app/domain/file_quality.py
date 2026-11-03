@@ -16,7 +16,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..common.exceptions import BusinessError
+from app.common.exceptions import BusinessError
 
 # 已有文件处理能力的检查项目码，由场景配置选择，不依赖 Excel 下拉或固定列。
 CHECK_FILE_FORMAT = "FILE_FORMAT"

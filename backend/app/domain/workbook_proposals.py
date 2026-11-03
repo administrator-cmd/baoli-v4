@@ -5,9 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..common.exceptions import BusinessError
-from .execution_mode import ExecutionMode
-from .proposals import (
+from app.common.exceptions import BusinessError
+from app.domain.execution_mode import ExecutionMode
+from app.domain.proposals import (
+    BindingGap,
     CalculationCandidate,
     FieldProposal,
     MaterialProposal,
@@ -16,7 +17,7 @@ from .proposals import (
     RuleProposal,
     SourceOrigin,
 )
-from .workbook import WorkbookIR, WorkbookSheet
+from app.domain.workbook import WorkbookIR, WorkbookSheet
 
 
 class ModelMaterial(MaterialProposal):
@@ -78,6 +79,11 @@ class WorkbookProposals(BaseModel):
     rules: list[ModelRule]
     calculations: list[ModelCalculation]
     report_sections: list[ModelReportSection]
+    # 第二轮逐项核对公式/条件与输入绑定后的未建立项；空列表表示没有缺项。
+    # 它只暴露配置完整性，不改变任何对象的启用/停用状态。必填：模型不能省略核对结果。
+    binding_gaps: list[BindingGap] = Field(
+        description="逐项核对后仍未建立绑定的输入；没有缺项时返回空数组。",
+    )
 
 
 @dataclass

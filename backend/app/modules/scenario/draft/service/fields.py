@@ -1,0 +1,272 @@
+"""场景草稿字段配置、来源引用及删除检查。"""
+
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.common.exceptions import BusinessError
+from app.constants.execution import ENTITY_SCOPE_SELF, NODE_RULE_EXECUTION
+from app.domain import field_strategy
+from app.domain.calculation_config import calculations_referencing_field, remap_calculation_field_codes
+from app.domain.identity import stable_key
+from app.domain.rule_library import active
+from app.modules.scenario.draft.model import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule, ScenarioDraftSection
+from app.modules.scenario.draft.service.draft import ScenarioDraftService
+from app.modules.scenario.draft.service.materials import ScenarioDraftMaterialsService
+from app.modules.scenario.template.service.common import (
+    DRAFT_VALUE_TYPES,
+    FIELD_ARTIFACT_SOURCES,
+    ScenarioTemplateCommonService,
+)
+from app.services.shared import configuration as config_store
+
+
+class ScenarioDraftFieldsService:
+    """本实体的服务方法；db 由构造时注入。"""
+
+    def __init__(self, db: Session | None = None) -> None:
+        self.db = db
+
+    def _draft_field_identity(self, item: ScenarioDraftField) -> tuple[Any, ...]:
+        """草稿字段的完整事实身份，与编译后的字段身份同口径；主体口径在草稿层固定为 SELF。"""
+        return (
+            ScenarioTemplateCommonService()._normalized_source_ref(item.source_ref) or item.field_key,
+            item.material_key, item.period_scope, item.statement_scope,
+            getattr(item, "entity_scope", None) or ENTITY_SCOPE_SELF,
+        )
+
+
+    def _assert_field_identity_available(self, draft_id: int, identity: tuple[Any, ...], *, field_key: str | None = None
+    ) -> None:
+        """按完整身份判重：同编号但材料或期间/报表口径不同的字段是合法字段。"""
+        for item in config_store.rows(self.db, ScenarioDraftField, draft_id):
+            if field_key is not None and item.field_key == field_key:
+                continue
+            if self._draft_field_identity(item) != identity:
+                continue
+            raise BusinessError(
+                "FIELD_CODE_DUPLICATE",
+                f"字段编号“{identity[0]}”在相同材料与期间/报表口径下已被字段“{item.name}”使用",
+                status_code=409,
+                details={"source_ref": identity[0], "field_key": item.field_key},
+            )
+
+
+    def create_draft_field(self, scenario_code: str, payload: dict[str, Any]) -> ScenarioDraft:
+        """在草稿中新增字段。已保存到草稿，发布后才供新方案使用。"""
+        template, draft = ScenarioDraftService(self.db)._locked_draft( scenario_code)
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise BusinessError("FIELD_NAME_REQUIRED", "字段名称不能为空", status_code=400)
+        material_key = str(payload.get("material_key") or "")
+        ScenarioDraftMaterialsService(self.db)._draft_material_or_404( draft.id, material_key)
+        value_type = str(payload.get("value_type") or "STRING")
+        if value_type not in DRAFT_VALUE_TYPES:
+            raise BusinessError(
+                "FIELD_TYPE_INVALID",
+                "字段类型不受支持",
+                status_code=400,
+                details={"value_type": value_type, "allowed": sorted(DRAFT_VALUE_TYPES)},
+            )
+        extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+            value_type=value_type,
+            extraction_strategy=payload.get("extraction_strategy"),
+            structure_schema=payload.get("structure_schema"),
+            field_name=name,
+        )
+        source_ref = ScenarioTemplateCommonService()._normalized_source_ref(payload.get("source_ref"))
+        field_key = stable_key("fld", scenario_code, ScenarioTemplateCommonService()._item_ref())
+        self._assert_field_identity_available( draft.id, (
+            source_ref or field_key, material_key,
+            ScenarioTemplateCommonService()._field_scope(payload, "period_scope"), ScenarioTemplateCommonService()._field_scope(payload, "statement_scope"),
+            str(payload.get("entity_scope") or "").strip() or ENTITY_SCOPE_SELF,
+        ))
+        field = config_store.add(
+            self.db, ScenarioDraftField(
+                draft_id=draft.id,
+                field_key=field_key,
+                material_key=material_key,
+                name=name,
+                value_type=value_type,
+                extraction_strategy=extraction_strategy,
+                structure_schema_json=structure_schema,
+                unit=(str(payload["unit"]).strip() or None) if payload.get("unit") else None,
+                currency=(str(payload["currency"]).strip() or None) if payload.get("currency") else None,
+                artifact_source=(
+                    str(payload["artifact_source"]).strip() or None
+                )
+                if payload.get("artifact_source")
+                else None,
+                period_scope=ScenarioTemplateCommonService()._field_scope(payload, "period_scope"),
+                statement_scope=ScenarioTemplateCommonService()._field_scope(payload, "statement_scope"),
+                entity_scope=str(payload.get("entity_scope") or "").strip() or ENTITY_SCOPE_SELF,
+                required=bool(payload.get("required", False)),
+                instruction=str(payload.get("instruction") or ""),
+                source_ref=source_ref,
+                sort_no=ScenarioDraftService(self.db).next_sort_no( ScenarioDraftField, draft.id),
+            )
+        )
+        field.node_code = NODE_RULE_EXECUTION
+        ScenarioDraftService(self.db)._save_draft(
+            
+            template,
+            draft,
+            operation_type="DRAFT_FIELD_CREATE",
+            object_name=name,
+            detail={"scenario_code": scenario_code, "field_key": field_key},
+        )
+        return draft
+
+
+    def _draft_field_or_404(self, draft_id: int, field_key: str) -> ScenarioDraftField:
+        item = next(iter([item for item in config_store.rows(self.db, ScenarioDraftField, draft_id) if (item.field_key == field_key)]), None)
+        if not item:
+            raise BusinessError("DRAFT_FIELD_NOT_FOUND", "字段配置不存在", status_code=404, details={"field_key": field_key})
+        return item
+
+
+    def _rules_referencing_field(self, draft_id: int, field_key: str) -> list[str]:
+        rules = config_store.rows(self.db, ScenarioDraftRule, draft_id)
+        return [
+            rule.name
+            for rule in rules
+            if any(entry.get("field_key") == field_key for entry in (rule.rule_json or {}).get("inputs", []))
+            or field_key in ((rule.rule_json or {}).get("outputs") or [])
+        ]
+
+
+    def update_draft_field(self, scenario_code: str, field_key: str, payload: dict[str, Any]) -> ScenarioDraft:
+        """修改草稿中的字段（只覆盖提交的字段）。"""
+        template, draft = ScenarioDraftService(self.db)._locked_draft( scenario_code)
+        item = self._draft_field_or_404( draft.id, field_key)
+        if "material_key" in payload and payload["material_key"] is not None and payload["material_key"] != item.material_key:
+            referencing = self._rules_referencing_field( draft.id, field_key)
+            if referencing:
+                raise BusinessError(
+                    "FIELD_MATERIAL_CHANGE_REFERENCED",
+                    "该字段已被规则引用，先调整相关规则后再更换所属材料",
+                    status_code=409,
+                    details={"field_name": item.name, "rule_keys": referencing},
+                )
+            ScenarioDraftMaterialsService(self.db)._draft_material_or_404( draft.id, str(payload["material_key"]))
+            item.material_key = str(payload["material_key"])
+        if "name" in payload and payload["name"] is not None:
+            name = str(payload["name"]).strip()
+            if not name:
+                raise BusinessError("FIELD_NAME_REQUIRED", "字段名称不能为空", status_code=400)
+            item.name = name
+        if "value_type" in payload and payload["value_type"] is not None:
+            value_type = str(payload["value_type"])
+            if value_type not in DRAFT_VALUE_TYPES:
+                raise BusinessError(
+                    "FIELD_TYPE_INVALID",
+                    "字段类型不受支持",
+                    status_code=400,
+                    details={"value_type": value_type, "allowed": sorted(DRAFT_VALUE_TYPES)},
+                )
+            item.value_type = value_type
+        if "extraction_strategy" in payload or "structure_schema" in payload or "value_type" in payload:
+            extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
+                value_type=item.value_type,
+                extraction_strategy=(
+                    payload.get("extraction_strategy")
+                    if "extraction_strategy" in payload
+                    else item.extraction_strategy
+                ),
+                structure_schema=(
+                    payload.get("structure_schema")
+                    if "structure_schema" in payload
+                    else item.structure_schema_json
+                ),
+                field_name=item.name,
+                enabled=active(item.data),
+            )
+            item.extraction_strategy = extraction_strategy
+            item.structure_schema_json = structure_schema
+        if "unit" in payload:
+            unit = payload.get("unit")
+            item.unit = (str(unit).strip() or None) if unit else None
+        if "currency" in payload:
+            currency = payload.get("currency")
+            item.currency = (str(currency).strip() or None) if currency else None
+        if "artifact_source" in payload:
+            # 产物来源：留空表示字段由常规字段抽取提供，不表示“未声明所以随便猜”。
+            artifact_source = payload.get("artifact_source")
+            normalized_source = (str(artifact_source).strip() or None) if artifact_source else None
+            if normalized_source is not None and normalized_source not in FIELD_ARTIFACT_SOURCES:
+                raise BusinessError(
+                    "FIELD_ARTIFACT_SOURCE_INVALID",
+                    "字段的产物来源不受支持",
+                    status_code=400,
+                    details={"artifact_source": normalized_source, "allowed": sorted(FIELD_ARTIFACT_SOURCES)},
+                )
+            item.artifact_source = normalized_source
+        if "period_scope" in payload and payload["period_scope"] is not None:
+            item.period_scope = ScenarioTemplateCommonService()._field_scope(payload, "period_scope")
+        if "statement_scope" in payload and payload["statement_scope"] is not None:
+            item.statement_scope = ScenarioTemplateCommonService()._field_scope(
+                payload, "statement_scope"
+            )
+        if "entity_scope" in payload and payload["entity_scope"] is not None:
+            item.entity_scope = str(payload["entity_scope"]).strip() or ENTITY_SCOPE_SELF
+        if "required" in payload and payload["required"] is not None:
+            item.required = bool(payload["required"])
+        if "instruction" in payload and payload["instruction"] is not None:
+            item.instruction = str(payload["instruction"])
+        if "source_ref" in payload:
+            source_ref = ScenarioTemplateCommonService()._normalized_source_ref(payload.get("source_ref"))
+            previous_code = ScenarioTemplateCommonService()._normalized_source_ref(item.source_ref) or field_key
+            next_code = source_ref or field_key
+            if previous_code != next_code and previous_code != field_key:
+                # 内部字段键不随业务编号修改；只更新按原业务编号保存的引用。
+                draft.calculation_json = remap_calculation_field_codes(
+                    draft.calculation_json, {previous_code: next_code},
+                )
+            item.source_ref = source_ref
+        # 材料、期间、报表口径与业务编号任一变化都会改变完整身份，统一按最终状态判重。
+        self._assert_field_identity_available( draft.id, self._draft_field_identity(item), field_key=field_key)
+        ScenarioDraftService(self.db)._save_draft(
+            
+            template,
+            draft,
+            operation_type="DRAFT_FIELD_UPDATE",
+            object_name=item.name,
+            detail={"scenario_code": scenario_code, "field_key": field_key},
+        )
+        return draft
+
+
+    def delete_draft_field(self, scenario_code: str, field_key: str) -> ScenarioDraft:
+        """删除草稿中的字段；仍被规则、计算或报告引用时 409，不级联删除。"""
+        template, draft = ScenarioDraftService(self.db)._locked_draft( scenario_code)
+        item = self._draft_field_or_404( draft.id, field_key)
+        referencing = self._rules_referencing_field( draft.id, field_key)
+        # 计算参数可以按内部字段键或字段的业务编号引用：两种写法都要查，否则按业务编号
+        # 引用的字段会被删掉，计算定义留下无法解析的失效引用。
+        calculations: list[str] = []
+        for code in (field_key, ScenarioTemplateCommonService()._normalized_source_ref(item.source_ref)):
+            if not code:
+                continue
+            for name in calculations_referencing_field(draft.calculation_json, code):
+                if name not in calculations:
+                    calculations.append(name)
+        sections = config_store.rows(self.db, ScenarioDraftSection, draft.id)
+        referencing_sections = [section.title for section in sections if field_key in (section.field_keys or [])]
+        if referencing or calculations or referencing_sections:
+            raise BusinessError(
+                "FIELD_REFERENCED",
+                "该字段仍被规则、计算或报告章节引用，请先移除引用后再删除",
+                status_code=409,
+                details={"field_name": item.name, "rule_keys": referencing,
+                         "calculation_rules": calculations, "section_names": referencing_sections},
+            )
+        config_store.delete(item)
+        ScenarioDraftService(self.db)._save_draft(
+            
+            template,
+            draft,
+            operation_type="DRAFT_FIELD_DELETE",
+            object_name=item.name,
+            detail={"scenario_code": scenario_code, "field_key": field_key},
+        )
+        return draft

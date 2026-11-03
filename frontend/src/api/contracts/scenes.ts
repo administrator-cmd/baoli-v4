@@ -1,6 +1,6 @@
 /** 场景配置：草稿、材料、字段、规则、章节与发布。 */
 
-import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
+import type { JsonValue, OperationAccepted } from "./common";
 
 export interface RuleSnapshotEntry {
   rule_key: string;
@@ -17,7 +17,7 @@ export interface TaskScope {
   enabled_rule_keys?: string[];
   unenabled_rule_keys?: string[];
 }
-export interface DocumentUploadResponse extends ApiResponse {
+export interface DocumentUploadResponse {
   document_no: string;
   material_name: string;
   filename: string;
@@ -69,7 +69,7 @@ export interface ScenarioDraftInfo {
   updated_at: string;
 }
 
-export interface ScenarioDetail extends ApiResponse {
+export interface ScenarioDetail {
   scenario_code: string;
   scenario_name: string;
   schema_key?: string | null;
@@ -118,6 +118,7 @@ export interface DraftFieldItem {
    */
   period_scope?: string | null;
   statement_scope?: string | null;
+  entity_scope?: string | null;
   required: boolean;
   instruction: string;
   /** 业务编号（Excel 的「字段编号」列）：导出时写回。 */
@@ -236,7 +237,7 @@ export interface DraftCalculationItem {
   definition: Record<string, JsonValue>;
 }
 
-export interface ScenarioConfigurationView extends ApiResponse {
+export interface ScenarioConfigurationView {
   scenario_code: string;
   configuration_kind: "DRAFT" | "PUBLISHED";
   version_no: number | null;
@@ -263,7 +264,7 @@ export interface ScenarioDraftView extends ScenarioConfigurationView {
   configuration_kind: "DRAFT";
   revision_no: number;
 }
-export interface ScenarioPublishResult extends ApiResponse {
+export interface ScenarioPublishResult {
   scenario_code: string;
   scenario_name: string;
   version_no: number;

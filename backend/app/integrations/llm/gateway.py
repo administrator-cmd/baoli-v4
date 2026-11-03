@@ -16,10 +16,13 @@ JSON；供应商的地址、密钥、超时与响应格式细节都不外泄。
 """
 
 import atexit
+import itertools
 import json
 import logging
+import os
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,8 +30,8 @@ from typing import Any
 
 import httpx
 
-from ...common.exceptions import BusinessError
-from ...core.config import get_settings
+from app.common.exceptions import BusinessError
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,297 @@ TURN_ERROR = "ERROR"
 # 响应契约错误不会因重复请求而恢复，必须直接暴露。
 LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 LLM_RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
+
+# 流式接收期间按固定间隔输出进度；该间隔只影响日志，不参与任何超时判断。
+LLM_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class RequestLogContext:
+    """调用方已持有的业务上下文，只用于日志展示；缺项保持 None，不查库、不猜。"""
+
+    task_name: str | None = None
+    material_name: str | None = None
+    operation: str | None = None
+    field_count: int | None = None
+
+
+_request_counter = itertools.count(1)
+_request_counter_lock = threading.Lock()
+
+
+def _next_request_short_id() -> str:
+    """服务进程内递增的短编号；同一次逻辑请求的所有重试共用一个编号。"""
+    with _request_counter_lock:
+        return f"R{next(_request_counter)}"
+
+
+def _context_text(context: RequestLogContext | None) -> str:
+    if context is None:
+        return ""
+    parts = []
+    if context.task_name:
+        parts.append(f"任务={context.task_name}")
+    if context.material_name:
+        parts.append(f"材料={context.material_name}")
+    if context.operation:
+        parts.append(f"操作={context.operation}")
+    if context.field_count is not None:
+        parts.append(f"字段数={context.field_count}")
+    return f" {' '.join(parts)}" if parts else ""
+
+
+def _seconds_since(now: float, moment: float | None) -> str:
+    """距离某个时刻的秒数；还没有发生过时明确写「未收到」，不拿别的数据代替。"""
+    return f"{now - moment:.3f}" if moment is not None else "未收到"
+
+
+def _since_ago(now: float, moment: float | None, *, missing: str) -> str:
+    return f"{now - moment:.2f}秒前" if moment is not None else missing
+
+
+def _tool_calls_text(tool_calls: dict[int, dict[str, Any]]) -> str:
+    """逐个工具调用的 index、名称和累计参数字符数；名称未到时明确写未知。"""
+    if not tool_calls:
+        return ""
+    parts = [
+        f"{index}:{call.get('name') or '未知'}/{call.get('argument_chars', 0)}字符"
+        for index, call in sorted(tool_calls.items())
+    ]
+    return f"工具=[{', '.join(parts)}]"
+
+
+def _finish_reason_label(reason: str, *, has_tool_calls: bool) -> str:
+    if has_tool_calls or reason == "tool_calls":
+        return "工具调用"
+    if reason == "stop":
+        return "正常结束"
+    if reason == "length":
+        return "输出截断"
+    if reason == "content_filter":
+        return "内容过滤"
+    return reason or "未知"
+
+
+def _end_type_text(finish_reasons: list[str], *, has_tool_calls: bool) -> str:
+    if not finish_reasons:
+        return "未知"
+    labels = list(dict.fromkeys(
+        _finish_reason_label(reason, has_tool_calls=has_tool_calls)
+        for reason in finish_reasons
+    ))
+    return "/".join(labels)
+
+
+def _usage_text(envelope: dict[str, Any]) -> str:
+    """供应商未返回 usage 时明确写未返回；不按字符数估算 token。"""
+    usage = envelope.get("usage")
+    if usage is None:
+        return "用量=未返回"
+    if not isinstance(usage, dict):
+        return "用量=格式无效"
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if prompt is None and completion is None:
+        return "用量=未返回"
+    prompt_text = f"输入token={prompt}" if prompt is not None else "输入token=未返回"
+    completion_text = f"输出token={completion}" if completion is not None else "输出token=未返回"
+    return f"{prompt_text} {completion_text}"
+
+
+def _failure_reason(exc: BaseException) -> str:
+    if isinstance(exc, BusinessError):
+        return f"{exc.code} {exc.message}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
+
+
+class _StreamProgress:
+    """一次流式尝试的接收统计。
+
+    主线程解析流时更新计数，后台线程按间隔读快照写日志。计数只来自真实收到的
+    SSE 行与字符串片段：注释行只算心跳，空 choices、仅 role 的数据块不产生正文，
+    不按 token 估算，也不改变解析与错误传播。
+    """
+
+    def __init__(
+        self, *, short_id: str, identity: str, attempt: int, started: float,
+        context_text: str = "",
+    ) -> None:
+        self.short_id = short_id
+        self.identity = identity
+        self.context_text = context_text
+        self.attempt = attempt
+        self.started = started
+        self._lock = threading.Lock()
+        self._last_network_at: float | None = None
+        self._last_output_at: float | None = None
+        self._comment_events = 0
+        self._json_chunks = 0
+        self._content_chars = 0
+        self._reasoning_chars = 0
+        self._tool_argument_chars = 0
+        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self._finish_reason = False
+        self._done = False
+
+    def attempt_text(self) -> str:
+        return f" 尝试={self.attempt}" if self.attempt > 1 else ""
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def network_line(self, *, comment: bool) -> None:
+        """收到一行网络数据；只有供应商明确发来的注释行才计入心跳。"""
+        with self._lock:
+            self._last_network_at = time.monotonic()
+            if comment:
+                self._comment_events += 1
+
+    def json_chunk(self) -> None:
+        with self._lock:
+            self._json_chunks += 1
+
+    def output(self, *, content: int, reasoning: int) -> None:
+        """累计正文与推理的字符串片段长度；空片段不算有效输出。"""
+        if not content and not reasoning:
+            return
+        with self._lock:
+            self._content_chars += content
+            self._reasoning_chars += reasoning
+            self._last_output_at = time.monotonic()
+
+    def tool_fragment(self, *, index: int, name: str, arguments: str) -> None:
+        """按 index 累计工具名称和参数字符数；只有 index 时也登记，名称写未知。"""
+        with self._lock:
+            call = self._tool_calls.setdefault(index, {"name": "", "argument_chars": 0})
+            if name:
+                call["name"] += name
+            if arguments:
+                chars = len(arguments)
+                call["argument_chars"] += chars
+                self._tool_argument_chars += chars
+            if name or arguments:
+                self._last_output_at = time.monotonic()
+
+    def tool_call_count(self) -> int:
+        with self._lock:
+            return len(self._tool_calls)
+
+    def mark_finish_reason(self) -> None:
+        with self._lock:
+            self._finish_reason = True
+
+    def mark_done(self) -> None:
+        with self._lock:
+            self._done = True
+
+    def stats_text(self) -> str:
+        """INFO 用的短摘要；零值计数不展开，工具只给数量和参数总量。"""
+        now = time.monotonic()
+        with self._lock:
+            last_network = self._last_network_at
+            last_output = self._last_output_at
+            content_chars = self._content_chars
+            reasoning_chars = self._reasoning_chars
+            tool_argument_chars = self._tool_argument_chars
+            comment_events = self._comment_events
+            tool_call_count = len(self._tool_calls)
+        parts = [
+            f"最近网络={_since_ago(now, last_network, missing='未收到')}",
+            f"有效输出={_since_ago(now, last_output, missing='无')}",
+        ]
+        if content_chars:
+            parts.append(f"正文={content_chars}字符")
+        if reasoning_chars:
+            parts.append(f"推理={reasoning_chars}字符")
+        if tool_call_count:
+            parts.append(f"工具数={tool_call_count}")
+        if tool_argument_chars:
+            parts.append(f"工具参数={tool_argument_chars}字符")
+        if comment_events:
+            parts.append(f"心跳={comment_events}")
+        return " ".join(parts)
+
+    def detailed_summary(self) -> str:
+        """DEBUG 用的完整统计；保留所有计数和工具明细。"""
+        now = time.monotonic()
+        with self._lock:
+            last_network = self._last_network_at
+            last_output = self._last_output_at
+            comment_events = self._comment_events
+            json_chunks = self._json_chunks
+            content_chars = self._content_chars
+            reasoning_chars = self._reasoning_chars
+            tool_argument_chars = self._tool_argument_chars
+            finish_reason = self._finish_reason
+            done = self._done
+            tool_calls = {index: dict(call) for index, call in self._tool_calls.items()}
+        text = (
+            f"elapsed_seconds={now - self.started:.3f}"
+            f" since_last_network_seconds={_seconds_since(now, last_network)}"
+            f" since_last_output_seconds={_seconds_since(now, last_output)}"
+            f" comment_events={comment_events}"
+            f" json_chunks={json_chunks}"
+            f" content_chars={content_chars}"
+            f" reasoning_chars={reasoning_chars}"
+            f" tool_argument_chars={tool_argument_chars}"
+            f" finish_reason={str(finish_reason).lower()}"
+            f" done={str(done).lower()}"
+        )
+        tool_text = _tool_calls_text(tool_calls)
+        return f"{text} {tool_text}" if tool_text else text
+
+    def log_progress(self) -> None:
+        logger.info(
+            "LLM进行中 请求=%s%s 耗时=%.1f秒 %s",
+            self.short_id, self.attempt_text(), self.elapsed(), self.stats_text(),
+        )
+        logger.debug(
+            "LLM详细统计 请求=%s 标识=%s 尝试=%s 阶段=进行中 %s",
+            self.short_id, self.identity, self.attempt, self.detailed_summary(),
+        )
+
+    def log_completion(self, envelope: dict[str, Any]) -> None:
+        finish_reasons = [
+            str(choice.get("finish_reason"))
+            for choice in envelope.get("choices") or []
+            if isinstance(choice, dict) and choice.get("finish_reason") is not None
+        ]
+        tool_count = self.tool_call_count()
+        parts = [
+            f"LLM完成 请求={self.short_id}{self.attempt_text()}",
+            f"耗时={self.elapsed():.1f}秒",
+            f"结束类型={_end_type_text(finish_reasons, has_tool_calls=bool(tool_count))}",
+        ]
+        if tool_count:
+            parts.append(f"工具数={tool_count}")
+        parts.append(_usage_text(envelope))
+        logger.info(" ".join(parts))
+        logger.debug(
+            "LLM详细统计 请求=%s 标识=%s 尝试=%s 阶段=完成 模型=%s %s",
+            self.short_id, self.identity, self.attempt,
+            envelope.get("model") or "未返回", self.detailed_summary(),
+        )
+
+    def log_abnormal_end(self, exc: BaseException) -> None:
+        logger.warning(
+            "LLM失败 请求=%s%s 耗时=%.1f秒 原因=%s %s",
+            self.short_id, self.attempt_text(), self.elapsed(),
+            _failure_reason(exc), self.stats_text(),
+        )
+        logger.debug(
+            "LLM详细统计 请求=%s 标识=%s 尝试=%s 阶段=失败 error_type=%s %s",
+            self.short_id, self.identity, self.attempt,
+            type(exc).__name__, self.detailed_summary(),
+        )
+
+
+def _stream_progress_loop(progress: _StreamProgress, stop: threading.Event) -> None:
+    """等待网络数据期间仍按期输出进度；`stop` 置位后线程立即结束。"""
+    while not stop.wait(LLM_PROGRESS_LOG_INTERVAL_SECONDS):
+        progress.log_progress()
 
 
 def _request_result_unknown(exc: BaseException) -> BusinessError:
@@ -136,20 +430,52 @@ def _stream_invalid(reason: str) -> BusinessError:
     )
 
 
+def _upstream_stream_error(chunk: dict[str, Any], response: httpx.Response) -> dict[str, Any]:
+    """保留上游流内 error 中真实存在的错误码、说明、响应 ID 与请求 ID；缺失字段不补造。
+
+    数据块顶层的 `id` 是响应 ID，响应头 `x-request-id` 是请求 ID；两者独立保留，
+    任何一个缺失都不拿另一个冒充，也不猜测供应商的其他字段。
+    """
+    error = chunk.get("error")
+    detail: dict[str, Any] = {}
+    if isinstance(error, dict):
+        for key in ("code", "type", "message", "param"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                detail[key] = value.strip()
+            elif isinstance(value, int) and not isinstance(value, bool):
+                detail[key] = value
+    elif isinstance(error, str) and error.strip():
+        detail["message"] = error.strip()
+    response_id = chunk.get("id")
+    if isinstance(response_id, str) and response_id.strip():
+        detail["response_id"] = response_id.strip()
+    elif isinstance(response_id, int) and not isinstance(response_id, bool):
+        detail["response_id"] = response_id
+    request_id = response.headers.get("x-request-id")
+    if isinstance(request_id, str) and request_id.strip():
+        detail["request_id"] = request_id.strip()
+    return detail
+
+
 def _sse_data(
     response: httpx.Response, *, deadline: float, max_seconds: float, attempt: int, started: float,
+    progress: _StreamProgress,
 ) -> Iterator[str]:
     """按 SSE 事件边界读取 data，保留多行数据，忽略协议定义的注释与控制字段。
 
     总时限在每一行到达时检查，包括被忽略的心跳注释：只在解析出 data 事件时检查时，
     持续发送注释心跳的连接可以让读取超时与总时限都不触发。
+
+    每一行都计入「最后收到网络数据」时间，注释行另外计入心跳数；统计只观察，不介入读取。
     """
     data_lines: list[str] = []
     for line in response.iter_lines():
+        progress.network_line(comment=line.startswith(":"))
         if time.monotonic() >= deadline:
             logger.warning(
-                "远程大模型流式请求超过总时限 attempt=%s max_seconds=%s elapsed_seconds=%.3f",
-                attempt, max_seconds, time.monotonic() - started,
+                "远程大模型流式请求超过总时限 请求=%s 尝试=%s max_seconds=%s elapsed_seconds=%.3f",
+                progress.short_id, attempt, max_seconds, time.monotonic() - started,
             )
             raise BusinessError(
                 "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
@@ -220,9 +546,47 @@ def _merge_stream_delta(
             message[key] = message.get(key, "") + value
 
 
+def _delta_output_stats(
+    delta: dict[str, Any],
+) -> tuple[int, int, list[tuple[int, str, str]]]:
+    """按真实收到的字符串片段统计正文、推理长度，并返回工具调用的分段信息。
+
+    只读取 delta 中明确存在的字段，非字符串和空片段都不计入；不估算 token。
+    调用点在 `_merge_stream_delta` 之后，结构已按流式契约校验过。
+    """
+    content = delta.get("content")
+    content_chars = len(content) if isinstance(content, str) else 0
+    reasoning_chars = 0
+    for key in ("reasoning_content", "reasoning"):
+        value = delta.get(key)
+        if isinstance(value, str):
+            reasoning_chars += len(value)
+    tool_fragments: list[tuple[int, str, str]] = []
+    entries = delta.get("tool_calls")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            index = entry.get("index")
+            if type(index) is not int or index < 0:
+                continue
+            name = ""
+            arguments = ""
+            function = entry.get("function")
+            if isinstance(function, dict):
+                value = function.get("name")
+                if isinstance(value, str):
+                    name = value
+                value = function.get("arguments")
+                if isinstance(value, str):
+                    arguments = value
+            tool_fragments.append((index, name, arguments))
+    return content_chars, reasoning_chars, tool_fragments
+
+
 def _read_stream(
     response: httpx.Response, *, attempt: int, started: float, deadline: float,
-    max_seconds: float,
+    max_seconds: float, progress: _StreamProgress,
 ) -> dict[str, Any]:
     """接收完整流并还原 Chat Completions 响应；未正常结束的流不能作为业务结果。
 
@@ -238,8 +602,10 @@ def _read_stream(
     done = False
     for data in _sse_data(
         response, deadline=deadline, max_seconds=max_seconds, attempt=attempt, started=started,
+        progress=progress,
     ):
         if data == "[DONE]":
+            progress.mark_done()
             done = True
             break
         try:
@@ -249,17 +615,38 @@ def _read_stream(
         if not isinstance(chunk, dict):
             raise _stream_invalid("data 不是 JSON 对象")
         chunks += 1
+        progress.json_chunk()
         if chunks == 1:
             logger.info(
-                "远程大模型收到首个流式数据块 attempt=%s elapsed_seconds=%.3f",
-                attempt, time.monotonic() - started,
+                "LLM首块 请求=%s%s 耗时=%.1f秒",
+                progress.short_id, progress.attempt_text(), time.monotonic() - started,
             )
         if "error" in chunk:
-            logger.warning("远程大模型流中返回错误 attempt=%s", attempt)
+            upstream = _upstream_stream_error(chunk, response)
+            logger.warning(
+                "远程大模型流中返回错误 请求=%s 尝试=%s code=%s type=%s response_id=%s request_id=%s message=%s",
+                progress.short_id, attempt,
+                upstream.get("code", "未返回"),
+                upstream.get("type", "未返回"),
+                upstream.get("response_id", "未返回"),
+                upstream.get("request_id", "未返回"),
+                upstream.get("message", "未返回"),
+            )
             # 请求已被接受并进入流式阶段：是否已生成内容无法确认，不能声称未产生费用。
+            # 上游真实返回的错误码、说明与请求 ID 保留在 details，不吞成通用失败。
+            details: dict[str, Any] = {
+                "service": "LLM",
+                "result_unknown": True,
+                "request_short_id": progress.short_id,
+                "request_identity": progress.identity,
+                "attempt": attempt,
+                "upstream": upstream,
+            }
+            if progress.context_text:
+                details["request_context"] = progress.context_text
             raise BusinessError(
                 "LLM_EXTERNAL_FAILED", "远程大模型流式响应返回错误", status_code=502,
-                details={"service": "LLM", "result_unknown": True},
+                details=details,
             )
         for key in ("id", "model", "created", "system_fingerprint", "usage"):
             if key in chunk and chunk[key] is not None:
@@ -280,6 +667,12 @@ def _read_stream(
             if choice["finish_reason"] is not None and any(value is not None for value in delta.values()):
                 raise _stream_invalid("choice 结束后仍返回消息片段")
             _merge_stream_delta(choice["message"], tool_calls.setdefault(index, {}), delta)
+            content_chars, reasoning_chars, tool_fragments = _delta_output_stats(delta)
+            progress.output(content=content_chars, reasoning=reasoning_chars)
+            for call_index, call_name, call_arguments in tool_fragments:
+                progress.tool_fragment(
+                    index=call_index, name=call_name, arguments=call_arguments,
+                )
             finish_reason = entry.get("finish_reason")
             if finish_reason is not None:
                 if not isinstance(finish_reason, str) or (
@@ -287,54 +680,29 @@ def _read_stream(
                 ):
                     raise _stream_invalid("finish_reason 无效或发生变化")
                 choice["finish_reason"] = finish_reason
+                progress.mark_finish_reason()
     if not done or not choices or any(choice["finish_reason"] is None for choice in choices.values()):
         logger.warning(
-            "远程大模型流未完整结束 attempt=%s chunks=%s done=%s elapsed_seconds=%.3f",
-            attempt, chunks, done, time.monotonic() - started,
+            "远程大模型流未完整结束 请求=%s 尝试=%s json_chunks=%s done=%s "
+            "elapsed_seconds=%.3f",
+            progress.short_id, attempt, chunks, done, time.monotonic() - started,
         )
         raise BusinessError(
             "LLM_STREAM_INCOMPLETE", "远程大模型流式响应未完整结束，未保存本次生成结果", status_code=502,
             details={"service": "LLM", "result_unknown": True},
         )
     if any(choice["finish_reason"] == "length" for choice in choices.values()):
-        logger.warning("远程大模型输出被截断 attempt=%s finish_reason=length", attempt)
+        logger.warning(
+            "远程大模型输出被截断 请求=%s 尝试=%s finish_reason=length",
+            progress.short_id, attempt,
+        )
         raise BusinessError("LLM_OUTPUT_TRUNCATED", "远程大模型输出被截断，未保存本次生成结果", status_code=502)
     for index, choice in choices.items():
         if tool_calls[index]:
             choice["message"]["tool_calls"] = [tool_calls[index][key] for key in sorted(tool_calls[index])]
     envelope["choices"] = [choices[index] for index in sorted(choices)]
-    logger.info(
-        "远程大模型流式接收完成 attempt=%s chunks=%s elapsed_seconds=%.3f finish_reasons=%s",
-        attempt, chunks, time.monotonic() - started,
-        [choice["finish_reason"] for choice in envelope["choices"]],
-    )
+    progress.log_completion(envelope)
     return envelope
-
-
-def _log_token_usage(
-    *, call: str, idempotency_key: str | None, requested_model: str, envelope: dict[str, Any],
-) -> None:
-    """记录一次模型调用的供应商 token 用量；未返回时明确记 usage=absent，不估算。"""
-    model = envelope.get("model") or requested_model
-    usage = envelope.get("usage")
-    if usage is None:
-        logger.info(
-            "远程大模型 token 用量 call=%s idempotency_key=%s model=%s usage=absent",
-            call, idempotency_key or "-", model,
-        )
-        return
-    if not isinstance(usage, dict):
-        logger.info(
-            "远程大模型 token 用量 call=%s idempotency_key=%s model=%s usage=invalid type=%s",
-            call, idempotency_key or "-", model, type(usage).__name__,
-        )
-        return
-    logger.info(
-        "远程大模型 token 用量 call=%s idempotency_key=%s model=%s "
-        "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
-        call, idempotency_key or "-", model,
-        usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
-    )
 
 
 _client_lock = threading.Lock()
@@ -438,60 +806,97 @@ def probe_connection(timeout_seconds: float = LLM_PROBE_TIMEOUT_SECONDS) -> Mode
     return ModelProbeResult(True, _elapsed_ms(started))
 
 
-def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
+def _post(
+    body: dict[str, Any], *, call: str, idempotency_key: str | None = None,
+    log_context: RequestLogContext | None = None,
+) -> dict[str, Any]:
     """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。
 
     ``idempotency_key`` 标识一次逻辑模型请求，而不是某一次网络尝试；
     同一逻辑请求的自动重试始终复用它，供应商支持该契约时可避免重复生成。
+    ``call`` 和 ``log_context`` 只用于日志归属，不进入请求体。
     """
     baseurl, api_key, _ = _require_settings()
     settings = get_settings()
     max_attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+    request_started = time.monotonic()
+    # 短编号只在当前进程内递增，同一次逻辑请求的所有重试共用它；
+    # 完整标识沿用幂等键，没有时生成本地诊断编号，只写日志，不发给供应商。
+    short_id = _next_request_short_id()
+    identity = idempotency_key or f"local-{uuid.uuid4().hex[:12]}"
+    logger.info("LLM开始 请求=%s%s 标识=%s", short_id, _context_text(log_context), identity)
+    logger.debug(
+        "LLM请求映射 请求=%s 标识=%s 调用=%s 进程=%s 最大尝试=%s 读取超时=%s秒 总时限=%s秒",
+        short_id, identity, call, os.getpid(), max_attempts,
+        settings.llm_timeout_seconds, settings.llm_max_seconds,
+    )
     # 总时限只兜住永不结束的流；读取超时按「连续多久收不到数据」判定卡住，
     # 仍在持续出块的长响应不会被总时长截断。
-    deadline = time.monotonic() + settings.llm_max_seconds
+    deadline = request_started + settings.llm_max_seconds
     client = _http_client()
     for attempt in range(1, max_attempts + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            logger.warning(
+                "LLM失败 请求=%s 耗时=%.1f秒 原因=超过总时限 max_seconds=%s "
+                "最近网络=未收到 有效输出=无",
+                short_id, time.monotonic() - request_started, settings.llm_max_seconds,
+            )
             raise BusinessError(
                 "LLM_TIMEOUT", "远程大模型请求超过总时限", status_code=504,
                 details={"service": "LLM", "max_seconds": settings.llm_max_seconds},
             )
         started = time.monotonic()
-        logger.info(
-            "远程大模型开始流式请求 attempt=%s max_attempts=%s read_timeout_seconds=%s max_seconds=%s",
-            attempt, max_attempts, settings.llm_timeout_seconds, settings.llm_max_seconds,
+        progress = _StreamProgress(
+            short_id=short_id, identity=identity, attempt=attempt, started=started,
+            context_text=_context_text(log_context).strip(),
         )
+        stop_progress = threading.Event()
+        progress_thread = threading.Thread(
+            target=_stream_progress_loop,
+            args=(progress, stop_progress),
+            name=f"llm-stream-progress-{attempt}",
+            daemon=True,
+        )
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "text/event-stream",
+        }
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        progress_thread.start()
         try:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "text/event-stream",
-            }
-            if idempotency_key:
-                headers["Idempotency-Key"] = idempotency_key
-            with client.stream(
-                "POST",
-                _endpoint(baseurl),
-                headers=headers,
-                json={
-                    **body,
-                    "stream": True,
-                    # 要求供应商在流末尾返回 usage，用于核对单次输入 token 规模。
-                    "stream_options": {**(body.get("stream_options") or {}), "include_usage": True},
-                },
-                # 读取超时按「连续多久收不到数据」判定卡住，但不超过本次请求剩余的总时限：
-                # 上游长时间不发数据时，等待本身也不会越过总截止时间。
-                timeout=min(settings.llm_timeout_seconds, max(remaining, 0.001)),
-            ) as response:
-                response.raise_for_status()
-                return _read_stream(
-                    response,
-                    attempt=attempt,
-                    started=started,
-                    deadline=deadline,
-                    max_seconds=settings.llm_max_seconds,
-                )
+            try:
+                with client.stream(
+                    "POST",
+                    _endpoint(baseurl),
+                    headers=headers,
+                    json={
+                        **body,
+                        "stream": True,
+                        # 要求供应商在流末尾返回 usage，用于核对单次输入 token 规模。
+                        "stream_options": {**(body.get("stream_options") or {}), "include_usage": True},
+                    },
+                    # 读取超时按「连续多久收不到数据」判定卡住，但不超过本次请求剩余的总时限：
+                    # 上游长时间不发数据时，等待本身也不会越过总截止时间。
+                    timeout=min(settings.llm_timeout_seconds, max(remaining, 0.001)),
+                ) as response:
+                    response.raise_for_status()
+                    return _read_stream(
+                        response,
+                        attempt=attempt,
+                        started=started,
+                        deadline=deadline,
+                        max_seconds=settings.llm_max_seconds,
+                        progress=progress,
+                    )
+            except BaseException as exc:
+                # 仅记录摘要后原样抛出；异常类型与传播路径不变。
+                progress.log_abnormal_end(exc)
+                raise
+            finally:
+                stop_progress.set()
+                progress_thread.join(timeout=5.0)
         except httpx.TimeoutException as exc:
             if time.monotonic() >= deadline:
                 # 等待本身已经用尽总时限：按总时限暴露，不再重试。
@@ -597,13 +1002,15 @@ def _post(body: dict[str, Any], *, idempotency_key: str | None = None) -> dict[s
 def call_json(
     payload: dict[str, Any], system_prompt: str,
     *, on_content: Callable[[str], None] | None = None, reasoning_effort: str | None = None,
-    idempotency_key: str | None = None,
+    idempotency_key: str | None = None, log_context: RequestLogContext | None = None,
 ) -> dict[str, Any]:
     """单轮请求 JSON 对象，完整接收流式文本后解析；不带工具或工具循环。
 
     ``idempotency_key`` 在自动重试期间保持不变，标识这一次逻辑请求。
+    ``log_context`` 只用于日志展示，缺项保持省略。
     """
     _, _, model = _require_settings()
+    settings = get_settings()
     request_body = {
         "model": model,
         "temperature": 0,
@@ -612,12 +1019,12 @@ def call_json(
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         "response_format": {"type": "json_object"},
+        "max_tokens": settings.llm_max_output_tokens,
     }
     if reasoning_effort is not None:
         request_body["reasoning_effort"] = reasoning_effort
-    envelope = _post(request_body, idempotency_key=idempotency_key)
-    _log_token_usage(
-        call="call_json", idempotency_key=idempotency_key, requested_model=model, envelope=envelope,
+    envelope = _post(
+        request_body, call="call_json", idempotency_key=idempotency_key, log_context=log_context,
     )
     try:
         content = envelope["choices"][0]["message"]["content"]
@@ -722,6 +1129,7 @@ def call_chat(
     response_format: dict[str, Any] | None = None,
     temperature: float = 0,
     idempotency_key: str | None = None,
+    log_context: RequestLogContext | None = None,
 ) -> ModelTurn:
     """完整接收一次流式 Chat Completions 响应，返回明确的响应契约。
 
@@ -733,10 +1141,13 @@ def call_chat(
     因为那会把「供应商不支持工具调用」伪装成「模型给了一段文字」。
     """
     _, _, model = _require_settings()
+    settings = get_settings()
     body: dict[str, Any] = {
         "model": model,
         "temperature": temperature,
         "messages": messages,
+        # 不传时由供应商决定默认输出上限；显式设置避免长响应被默认值截断。
+        "max_tokens": settings.llm_max_output_tokens,
     }
     if tools is not None:
         body["tools"] = tools
@@ -744,11 +1155,10 @@ def call_chat(
     if response_format is not None:
         body["response_format"] = response_format
     requested_at = datetime.now(UTC).isoformat()
-    envelope = _post(body, idempotency_key=idempotency_key)
-    responded_at = datetime.now(UTC).isoformat()
-    _log_token_usage(
-        call="call_chat", idempotency_key=idempotency_key, requested_model=model, envelope=envelope,
+    envelope = _post(
+        body, call="call_chat", idempotency_key=idempotency_key, log_context=log_context,
     )
+    responded_at = datetime.now(UTC).isoformat()
     try:
         choice = envelope["choices"][0]
         message = choice["message"]

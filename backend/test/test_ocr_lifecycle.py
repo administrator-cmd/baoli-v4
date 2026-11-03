@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.common.exceptions import BusinessError
-from app.entity.tasks import StoredArtifact
-from app.services.audit import artifacts
+from app.modules.audit.artifact.model import StoredArtifact
+from app.modules.audit.artifact.service import artifacts
 
 
 class OcrLifecycleTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class OcrLifecycleTests(unittest.TestCase):
         port.poll_ocr_job.side_effect = failure
         with patch.object(artifacts, "document_service", return_value=port):
             with self.assertRaises(BusinessError) as raised:
-                artifacts._complete_ocr_job(self.db, self.task, self.upload, self.record)
+                artifacts.AuditArtifactArtifactsService(self.db)._complete_ocr_job( self.task, self.upload, self.record)
         self.assertIs(raised.exception, failure)
         self.assertEqual(self.record.status, "FAILED")
         self.assertEqual(self.record.external_job_id, "original-job")
@@ -40,24 +40,24 @@ class OcrLifecycleTests(unittest.TestCase):
         port.poll_ocr_job.side_effect = BusinessError("EXTERNAL_SERVICE_TIMEOUT", "network timeout")
         with patch.object(artifacts, "document_service", return_value=port):
             with self.assertRaises(BusinessError):
-                artifacts._complete_ocr_job(self.db, self.task, self.upload, self.record)
+                artifacts.AuditArtifactArtifactsService(self.db)._complete_ocr_job( self.task, self.upload, self.record)
         self.assertEqual(self.record.status, "PENDING")
         self.assertEqual(self.record.external_job_id, "original-job")
         self.db.commit.assert_not_called()
 
     def test_failed_job_is_not_polled_or_resubmitted_by_ordinary_execution(self):
         self.record.status = "FAILED"
-        with patch.object(artifacts, "_artifact_for_upload", return_value=self.record), \
+        with patch.object(artifacts.AuditArtifactArtifactsService, "_artifact_for_upload", return_value=self.record), \
              patch.object(artifacts, "document_service") as port:
             with self.assertRaises(BusinessError) as raised:
-                artifacts._submit_ocr_job(self.db, self.task, self.upload, MagicMock())
+                artifacts.AuditArtifactArtifactsService(self.db)._submit_ocr_job( self.task, self.upload, MagicMock())
         self.assertEqual(raised.exception.code, "OCR_JOB_FAILED")
         port.assert_not_called()
 
     def test_ready_artifact_requires_no_provider_request(self):
         self.record.status = "READY"
         with patch.object(artifacts, "document_service") as port:
-            result = artifacts._complete_ocr_job(self.db, self.task, self.upload, self.record)
+            result = artifacts.AuditArtifactArtifactsService(self.db)._complete_ocr_job( self.task, self.upload, self.record)
         self.assertIs(result, self.record)
         port.assert_not_called()
 

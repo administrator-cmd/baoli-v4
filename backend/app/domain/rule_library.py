@@ -6,11 +6,11 @@ RULE_EXECUTION 是现有数据库执行记录的关联容器，没有业务阶�
 from copy import deepcopy
 from typing import Any
 
-from ..common.exceptions import BusinessError
-from ..constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
-from ..constants.status import CONFIG_STATUS_DISABLED, CONFIG_STATUS_PENDING
-from . import fact_projection, scenario_schema
-from .execution_mode import (
+from app.common.exceptions import BusinessError
+from app.constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
+from app.constants.status import CONFIG_STATUS_DISABLED, CONFIG_STATUS_PENDING
+from app.domain import fact_projection, scenario_schema
+from app.domain.execution_mode import (
     EXECUTION_MODE_ORDER,
     EXECUTION_MODES,
     MODE_AGGREGATE,
@@ -22,9 +22,9 @@ from .execution_mode import (
     MODE_UNKNOWN,
     MODE_VALUE_COMPARE,
 )
-from .identity import stable_key
-from .node_profile import NODE_PROFILE_VERSION
-from .report_data import report_data_refs
+from app.domain.identity import stable_key
+from app.domain.node_profile import NODE_PROFILE_VERSION
+from app.domain.report_data import report_data_refs
 
 EXECUTION_CODE = NODE_RULE_EXECUTION
 EXECUTION_VERSION = NODE_PROFILE_VERSION
@@ -195,6 +195,7 @@ def compile_library(**config: Any) -> dict[str, Any]:
         field["enabled"] = active(field)
         field.setdefault("period_scope", "NOT_APPLICABLE")
         field.setdefault("statement_scope", "NOT_APPLICABLE")
+        field.setdefault("entity_scope", "SELF")
     for rule in rules:
         rule["node"] = rule["node_type"] = EXECUTION_CODE
         rule["enabled"] = active(rule)
@@ -252,7 +253,12 @@ def compile_library(**config: Any) -> dict[str, Any]:
             existing["enabled"] = active(existing) and active(calculation)
             existing["calculation_definition"] = deepcopy(calculation)
             existing["inputs"] = inputs
-            existing["materials"] = list(dict.fromkeys(i["material_key"] for i in inputs))
+            existing["materials"] = (
+                [item["material_key"] for item in materials]
+                if calculation.get("input_gaps")
+                else list(dict.fromkeys(i["material_key"] for i in inputs))
+            )
+            existing["input_gaps"] = deepcopy(calculation.get("input_gaps") or [])
             existing.pop("dependency_error", None)
             continue
         rules.append({"rule_key": key, "rule_code": calculation["rule_code"],
@@ -262,9 +268,18 @@ def compile_library(**config: Any) -> dict[str, Any]:
                       "config_status": calculation.get("status"),
                       "source_ref": calculation.get("source_id"),
                       "result_code": calculation["result_code"], "calculation_ref": calculation["rule_code"],
-                      "materials": list(dict.fromkeys(i["material_key"] for i in inputs)),
+                      # 存在未绑定输入时，允许模型从任务内任一材料补取真实值；
+                      # 没有缺项时仍只开放声明输入所属材料。
+                      "materials": (
+                          [item["material_key"] for item in materials]
+                          if calculation.get("input_gaps")
+                          else list(dict.fromkeys(i["material_key"] for i in inputs))
+                      ),
                       "parameters": {}, "requirement": "\n".join(text for text in (calculation.get("formula"), calculation.get("requirement")) if text),
-                      "calculation_definition": deepcopy(calculation), "origin": calculation.get("origin"),
+                      "calculation_definition": deepcopy(calculation),
+                      # 解析阶段已确认的未绑定输入：执行时不能把缺项当 0，也不能用其他科目替代。
+                      "input_gaps": deepcopy(calculation.get("input_gaps") or []),
+                      "origin": calculation.get("origin"),
                       "applicability": {"kind": "ALWAYS", "material_keys": []}})
     groups: dict[str, dict[str, Any]] = {}
     for section in sections:

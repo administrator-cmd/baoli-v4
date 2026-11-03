@@ -1,0 +1,207 @@
+"""方案创建、启停、删除与恢复；拒绝任务反向生成方案。"""
+
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.common.exceptions import BusinessError
+from app.domain.identity import public_no
+from app.modules.plan.plan.crud import PlanCRUD
+from app.modules.plan.plan.model import AuditPlan
+from app.modules.plan.plan.service.compilation import PlanCompilationService
+from app.modules.plan.plan.service.lookup import PlanLookupService
+from app.modules.system.operation.service.operation_log import OperationLogService
+from app.modules.system.operation.service.operation_types import OBJECT_PLAN
+
+
+class PlanLifecycleService:
+    """本实体的服务方法；db 由构造时注入。"""
+
+    def __init__(self, db: Session | None = None) -> None:
+        self.db = db
+
+    def create_plan(self, payload: dict[str, Any]) -> AuditPlan:
+        """同内容、同幂等键返回原方案；唯一约束裁决同时到达的请求。"""
+        key = payload.get("idempotency_key")
+        if not isinstance(key, str) or not key.strip():
+            raise BusinessError("OPERATION_IDEMPOTENCY_REQUIRED", "新建方案必须提供幂等标识", status_code=400)
+        request = {name: value for name, value in payload.items() if name != "idempotency_key"}
+        request["plan_name"] = str(request.get("plan_name") or "").strip()
+        request["description"] = str(request.get("description") or "").strip() or None
+        replay, request_hash = OperationLogService(self.db).require_idempotent_replay(object_type=OBJECT_PLAN, operation_type="CREATE", idempotency_key=key, request=request,
+        )
+        if replay is not None:
+            return PlanLookupService(self.db).plan_or_404( replay.object_no, include_deleted=True)
+        try:
+            return self._create_plan( request, idempotency_key=key, request_hash=request_hash)
+        except IntegrityError:
+            # 冲突事务中的方案、配置、日志一起回滚；只回放已提交的同一请求。
+            PlanCRUD(self.db).rollback()
+            replay, _ = OperationLogService(self.db).require_idempotent_replay(object_type=OBJECT_PLAN, operation_type="CREATE", idempotency_key=key, request=request,
+            )
+            if replay is None:
+                raise
+            return PlanLookupService(self.db).plan_or_404( replay.object_no, include_deleted=True)
+
+
+    def _create_plan(self, payload: dict[str, Any], *, idempotency_key: str, request_hash: str) -> AuditPlan:
+        """创建方案：把钉住的那一版场景配置整份复制成方案自己的配置，并立即编译一次。
+
+        版本号与当前可用的最新已发布版本不一致时明确返回 `PLAN_VERSION_CHANGED`，
+        不静默改取「当前最新版本」。复制与编译在同一次提交里完成，不会先建一个空方案、
+        失败后留下没有配置的半成品。
+
+        过去返回的第二项是「指向不存在规则、已被移除的条目名」——方案现在持有自己的配置，
+        不存在「引用了不存在的规则」这条路，因此不再返回它。
+        """
+        name = str(payload.get("plan_name") or "").strip()
+        if not name:
+            raise BusinessError("PLAN_NAME_REQUIRED", "方案名称不能为空", status_code=400)
+        scenario_code = str(payload.get("scenario_code") or "")
+        version_no = payload.get("scenario_version_no")
+        if not isinstance(version_no, int):
+            raise BusinessError(
+                "PLAN_VERSION_REQUIRED",
+                "创建方案必须携带页面预览的场景版本号，不能按场景编码改取最新版本",
+                status_code=400,
+                details={"scenario_code": scenario_code},
+            )
+        # 复制的是页面预览的那一版：它不是最新版或场景不可用时明确失败，
+        # 不先建一个半成品方案再等后台补复制。
+        published = PlanLookupService(self.db)._published_scenario_version_or_fail( scenario_code, version_no)
+        plan = AuditPlan(
+            plan_code=public_no("PLAN"),
+            plan_name=name,
+            scenario_code=scenario_code,
+            scenario_version_id=published.id,
+            description=(str(payload.get("description")).strip() or None) if payload.get("description") else None,
+            enabled=bool(payload.get("enabled", True)),
+        )
+        PlanCRUD(self.db).add(plan)
+        PlanCRUD(self.db).flush()
+        # 场景版本 → 方案配置：与缺少草稿时从最新发布版本初始化共用映射口径。
+        PlanCompilationService(self.db)._load_manifest_into_plan( plan, published.manifest_json)
+        PlanCRUD(self.db).flush()
+        # 立即编译一次：方案的 manifest 与范围在同一次提交里产生，页面直接可用。
+        PlanCompilationService(self.db)._recompile_plan( plan)
+        if plan.sync_error is not None:
+            raise BusinessError(
+                str(plan.sync_error["code"]),
+                str(plan.sync_error["message"]),
+                status_code=409,
+            )
+        OperationLogService(self.db).record_operation(
+            
+            object_type=OBJECT_PLAN,
+            object_no=plan.plan_code,
+            object_name=name,
+            operation_type="CREATE",
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            detail={
+                "plan_code": plan.plan_code,
+                "scenario_code": scenario_code,
+                "scenario_version_no": version_no,
+                "effective": plan.sync_error is None,
+            },
+        )
+        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).refresh(plan)
+        return plan
+
+
+    def update_plan(self, plan_code: str, payload: dict[str, Any]) -> AuditPlan:
+        """编辑方案基本资料（只覆盖提交的字段）；不修改规则范围。"""
+        plan = PlanLookupService(self.db).plan_or_404( plan_code, lock=True)
+        if "plan_name" in payload and payload["plan_name"] is not None:
+            name = str(payload["plan_name"]).strip()
+            if not name:
+                raise BusinessError("PLAN_NAME_REQUIRED", "方案名称不能为空", status_code=400)
+            plan.plan_name = name
+        if "description" in payload:
+            description = payload.get("description")
+            plan.description = (str(description).strip() or None) if description is not None else None
+        if "enabled" in payload and payload["enabled"] is not None:
+            plan.enabled = bool(payload["enabled"])
+        OperationLogService(self.db).record_operation(
+            
+            object_type=OBJECT_PLAN,
+            object_no=plan_code,
+            object_name=plan.plan_name,
+            operation_type="UPDATE",
+            detail={"plan_code": plan_code},
+        )
+        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).refresh(plan)
+        return plan
+
+
+    def set_plan_enabled(self, plan_code: str, enabled: bool) -> AuditPlan:
+        """启用 / 停用方案。"""
+        plan = PlanLookupService(self.db).plan_or_404( plan_code, lock=True)
+        plan.enabled = enabled
+        OperationLogService(self.db).record_operation(
+            
+            object_type=OBJECT_PLAN,
+            object_no=plan_code,
+            object_name=plan.plan_name,
+            operation_type="ENABLE" if enabled else "DISABLE",
+            detail={"plan_code": plan_code},
+        )
+        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).refresh(plan)
+        return plan
+
+
+    def delete_plan(self, plan_code: str) -> AuditPlan:
+        """逻辑删除方案。"""
+        plan = PlanLookupService(self.db).plan_or_404( plan_code, lock=True)
+        if plan.deleted_at is not None:
+            raise BusinessError("PLAN_ALREADY_DELETED", "该方案已在已删除列表中", status_code=409)
+        plan.deleted_at = datetime.now(UTC)
+        OperationLogService(self.db).record_operation(
+            
+            object_type=OBJECT_PLAN,
+            object_no=plan_code,
+            object_name=plan.plan_name,
+            operation_type="DELETE",
+            detail={"plan_code": plan_code},
+        )
+        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).refresh(plan)
+        return plan
+
+
+    def restore_plan(self, plan_code: str) -> AuditPlan:
+        """恢复已逻辑删除的方案。"""
+        plan = PlanLookupService(self.db).plan_or_404( plan_code, lock=True, include_deleted=True)
+        if plan.deleted_at is None:
+            raise BusinessError("PLAN_NOT_DELETED", "该方案未被删除，无需恢复", status_code=409)
+        plan.deleted_at = None
+        OperationLogService(self.db).record_operation(
+            
+            object_type=OBJECT_PLAN,
+            object_no=plan_code,
+            object_name=plan.plan_name,
+            operation_type="RESTORE",
+            detail={"plan_code": plan_code},
+        )
+        PlanCRUD(self.db).commit()
+        PlanCRUD(self.db).refresh(plan)
+        return plan
+
+
+    def save_task_range_as_plan(self, payload: dict[str, Any]) -> AuditPlan:
+        """任务不能反向生成方案。
+
+        方案必须先基于已发布场景版本建立，任务再从方案创建。
+        用任务结果补造方案会把执行阶段的数据写回上一阶段。
+        """
+        raise BusinessError(
+            "PLAN_FROM_TASK_FORBIDDEN",
+            "不能把审核任务另存为方案。请先选择已发布场景建立方案，再从方案创建任务",
+            status_code=409,
+            details={"task_no": payload.get("task_no")},
+        )

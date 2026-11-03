@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ..common.exceptions import BusinessError
+from app.common.exceptions import BusinessError
 
 # 结果失效的机器原因；说明文案由各页面按自己的语境给出。
 RESULT_STALE_EXECUTION = "EXECUTION_NOT_CURRENT"

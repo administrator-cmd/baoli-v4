@@ -1,6 +1,6 @@
 /** 管理端列表：材料、上传、证据、执行记录、复核记录与操作日志。 */
 
-import type { ApiResponse, JsonValue } from "./common";
+import type { JsonValue } from "./common";
 
 export interface DocumentRow {
   document_no: string;
@@ -28,7 +28,7 @@ export interface DocumentUploadRow {
   created_at: string;
 }
 
-export interface DocumentDetail extends ApiResponse {
+export interface DocumentDetail {
   document_no: string;
   task_no: string | null;
   task_name: string | null;
@@ -38,6 +38,27 @@ export interface DocumentDetail extends ApiResponse {
   status: string;
   current_upload_no: string | null;
   uploads: DocumentUploadRow[];
+}
+
+export interface ExecutionProgress {
+  /** 本批次已经产生规则结果的数量。 */
+  executed: number;
+  /** 本批次规则结果中标记为执行阻断的数量。 */
+  blocked: number;
+  /** 计划内没有产生结果、尚未执行的数量。 */
+  not_executed: number;
+}
+
+export interface ExecutionModelTurns {
+  /** 按 evaluation_id 去重后的模型请求轮次；历史数据无法还原时为 null。 */
+  count: number | null;
+  available: boolean;
+}
+
+export interface ExecutionBlockReason {
+  code: string | null;
+  /** 由错误码或结构化字段生成的简短原因；完整原因由接口的 failure_message 保留。 */
+  text: string;
 }
 
 export interface ExecutionRow {
@@ -61,16 +82,12 @@ export interface ExecutionRow {
   failure_code: string | null;
   failure_message: string | null;
   result_summary: Record<string, JsonValue> | null;
-}
-
-export interface ExecutionDetail extends ExecutionRow {
-  request_id: string;
-  task_status: string | null;
-  task_current_node: string | null;
-  input_revision: number | null;
-  plan_bound: boolean | null;
-  operation_no: string | null;
-  created_at: string;
+  progress: ExecutionProgress;
+  model_turns: ExecutionModelTurns;
+  /** 当前仍属于本批次的规则级阻断数量；已失效或等待字段核对的旧阻断不计入。 */
+  current_blocked: number;
+  /** 列表与顶部提示用的简短阻断原因；等待核对、执行中与已失效批次为空。 */
+  block_reason: ExecutionBlockReason | null;
 }
 
 export interface OperationLogRow {

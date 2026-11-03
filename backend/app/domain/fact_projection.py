@@ -7,10 +7,10 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..common.exceptions import BusinessError
-from ..constants.execution import FACT_KIND_DERIVED, FACT_KIND_EXTRACTED
-from ..constants.status import EXECUTABLE_FIELD_STATUSES
-from . import field_strategy
+from app.common.exceptions import BusinessError
+from app.constants.execution import FACT_KIND_DERIVED, FACT_KIND_EXTRACTED
+from app.constants.status import EXECUTABLE_FIELD_STATUSES
+from app.domain import field_strategy
 
 # 被显式编码的标量类型。`kind` 取值即这几个，解码时据此还原。
 ENCODED_KINDS = ("decimal", "date", "datetime")
@@ -204,11 +204,16 @@ def resolve_rule_inputs(
             # 展示用的中文名随输入一起传：比较面板据此写明左右两侧分别是谁。
             "field_name": (fact or {}).get("field_name"),
             "material_name": (fact or {}).get("material_name"),
+            "source_files": list((fact or {}).get("source_files") or []),
             # 事实记录 id 供诊断按历史版本回读取值，不在结果里再复制一份业务值。
             "fact_id": (fact or {}).get("fact_id"),
             "value_type": (fact or {}).get("value_type"),
             "unit": (fact or {}).get("unit"),
             "currency": (fact or {}).get("currency"),
+            "actual_period_scope": (fact or {}).get("actual_period_scope"),
+            "actual_statement_scope": (fact or {}).get("actual_statement_scope"),
+            "actual_entity_scope": (fact or {}).get("actual_entity_scope"),
+            "actual_unit": (fact or {}).get("actual_unit"),
             "material_state": (fact or {}).get("material_state"),
             **{key: (fact or {}).get(key) for key in ("period_scope", "statement_scope", "entity_scope", "origin")},
         }
@@ -292,6 +297,10 @@ def facts_of_task_fact_rows(
             "field_name": ((field_definitions or {}).get(field_key) or {}).get("name"),
             "material_name": (material_names or {}).get(row.material_key),
             "unit": payload.get("unit"), "currency": payload.get("currency"), "status": row.status,
+            "actual_period_scope": payload.get("actual_period_scope"),
+            "actual_statement_scope": payload.get("actual_statement_scope"),
+            "actual_entity_scope": payload.get("actual_entity_scope"),
+            "actual_unit": payload.get("actual_unit"),
             "material_state": states.get(row.material_key) if row.material_key else None,
             "raw_value": encode_value((raw_values or {}).get(row.id) if executable else None),
             "normalized_value": encode_value(normalized_value if executable else None),

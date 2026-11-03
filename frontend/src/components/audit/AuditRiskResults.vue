@@ -21,7 +21,7 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
  */
 const props = defineProps<{
   risks: RiskList | null;
-  /** 风险评定节点是否执行过（状态来自服务端节点列表）。 */
+  /** 风险规则是否随当前批次执行过（状态来自服务端节点列表）。 */
   riskNodeExecuted: boolean;
   /** 当前场景是否配置了风险评级规则。 */
   riskConfigured: boolean;
@@ -73,7 +73,7 @@ const filteredItems = computed(() => {
     return [
       item.rule_code, item.name, item.risk_level, item.source_sheet,
       statusTextOf("risk", item.status), riskSummary(item), item.message,
-      ...item.evidence.flatMap((source) => [source.material_name, source.document_name, source.quote_text]),
+      ...item.evidence.flatMap((source) => [source.material_name, source.document_name, source.quote_label, source.quote_header, source.quote_period, source.quote_text]),
     ].join(" ").toLocaleLowerCase().includes(query);
   });
 });
@@ -124,7 +124,7 @@ const emptyState = computed(() => {
   if (props.riskNodeExecuted && props.risks && !props.risks.risk_executed) {
     return {
       title: "风险结果已失效",
-      description: "当前没有有效的风险结果，需要重新执行审核。",
+      description: "已有风险结果不再对应当前输入，不能作为当前风险结论。",
     };
   }
   if (!props.risks?.risk_executed) {
@@ -146,13 +146,13 @@ const emptyState = computed(() => {
     v-else-if="error"
     kind="error"
     title="风险结果读取失败"
-    :description="`${error}。这不代表没有风险，请重新查询后再判断。`"
+    :description="`${error}。当前无法确认风险结果。`"
   />
   <StateBlock
     v-else-if="!risks"
     kind="empty"
     title="尚未读取到风险结果"
-    description="还没有取得服务端返回的风险结果；请刷新后重试。这不代表没有风险。"
+    description="尚未取得服务端风险数据，不能据此判断没有风险。"
   />
   <div v-else class="stack">
     <div v-if="riskItems.length" class="risk-toolbar">
@@ -207,7 +207,11 @@ const emptyState = computed(() => {
       <span v-if="detailRisk.rule_code" class="risk-code">{{ detailRisk.rule_code }}</span>
       <span v-if="detailRisk.risk_level" class="risk-level">规则等级：{{ detailRisk.risk_level }}</span>
       <p>{{ riskSummary(detailRisk) }}</p>
-      <AuditBusinessDetails :result="detailRisk.details" />
+      <AuditBusinessDetails
+        :result="detailRisk.details"
+        :source-files="detailRisk.evidence.map((item) => item.document_name).filter((name): name is string => Boolean(name))"
+        :material-names="detailRisk.evidence.map((item) => item.material_name).filter((name): name is string => Boolean(name))"
+      />
       <template v-if="sourceRules.length">
         <h4 class="app-section-title">来源审核项</h4>
         <el-table :data="sourceRules" border size="small">
@@ -221,11 +225,18 @@ const emptyState = computed(() => {
         <p v-if="quoteNote(detailRisk)" class="risk-quote-note">{{ quoteNote(detailRisk) }}</p>
         <div v-for="(source, index) in detailRisk.evidence" :key="index" class="risk-source">
           <div class="text-muted">
-            {{ source.material_name || '来源材料未记录' }}
-            <template v-if="source.document_name"> · {{ source.document_name }}</template>
+            {{ source.document_name || '来源文件未记录' }}
+            <template v-if="!source.document_name && source.material_name"> · 材料位：{{ source.material_name }}</template>
             <template v-if="source.field_path"> · {{ source.field_path }}</template>
           </div>
-          <QuoteBlock v-if="source.quote_text" :text="source.quote_text" />
+          <QuoteBlock
+            v-if="source.quote_text"
+            :text="source.quote_text"
+            :label="source.quote_label"
+            :header="source.quote_header"
+            :period="source.quote_period"
+            :page="source.artifact_page"
+          />
           <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>
         </div>
       </template>

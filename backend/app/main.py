@@ -8,24 +8,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import routes
-from .common.exceptions import (
+from app.api import routes
+from app.common.exceptions import (
     BusinessError,
     business_error_handler,
     http_error_handler,
     request_validation_error_handler,
     unhandled_error_handler,
 )
-from .core.config import PROJECT_DIR, get_settings
-from .core.database import SessionLocal, check_database_connection
-from .integrations.documents.material_classify import list_material_types, validate_material_type
-from .integrations.documents.ocr import poll_ocr_job, submit_processed_document
-from .integrations.documents.parsing import detect_seals, process_document
-from .middleware.request_context import RequestContextMiddleware
-from .runtime.schema_check import verify_schema
-from .services.audit import document_ports
-from .services.audit.commands import recover_interrupted_executions
-from .services.system.background import recover_interrupted_operations
+from app.core.config import PROJECT_DIR, get_settings
+from app.core.database import SessionLocal, check_database_connection
+from app.integrations.documents.material_classify import list_material_types, validate_material_type
+from app.integrations.documents.ocr import poll_ocr_job, submit_processed_document
+from app.integrations.documents.parsing import detect_seals, process_document
+from app.middleware.request_context import RequestContextMiddleware
+from app.modules.audit.artifact.service import document_ports
+from app.modules.audit.execution.service.commands import AuditExecutionCommandsService
+from app.modules.system.operation.service.background import OperationBackgroundService
+from app.runtime.schema_check import verify_schema
 
 
 def _configure_logging(level_name: str) -> None:
@@ -106,8 +106,8 @@ async def lifespan(_: FastAPI):
     # 上次进程被杀时可能有节点停在 RUNNING、或后台操作停在活跃状态；
     # 这里显式标记中断原因，不自动重放外部调用。等待中的任务不受影响。
     with SessionLocal() as session:
-        recovered = recover_interrupted_executions(session)
-        operations = recover_interrupted_operations(session)
+        recovered = AuditExecutionCommandsService(session).recover_interrupted_executions()
+        operations = OperationBackgroundService(session).recover_interrupted_operations()
     if recovered["interrupted_executions"] or recovered["blocked_tasks"] or operations["interrupted_operations"]:
         logger.warning("已标记上次运行中断：%s %s", recovered, operations)
     yield

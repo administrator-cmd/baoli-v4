@@ -2,20 +2,26 @@
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+/** 所有 JSON 接口的统一信封；失败时 data 承载已脱敏的 details。 */
+export interface ApiEnvelope<T> {
+  code: string;
+  message: string;
+  data: T | null;
+  request_id: string;
+  success: boolean;
+}
+
 export interface ApiFailure {
   code: string;
   message: string;
-  details: Record<string, JsonValue>;
+  data: Record<string, JsonValue> | null;
   request_id: string;
-}
-
-export interface ApiResponse {
-  request_id: string;
+  success: boolean;
 }
 
 export type OperationStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "INTERRUPTED";
 
-export interface OperationAccepted extends ApiResponse {
+export interface OperationAccepted {
   operation_no: string;
   object_no: string;
   object_type: string;
@@ -39,7 +45,7 @@ export interface OperationAccepted extends ApiResponse {
   finished_at: string | null;
 }
 
-export interface Paged<T> extends ApiResponse {
+export interface Paged<T> {
   total: number;
   page: number;
   page_size: number;

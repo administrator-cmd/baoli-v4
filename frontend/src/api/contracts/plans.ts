@@ -1,6 +1,6 @@
 /** 审核方案与任务创建：方案选择、范围预览与任务创建结果。 */
 
-import type { ApiResponse, JsonValue } from "./common";
+import type { JsonValue } from "./common";
 import type { ConfigOrigin } from "./scenes";
 
 export interface PlanListItem {
@@ -41,7 +41,7 @@ export interface PlanStatus {
   } | null;
 }
 
-export interface PlanSelection extends ApiResponse, PlanStatus {
+export interface PlanSelection extends PlanStatus {
   /** 方案自己的全部规则与启停：这就是「这个方案跑哪些规则」的唯一来源。 */
   rules: Array<{ rule_key: string; name: string; node: string | null; enabled: boolean }>;
   calculation_rules: Array<{ rule_code: string; name: string; enabled: boolean }>;
@@ -51,7 +51,7 @@ export interface PlanSelection extends ApiResponse, PlanStatus {
 }
 
 /** 方案的可编辑配置：方案状态、材料、字段、审核规则、计算定义和报告章节。 */
-export interface PlanConfig extends ApiResponse, PlanStatus {
+export interface PlanConfig extends PlanStatus {
   materials: PlanMaterialItem[];
   fields: PlanFieldItem[];
   rules: PlanRuleItem[];
@@ -95,6 +95,7 @@ export interface PlanFieldItem {
   artifact_source?: string | null;
   period_scope: string;
   statement_scope: string;
+  entity_scope?: string | null;
   required: boolean;
   instruction: string;
   source_ref?: string | null;
@@ -196,7 +197,7 @@ export interface AuditTaskRow {
   updated_at: string;
 }
 
-export interface TaskCreatedResult extends ApiResponse {
+export interface TaskCreatedResult {
   task_no: string;
   task_name: string;
   task_status: string;

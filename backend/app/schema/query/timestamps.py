@@ -13,7 +13,7 @@ from typing import Annotated
 
 from pydantic import AfterValidator
 
-from ...common.exceptions import BusinessError
+from app.common.exceptions import BusinessError
 
 
 def _reject_naive(value: datetime) -> datetime:

@@ -47,6 +47,7 @@ DETAIL_COLUMNS = ("业务项目", "属性名", "数组序号", "值类型", "值
 EXTRA_LABELS = {
     "tool_findings": "工具核查明细", "extracted_values": "抽取字段明细",
     "calculation_definition": "计算定义", "calculation_steps": "计算过程",
+    "input_resolutions": "补取输入",
     "source_rules": "风险来源规则", "risk_condition": "风险触发条件", "report": "报告正文",
 }
 

@@ -1,33 +1,36 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 
 import type { AuditFieldView } from "@/api/audits";
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { statusTextOf } from "@/constants/statusVocabulary";
-import { evidenceIsValue, fieldMode, fieldReason, formatFieldValue } from "@/utils/fieldPresentation";
+import { periodScopeLabel } from "@/constants/labels";
+import { evidenceIsValue, fieldMode, fieldReason, fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
 import { quoteInlineText } from "@/utils/quoteText";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /** 字段列表展示业务编号、名称、关联材料、抽取结果和状态；原文、说明和纠错入口在详情抽屉中。 */
 const props = defineProps<{
   fields: AuditFieldView[];
-  /** 字段抽取节点是否已经执行过；未执行时说明原因，而不是显示成空值。 */
+  /** 字段抽取是否已经执行过；未执行时说明原因，而不是显示成空值。 */
   extractionFinished: boolean;
   /** 任务是否允许发起纠错（未结束的任务才可）。 */
   correctionEnabled?: boolean;
+  /** 页面汇总入口设置的初始筛选；由父组件传入，改选后同步回父组件。 */
+  filter?: string;
 }>();
 
 const emit = defineEmits<{
   correct: [field: AuditFieldView];
+  "update:filter": [value: string];
 }>();
 
 const detailField = shallowRef<AuditFieldView | null>(null);
 
 function extractedText(field: AuditFieldView): string {
-  const value = field.normalized_value;
-  if (value !== null && value !== undefined && value !== "") return formatFieldValue(field);
+  if (hasEffectiveFieldValue(field)) return formatFieldValue(field);
   if (field.status === "NOT_PRESENT") return "材料未载明";
   if (field.status === "NOT_APPLICABLE") return "本次不适用";
   if (field.extraction_enabled === false) return "未启用抽取";
@@ -41,12 +44,16 @@ function searchText(field: AuditFieldView): string {
     field.source_ref,
     field.name,
     field.material_name,
+    ...fieldSourceFiles(field),
+    field.actual_period_scope,
+    field.actual_unit,
+    field.actual_statement_scope,
     field.raw_value,
     String(field.normalized_value ?? ""),
     formatFieldValue(field),
     field.status,
     ...(evidenceIsValue(mode)
-      ? field.evidence.map((item) => quoteInlineText(item.quote_text))
+      ? field.evidence.map((item) => [item.quote_text, item.quote_label, item.quote_header, item.quote_period].filter(Boolean).map((text) => quoteInlineText(String(text))).join(" "))
       : [fieldReason(field)]),
   ]
     .join(" ")
@@ -60,13 +67,29 @@ function forwardCorrect(field: AuditFieldView): void {
 const search = ref("");
 const statusFilter = ref("ALL");
 
+/** 实际识别与配置声明分开标注，不把配置值冒充正文识别结果。 */
+function scopeText(field: AuditFieldView): string {
+  const parts = [
+    field.actual_period_scope ? `期间：${field.actual_period_scope}` : "期间未识别",
+    field.actual_unit ? `单位：${field.actual_unit}` : "单位未识别",
+  ];
+  if (field.period_scope) parts.push(`要求期间：${periodScopeLabel(field.period_scope)}`);
+  if (field.unit) parts.push(`要求单位：${field.unit}`);
+  return parts.join(" · ");
+}
+
+function sourceFilesText(field: AuditFieldView): string {
+  return fieldSourceFiles(field).join("、") || "未记录来源文件";
+}
+
 /**
  * 筛选分档。分档必须覆盖服务端可能给出的全部字段状态码：
  * 落在分档之外的码会让数量对不上，也会让人以为所有结果都被看过了。
  */
 const filters = [
   { value: "ALL", label: "全部", statuses: [] as string[] },
-  { value: "EXTRACTED", label: "已抽取", statuses: ["PRESENT", "REVIEWED"] },
+  { value: "EXTRACTED", label: "有有效值", statuses: ["PRESENT", "REVIEWED"] },
+  { value: "NO_VALUE", label: "无有效值", statuses: [] as string[] },
   {
     value: "UNRESOLVED",
     label: "未取到值",
@@ -77,8 +100,33 @@ const filters = [
 ];
 
 function matchesFilter(field: AuditFieldView, filter: (typeof filters)[number]): boolean {
-  return filter.value === "ALL" || filter.statuses.includes(field.status);
+  if (filter.value === "ALL") return true;
+  if (filter.value === "EXTRACTED") return hasEffectiveFieldValue(field);
+  if (filter.value === "NO_VALUE") {
+    return field.status !== "NOT_APPLICABLE" && !hasEffectiveFieldValue(field);
+  }
+  return filter.statuses.includes(field.status);
 }
+
+watch(() => props.filter, (value) => {
+  if (value && filters.some((item) => item.value === value)) {
+    statusFilter.value = value;
+  }
+}, { immediate: true });
+
+watch(statusFilter, (value) => emit("update:filter", value));
+
+/** 统计入口每次点击都重置搜索，即使选中的状态没有变化。 */
+function applyFilter(value: string): void {
+  search.value = "";
+  statusFilter.value = value;
+}
+defineExpose({ applyFilter });
+
+watch(() => props.fields, (fields) => {
+  if (detailField.value) detailField.value = fields.find((field) =>
+    field.field_key === detailField.value?.field_key && field.material_key === detailField.value?.material_key) ?? null;
+});
 
 /** 不被任何分档覆盖的状态码：新增状态出现时必须看得见，不能静默消失。 */
 const uncoveredStatusCounts = computed(() => {
@@ -105,9 +153,9 @@ const rows = computed(() => {
 /** 未执行时说明是「节点还没跑」还是「跑了但这一项没结果」，两者不能混。 */
 const emptyDescription = computed(() => {
   if (props.extractionFinished) {
-    return "字段抽取节点已执行，但没有形成字段结果；可在规则结果或证据区域核对具体原因。";
+    return "字段抽取已执行，但没有形成字段结果；可在规则结果或证据区域核对具体原因。";
   }
-  return "字段抽取节点尚未执行。执行后这里会显示服务端真实抽取到的原文与标准化结果。";
+  return "字段抽取尚未执行。执行后这里会显示真实抽取到的原文与标准化结果。";
 });
 </script>
 
@@ -115,7 +163,7 @@ const emptyDescription = computed(() => {
   <StateBlock v-if="!fields.length" kind="empty" title="当前还没有字段结果" :description="emptyDescription" />
   <div v-else class="stack">
     <div class="field-toolbar">
-      <el-input v-model="search" clearable placeholder="搜索编号、字段、材料或原文" aria-label="搜索字段结果" class="field-search" />
+      <el-input v-model="search" clearable placeholder="搜索字段、来源文件或原文" aria-label="搜索字段结果" class="field-search" />
       <el-select v-model="statusFilter" aria-label="按字段状态筛选" class="field-status-filter">
         <el-option v-for="filter in filters" :key="filter.value" :value="filter.value"
           :label="`${filter.label}（${fields.filter((field) => matchesFilter(field, filter)).length}）`" />
@@ -144,11 +192,18 @@ const emptyDescription = computed(() => {
           <span class="cell-strong">{{ row.name }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="material_name" label="关联材料" width="220" show-overflow-tooltip />
-      <el-table-column label="抽取结果" min-width="260">
+      <el-table-column label="来源文件" width="230">
+        <template #default="{ row }">
+          <div class="field-value" :title="sourceFilesText(row)">{{ sourceFilesText(row) }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="抽取结果" min-width="240">
         <template #default="{ row }">
           <div class="field-value" :class="{ 'field-value--empty': row.normalized_value === null || row.normalized_value === undefined || row.normalized_value === '' }">{{ extractedText(row) }}</div>
         </template>
+      </el-table-column>
+      <el-table-column label="期间 / 单位" width="210">
+        <template #default="{ row }">{{ scopeText(row) }}</template>
       </el-table-column>
       <el-table-column label="状态" width="140">
         <template #default="{ row }">

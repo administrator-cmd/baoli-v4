@@ -1,4 +1,4 @@
-import type { ApiFailure, OperationAccepted, OperationStatus } from "./contracts";
+import type { ApiEnvelope, ApiFailure, OperationAccepted, OperationStatus } from "./contracts";
 import { newId } from "../utils/ids";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
@@ -9,7 +9,7 @@ export const OPERATION_POLL_INTERVAL_MS = 2_000;
 
 export class ApiError extends Error {
   readonly code: string;
-  readonly details: ApiFailure["details"];
+  readonly details: NonNullable<ApiFailure["data"]>;
   readonly requestId: string;
   /** 没有收到 HTTP 响应时为 null。 */
   readonly statusCode: number | null;
@@ -19,30 +19,36 @@ export class ApiError extends Error {
     super(failure.message);
     this.name = "ApiError";
     this.code = failure.code;
-    this.details = failure.details;
+    this.details = failure.data ?? {};
     this.requestId = failure.request_id;
     this.statusCode = statusCode;
     this.cause = cause;
   }
 }
 
-function isApiFailure(value: unknown): value is ApiFailure {
+function isApiEnvelope(value: unknown): value is ApiEnvelope<unknown> {
   if (typeof value !== "object" || value === null) return false;
-  const failure = value as Record<string, unknown>;
-  return typeof failure.code === "string"
-    && typeof failure.message === "string"
-    && typeof failure.request_id === "string"
-    && typeof failure.details === "object"
-    && failure.details !== null
-    && !Array.isArray(failure.details);
+  const envelope = value as Record<string, unknown>;
+  return typeof envelope.code === "string"
+    && typeof envelope.message === "string"
+    && typeof envelope.request_id === "string"
+    && typeof envelope.success === "boolean"
+    && "data" in envelope;
+}
+
+function isApiFailure(value: unknown): value is ApiFailure {
+  if (!isApiEnvelope(value)) return false;
+  return value.success === false
+    && (value.data === null || (typeof value.data === "object" && !Array.isArray(value.data)));
 }
 
 function invalidResponse(statusCode: number, requestId: string, cause: unknown): ApiError {
   return new ApiError({
     code: "INVALID_RESPONSE",
     message: "服务返回了无法识别的响应",
-    details: {},
+    data: {},
     request_id: requestId,
+    success: false,
   }, statusCode, cause);
 }
 
@@ -51,8 +57,9 @@ function httpFailure(payload: unknown, statusCode: number, requestId: string): A
   return new ApiError({
     code: "HTTP_ERROR",
     message: `服务返回 HTTP ${statusCode}，错误响应不符合接口约定`,
-    details: { status_code: statusCode },
+    data: { status_code: statusCode },
     request_id: requestId,
+    success: false,
   }, statusCode);
 }
 
@@ -95,7 +102,9 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       throw error;
     }
     if (!response.ok) throw httpFailure(payload, statusCode, responseRequestId);
-    return payload as T;
+    if (!isApiEnvelope(payload)) throw invalidResponse(statusCode, responseRequestId, payload);
+    if (!payload.success) throw new ApiError(payload as ApiFailure, statusCode);
+    return payload.data as T;
   } catch (error) {
     if (error instanceof ApiError) throw error;
     const cancelled = init.signal?.aborted === true;
@@ -104,8 +113,9 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       message: timedOut
         ? "请求超过 60 秒仍未返回，尚未确认操作结果；请查询真实状态后再决定是否重新提交"
         : cancelled ? "请求已取消，尚未确认操作结果" : "请求通信失败，请检查网络或服务状态",
-      details: {},
+      data: {},
       request_id: responseRequestId,
+      success: false,
     }, statusCode, error);
   } finally {
     clearTimeout(timeoutId);
@@ -153,7 +163,15 @@ export function uploadWithProgress<T>(
         return;
       }
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(payload as T);
+        if (!isApiEnvelope(payload)) {
+          reject(invalidResponse(xhr.status, responseRequestId, payload));
+          return;
+        }
+        if (!payload.success) {
+          reject(new ApiError(payload as ApiFailure, xhr.status));
+          return;
+        }
+        resolve(payload.data as T);
       } else {
         reject(httpFailure(payload, xhr.status, responseRequestId));
       }
@@ -162,20 +180,23 @@ export function uploadWithProgress<T>(
     xhr.onerror = (event) => reject(new ApiError({
       code: "NETWORK_ERROR",
       message: "上传通信失败，请检查网络或服务状态",
-      details: {},
+      data: {},
       request_id: requestId,
+      success: false,
     }, null, event));
     xhr.ontimeout = (event) => reject(new ApiError({
       code: "REQUEST_TIMEOUT",
       message: "上传超过等待时间，尚未确认操作结果；请查询材料的真实状态后再决定是否重新提交",
-      details: {},
+      data: {},
       request_id: requestId,
+      success: false,
     }, null, event));
     xhr.onabort = (event) => reject(new ApiError({
       code: "REQUEST_CANCELLED",
       message: "上传已取消，尚未确认操作结果",
-      details: {},
+      data: {},
       request_id: requestId,
+      success: false,
     }, null, event));
     xhr.send(formData);
   });

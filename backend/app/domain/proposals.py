@@ -2,8 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..constants.execution import OPERATOR_LLM_EXECUTE
-from .execution_mode import ExecutionMode
+from app.constants.execution import OPERATOR_LLM_EXECUTE
+from app.domain.execution_mode import ExecutionMode
 
 # 普通数值 DECIMAL 不带财务假设；AMOUNT 与大写金额 DECIMAL_CN 保留单位、币种口径。
 ValueType = Literal["STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"]
@@ -119,11 +119,21 @@ class FieldProposal(SourcedProposal):
     artifact_source: str | None = None
     extraction_strategy: Literal["RAW_TEXT", "DETERMINISTIC", "STRUCTURED"] | None = None
     structure_schema: dict[str, Any] | None = None
-    # 取数期间与报表口径：由字段自己声明。计算参数不再重复声明这两项，
-    # 因此这里是「这个数取的是哪一期、哪个口径」的唯一来源。
-    # 只有规则实际涉及期间/报表口径时才填写；省略表示不涉及，由编译层归一为 NOT_APPLICABLE。
-    period_scope: FieldPeriodScope | None = None
-    statement_scope: FieldStatementScope | None = None
+    # 取数期间、报表口径与主体范围：由字段自己声明。计算参数不再重复声明这几项，
+    # 因此这里是「这个数取的是哪一期、哪个口径、哪个主体」的唯一来源。
+    # 只有规则实际涉及这些口径时才填写；省略表示不涉及，由编译层归一为 NOT_APPLICABLE / SELF。
+    period_scope: FieldPeriodScope | None = Field(
+        default=None,
+        description="该字段取数的期间或时点，例如本期、上期、期初、期末、2025-06-30；原文未说明时省略，不猜默认期间。",
+    )
+    statement_scope: FieldStatementScope | None = Field(
+        default=None,
+        description="该字段取数的报表口径，例如合并报表、母公司报表；原文未说明时省略。",
+    )
+    entity_scope: str | None = Field(
+        default=None,
+        description="该字段取数的主体范围，例如母公司、子公司、合并主体；原文未说明时省略，编译层按 SELF 处理。",
+    )
     config_status: str | None = None
 
 
@@ -212,6 +222,27 @@ class ReportSectionProposal(SourcedProposal):
     config_status: str | None = None
 
 
+class InputGap(ProposalModel):
+    """计算定义内部的未绑定输入；所属计算由所在对象确定。"""
+
+    parameter_code: str | None = None
+    missing_input: str
+    reason: str
+    original_requirement: str = ""
+
+
+class BindingGap(InputGap):
+    """解析阶段已确认存在、但尚未建立输入绑定的取数需求。
+
+    它不是规则状态，也不改变启用/停用：只说明公式或检查要求中的哪项输入没有
+    对应字段、计算结果或常量，以及原文为什么需要它。执行时据此拒绝把缺项当成 0。
+    """
+
+    owner_group: Literal["rules", "calculations"]
+    owner_ref: str = Field(description="所属对象的 candidate_ref（内部引用），不是业务编号。")
+    owner_name: str | None = None
+
+
 class CalculationCandidate(SourcedProposal):
     """计算业务定义；LLM 根据公式和完整要求执行，不使用固定计算/判定协议。"""
 
@@ -233,3 +264,5 @@ class CalculationCandidate(SourcedProposal):
     remark: str = ""
     parameters: list[dict[str, Any]] = Field(default_factory=list)
     depends_on_result_codes: list[str] = Field(default_factory=list)
+    # 第二轮逐项核对公式输入后的未绑定项；空列表表示所有输入已经建立绑定。
+    input_gaps: list[InputGap] = Field(default_factory=list)

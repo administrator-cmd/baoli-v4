@@ -35,8 +35,8 @@ export interface PlanOption {
 }
 
 /** 方案下拉选项，可按场景编码过滤。 */
-export function listPlanOptions(scenarioCode?: string): Promise<{ request_id: string; items: PlanOption[] }> {
-  return request<{ request_id: string; items: PlanOption[] }>(`/plans/options${toQuery({ scenario_code: scenarioCode })}`);
+export function listPlanOptions(scenarioCode?: string): Promise<{ items: PlanOption[] }> {
+  return request<{ items: PlanOption[] }>(`/plans/options${toQuery({ scenario_code: scenarioCode })}`);
 }
 
 /**

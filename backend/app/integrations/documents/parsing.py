@@ -7,14 +7,14 @@ import math
 from pathlib import Path
 from typing import Any
 
-from ...common.exceptions import BusinessError
-from ...core.config import get_settings
-from ...domain.external_artifacts import (
+from app.common.exceptions import BusinessError
+from app.core.config import get_settings
+from app.domain.external_artifacts import (
     ExternalArtifact,
     ExternalEvidence,
     ExternalServiceResult,
 )
-from .http import (
+from app.integrations.documents.http import (
     client,
     contract_error,
     json_object,
@@ -24,7 +24,7 @@ from .http import (
     response_content_type,
     strict_bool,
 )
-from .http import (
+from app.integrations.documents.http import (
     confidence as _confidence,
 )
 

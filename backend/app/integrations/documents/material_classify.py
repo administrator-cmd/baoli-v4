@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ...common.exceptions import BusinessError
-from ...core.config import get_settings
-from ...domain.external_artifacts import ExternalArtifact, ExternalServiceResult
-from .http import (
+from app.common.exceptions import BusinessError
+from app.core.config import get_settings
+from app.domain.external_artifacts import ExternalArtifact, ExternalServiceResult
+from app.integrations.documents.http import (
     client,
     confidence,
     contract_error,

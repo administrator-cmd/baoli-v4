@@ -12,7 +12,7 @@ import PlanConfigList from "@/components/plans/PlanConfigList.vue";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { sourceSheetLabel } from "@/composables/useRuleSourceFilter";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
-import { formatBusinessValue, valueTypeLabel } from "@/constants/labels";
+import { formatBusinessValue, periodScopeLabel, statementScopeLabel, valueTypeLabel } from "@/constants/labels";
 
 const props = defineProps<{ job: ImportJob; readonly: boolean }>();
 const emit = defineEmits<{ saved: [job: ImportJob]; busy: [value: boolean] }>();
@@ -85,7 +85,11 @@ function parametersText(item: ProposalCalculation): string {
     if (parameter.source_type === "CONSTANT") return `常量 ${formatBusinessValue(parameter.constant_value ?? null)}`;
     const field = props.job.proposals?.fields.find((field) => field.candidate_ref === parameter.source_code);
     const calculation = props.job.proposals?.calculations.find((calculation) => calculation.result_code === parameter.source_code);
-    return field?.name ?? calculation?.rule_name ?? String(parameter.source_code ?? "未声明来源");
+    if (field) {
+      return [field.name, field.material_name, periodScopeLabel(field.period_scope), statementScopeLabel(field.statement_scope), field.entity_scope]
+        .filter(Boolean).join(" · ");
+    }
+    return calculation?.rule_name ?? "未建立来源绑定";
   }).join("、");
 }
 
@@ -107,7 +111,8 @@ function rowsOf(group: ImportProposalGroup): ProposalRow[] {
       required: item.required, status: item.config_status ?? null,
       details: [{ label: "来源材料", value: item.material_name ?? "未关联材料" },
         { label: "字段类型", value: valueTypeLabel(item.value_type) },
-        { label: "单位 / 币种", value: [item.unit, item.currency].filter(Boolean).join(" / ") || "未声明" }],
+        { label: "单位 / 币种", value: [item.unit, item.currency].filter(Boolean).join(" / ") || "未声明" },
+        { label: "期间 / 报表 / 主体", value: [periodScopeLabel(item.period_scope), statementScopeLabel(item.statement_scope), item.entity_scope].filter(Boolean).join(" / ") }],
     }));
     case "rules": return proposals.rules.map<ProposalRow>((item) => ({
       ref: item.candidate_ref, group: "rules", name: item.name, text: item.requirement,
@@ -150,6 +155,8 @@ const fieldRows = computed(() => rowsOf("fields"));
 const ruleRows = computed(() => rowsOf("rules"));
 const calculationRows = computed(() => rowsOf("calculations"));
 const sectionRows = computed(() => rowsOf("report_sections"));
+/** 第二轮逐项核对后仍未建立绑定的输入；不改变启用状态，只暴露配置不完整。 */
+const bindingGaps = computed(() => props.job.proposals?.binding_gaps ?? []);
 
 /** 材料筛选按名称匹配：表格里的「适用材料 / 所属材料」显示的就是名称。 */
 const materialOptions = computed(() => (props.job.proposals?.materials ?? [])
@@ -241,6 +248,22 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
     </div>
 
     <FailureNotice v-if="!editing" :error="failure" @dismiss="failure = null" />
+    <el-alert
+      v-if="bindingGaps.length"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="`有 ${bindingGaps.length} 项输入尚未建立绑定`"
+      class="block-gap-sm"
+    >
+      这些缺项不会把规则自动改为停用；执行时缺少真实依据会按证据不足记录，不会用 0 或相近科目替代。
+      <div v-for="(gap, index) in bindingGaps" :key="index" class="binding-gap">
+        <strong>{{ gap.owner_name || gap.owner_ref }}</strong>
+        <template v-if="gap.parameter_code"> · 参数 {{ gap.parameter_code }}</template>
+        ：缺少「{{ gap.missing_input }}」——{{ gap.reason }}
+        <div v-if="gap.original_requirement" class="text-hint">原文要求：{{ gap.original_requirement }}</div>
+      </div>
+    </el-alert>
     <el-tabs v-model="activeGroup">
       <el-tab-pane :label="`材料（${materialRows.length}）`" name="materials" lazy>
         <PlanConfigList
@@ -439,6 +462,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
 .proposal-edit-form :deep(.el-select) { width: 100%; }
 .proposal-context { margin-top: 12px; }
 .proposal-context :deep(.el-descriptions__content) { overflow-wrap: anywhere; white-space: pre-wrap; }
+.binding-gap { margin-top: 4px; font-size: 12px; line-height: 1.6; }
 @media (max-width: 640px) {
   .proposal-heading { align-items: flex-start; }
   .proposal-edit-meta { grid-template-columns: 1fr; gap: 0; }

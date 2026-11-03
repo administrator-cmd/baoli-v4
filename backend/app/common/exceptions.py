@@ -8,19 +8,12 @@ from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from ..middleware.request_context import request_id_of
+from app.common.response import ResponseSchema
+from app.middleware.request_context import request_id_of
 
 logger = logging.getLogger(__name__)
-
-
-class ErrorBody(BaseModel):
-    code: str
-    message: str
-    details: dict[str, Any] = Field(default_factory=dict)
-    request_id: str
 
 
 class BusinessError(Exception):
@@ -105,11 +98,12 @@ def _error_response(
     details: dict[str, Any] | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
-    body = ErrorBody(
+    body = ResponseSchema[dict[str, Any]](
         code=code,
         message=message,
-        details=safe_error_details(details),
+        data=safe_error_details(details),
         request_id=request_id_of(request),
+        success=False,
     )
     response = JSONResponse(
         status_code=status_code,

@@ -7,15 +7,19 @@ from sqlalchemy import create_engine, pool
 
 from app.core.config import get_settings, validated_database_url
 from app.core.database import Base
-from app.entity import (  # noqa: F401 - 导入实体模块以填充 Base.metadata
-    imports,
-    operations,
-    plans,
-    reports,
-    scenario_drafts,
-    scenarios,
-    tasks,
-)
+from app.modules.audit.artifact import model as audit_artifacts  # noqa: F401
+from app.modules.audit.execution import model as audit_executions  # noqa: F401
+from app.modules.audit.field import model as audit_fields  # noqa: F401
+from app.modules.audit.report import model as audit_reports  # noqa: F401
+from app.modules.audit.rule import model as audit_rules  # noqa: F401
+from app.modules.audit.task import model as audit_tasks  # noqa: F401
+from app.modules.imports.job import model as imports  # noqa: F401
+from app.modules.material.document import model as documents  # noqa: F401
+from app.modules.plan.config import model as plan_config  # noqa: F401
+from app.modules.plan.plan import model as plans  # noqa: F401
+from app.modules.scenario.draft import model as scenario_drafts  # noqa: F401
+from app.modules.scenario.template import model as scenarios  # noqa: F401
+from app.modules.system.operation import model as operations  # noqa: F401
 
 config = context.config
 

@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # 不把「跑到上限」当作结论，也不静默降级成普通文本解析。
     # 0 表示不设上限，由调用方自行控制终止——上限是安全阀，不是业务默认。
     llm_tool_max_rounds: int = Field(default=12, ge=0)
+    # 单次模型请求的最大输出 token 数。供应商在未传 max_tokens 时可能使用较小的默认值，
+    # 批量抽取等长响应会被截断；这里显式设置为模型上限（deepseek-v4.1-flash 为 384K = 393216）。
+    # 超过模型上限时供应商直接返回 400，需要按实际模型调整。
+    llm_max_output_tokens: int = Field(default=393216, gt=0)
 
     service_8018_url: str | None = None
     service_8010_url: str | None = None

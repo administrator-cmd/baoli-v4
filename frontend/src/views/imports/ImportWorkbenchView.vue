@@ -32,7 +32,6 @@ import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { getUploadPolicy } from "@/api/system";
 import { getSceneConfiguration } from "@/api/scenes";
-import { failureNextStep } from "@/constants/labels";
 
 const route = useRoute();
 const router = useRouter();
@@ -557,7 +556,7 @@ watch(
         <span>正在解析规则库，完成后将显示解析结果。</span>
       </div>
 
-      <!-- 只展示业务失败原因与下一步，不暴露内部操作状态。 -->
+      <!-- 展示失败原因；可用的重试操作由当前作业状态决定。 -->
       <el-alert
         v-if="jobFailure"
         class="block-gap"
@@ -566,7 +565,6 @@ watch(
         :closable="false"
         :title="jobFailure.message"
       >
-        <div>{{ failureNextStep(jobFailure.code) }}</div>
         <div v-if="canResumeRefinement">第一轮解析结果已保存，可只重试第二轮；如需重新理解整份 Excel，选择「从头重新解析」。</div>
       </el-alert>
 

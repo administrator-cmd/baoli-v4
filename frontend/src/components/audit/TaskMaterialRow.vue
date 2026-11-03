@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Upload } from "lucide-vue-next";
 import type { AuditDocument } from "@/api/contracts";
@@ -37,6 +37,15 @@ const emit = defineEmits<{
 
 const uploadRef = ref<{ clearFiles: () => void } | null>(null);
 const selectedType = ref("");
+/** 当前上传已保存的类型；上传后刷新或重新进入任务时用它回显。 */
+const savedMaterialType = computed(() => (
+  props.document.declared_material_type
+  ?? props.document.material_classify?.declared_material_type
+  ?? ""
+));
+watch(savedMaterialType, (value) => {
+  selectedType.value = value;
+}, { immediate: true });
 const missingRequired = computed(() => props.document.required && !props.document.filename);
 const materialClassify = computed(() => props.document.material_classify ?? null);
 const confidenceLabel = computed(() => {

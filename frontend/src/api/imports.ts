@@ -89,7 +89,7 @@ export interface TemplateOption {
  * 只返回已发布且启用的场景，选不到刚建好的场景。
  */
 export function listTemplates(): Promise<TemplateOption[]> {
-  return request<{ request_id: string; items: TemplateOption[] }>("/scenarios/admin-options").then((payload) => payload.items);
+  return request<{ items: TemplateOption[] }>("/scenarios/admin-options").then((payload) => payload.items);
 }
 
 /**

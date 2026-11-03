@@ -5,8 +5,8 @@ from pathlib import Path
 
 from fastapi import UploadFile
 
-from ...common.exceptions import BusinessError
-from ...core.config import get_settings
+from app.common.exceptions import BusinessError
+from app.core.config import get_settings
 
 RULEBOOK_EXTENSIONS = {".xlsx", ".xlsm"}
 

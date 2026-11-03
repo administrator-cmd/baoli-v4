@@ -12,10 +12,10 @@ import { auditResultSummary } from "@/constants/auditStatus";
 import { executionModeLabel } from "@/constants/executionModes";
 import {
   hasBusinessResult,
-  materialsOf,
   materialRowsOf,
   payloadOf,
   ruleCodeOf,
+  sourceFilesOf,
   standardDetail,
   standardText,
   valueSourcesOf,
@@ -67,24 +67,29 @@ const detailEvidenceTitle = computed(() => {
 const detailEvidenceNote = computed(() => (
   detailRule.value?.status === "EVIDENCE_INSUFFICIENT" ? "以下原文不足以形成确定结论。" : ""
 ));
-/** 同一材料、同一文件的引用合并成一组，来源只写一次。 */
+/** 同一上传版本的引用合并成一组；同名文件的不同上传不能合并。 */
 const evidenceGroups = computed(() => {
-  const groups: Array<{ source: string; items: Array<{ key: string; label: string; quote: string }> }> = [];
+  const groups: Array<{ source: string; items: Array<{ key: string; label: string; quote: string; quoteLabel?: string | null; quoteHeader?: string | null; quotePeriod?: string | null; page?: number | null }> }> = [];
   const positions = new Map<string, number>();
   for (const item of detailRule.value?.evidence ?? []) {
-    const sourceParts = [item.material_name || "来源材料未记录"];
-    if (item.document_name) sourceParts.push(item.document_name);
+    const sourceParts = [item.document_name || "来源文件未记录"];
+    if (!item.document_name && item.material_name) sourceParts.push(`材料位：${item.material_name}`);
     const source = sourceParts.join(" · ");
-    let position = positions.get(source);
+    const identity = JSON.stringify([item.document_upload_id, item.artifact_id, item.document_name, item.material_name]);
+    let position = positions.get(identity);
     if (position === undefined) {
       position = groups.length;
-      positions.set(source, position);
+      positions.set(identity, position);
       groups.push({ source, items: [] });
     }
     groups[position].items.push({
       key: `${position}-${groups[position].items.length}`,
       label: item.field_path ?? "",
       quote: item.quote_text,
+      quoteLabel: item.quote_label,
+      quoteHeader: item.quote_header,
+      quotePeriod: item.quote_period,
+      page: item.artifact_page,
     });
   }
   return groups;
@@ -113,7 +118,6 @@ const hasTechnicalDetail = computed(() => {
         <StatusBadge domain="rule" :status="detailRule.status" size="default" />
         <span v-if="detailRuleCode" class="mono detail-head__code">{{ detailRuleCode }}</span>
         <span class="detail-head__meta">执行方式：{{ executionModeLabel(detailRule.execution_mode) }}</span>
-        <span class="detail-head__meta">{{ materialsOf(detailRule) }}</span>
         <span v-if="detailRule.source_sheet" class="detail-head__sheet">{{ detailRule.source_sheet }}</span>
       </div>
 
@@ -128,13 +132,25 @@ const hasTechnicalDetail = computed(() => {
         </div>
       </section>
 
+      <section v-if="detailRule.input_gaps?.length" class="detail-section">
+        <h4 class="app-section-title">配置输入缺项</h4>
+        <div v-for="(gap, index) in (detailRule.input_gaps ?? [])" :key="index" class="text-muted detail-note">
+          {{ gap.missing_input || "未命名输入" }}<template v-if="gap.parameter_code">（参数 {{ gap.parameter_code }}）</template>：{{ gap.reason || "未建立绑定" }}
+        </div>
+      </section>
+
       <section class="detail-section">
         <h4 class="app-section-title">审核标准</h4>
         <div class="detail-standard">{{ detailStandardText }}</div>
         <div v-if="detailStandardDetail" class="text-muted detail-note">{{ detailStandardDetail }}</div>
       </section>
 
-      <AuditBusinessDetails class="detail-section" :result="detailPayload" />
+      <AuditBusinessDetails
+        class="detail-section"
+        :result="detailPayload"
+        :source-files="sourceFilesOf(detailRule)"
+        :material-names="detailRule.material_names ?? []"
+      />
 
       <section v-if="showValueTableInMain" class="detail-section">
         <h4 v-if="detailValues.length || detailMaterialRows.length" class="app-section-title">实际取值</h4>
@@ -167,7 +183,14 @@ const hasTechnicalDetail = computed(() => {
           <div class="evidence-group__list">
             <div v-for="item in group.items" :key="item.key" class="evidence-group__item">
               <div v-if="item.label" class="evidence-group__label">{{ item.label }}</div>
-              <QuoteBlock v-if="item.quote" :text="item.quote" />
+              <QuoteBlock
+                v-if="item.quote"
+                :text="item.quote"
+                :label="item.quoteLabel"
+                :header="item.quoteHeader"
+                :period="item.quotePeriod"
+                :page="item.page"
+              />
               <div v-else class="text-muted">该引用记录产物来源，未提供具体原文。</div>
             </div>
           </div>

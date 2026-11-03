@@ -1,13 +1,11 @@
 /** 系统与能力目录：服务状态、上传策略、材料类型目录、能力目录与规则状态口径。 */
 
-import type { ApiResponse } from "./common";
-
 export interface UploadKindPolicy {
   max_bytes: number;
   allowed_extensions: string[];
 }
 
-export interface UploadPolicy extends ApiResponse {
+export interface UploadPolicy {
   rulebook: UploadKindPolicy;
   document: UploadKindPolicy;
   scope_note: string;
@@ -34,7 +32,7 @@ export interface StatusVocabularyDomain {
 }
 
 /** 全部语境的审核状态词表与分档。 */
-export interface StatusVocabulary extends ApiResponse {
+export interface StatusVocabulary {
   domains: StatusVocabularyDomain[];
   categories: Array<{ category: string; label: string }>;
 }
@@ -50,7 +48,7 @@ export interface SystemServiceItem {
   note: string | null;
 }
 
-export interface SystemServices extends ApiResponse {
+export interface SystemServices {
   database: "CONNECTED" | "FAILED";
   services: SystemServiceItem[];
 }

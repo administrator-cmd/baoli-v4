@@ -15,10 +15,15 @@ from unittest.mock import MagicMock, patch
 
 from app.common.exceptions import BusinessError
 from app.domain.rule_library import _validate_field_fact_identity
-from app.services.audit import field_review, resume
-from app.services.audit.flow import extraction_batch
-from app.services.audit.flow.plan import ReviewBoundary
-from app.services.audit.tasks.detail import _comparison_sources
+from app.modules.audit.execution.service import resume
+from app.modules.audit.execution.service.flow import extraction_batch
+from app.modules.audit.execution.service.flow.plan import ReviewBoundary
+from app.modules.audit.field.service import field_review
+from app.modules.audit.field.service.facts import AuditFieldFactsService
+from app.modules.audit.rule.service.rule_execution import AuditRuleExecutionService
+from app.modules.audit.rule.service.rule_results import AuditRuleResultsService
+from app.modules.audit.task.service.detail import AuditTaskDetailService
+from app.modules.audit.task.service.lookup import AuditTaskLookupService
 
 
 def _field(key: str, **extra):
@@ -74,7 +79,7 @@ class ComparisonSourceTests(unittest.TestCase):
             ],
         }]}
         documents = {"m1": SimpleNamespace(material_name="主合同")}
-        fixed = _comparison_sources(result, task=self._task(), documents_by_material_key=documents)
+        fixed = AuditTaskDetailService()._comparison_sources(result, task=self._task(), documents_by_material_key=documents)
         self.assertEqual(fixed["tool_findings"][0]["comparison"]["addend_labels"], ["主合同 · 分项金额"])
 
     def test_existing_labels_are_kept(self):
@@ -86,7 +91,7 @@ class ComparisonSourceTests(unittest.TestCase):
             ],
         }]}
         documents = {"m1": SimpleNamespace(material_name="主合同")}
-        fixed = _comparison_sources(result, task=self._task(), documents_by_material_key=documents)
+        fixed = AuditTaskDetailService()._comparison_sources(result, task=self._task(), documents_by_material_key=documents)
         self.assertEqual(fixed["tool_findings"][0]["comparison"]["addend_labels"], ["原标签"])
 
 
@@ -114,9 +119,9 @@ class ResumePlanTests(unittest.TestCase):
         self.execution = SimpleNamespace(id=7, result_json={})
 
     def _plan(self, saved, *, allowed, after):
-        with patch.object(resume, "_saved_results", return_value=saved):
-            return resume.resume_plan(
-                MagicMock(), self.task, self.execution,
+        with patch.object(resume.AuditExecutionResumeService, "_saved_results", return_value=saved):
+            return resume.AuditExecutionResumeService(MagicMock()).resume_plan(
+                self.task, self.execution,
                 plan=self.plan, allowed_keys=allowed, deferred_keys=after,
             )
 
@@ -164,23 +169,23 @@ class FieldReviewPairReuseTests(unittest.TestCase):
     )
 
     def test_digest_and_confirmation_view_use_provided_pairs(self):
-        with patch.object(field_review, "_current_field_fact_pairs") as pairs_fn:
-            digest = field_review.field_review_digest(MagicMock(), self.task, {})
-            view = field_review.confirmation_view(
-                MagicMock(), self.task, None,
+        with patch.object(AuditFieldFactsService, "_current_field_fact_pairs") as pairs_fn:
+            digest = field_review.AuditFieldReviewService(MagicMock()).field_review_digest(self.task, {})
+            view = field_review.AuditFieldReviewService(MagicMock()).confirmation_view(
+                self.task, None,
                 required=False, after_review_rule_count=3, pairs={},
             )
         pairs_fn.assert_not_called()
-        self.assertEqual(digest, field_review.field_review_digest(MagicMock(), self.task, {}))
+        self.assertEqual(digest, field_review.AuditFieldReviewService(MagicMock()).field_review_digest(self.task, {}))
         self.assertEqual(view["missing_fields"], [])
         self.assertFalse(view["required"])
 
     def test_missing_fields_without_upload_reports_reason(self):
         document = SimpleNamespace(id=10, material_key="m1", material_name="主合同")
-        with patch.object(field_review, "_current_field_fact_pairs") as pairs_fn, \
+        with patch.object(AuditFieldFactsService, "_current_field_fact_pairs") as pairs_fn, \
                 patch.object(field_review, "_current_upload_map", return_value={}), \
                 patch.object(field_review, "_task_documents", return_value=[document]):
-            missing = field_review.missing_fields(MagicMock(), self.task, {})
+            missing = field_review.AuditFieldReviewService(MagicMock()).missing_fields(self.task, {})
         pairs_fn.assert_not_called()
         self.assertEqual(len(missing), 1)
         self.assertEqual(missing[0]["reason"], field_review.MISSING_MATERIAL)
@@ -215,13 +220,13 @@ class ExtractionBatchChannelFailureTests(unittest.TestCase):
             },
         ]
         with patch.object(extraction_batch, "agent_step", return_value=nullcontext()), \
-                patch.object(extraction_batch, "task_or_404", return_value=task), \
+                patch.object(AuditTaskLookupService, "task_or_404", return_value=task), \
                 patch.object(extraction_batch, "_task_manifest",
                              return_value={"materials": [{"material_key": "m1", "name": "主合同"}]}), \
                 patch.object(extraction_batch, "execution_in_progress", return_value=execution), \
                 patch.object(extraction_batch, "execution_attempt_no", return_value=1), \
                 patch.object(extraction_batch, "agent_module", return_value=agent), \
-                patch.object(extraction_batch, "evaluation_context",
+                patch.object(AuditRuleExecutionService, "evaluation_context",
                              return_value={"upstream_facts": [], "upstream_results": []}), \
                 patch.object(extraction_batch, "graph_call_model", side_effect=turns) as call_model, \
                 patch.object(extraction_batch, "graph_execute_tool_calls", return_value={
@@ -230,8 +235,8 @@ class ExtractionBatchChannelFailureTests(unittest.TestCase):
                     "channel_failure": failure,
                 }), \
                 patch.object(extraction_batch, "graph_append_tool_results") as append_results, \
-                patch.object(extraction_batch, "revoke_outputs"), \
-                patch.object(extraction_batch, "save_rule_result",
+                patch.object(AuditRuleExecutionService, "revoke_outputs"), \
+                patch.object(AuditRuleResultsService, "save_rule_result",
                              return_value=SimpleNamespace(status="NOT_EXECUTED", result_json={})):
             outcomes = extraction_batch.graph_execute_extraction_batch(
                 db, "task-test", "node", 5, entries,

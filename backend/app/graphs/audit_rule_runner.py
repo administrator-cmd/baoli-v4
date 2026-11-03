@@ -3,34 +3,10 @@
 import logging
 from typing import Any, Protocol
 
-from ..constants.status import LOOP_BLOCKED, LOOP_DONE, LOOP_RUNNING
-from ..domain.execution_mode import MODE_AGGREGATE, MODE_CALCULATE, MODE_CROSS_SCOPE_COMPARE, MODE_VALUE_COMPARE
+from app.constants.status import LOOP_BLOCKED, LOOP_DONE, LOOP_RUNNING
+from app.domain.execution_mode import MODE_AGGREGATE
 
 logger = logging.getLogger(__name__)
-
-# 这些执行方式必须由声明输入支撑；输入未形成取值时不能交给模型自行读材料补位。
-_INPUT_REQUIRED_MODES = {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE, MODE_CALCULATE}
-
-
-def _input_block_reason(rule: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any] | None:
-    """声明输入未形成取值时，规则应明确未执行，而不是让模型改用其它材料来源。"""
-    if str(rule.get("execution_mode") or "") not in _INPUT_REQUIRED_MODES:
-        return None
-    missing = [item for item in instance.get("inputs") or [] if item.get("status") == "NOT_EXECUTED"]
-    if not missing:
-        return None
-    names = instance.get("field_names") or {}
-    labels = list(dict.fromkeys(
-        str(names.get(item.get("field_key")) or item.get("field_key")) for item in missing
-    ))
-    return {
-        "kind": "RULE_INPUT_NOT_EXECUTED",
-        "message": f"输入字段「{'、'.join(labels)}」未形成取值，无法执行本规则",
-        "details": {
-            "field_keys": [item.get("field_key") for item in missing],
-            "material_keys": [item.get("material_key") for item in missing],
-        },
-    }
 
 
 class RuleEvaluationRunner(Protocol):
@@ -97,7 +73,7 @@ def _batch_key(rule: dict[str, Any]) -> tuple[str, str | None] | None:
         return None
     if any(rule.get(key) for key in (
         "dependency_error", "unavailable_dependencies", "source_rule_key",
-        "source_rule_keys", "source_rule_codes",
+        "source_rule_keys", "source_rule_codes", "input_gaps",
     )):
         return None
     definitions = rule.get("output_definitions") or []
@@ -149,15 +125,6 @@ def run_rule_evaluation(
         )
         logger.info("组合汇总执行结束 task_no=%s rule_key=%s status=%s",
                     task_no, rule_key, saved["rule_outcome"]["status"])
-        return saved["rule_outcome"]
-
-    blocked_input = _input_block_reason(planned_rule, state["rule_instance"])
-    if blocked_input is not None:
-        saved = nodes.graph_save_evaluation_result(
-            db, task_no, node_code, execution_id, state["rule_instance"],
-            None, LOOP_BLOCKED, [blocked_input], state["evaluation_id"], 0,
-        )
-        logger.info("规则输入未形成取值 task_no=%s rule_key=%s", task_no, rule_key)
         return saved["rule_outcome"]
 
     state.update(nodes.graph_prepare_agent_context(

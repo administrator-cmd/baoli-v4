@@ -34,8 +34,9 @@ export function useRequestRunner(): RequestRunner {
     failure.value = new ApiError({
       code: "UNEXPECTED_ERROR",
       message: `页面处理出错：${message}`,
-      details: {},
+      data: {},
       request_id: "",
+      success: false,
     }, null, error);
   }
 

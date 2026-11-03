@@ -1,6 +1,6 @@
 /** 审核任务：任务详情、节点、字段、规则结果、证据与字段纠错。 */
 
-import type { ApiResponse, JsonValue, OperationAccepted } from "./common";
+import type { JsonValue, OperationAccepted } from "./common";
 import type { TaskScope } from "./scenes";
 import type { TaskPlanInfo } from "./plans";
 
@@ -63,7 +63,7 @@ export interface FieldReviewCorrection {
 }
 
 /** 只保存核对修改的结果；任务仍停在等待核对。 */
-export interface FieldReviewSaveResult extends ApiResponse {
+export interface FieldReviewSaveResult {
   task_no: string;
   input_revision: number;
   applied: Array<{
@@ -143,6 +143,8 @@ export interface AuditDocument {
   required: boolean;
   status: string;
   filename: string | null;
+  /** 当前上传时从 8018 目录选择的材料类型；没有当前上传时为空。 */
+  declared_material_type?: string | null;
   /**
    * 该材料位的 8018 识别结论；材料处理节点尚未执行时为 null。
    * 置信度与判定类型只作展示，不参与任何判定，也不影响材料状态。
@@ -187,8 +189,15 @@ export interface AuditField {
     material_name?: string | null;
     document_upload_id: number;
     artifact_id: number | null;
-    field_path?: string | null;
+    /** 目标值所在单元格的真实原文。 */
     quote_text: string;
+    /** 目标值对应的科目/行标签、列/期间表头、期间原文；各自独立校验。 */
+    quote_label?: string | null;
+    quote_header?: string | null;
+    quote_period?: string | null;
+    /** OCR 产物内页码；只表示产物位置，不冒充原 PDF 页码。 */
+    artifact_page?: number | null;
+    field_path?: string | null;
   }>;
 }
 
@@ -214,6 +223,14 @@ export interface RuleInputSnapshot {
   /** 由原文确定性算出的标准化值；标准化不改变原文，也不代表审核通过。 */
   normalized_value?: JsonValue;
   value?: JsonValue;
+  /** 配置声明的取数期间与报表口径；实际识别值另见 actual_*。 */
+  period_scope?: string | null;
+  statement_scope?: string | null;
+  /** 正文实际识别到的期间与单位；用于解释取数口径。 */
+  actual_period_scope?: string | null;
+  actual_statement_scope?: string | null;
+  actual_entity_scope?: string | null;
+  actual_unit?: string | null;
   has_evidence?: boolean | null;
 }
 
@@ -264,10 +281,17 @@ export interface AuditRule {
   result: Record<string, JsonValue> | null;
   turn_count?: number;
   configured_requirement?: string | null;
+  /** 解析阶段记录的未绑定输入；只解释配置完整性，不改变执行状态。 */
+  input_gaps?: Array<{
+    parameter_code?: string | null;
+    missing_input?: string | null;
+    reason?: string | null;
+    original_requirement?: string | null;
+  }>;
   evidence: AuditField["evidence"];
 }
 
-export interface AuditTask extends ApiResponse {
+export interface AuditTask {
   task_no: string;
   task_name: string;
   scenario_name: string;
@@ -296,7 +320,7 @@ export interface AuditTask extends ApiResponse {
   plan?: TaskPlanInfo | null;
 }
 
-export interface ExecuteNodeResponse extends ApiResponse {
+export interface ExecuteNodeResponse {
   task_no: string;
   node_name: string;
   execution_status: string;
@@ -306,7 +330,7 @@ export interface ExecuteNodeResponse extends ApiResponse {
 }
 
 
-export interface RiskList extends ApiResponse {
+export interface RiskList {
   task_no: string;
   risk_configured: boolean;
   risk_executed: boolean;
@@ -339,7 +363,7 @@ export interface FieldCorrectionRequest {
   input_revision?: number;
 }
 
-export interface FieldCorrectionResponse extends ApiResponse {
+export interface FieldCorrectionResponse {
   task_no: string;
   field_key: string;
   material_key: string;
@@ -355,7 +379,7 @@ export interface FieldCorrectionResponse extends ApiResponse {
   recomputed_rules: string[];
 }
 
-export interface DocumentRemoveResult extends ApiResponse {
+export interface DocumentRemoveResult {
   document_no: string;
   material_name: string;
   status: string;
