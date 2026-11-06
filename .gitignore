@@ -21,3 +21,7 @@ frontend/dist/
 
 # 临时脚本与临时产物；需长期保留的放 script/。
 tmp/
+
+# 本地验收产物：模型请求与响应、截图、浏览器快照和导出样本。
+/output/
+/.playwright-cli/

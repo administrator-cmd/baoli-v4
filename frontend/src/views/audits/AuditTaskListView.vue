@@ -20,6 +20,8 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import type { DetailTab } from "@/constants/auditWorkspaces";
 import { formatDate, statusFilterOptions, statusLabel } from "@/constants/labels";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { listReportTemplateOptions } from "@/api/reportTemplates";
+import type { ReportTemplateOption } from "@/api/contracts";
 
 /**
  * 审核任务列表：任务从已启用且配置生效的方案创建；
@@ -115,7 +117,9 @@ const createVisible = ref(false);
 const createSaving = ref(false);
 const createOptionsLoading = ref(false);
 const createError = ref<string | null>(null);
-const createForm = reactive({ plan_code: "", task_name: "", remark: "" });
+const createForm = reactive({ plan_code: "", task_name: "", remark: "", report_generation_mode: "RULES" as "RULES" | "TEMPLATE", report_template_no: "" });
+const reportTemplateOptions = ref<ReportTemplateOption[]>([]);
+const reportTemplateOptionsError = ref<string | null>(null);
 let createAttemptKey: string | null = null;
 let createAttemptPayload: string | null = null;
 let createOpenRequest = 0;
@@ -131,11 +135,20 @@ async function openCreate(planCode?: string): Promise<void> {
   createForm.plan_code = "";
   createForm.task_name = "";
   createForm.remark = "";
+  createForm.report_generation_mode = "RULES";
+  createForm.report_template_no = "";
   createOptionsLoading.value = true;
   try {
     const planPayload = await listPlanOptions();
     if (request !== createOpenRequest || !createVisible.value) return;
     planOptions.value = planPayload.items;
+    try {
+      reportTemplateOptions.value = (await listReportTemplateOptions()).items;
+      reportTemplateOptionsError.value = null;
+    } catch (failure) {
+      reportTemplateOptions.value = [];
+      reportTemplateOptionsError.value = failure instanceof Error ? failure.message : "报告模板读取失败";
+    }
     if (!planOptions.value.length) {
       createError.value = "当前没有可用于创建任务的方案。";
     }
@@ -163,7 +176,8 @@ async function openCreate(planCode?: string): Promise<void> {
 const createSnapshot = computed(() =>
   planOptions.value.find((item) => item.plan_code === createForm.plan_code) ?? null,
 );
-const canCreateTask = computed(() => Boolean(createSnapshot.value?.scope_hash));
+const canCreateTask = computed(() => Boolean(createSnapshot.value?.scope_hash)
+  && (createForm.report_generation_mode === "RULES" || reportTemplateOptions.value.some((item) => item.template_no === createForm.report_template_no)));
 
 watch(
   () => route.query.createPlan,
@@ -191,7 +205,11 @@ async function submitCreate(): Promise<void> {
   }
   const taskName = createForm.task_name.trim();
   const remark = createForm.remark.trim() || null;
-  const attemptPayload = JSON.stringify([createForm.plan_code, taskName, remark, snapshot.scope_hash]);
+  if (createForm.report_generation_mode === "TEMPLATE" && !createForm.report_template_no) {
+    ElMessage.warning("请选择要仿照的报告模板");
+    return;
+  }
+  const attemptPayload = JSON.stringify([createForm.plan_code, taskName, remark, snapshot.scope_hash, createForm.report_generation_mode, createForm.report_template_no]);
   const attemptKey = createAttemptPayload === attemptPayload && createAttemptKey
     ? createAttemptKey
     : operationIdempotencyKey("TASK_CREATE", createForm.plan_code, taskName);
@@ -205,6 +223,8 @@ async function submitCreate(): Promise<void> {
       remark,
       expected_scope_hash: snapshot.scope_hash,
       idempotency_key: attemptKey,
+      report_generation_mode: createForm.report_generation_mode,
+      report_template_no: createForm.report_generation_mode === "TEMPLATE" ? createForm.report_template_no : null,
     });
     createAttemptKey = null;
     createAttemptPayload = null;
@@ -412,6 +432,19 @@ async function loadFilterOptions(): Promise<void> {
         </el-form-item>
         <el-form-item label="任务名称" required>
           <el-input v-model="createForm.task_name" maxlength="255" placeholder="例如：供应商甲 9 月合同审核" />
+        </el-form-item>
+        <el-form-item label="报告生成">
+          <el-radio-group v-model="createForm.report_generation_mode">
+            <el-radio-button value="RULES">按规则生成</el-radio-button>
+            <el-radio-button value="TEMPLATE">仿照模板</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="createForm.report_generation_mode === 'TEMPLATE'" label="报告模板" required>
+          <el-select v-model="createForm.report_template_no" filterable placeholder="选择已分析的模板" style="width: 100%">
+            <el-option v-for="item in reportTemplateOptions" :key="item.template_no" :value="item.template_no" :label="item.name" />
+          </el-select>
+          <div v-if="reportTemplateOptionsError" class="form-error">{{ reportTemplateOptionsError }}</div>
+          <div v-else-if="!reportTemplateOptions.length" class="form-error">尚无可用模板，请先到“报告管理 → 报告模板”上传并分析 PDF。</div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="createForm.remark" type="textarea" :rows="2" maxlength="4000" placeholder="可选" />

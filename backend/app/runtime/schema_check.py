@@ -16,8 +16,10 @@ from app.modules.audit.artifact import model as artifacts  # noqa: F401
 from app.modules.audit.execution import model as executions  # noqa: F401
 from app.modules.audit.field import model as fields  # noqa: F401
 from app.modules.audit.report import model as reports  # noqa: F401
+from app.modules.audit.report_template import model as report_templates  # noqa: F401
 from app.modules.audit.rule import model as rules  # noqa: F401
 from app.modules.audit.task import model as tasks  # noqa: F401
+from app.modules.imports.generation import model as generations  # noqa: F401
 from app.modules.imports.job import model as imports  # noqa: F401
 from app.modules.material.document import model as documents  # noqa: F401
 from app.modules.plan.config import model as plan_config  # noqa: F401
@@ -33,6 +35,12 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "scenario_template",
     "background_operation",
     "import_job",
+    # AI 辅助生成规则库：作业、冻结导出与导入关联。
+    "rulebook_generation_job",
+    "rulebook_generation_export",
+    "rulebook_generation_import",
+    "rulebook_generation_revision",
+    "rulebook_generation_message",
     "scenario_version",
     "scenario_node",
     "scenario_draft",
@@ -41,6 +49,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     # 方案与草稿均将业务配置保存在 config_json 中。
     "audit_task",
     "audit_report",
+    "report_template",
     "operation_log",
     "task_document",
     "document_upload",

@@ -7,6 +7,7 @@ import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { MaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
 import type { StatusTone } from "@/constants/labels";
+import { materialQualityLabel, materialQualityTone } from "@/constants/materialQuality";
 import {
   processingArtifactLabel,
   processingStatusLabel,
@@ -47,6 +48,14 @@ watch(savedMaterialType, (value) => {
   selectedType.value = value;
 }, { immediate: true });
 const missingRequired = computed(() => props.document.required && !props.document.filename);
+const quality = computed(() => props.document.quality_precheck);
+const qualityBlocked = computed(() => quality.value?.blocked === true);
+const waitingQuality = computed(() => Boolean(props.document.filename && quality.value?.processing_allowed === false && !qualityBlocked.value));
+const qualityNote = computed(() => {
+  if (qualityBlocked.value) return quality.value?.reasons[0]?.message ?? quality.value?.message;
+  if (quality.value?.status === "RUNNING") return quality.value.message;
+  return null;
+});
 const materialClassify = computed(() => props.document.material_classify ?? null);
 const confidenceLabel = computed(() => {
   const confidence = materialClassify.value?.confidence;
@@ -54,6 +63,10 @@ const confidenceLabel = computed(() => {
 });
 
 function materialStatusTone(status: string | null | undefined): StatusTone {
+  if (qualityBlocked.value) return "warning";
+  if (waitingQuality.value) return "neutral";
+  if (artifactAttention.value) return "danger";
+  if (processingActive.value) return "info";
   if (status === "PREPARED" || status === "PROCESSED") return "success";
   if (status === "TYPE_REJECTED") return "danger";
   if (status === "TYPE_REVIEW" || status === "WAITING_UPLOAD") return "warning";
@@ -62,6 +75,10 @@ function materialStatusTone(status: string | null | undefined): StatusTone {
 }
 
 const statusLabelOverride = computed<string | null>(() => {
+  if (qualityBlocked.value) return "已停止处理";
+  if (waitingQuality.value) return "等待前置检查完成";
+  if (artifactAttention.value) return "处理未完成";
+  if (processingActive.value) return "处理中";
   if (props.document.status === "TYPE_REVIEW") return "材料类型待复核";
   if (props.document.status === "TYPE_REJECTED") return "材料类型不符";
   if (!props.document.filename) return "待上传";
@@ -77,6 +94,10 @@ const impactText = computed(() => {
 
 /** 四项处理产物状态（任务详情一次返回）；按处理顺序展示当前进度与失败项。 */
 const ARTIFACT_ORDER = ["MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL"] as const;
+const processingActive = computed(() => Object.values(props.document.artifacts ?? {}).some(
+  (artifact) => artifact.status === "PENDING"
+    || (props.operationActive && ["PROCESSING", "SUBMITTING"].includes(artifact.status)),
+));
 
 function artifactOf(type: (typeof ARTIFACT_ORDER)[number]): ProcessingArtifact | null {
   const item = props.document.artifacts?.[type];
@@ -110,6 +131,7 @@ const ocrProgressText = computed(() => {
 
 /** 当前需要用户处理的处理项：确定失败，或操作结束后仍结果未知的第一项。 */
 const artifactAttention = computed(() => {
+  if (quality.value?.processing_allowed === false) return null;
   for (const type of ARTIFACT_ORDER) {
     const artifact = artifactOf(type);
     if (!artifact) continue;
@@ -151,7 +173,10 @@ async function onFileChange(file: { raw?: File }): Promise<void> {
 </script>
 
 <template>
-  <tr class="material-row" :class="{ 'material-row--attention': missingRequired }">
+  <tr class="material-row" :class="{
+    'material-row--attention': missingRequired || qualityBlocked,
+    'material-row--uncertain': qualityBlocked && quality?.status === 'EVIDENCE_INSUFFICIENT',
+  }">
     <td>
       <div class="material-row__name">
         <strong>{{ document.material_name }}</strong>
@@ -162,11 +187,22 @@ async function onFileChange(file: { raw?: File }): Promise<void> {
     </td>
     <td class="material-row__file">{{ document.filename || "未上传" }}</td>
     <td>
+      <StatusBadge
+        :status="quality?.status"
+        :label="document.filename ? materialQualityLabel(quality?.status) : '待上传'"
+        :tone="materialQualityTone(quality?.status)"
+      />
+      <p v-if="qualityNote" class="material-row__note material-row__quality-note">{{ qualityNote }}</p>
+      <el-button v-if="document.filename" link type="primary" size="small" :disabled="busy" @click="emit('inspectProcessing', document)">
+        查看明细<template v-if="(quality?.reasons.length ?? 0) > 1">（{{ quality?.reasons.length }} 项问题）</template>
+      </el-button>
+    </td>
+    <td>
       <div class="material-row__status">
         <StatusBadge :status="document.status" :label="statusLabelOverride" :tone="materialStatusTone(document.status)" />
         <span v-if="materialClassify" class="material-row__confidence">置信度 {{ confidenceLabel }}</span>
       </div>
-      <div v-if="ocrProgressText" class="material-row__note">{{ ocrProgressText }}</div>
+      <div v-if="ocrProgressText && !qualityBlocked && !waitingQuality" class="material-row__note">{{ ocrProgressText }}</div>
       <div v-if="artifactAttention" class="material-row__note" :class="artifactAttention.artifact.status === 'FAILED' ? 'text-danger' : ''">
         {{ artifactAttention.label }}：{{ artifactAttention.artifact.message }}
       </div>
@@ -185,7 +221,6 @@ async function onFileChange(file: { raw?: File }): Promise<void> {
           </el-button>
         </el-upload>
         <template v-if="document.filename">
-          <el-button link type="primary" size="small" :disabled="busy" @click="emit('inspectProcessing', document)">处理状态</el-button>
           <el-button link type="danger" size="small" :disabled="disabled || busy" @click="emit('remove', document)">移除</el-button>
         </template>
       </div>
@@ -195,6 +230,7 @@ async function onFileChange(file: { raw?: File }): Promise<void> {
 
 <style scoped>
 .material-row--attention { background: var(--el-color-danger-light-9); }
+.material-row--uncertain { background: var(--el-color-warning-light-9); }
 .material-row__name,
 .material-row__status,
 .material-row__actions {
@@ -206,6 +242,13 @@ async function onFileChange(file: { raw?: File }): Promise<void> {
 }
 .material-row__file { overflow-wrap: anywhere; }
 .material-row__note { margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+.material-row__quality-note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
 .material-row__actions { gap: 4px 8px; }
 .material-row__confidence { color: var(--el-text-color-secondary); font-size: 12px; }
 </style>

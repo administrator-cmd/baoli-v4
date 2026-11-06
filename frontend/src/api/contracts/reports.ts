@@ -2,6 +2,16 @@
 
 import type { JsonValue } from "./common";
 
+export interface ReportGenerationInfo {
+  /** 报告实际采用的生成方式。 */
+  mode: "RULES" | "TEMPLATE";
+  requested_mode?: "RULES" | "TEMPLATE" | null;
+  template_no?: string | null;
+  template_name?: string | null;
+  fallback_code?: string | null;
+  fallback_reason?: string | null;
+}
+
 export interface Report {
   task_no: string;
   report_no: string | null;
@@ -19,6 +29,7 @@ export interface Report {
   content_type: "text/markdown" | "text/plain" | "text/html";
   content: string | null;
   reasons: string[];
+  report_generation?: ReportGenerationInfo | null;
   /** 报告是否已生成。 */
   report_generated: boolean;
   /** 已配置的审核范围是否执行完整；与"是否通过"不是一回事。 */
@@ -111,6 +122,7 @@ export interface ReportDetail {
   risk_conclusion_available: boolean;
   reasons: Record<string, JsonValue>;
   snapshot: Record<string, JsonValue> | null;
+  report_generation?: ReportGenerationInfo | null;
   status: string;
   archived_at: string | null;
   remark: string | null;

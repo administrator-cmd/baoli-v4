@@ -2,6 +2,8 @@
 
 业务取值保存在 UTF-8 BOM、中文列名的 CSV 里。日常查看先看 `values.csv` 和 `rule_results.csv`，不需要解析模型返回的 JSON。
 
+「AI 辅助生成规则库」是独立的编制功能：当前文档保存在数据库 JSON，导出是独立 `.xlsx` 文件，不使用本文四张 CSV，也不写任务取值目录。详见 [AI 辅助生成规则库](AI辅助生成规则库.md)。
+
 当前格式版本为 6。每个任务固定维护 `tasks/{task_no}/value_batches/current/` 下的四张表，路径登记在 `audit_task.value_file_json.batches[0].files`。每次写入按 `(记录类型, 记录ID)` 合并，再逐个原子替换四张表，不再新增批次目录。
 
 | 文件 | 每行含义 | 主要业务列 |

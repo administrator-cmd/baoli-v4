@@ -1,6 +1,6 @@
 /** 场景配置：草稿、材料、字段、规则、章节与发布。 */
 
-import type { JsonValue, OperationAccepted } from "./common";
+import type { JsonValue } from "./common";
 
 export interface RuleSnapshotEntry {
   rule_key: string;
@@ -24,8 +24,6 @@ export interface DocumentUploadResponse {
   size_bytes: number;
   status: string;
   material_classify: Record<string, JsonValue> | null;
-  /** 文件已经保存，自动校验通过此后台操作查询。 */
-  classification_operation: OperationAccepted;
 }
 
 export interface ScenarioListItem {

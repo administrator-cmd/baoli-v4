@@ -20,6 +20,8 @@ from app.modules.imports.job.response_execution import save_raw_response
 
 logger = logging.getLogger(__name__)
 
+PROPOSAL_GROUPS = ("materials", "fields", "rules", "calculations", "report_sections")
+
 
 CONVERSION_MODE_FULL = "FULL"
 CONVERSION_MODE_RESUME = "RESUME_REFINEMENT"
@@ -31,28 +33,92 @@ class ImportsJobLlmService:
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
 
+    def _validate_content_references(
+        self, result: dict[str, Any], *, initial: dict[str, Any] | None = None,
+    ) -> None:
+        """只校验记录身份、资料归属与保留，不用代码判断哪条业务是真规则。"""
+        refs = {group: [item["candidate_ref"] for item in result[group]] for group in PROPOSAL_GROUPS}
+        all_refs = [reference for group in refs.values() for reference in group]
+        support_refs = [item["support_ref"] for item in result["supporting_content"]]
+        problems = []
+        for label, identifiers in (("candidate_ref", all_refs), ("support_ref", support_refs)):
+            seen: set[str] = set()
+            for reference in identifiers:
+                if not reference.strip() or reference in seen:
+                    problems.append({"kind": label, "reference": reference})
+                seen.add(reference)
+        for item in result["supporting_content"]:
+            for target in item["targets"]:
+                if target["candidate_ref"] not in refs[target["group"]]:
+                    problems.append({"kind": "supporting_content.target", "owner": item["support_ref"],
+                                     "group": target["group"], "reference": target["candidate_ref"]})
+        if initial is not None:
+            for reference in {item["support_ref"] for item in initial["supporting_content"]} - set(support_refs):
+                problems.append({"kind": "supporting_content.missing", "reference": reference})
+        if problems:
+            raise BusinessError(
+                "LLM_CONTRACT_INVALID", "解析结果的对象身份或辅助资料归属不完整", status_code=502,
+                details={"references": problems, "count": len(problems)},
+            )
+
+    def _source_rows(self, sheets: dict[str, PreparedSheet]) -> dict[tuple[str, int], dict[str, Any]]:
+        return {(sheet.sheet.name, row.row_no): row.cells
+                for sheet in sheets.values() for row in sheet.sheet.rows}
+
+    def _validate_sources(
+        self, result: dict[str, Any], source_rows: dict[tuple[str, int], dict[str, Any]], *, attach: bool,
+    ) -> None:
+        """配置和辅助资料都必须引用真实原行；最终保存时附上文件中的原始单元格。"""
+        for group in (*PROPOSAL_GROUPS, "supporting_content"):
+            for item in result[group]:
+                origin = item["origin"]
+                references = [(origin["sheet_name"], origin["row_no"]), *(
+                    (ref["sheet_name"], ref["row_no"]) for ref in origin["related_rows"]
+                )]
+                rows = []
+                for sheet_name, row_no in dict.fromkeys(references):
+                    if (sheet_name, row_no) not in source_rows:
+                        raise BusinessError(
+                            "LLM_SOURCE_REFERENCE_INVALID", "模型返回的规则库来源行不存在", status_code=502,
+                            details={"group": group, "reference": item.get("candidate_ref", item.get("support_ref")),
+                                     "sheet_name": sheet_name, "row_no": row_no},
+                        )
+                    if attach:
+                        rows.append({"sheet_name": sheet_name, "row_no": row_no,
+                                     "cells": dict(source_rows[(sheet_name, row_no)])})
+                if attach:
+                    origin["rows"] = rows
+
+    def _attach_supporting_context(self, result: dict[str, Any]) -> None:
+        """相关资料进入所属对象的业务上下文；全局资料在导入快照中完整保留。"""
+        objects = {(group, item["candidate_ref"]): item for group in PROPOSAL_GROUPS for item in result[group]}
+        related = {identity: [] for identity in objects}
+        for item in objects.values():
+            item["business_context"]["interpretation"] = item.pop("interpretation")
+        for support in result["supporting_content"]:
+            for target in support["targets"]:
+                related[(target["group"], target["candidate_ref"])].append({
+                    "kind": support["kind"], "title": support["title"], "content": support["content"],
+                    "usage": target["usage"],
+                    "origin": {key: value for key, value in support["origin"].items() if key != "rows"},
+                })
+        for identity, items in related.items():
+            # 来源及归属只从已校验的顶层记录投影，不采纳模型另写的一份嵌套真值。
+            objects[identity]["business_context"].pop("supporting_content", None)
+            if items:
+                objects[identity]["business_context"]["supporting_content"] = items
+
     def _validate_proposal_references(self, result: dict[str, Any]) -> None:
         """检查模型返回配置的内部身份：全局唯一、引用可解析。
 
         模型漏写或抄错 candidate_ref 时，如果只等编译/执行阶段暴露，用户看到的是内部身份错误；
         这里在写入提案前给出具体对象和引用位置，不猜测、不自动补引用。
         """
-        groups = ("materials", "fields", "rules", "calculations", "report_sections")
+        groups = PROPOSAL_GROUPS
         refs_by_group = {
             group: [str(item.get("candidate_ref") or "") for item in result.get(group) or []]
             for group in groups
         }
-        all_refs = [ref for refs in refs_by_group.values() for ref in refs]
-        duplicates = sorted({ref for ref in all_refs if ref and all_refs.count(ref) > 1})
-        empty = [ref for ref in all_refs if not ref]
-        if duplicates or empty:
-            raise BusinessError(
-                "LLM_CONTRACT_INVALID",
-                "模型返回的配置包含重复或空的内部引用，无法建立业务对象关系",
-                status_code=502,
-                details={"duplicates": duplicates[:20], "empty_count": len(empty)},
-            )
-
         field_refs = set(refs_by_group["fields"])
         field_source_ids = {
             str(item.get("source_id")) for item in result.get("fields") or [] if item.get("source_id")
@@ -280,7 +346,7 @@ class ImportsJobLlmService:
             )
         # 第一轮目录既是检查点又被第二轮直接消费；形状不合法时不能存下来反复复用。
         try:
-            WorkbookInventory.model_validate(initial_response)
+            inventory = WorkbookInventory.model_validate(initial_response)
         except ValidationError as exc:
             if mode == CONVERSION_MODE_RESUME:
                 raise BusinessError(
@@ -295,6 +361,10 @@ class ImportsJobLlmService:
                     include_url=False, include_input=False, include_context=False,
                 )},
             ) from exc
+        initial_response = inventory.model_dump(mode="json")
+        self._validate_content_references(initial_response)
+        source_rows = self._source_rows(sheets)
+        self._validate_sources(initial_response, source_rows, attach=False)
         if mode != CONVERSION_MODE_RESUME:
             # 检查点写不出是真实的存储故障：原样上抛，不把一次写盘失败伪装成转换成功。
             ImportsJobStageCacheService().save_initial(job_no, resume_fingerprint, fingerprint, initial_response)
@@ -316,7 +386,7 @@ class ImportsJobLlmService:
             idempotency_key=f"{operation_no}:refinement",
             on_content=lambda content: save_raw_response(operation_no, content, stage="refinement"),
         )
-        # 只读取最终 JSON 的接口数据形状，不检查业务身份、引用或公式，不筛除任何业务项。
+        # 读取结构后核对真实引用与出处；不按规则名称或表名筛除业务项。
         try:
             proposals = WorkbookProposals.model_validate(response)
         except ValidationError as exc:
@@ -327,27 +397,8 @@ class ImportsJobLlmService:
                 )},
             ) from exc
         result = proposals.model_dump(mode="json")
+        self._validate_content_references(result, initial=initial_response)
         self._validate_proposal_references(result)
-        source_rows = {
-            (sheet.sheet.name, row.row_no): row.cells
-            for sheet in sheets.values() for row in sheet.sheet.rows
-        }
-        for group in ("materials", "fields", "rules", "calculations", "report_sections"):
-            for item in result[group]:
-                origin = item["origin"]
-                references = [(origin["sheet_name"], origin["row_no"]), *(
-                    (ref["sheet_name"], ref["row_no"]) for ref in origin["related_rows"]
-                )]
-                rows = []
-                for sheet_name, row_no in dict.fromkeys(references):
-                    if (sheet_name, row_no) not in source_rows:
-                        raise BusinessError(
-                            "LLM_SOURCE_REFERENCE_INVALID", "模型返回的规则库来源行不存在", status_code=502,
-                            details={"group": group, "candidate_ref": item["candidate_ref"],
-                                     "sheet_name": sheet_name, "row_no": row_no},
-                        )
-                    rows.append({"sheet_name": sheet_name, "row_no": row_no,
-                                 "cells": dict(source_rows[(sheet_name, row_no)])})
-                # 原始单元格来自文件；模型只提供引用，不能自行编造来源原文。
-                origin["rows"] = rows
+        self._validate_sources(result, source_rows, attach=True)
+        self._attach_supporting_context(result)
         return result

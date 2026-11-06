@@ -1,18 +1,17 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { Download } from "lucide-vue-next";
+import { computed, ref } from "vue";
+import { Download, Eye } from "lucide-vue-next";
 
 import type { Report } from "@/api/contracts";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import ReportBody from "@/components/audit/ReportBody.vue";
+import ReportGenerationNotice from "@/components/audit/ReportGenerationNotice.vue";
 
 /**
  * 审核报告。
  *
- * 首屏展示报告有效性、审核范围、风险结论与缺项，不推断用户可以执行的后续操作。
- * 技术诊断（输出格式未实现、能力缺口、业务章节未配置、历史报告说明）统一收进
- * 下方「执行说明 / 报告诊断」折叠区，不占首屏。
+ * 任务页保持报告清单；用户主动查看后，在弹窗中读取报告状态、缺项与正文。
  *
  * 「报告已生成」不等于「审核通过」：三个信号必须分开表达，不能合并成一个「通过」。
  * 如果服务端没有给出结构化总体结论，这里如实列为后端接口缺口，不从 Markdown
@@ -20,8 +19,8 @@ import ReportBody from "@/components/audit/ReportBody.vue";
  */
 const props = defineProps<{
   report: Report | null;
-  /** 报告下载地址；服务端没有内容时为 null。 */
-  downloadUrl: string | null;
+  /** 为每份报告生成独立下载地址；失效和未生成报告由列表禁用下载。 */
+  downloadUrlFor: (reportNo: string) => string;
   /** 当前任务的后台操作是否正在进行。 */
   running: boolean;
   loading: boolean;
@@ -29,6 +28,8 @@ const props = defineProps<{
   error?: string | null;
 }>();
 const emit = defineEmits<{ "select-report": [reportNo: string] }>();
+const detailVisible = ref(false);
+const activeReportNo = ref<string | null>(null);
 
 /** 报告对应的输入修订已过期：报告仍可查看，但不能当作当前结论，也不能下载。 */
 const stale = computed(() => props.report?.current === false);
@@ -41,7 +42,7 @@ const generated = computed(() => Boolean(props.report?.report_generated && props
 
 /** 只有报告真的生成、有正文且仍对应当前输入修订时才开放下载。 */
 const canDownload = computed(
-  () => Boolean(props.report?.report_generated && props.report?.content && props.report?.current && props.downloadUrl),
+  () => Boolean(props.report?.report_generated && props.report?.content && props.report?.current),
 );
 
 /** 本次审核范围是否执行完整。 */
@@ -50,17 +51,44 @@ const scopeComplete = computed(() => Boolean(props.report?.scope_execution_compl
 /** 风险是否可判定；未配置风险评级时为 false，但不代表执行故障。 */
 const riskAvailable = computed(() => Boolean(props.report?.risk_conclusion_available));
 
-/** 模板声明但当前没有文件生成实现的输出格式（如 PDF / Word / Excel）。 */
-const unsupportedFormats = computed(() => (props.report?.format_support ?? []).filter((item) => !item.supported));
+/** 报告清单用于行列表；旧的单份报告响应也保持可读。 */
+const reportRows = computed(() => {
+  if (!props.report) return [];
+  if (props.report.reports.length) return props.report.reports;
+  if (!props.report.report_no || !props.report.report_name) return [];
+  return [{
+    report_no: props.report.report_no,
+    report_name: props.report.report_name,
+    current: props.report.current,
+    report_generated: props.report.report_generated,
+    scope_execution_complete: props.report.scope_execution_complete,
+    unresolved_count: props.report.reasons.length,
+  }];
+});
 
-/** 本次报告里系统固定事实章节之外的业务附加章节数量；为零时如实说明。 */
-const businessSectionCount = computed(() => props.report?.business_section_count ?? 0);
+function canDownloadRow(row: (typeof reportRows.value)[number]): boolean {
+  return Boolean(row.report_generated && row.current);
+}
+
+const activeReport = computed(() => reportRows.value.find((row) => row.report_no === activeReportNo.value));
+const detailTitle = computed(() => activeReport.value?.report_name ?? props.report?.report_name ?? "报告详情");
+const detailLoadFailed = computed(() => Boolean(props.error && props.report?.report_no !== activeReportNo.value));
+
+function openReport(row: (typeof reportRows.value)[number]): void {
+  activeReportNo.value = row.report_no;
+  detailVisible.value = true;
+  if (row.report_no !== props.report?.report_no) emit("select-report", row.report_no);
+}
+
+function reportRowClass({ row }: { row: (typeof reportRows.value)[number] }): string {
+  return row.report_no === props.report?.report_no ? "report-row-active" : "";
+}
 </script>
 
 <template>
-  <StateBlock v-if="loading" kind="loading" />
+  <StateBlock v-if="loading && !report" kind="loading" />
   <StateBlock
-    v-else-if="error"
+    v-else-if="error && !report"
     kind="error"
     title="报告读取失败"
     :description="`${error}。当前无法确认报告状态。`"
@@ -72,147 +100,159 @@ const businessSectionCount = computed(() => props.report?.business_section_count
     description="尚未取得服务端报告数据，当前无法确认报告是否生成。"
   />
   <div v-else class="stack">
-    <el-select v-if="report.reports.length > 1" :model-value="report.report_no" class="report-picker" aria-label="选择报告" @change="(value: string) => emit('select-report', value)">
-      <el-option
-        v-for="item in report.reports"
-        :key="item.report_no"
-        :value="item.report_no"
-        :label="`${item.report_name}${item.current ? '（当前）' : '（历史）'}${item.report_generated === false ? ' · 未生成' : ''}${item.scope_execution_complete === false ? ' · 未完整' : ''}${item.unresolved_count !== undefined ? ` · 说明 ${item.unresolved_count} 项` : ''}`"
-      />
-    </el-select>
-    <!-- 1. 首屏业务结论：报告有效性 → 范围完整性 → 风险可判定性 -->
-    <el-alert
-      v-if="!generated"
-      type="info"
-      show-icon
-      :closable="false"
-      title="报告尚未生成"
+    <el-table
+      :data="reportRows"
+      border
+      stripe
+      size="small"
+      class="management-table report-list"
+      empty-text="暂无报告记录"
+      :row-class-name="reportRowClass"
     >
-      报告将在审核流程执行到对应步骤时生成。报告未生成不代表审核通过或未通过。
-    </el-alert>
-
-    <el-alert
-      v-else-if="stale"
-      type="warning"
-      show-icon
-      :closable="false"
-      :title="staleReason ? `报告当前无效：${staleReason}` : '报告当前无效（原因未记录）'"
-    >
-      当前入口返回的报告不再对应当前执行，不能作为当前结论，也不提供下载。
-      下方正文仅供查看历史结果。
-    </el-alert>
-
-    <div v-else class="report-valid-note">
-      报告当前有效，对应当前任务输入修订。报告可读不代表审核通过。
-    </div>
-
-    <el-descriptions :column="4" border>
-      <el-descriptions-item label="报告是否生成">
-        <StatusBadge :status="generated ? 'COMPLETE' : 'NOT_GENERATED'" :label="generated ? '已生成' : '未生成'" />
-      </el-descriptions-item>
-      <el-descriptions-item label="审核范围是否完整">
-        <StatusBadge
-          :status="scopeComplete ? 'CONFIRMED' : 'INCOMPLETE'"
-          :label="scopeComplete ? '已完整执行' : '未完整执行'"
-          :tone="scopeComplete ? 'success' : 'warning'"
-        />
-      </el-descriptions-item>
-      <el-descriptions-item label="风险结论状态">
-        <StatusBadge
-          :status="riskAvailable ? 'CONFIRMED' : 'NOT_APPLICABLE'"
-          :label="riskAvailable ? '可判定' : '不可判定'"
-          :tone="riskAvailable ? 'success' : 'warning'"
-        />
-      </el-descriptions-item>
-      <el-descriptions-item label="业务缺项 / 未完成说明">
-        <StatusBadge
-          :status="report.reasons.length ? 'INCOMPLETE' : 'COMPLETE'"
-          :label="report.reasons.length ? `${report.reasons.length} 项` : '无记录'"
-          :tone="report.reasons.length ? 'warning' : 'success'"
-        />
-      </el-descriptions-item>
-    </el-descriptions>
-
-    <el-alert v-if="report.reasons.length" type="warning" show-icon :closable="false" title="业务缺项与未完成说明">
-      <ul class="report-reasons">
-        <li v-for="reason in report.reasons" :key="reason">{{ reason }}</li>
-      </ul>
-    </el-alert>
-
-    <!-- 4. 报告正文 -->
-    <el-card v-if="report.content" shadow="never">
-      <template #header>
-        <div class="report-header">
-          <span>审核报告正文</span>
-          <a v-if="canDownload" :href="downloadUrl as string">
-            <el-button type="primary" size="small">
-              <template #icon><Download :size="14" /></template>
-              下载 Markdown 报告
-            </el-button>
-          </a>
-          <span v-else class="text-hint">报告未生成或已过期，暂不提供下载。</span>
-        </div>
-      </template>
-      <el-collapse>
-        <el-collapse-item title="在页面中查看报告全文" name="content">
-          <ReportBody :content="report.content" :content-type="report.content_type" />
-        </el-collapse-item>
-      </el-collapse>
-    </el-card>
-
-    <!-- 5. 执行说明 / 报告诊断：技术信息统一收在这里 -->
-    <el-collapse class="block-gap">
-      <el-collapse-item title="执行说明 / 报告诊断" name="diagnostics">
-        <el-alert
-          v-if="unsupportedFormats.length"
-          type="warning"
-          show-icon
-          :closable="false"
-          title="模板声明的输出格式尚未实现"
-        >
-          <div v-for="item in unsupportedFormats" :key="`${item.report_code}-${item.format}`">
-            {{ item.report_name || item.report_code || "本报告" }} 要求 {{ item.format }}：{{ item.message }}
-          </div>
-        </el-alert>
-
-
-        <el-alert
-          v-if="!businessSectionCount"
-          class="block-gap-sm"
-          type="info"
-          show-icon
-          :closable="false"
-          title="本次报告只有系统固定事实章节"
-        >
-          当前场景未配置业务报告章节。零业务章节不等于零报告，也不等于审核范围完整；
-          审核范围是否完整以上方的「审核范围是否完整」为准。
-        </el-alert>
-
-        <el-descriptions :column="1" size="small" border class="block-gap-sm">
-          <el-descriptions-item label="报告状态">
-            <StatusBadge :status="report.status" />
-          </el-descriptions-item>
-          <el-descriptions-item label="结果范围">
-            只对应当前有效事实与执行结果（服务端标记 {{ report.results_scope }}）
-          </el-descriptions-item>
-          <el-descriptions-item label="报告输入修订">
-            <span class="mono">{{ report.snapshot?.task_input_revision ?? report.input_revision }}</span>
-          </el-descriptions-item>
-          <el-descriptions-item label="当前任务输入修订">
-            <span class="mono">{{ report.input_revision }}</span>
-          </el-descriptions-item>
-        </el-descriptions>
-      </el-collapse-item>
-    </el-collapse>
-
-    <el-alert
-      v-if="running"
-      type="info"
-      show-icon
-      :closable="false"
-      title="任务正在执行，报告结果将在完成后更新。"
-    />
+      <el-table-column label="报告" min-width="220" show-overflow-tooltip>
+        <template #default="{ row }"><span class="report-name">{{ row.report_name }}</span></template>
+      </el-table-column>
+      <el-table-column label="版本" width="100">
+        <template #default="{ row }">
+          <el-tag :type="row.current ? 'success' : 'info'" size="small" effect="plain" disable-transitions>
+            {{ row.current ? "当前" : "历史" }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="生成状态" width="110">
+        <template #default="{ row }">
+          <el-tag :type="row.report_generated ? 'success' : 'info'" size="small" effect="light" disable-transitions>
+            {{ row.report_generated ? "已生成" : "未生成" }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="审核范围" width="120">
+        <template #default="{ row }">
+          <el-tag :type="row.scope_execution_complete ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
+            {{ row.scope_execution_complete ? "完整" : "未完整" }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="缺项说明" width="110">
+        <template #default="{ row }">{{ row.unresolved_count ?? "—" }}</template>
+      </el-table-column>
+      <el-table-column label="操作" width="150" class-name="table-actions" fixed="right">
+        <template #default="{ row }">
+          <el-button
+            link
+            type="primary"
+            size="small"
+            @click="openReport(row)"
+          >
+            <template #icon><Eye :size="14" /></template>
+            查看
+          </el-button>
+          <el-button
+            link
+            type="primary"
+            size="small"
+            tag="a"
+            :href="canDownloadRow(row) ? downloadUrlFor(row.report_no) : undefined"
+            :disabled="!canDownloadRow(row)"
+            :title="canDownloadRow(row) ? '下载报告正文' : '报告未生成或已失效，暂不能下载'"
+          >
+            <template #icon><Download :size="14" /></template>
+            下载
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
   </div>
+
+  <el-dialog
+    v-model="detailVisible"
+    :title="detailTitle"
+    width="min(1100px, 92vw)"
+    align-center
+    append-to-body
+    class="report-dialog"
+  >
+    <StateBlock
+      v-if="detailLoadFailed"
+      kind="error"
+      title="报告读取失败"
+      :description="`${error}。可以关闭后重新点击查看。`"
+    />
+    <div v-else-if="report && report.report_no === activeReportNo" v-loading="loading" class="stack report-detail">
+      <el-alert
+        v-if="!generated"
+        type="info"
+        show-icon
+        :closable="false"
+        title="报告尚未生成"
+      >
+        报告将在审核流程执行到对应步骤时生成。报告未生成不代表审核通过或未通过。
+      </el-alert>
+
+      <el-alert
+        v-else-if="stale"
+        type="warning"
+        show-icon
+        :closable="false"
+        :title="staleReason ? `报告当前无效：${staleReason}` : '报告当前无效（原因未记录）'"
+      >
+        当前报告不再对应当前执行，不能作为当前结论，也不提供下载。正文仅供查看历史结果。
+      </el-alert>
+
+      <div v-else class="report-valid-note">
+        报告当前有效，对应当前任务输入修订。报告可读不代表审核通过。
+      </div>
+
+      <div class="report-status-grid">
+        <div class="report-status-item">
+          <span>报告是否生成</span>
+          <StatusBadge :status="generated ? 'COMPLETE' : 'NOT_GENERATED'" :label="generated ? '已生成' : '未生成'" />
+        </div>
+        <div class="report-status-item">
+          <span>审核范围是否完整</span>
+          <StatusBadge :status="scopeComplete ? 'CONFIRMED' : 'INCOMPLETE'" :label="scopeComplete ? '已完整执行' : '未完整执行'" :tone="scopeComplete ? 'success' : 'warning'" />
+        </div>
+        <div class="report-status-item">
+          <span>风险结论状态</span>
+          <StatusBadge :status="riskAvailable ? 'CONFIRMED' : 'NOT_APPLICABLE'" :label="riskAvailable ? '可判定' : '不可判定'" :tone="riskAvailable ? 'success' : 'warning'" />
+        </div>
+        <div class="report-status-item">
+          <span>业务缺项 / 未完成说明</span>
+          <StatusBadge :status="report.reasons.length ? 'INCOMPLETE' : 'COMPLETE'" :label="report.reasons.length ? `${report.reasons.length} 项` : '无记录'" :tone="report.reasons.length ? 'warning' : 'success'" />
+        </div>
+      </div>
+
+      <ReportGenerationNotice :generation="report.report_generation" />
+
+      <el-alert v-if="report.reasons.length" type="warning" show-icon :closable="false" title="业务缺项与未完成说明">
+        <ul class="report-reasons">
+          <li v-for="reason in report.reasons" :key="reason">{{ reason }}</li>
+        </ul>
+      </el-alert>
+
+      <el-card v-if="report.content" shadow="never" class="report-content-card">
+        <template #header>
+          <div class="report-header">
+            <span>审核报告正文</span>
+            <el-button v-if="canDownload" size="small" tag="a" :href="downloadUrlFor(report.report_no ?? '')">
+              <template #icon><Download :size="14" /></template>
+              下载报告
+            </el-button>
+          </div>
+        </template>
+        <ReportBody :content="report.content" :content-type="report.content_type" />
+      </el-card>
+
+      <el-alert
+        v-if="running"
+        type="info"
+        show-icon
+        :closable="false"
+        title="任务正在执行，报告结果将在完成后更新。"
+      />
+    </div>
+    <StateBlock v-else kind="loading" />
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -223,7 +263,45 @@ const businessSectionCount = computed(() => props.report?.business_section_count
   justify-content: space-between;
   gap: 12px;
 }
-.report-picker { width: min(100%, 360px); }
+.report-list {
+  width: 100%;
+  margin-top: 8px;
+}
+.report-name { font-weight: 600; }
+.report-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.report-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: var(--el-fill-color-blank);
+}
+.report-status-item > span {
+  color: var(--el-text-color-regular);
+  font-weight: 600;
+}
+.report-content-card :deep(.el-card__body) {
+  overflow-x: auto;
+}
+.report-detail {
+  max-height: 72vh;
+  overflow-y: auto;
+  padding: 2px 4px 4px 0;
+}
+.report-detail > * {
+  flex: 0 0 auto;
+}
+.report-list :deep(.report-row-active td) {
+  background: var(--el-fill-color-light) !important;
+}
 
 .report-reasons {
   margin: 0;
@@ -238,6 +316,11 @@ const businessSectionCount = computed(() => props.report?.business_section_count
   color: var(--el-text-color-secondary);
   font-size: 13px;
   line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  .report-status-grid { grid-template-columns: minmax(0, 1fr); }
+  .report-status-item { align-items: flex-start; flex-direction: column; gap: 6px; }
 }
 
 </style>

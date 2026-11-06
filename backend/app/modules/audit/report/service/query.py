@@ -140,6 +140,7 @@ class AuditReportQueryService:
             "risk_conclusion_available": report.risk_conclusion_available,
             "reasons": report.reasons_json or {},
             "snapshot": report.snapshot_json,
+            "report_generation": snapshot.get("report_generation"),
             "status": "ARCHIVED" if report.archived_at else "GENERATED",
             "archived_at": report.archived_at,
             "remark": report.remark,

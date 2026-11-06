@@ -10,6 +10,17 @@ from app.core.config import get_settings
 
 RULEBOOK_EXTENSIONS = {".xlsx", ".xlsm"}
 
+# 规则库文件只接受 Excel；按扩展名给出真实的下载类型，未知扩展名按二进制流返回。
+_RULEBOOK_MEDIA_TYPES = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".xls": "application/vnd.ms-excel",
+}
+
+
+def rulebook_media_type(path: Path) -> str:
+    return _RULEBOOK_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
 
 DOCUMENT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 

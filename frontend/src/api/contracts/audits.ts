@@ -107,6 +107,7 @@ export interface AuditNode {
   sequence_no: number;
   enabled: boolean;
   status: string;
+  failure_code?: string | null;
   failure_message: string | null;
   skip_reason: string | null;
   /** 可原地继续的执行批次；为 null 表示只能全部重新执行。 */
@@ -135,6 +136,20 @@ export interface TaskDisplay {
   }>;
 }
 
+export type MaterialQualityStatus = "NO_FILE" | "NOT_CHECKED" | "RUNNING" | "PASSED"
+  | "ABNORMAL" | "EVIDENCE_INSUFFICIENT" | "NOT_APPLICABLE" | "NOT_CONFIGURED";
+
+export interface MaterialQualityPrecheck {
+  status: MaterialQualityStatus;
+  message: string;
+  blocked: boolean;
+  processing_allowed: boolean;
+  completed_checks: number;
+  total_checks: number;
+  checks: Array<{ rule_key: string; rule_name: string; requirement?: string | null; status: MaterialQualityStatus; message: string }>;
+  reasons: Array<{ rule_name: string; message: string }>;
+}
+
 export interface AuditDocument {
   document_no: string;
   /** 材料键：材料位的稳定身份，不用中文名匹配材料。 */
@@ -143,6 +158,8 @@ export interface AuditDocument {
   required: boolean;
   status: string;
   filename: string | null;
+  /** 当前文件的前置检查视图；通过仅指前置检查，不代表内容质量已全部核对。 */
+  quality_precheck?: MaterialQualityPrecheck | null;
   /** 当前上传时从 8018 目录选择的材料类型；没有当前上传时为空。 */
   declared_material_type?: string | null;
   /**

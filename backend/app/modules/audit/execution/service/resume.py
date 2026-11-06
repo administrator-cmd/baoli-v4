@@ -46,8 +46,8 @@ from app.modules.audit.execution.service.flow.plan import (
     assert_results_match_plan,
     evaluation_plan,
     field_review_boundary,
-    reviewed_extraction_rule_keys,
     rerun_split,
+    reviewed_extraction_rule_keys,
 )
 from app.modules.audit.execution.service.flow.runner import audit_runner
 from app.modules.audit.field.service.field_review import AuditFieldReviewService
@@ -72,6 +72,9 @@ RESUMABLE_FAILURE_CODES = frozenset({
     "AUDIT_GRAPH_RUNTIME_FAILED",
     "AUDIT_NODE_UNEXPECTED_ERROR",
     "STORAGE_UNAVAILABLE",
+    "MATERIAL_PRECHECK_PLAN_INVALID",
+    # 历史任务的无效风格档案现在可降级，不影响已提交的审核结果。
+    "REPORT_TEMPLATE_PROFILE_INVALID",
 })
 
 
@@ -160,7 +163,7 @@ class AuditExecutionResumeService:
         本轮允许范围；`deferred_keys` 是其中「确认后才执行」的那一段，范围外只有这一段
         记入 `deferred`，边界外已经结束的抽取段记入 `closed`。
         """
-        plan = evaluation_plan(task, task.current_node) if plan is None else plan
+        plan = evaluation_plan(task, task.current_node, execution=execution) if plan is None else plan
         plan_keys = {entry["rule_key"] for entry in plan}
         scope = plan_keys if allowed_keys is None else (plan_keys & allowed_keys)
         pending = pending_rerun_keys(execution)
@@ -200,7 +203,7 @@ class AuditExecutionResumeService:
 
         任务详情、受理校验与真实续跑都从这里取，避免各自判断「现在该不该再核对一次」。
         """
-        entries = evaluation_plan(task, task.current_node) if plan is None else plan
+        entries = evaluation_plan(task, task.current_node, execution=execution) if plan is None else plan
         if AuditFieldReviewService().extraction_closed(execution):
             extraction = reviewed_extraction_rule_keys(execution)
             boundary = ReviewBoundary(tuple(sorted(extraction)), tuple(
@@ -212,6 +215,8 @@ class AuditExecutionResumeService:
         allowed = boundary.phase_keys(
             confirmed=confirmed, extraction_closed=AuditFieldReviewService().extraction_closed(execution),
         )
+        from app.domain.material_precheck import precheck_rule_keys
+        allowed |= precheck_rule_keys(execution.result_json)
         return boundary, confirmed, allowed, entries
 
 
@@ -377,6 +382,11 @@ class AuditExecutionResumeService:
                 return advanced["last_execution"]
             # 重跑范围与详情页预览出自同一个函数：待重跑清单、未完成项与依赖下游不再各算一份。
             # 字段核对边界同样取自服务端：未确认时本轮只跑抽取段，确认后才是完整计划。
+            from app.domain.material_precheck import PRECHECK_KEY
+            precheck = (execution.result_json or {}).get(PRECHECK_KEY)
+            prepared = precheck is None or precheck["status"] != "READY"
+            if prepared:
+                graph_prepare_materials(self.db, task_no, execution.id)
             loaded = graph_load_evaluation(self.db, task_no, task.current_node, execution.id)
             plan = loaded["evaluation_plan"]
             review = loaded["field_review"]
@@ -389,7 +399,16 @@ class AuditExecutionResumeService:
             covered = resume.scope
             if rerun_keys:
                 # 没有重跑项时不重复材料前置处理：规则已经跑过，本次只补收尾与推进。
-                graph_prepare_materials(self.db, task_no, execution.id)
+                if not prepared:
+                    graph_prepare_materials(self.db, task_no, execution.id)
+                # 前置质量检查会产生独立结果并改变材料可用范围，必须重新取计划与核对边界。
+                loaded = graph_load_evaluation(self.db, task_no, task.current_node, execution.id)
+                plan, review = loaded["evaluation_plan"], loaded["field_review"]
+                resume = self.resume_plan(task, execution, plan=plan, allowed_keys=set(review["allowed_rule_keys"]),
+                                          deferred_keys=set(review.get("after_rule_keys") or ()))
+                from app.domain.material_precheck import precheck_rule_keys
+                rerun_keys = resume.rerun_keys - precheck_rule_keys(execution.result_json)
+                covered = resume.scope
             saved = self._saved_results( execution)
             assert_results_match_plan(plan, saved)
             # 先落库再逐条执行：上游成功后进程再中断，下游的重算意图仍然保留。

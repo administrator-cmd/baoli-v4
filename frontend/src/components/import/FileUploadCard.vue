@@ -21,6 +21,8 @@ const props = defineProps<{
   jobFilename: string | null;
   jobCreatedAt: string | null;
   jobStatus: string | null;
+  /** 尚未创建作业时，明确显示浏览器中已经选中的文件。 */
+  selectedFilename?: string | null;
   /** 本次浏览器选择的文件大小；刷新后浏览器不再保留该信息。 */
   selectedFileSize: number | null;
   /** 后端上传策略中的规则库一项；未取得前不展示大小与格式提示，也不做前端预检。 */
@@ -32,6 +34,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   pick: [file: File];
+  remove: [];
 }>();
 
 const uploadRef = ref<{ clearFiles: () => void } | null>(null);
@@ -48,6 +51,7 @@ const sizeText = computed(() => (props.selectedFileSize === null ? null : format
 
 function onFileChange(file: { raw?: File; name: string }): void {
   uploadRef.value?.clearFiles();
+  if (props.pending || props.disabled) return;
   const raw = file.raw;
   if (!raw) {
     return;
@@ -101,7 +105,34 @@ function onFileChange(file: { raw?: File; name: string }): void {
       </el-alert>
     </template>
 
-    <!-- 未上传：拖拽上传区域 -->
+    <div v-else-if="selectedFilename" class="selected-file">
+      <div class="selected-file__info" role="status" aria-live="polite">
+        <FileSpreadsheet class="selected-file__icon" :size="32" aria-hidden="true" />
+        <div class="selected-file__content">
+          <div class="selected-file__heading">
+            <strong class="selected-file__name">{{ selectedFilename }}</strong>
+            <slot name="selected-status"><el-tag type="success" size="small">已选择</el-tag></slot>
+          </div>
+          <div class="selected-file__meta">Excel 工作簿<template v-if="sizeText"> · {{ sizeText }}</template></div>
+          <div class="selected-file__hint"><slot name="selected-hint">文件已选择，提交后上传。</slot></div>
+        </div>
+      </div>
+      <div class="selected-file__actions">
+        <el-upload
+          ref="uploadRef"
+          :accept="acceptText"
+          :auto-upload="false"
+          :show-file-list="false"
+          :disabled="pending || disabled"
+          :on-change="onFileChange"
+        >
+          <el-button :disabled="pending || disabled">更换文件</el-button>
+        </el-upload>
+        <el-button link type="danger" :disabled="pending || disabled" @click="emit('remove')">移除</el-button>
+      </div>
+    </div>
+
+    <!-- 没有选择文件时才显示空的拖拽区域。 -->
     <el-upload
       v-else
       ref="uploadRef"
@@ -137,4 +168,23 @@ function onFileChange(file: { raw?: File; name: string }): void {
   font-size: 15px;
   overflow-wrap: anywhere;
 }
+.selected-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-color-primary-light-9);
+}
+.selected-file__info { display: flex; align-items: flex-start; gap: 14px; min-width: 0; flex: 1 1 260px; }
+.selected-file__icon { flex-shrink: 0; color: var(--el-color-success-dark-2); }
+.selected-file__content { min-width: 0; flex: 1; }
+.selected-file__heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.selected-file__name { color: var(--el-text-color-primary); font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
+.selected-file__meta, .selected-file__hint { margin-top: 6px; color: var(--el-text-color-regular); font-size: 13px; line-height: 1.5; }
+.selected-file__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.selected-file__actions :deep(.el-button + .el-button) { margin-left: 0; }
 </style>

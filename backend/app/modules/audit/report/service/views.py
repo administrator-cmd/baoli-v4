@@ -242,6 +242,7 @@ class AuditReportViewsService:
                 "risk_conclusion_available": report.risk_conclusion_available, "results_scope": "CURRENT_RUN", "current": current,
                 "stale_reason": reason,
                 "input_revision": task.input_revision, "snapshot": report.snapshot_json, "conclusion": None,
+                "report_generation": (report.snapshot_json or {}).get("report_generation"),
                 "reports": choices, "report_no": report.report_no, "report_name": report.report_name,
                 "format_support": (report.reasons_json or {}).get("format_support", [{"format": report.content_type, "supported": True}]),
                 "business_section_count": len((rule or {}).get("report_definition", {}).get("sections") or [])}

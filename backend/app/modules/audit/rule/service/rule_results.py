@@ -120,6 +120,8 @@ class AuditRuleResultsService:
             "tool_findings": (verdict or {}).get("tool_findings") or [],
             "input_resolutions": (verdict or {}).get("input_resolutions") or [],
         }
+        if (verdict or {}).get("material_quality") is not None:
+            payload["material_quality"] = verdict["material_quality"]
         risk_level = None
         rule_role = "RISK" if is_risk_rule(rule) else "CHECK"
         if rule.get("calculation_ref"):
@@ -144,6 +146,8 @@ class AuditRuleResultsService:
             "unresolved_items": unresolved_items or [],
             "execution_issues": (verdict or {}).get("execution_issues") or [],
         }
+        if payload.get("material_quality") is not None:
+            diagnostics["material_precheck"] = True
         if record is not None:
             record.status = status
             record.message = message

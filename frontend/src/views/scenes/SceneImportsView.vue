@@ -15,6 +15,7 @@ import {
 import { usePagedList } from "@/composables/usePagedList";
 import BackButton from "@/components/BackButton.vue";
 import { formatDate, statusLabel } from "@/constants/labels";
+import { importJobStatusOptions } from "@/constants/imports";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
@@ -55,13 +56,6 @@ const { filters, page, pageSize, total, items, loading, error } = list;
 const abortingJobNo = ref("");
 const deletingJobs = ref<string[]>([]);
 const deleteError = ref<string | null>(null);
-
-const statusOptions = [
-  { value: "PARSED", label: "已解析" },
-  { value: "PROPOSED", label: "已生成候选" },
-  { value: "CONFIRMED", label: "已确认" },
-  { value: "APPLIED", label: "已写入场景配置" },
-];
 
 function openJob(row: ImportJobRow): void {
   void router.push({ name: "scene-import-detail", params: { jobNo: row.job_no } });
@@ -236,7 +230,7 @@ watch(scopedScenarioCode, () => {
       </el-form-item>
       <el-form-item label="导入状态">
         <el-select v-model="filters.status" clearable placeholder="全部" style="width: 140px">
-          <el-option v-for="item in statusOptions" :key="item.value" :value="item.value" :label="item.label" />
+          <el-option v-for="item in importJobStatusOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
       <el-form-item label="创建时间">

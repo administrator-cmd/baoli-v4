@@ -427,7 +427,9 @@ def rule_dependencies(
 
 def execution_order(rules: list[dict[str, Any]], *, all_rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """只按显式输入/结果引用排序；无法满足的引用与环在执行项上暴露。"""
-    rules = deepcopy(rules)
+    # 本函数只增删当前规则对象的顶层键；嵌套定义仅读取，逐条浅拷贝即可避免
+    # 对全量规则的递归复制成本，同时仍确保不修改调用方传入的顶层字典。
+    rules = [dict(rule) for rule in rules]
     selected = {r["rule_key"] for r in rules}
     known_by_key = {r["rule_key"]: r for r in all_rules}
     producers, by_code = dependency_indexes(all_rules)

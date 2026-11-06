@@ -36,7 +36,7 @@ _OCR_PROVIDER_PAGE_INDEX_FIELDS: tuple[str, ...] = ()
 
 
 def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmission:
-    """按官方 requests 示例，用本地文件句柄提交 8010 产物。"""
+    """按官方 requests 示例提交 PDF/图片；审核材料通常传入 8010 产物。"""
     settings, submit_url, token, model = _configuration()
     deadline_at = datetime.now(UTC) + timedelta(seconds=settings.ocr_max_wait_seconds)
     deadline = time.monotonic() + settings.ocr_max_wait_seconds
@@ -51,8 +51,8 @@ def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmis
         input_file = file_path.open("rb")
     except OSError as exc:
         raise BusinessError(
-            "PROCESSED_ARTIFACT_MISSING",
-            "当前上传文件缺少可读取的 8010 处理产物，无法提交 OCR",
+            "OCR_SOURCE_FILE_MISSING",
+            "当前文件不存在或无法读取，无法提交 OCR",
             status_code=409,
         ) from exc
     with input_file:

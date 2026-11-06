@@ -6,6 +6,9 @@
 
 from typing import Literal
 
+# 后台操作只有 PENDING/RUNNING 两个活跃态；互斥、清理和查询共用同一口径。
+ACTIVE_OPERATION_STATUSES = frozenset({"PENDING", "RUNNING"})
+
 # 字段「期间口径」「报表口径」的不适用取值，由当前业务是否涉及相应口径决定。
 SCOPE_NOT_APPLICABLE = "NOT_APPLICABLE"
 

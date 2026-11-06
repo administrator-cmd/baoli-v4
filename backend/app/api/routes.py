@@ -12,7 +12,9 @@ from app.modules.audit.field import controller as audit_fields
 from app.modules.audit.report import controller as audit_report
 from app.modules.audit.report import report_controller as report_reports
 from app.modules.audit.report import risk_controller as report_risks
+from app.modules.audit.report_template import controller as report_templates
 from app.modules.audit.task import controller as audit_tasks
+from app.modules.imports.generation import controller as rulebook_generations
 from app.modules.imports.job import controller as import_jobs
 from app.modules.material.document import controller as material_documents
 from app.modules.plan.config import controller as plan_configuration
@@ -37,6 +39,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     system_logs.router,
     system_operations.router,
     import_jobs.router,
+    rulebook_generations.router,
     scenario_lifecycle.router,
     scenario_configuration.router,
     scenario_materials.router,
@@ -57,4 +60,5 @@ ROUTERS: tuple[APIRouter, ...] = (
     material_documents.router,
     report_reports.router,
     report_risks.risks_router,
+    report_templates.router,
 )

@@ -25,7 +25,6 @@ class DocumentUploadResponse(BaseModel):
     size_bytes: int
     status: str
     material_classify: dict[str, Any] | None = None
-    classification_operation: dict[str, Any]
     impact: ReplacementImpact | None = None
 
 

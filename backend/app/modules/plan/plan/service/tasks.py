@@ -30,6 +30,8 @@ class PlanTasksService:
             "task_name": payload["task_name"],
             "remark": payload.get("remark"),
             "expected_scope_hash": payload["expected_scope_hash"],
+            "report_generation_mode": payload.get("report_generation_mode", "RULES"),
+            "report_template_no": payload.get("report_template_no"),
         }
         request_hash = OperationLogService().normalized_request_hash(request_payload)
 
@@ -84,6 +86,8 @@ class PlanTasksService:
             remark=payload.get("remark"),
             task_no=task_no,
             expected_scope_hash=payload["expected_scope_hash"],
+            report_generation_mode=payload.get("report_generation_mode", "RULES"),
+            report_template_no=payload.get("report_template_no"),
         )
         AuditTaskCRUD(self.db).flush()
         was_reused = AuditTaskCommandRecordsService(self.db).finish_task_command(

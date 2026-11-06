@@ -42,6 +42,17 @@ class ReportFormatSupport(BaseModel):
     report_name: str | None = None
 
 
+class ReportGenerationInfo(BaseModel):
+    """报告生成时记录的实际方式；历史报告不推断或补造。"""
+
+    mode: Literal["RULES", "TEMPLATE"]
+    requested_mode: Literal["RULES", "TEMPLATE"] | None = None
+    template_no: str | None = None
+    template_name: str | None = None
+    fallback_code: str | None = None
+    fallback_reason: str | None = None
+
+
 class ReportResponse(BaseModel):
     task_no: str
     report_no: str | None = None
@@ -64,6 +75,7 @@ class ReportResponse(BaseModel):
     stale_reason: str | None = None
     input_revision: int = 0
     snapshot: ReportSnapshotSignal | None = None
+    report_generation: ReportGenerationInfo | None = None
     # 本节报告声明的输出格式与各自的真实支持状态；缺少该字段会让页面无从判断
     # 「模板要求 PDF、系统只产 Markdown」这件事。
     format_support: list[ReportFormatSupport] = Field(default_factory=list)
@@ -93,6 +105,7 @@ class ReportDetailResponse(BaseModel):
     risk_conclusion_available: bool
     reasons: dict[str, Any] = Field(default_factory=dict)
     snapshot: dict[str, Any] | None = None
+    report_generation: ReportGenerationInfo | None = None
     status: str
     archived_at: datetime | None = None
     remark: str | None = None

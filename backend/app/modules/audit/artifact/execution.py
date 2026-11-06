@@ -32,6 +32,10 @@ PRE_CONTACT_ERROR_CODES = {
 class ArtifactExecution(AuditArtifactArtifactsService):
     """远端调用的阶段编排；调用前占位、进度与失败各自提交。"""
 
+    def _assert_quality_precheck(self, task, upload) -> None:
+        from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
+        AuditMaterialPrecheckService(self.db).assert_processing_allowed(task, upload)
+
     def _ensure_external_artifact(self, task: AuditTask,
         upload: DocumentUpload,
         service_code: str,
@@ -43,6 +47,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
         已 READY 直接复用；FAILED 或 PROCESSING 明确报错，由材料弹窗单项重试。
         占位与每次真实调用历史均保留，避免自动重发制造重复作业。
         """
+        self._assert_quality_precheck(task, upload)
         existing = self._artifact_for_upload( upload, service_code)
         if existing is not None:
             if existing.status == "READY":
@@ -73,6 +78,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
 
     def execute_external_artifact_call(self, task, upload, record, call, *, operation_no=None, resubmit_unknown=False):
         """联系服务前记录本次调用，保留失败原因与用户确认的重试意图。"""
+        self._assert_quality_precheck(task, upload)
         metadata = record.metadata_json or {}
         attempts = list(metadata.get("processing_attempts") or [])
         attempt = {"operation_no": operation_no, "started_at": datetime.now(UTC).isoformat(),
@@ -112,6 +118,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
         return record
 
     def _submit_ocr_job(self, task: AuditTask, upload: DocumentUpload, parsed_artifact: StoredArtifact) -> StoredArtifact:
+        self._assert_quality_precheck(task, upload)
         existing = self._artifact_for_upload( upload, "OCR")
         if existing:
             if existing.status == "FAILED":
@@ -184,6 +191,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
         idempotency_key: str,
     ) -> StoredArtifact:
         """执行已持久化的单份重试提交意图；保留原作业与每次提交尝试。"""
+        self._assert_quality_precheck(task, upload)
         metadata = record.metadata_json or {}
         attempts = list(metadata["submit_attempts"])
         attempt = dict(attempts[-1])
@@ -267,6 +275,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
         return record
 
     def _complete_ocr_job(self, task: AuditTask, upload: DocumentUpload, artifact: StoredArtifact) -> StoredArtifact:
+        self._assert_quality_precheck(task, upload)
         if artifact.status == "READY":
             return artifact
         job_id, deadline_at = self._ocr_job_metadata(artifact)

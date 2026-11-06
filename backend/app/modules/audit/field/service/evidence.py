@@ -33,10 +33,20 @@ class AuditFieldEvidenceService:
 
     def _check_evidence_content(self, texts: list[str], quote_text: str) -> str:
         """核对引文是否在实际读取内容中出现，不证明字段或结论正确。"""
-        quoted = _locatable_text(quote_text)
-        if not quoted:
-            return "NOT_CHECKABLE"
-        return "FOUND" if any(quoted in _locatable_text(text) for text in texts) else "NOT_FOUND"
+        return self._check_evidence_contents(texts, [quote_text])[0]
+
+
+    def _check_evidence_contents(self, texts: list[str], quote_texts: list[str]) -> list[str]:
+        """一次规范化材料正文并检查多个独立引文，避免每个片段重扫整份 OCR。"""
+        normalized_texts = tuple(_locatable_text(text) for text in texts)
+        results = []
+        for quote_text in quote_texts:
+            quoted = _locatable_text(quote_text)
+            if not quoted:
+                results.append("NOT_CHECKABLE")
+            else:
+                results.append("FOUND" if any(quoted in text for text in normalized_texts) else "NOT_FOUND")
+        return results
 
 
     def artifact_content_texts(self, content: Any) -> list[str]:

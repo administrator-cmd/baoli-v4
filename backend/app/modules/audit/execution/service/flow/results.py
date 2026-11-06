@@ -78,6 +78,9 @@ def graph_produce_candidate_verdict(
         manifest = _task_manifest(task)
         instance = rule_instance or {}
         rule = rule_of_instance(manifest, node_code, instance)
+        if instance.get("material_precheck"):
+            rule = {**rule, "material_precheck": True,
+                    "precheck_material_keys": [item["material_key"] for item in instance.get("materials") or []]}
         if loop_status in {LOOP_BLOCKED, LOOP_NEEDS_HUMAN}:
             # 模型响应不可用或拒绝判断：没有候选结论，如实保留原因交后续处理。
             return {

@@ -1,7 +1,9 @@
 """方案请求模型。"""
 
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PlanCreateRequest(BaseModel):
@@ -37,3 +39,13 @@ class TaskFromPlanRequest(BaseModel):
     remark: str | None = Field(default=None, max_length=4000)
     expected_scope_hash: str = Field(min_length=1, max_length=128)
     idempotency_key: str = Field(min_length=1, max_length=120)
+    report_generation_mode: Literal["RULES", "TEMPLATE"] = "RULES"
+    report_template_no: str | None = Field(default=None, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_report_template(self):
+        if self.report_generation_mode == "TEMPLATE" and not self.report_template_no:
+            raise ValueError("仿照模板生成时必须选择报告模板")
+        if self.report_generation_mode == "RULES" and self.report_template_no:
+            raise ValueError("按规则生成时不能同时指定报告模板")
+        return self

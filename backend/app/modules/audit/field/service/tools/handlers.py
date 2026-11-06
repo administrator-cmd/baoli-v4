@@ -172,6 +172,8 @@ def _requested_uploads(context: Any, material_keys: list[str]):
         upload = uploads[key]
         if upload is None:
             raise BusinessError("TOOL_DOCUMENT_NOT_UPLOADED", "选定材料没有实际上传", details={"material_key": key})
+        from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
+        AuditMaterialPrecheckService(context.database_session).assert_processing_allowed(snapshot["task"], upload)
         yield snapshot["task"], key, upload
 
 

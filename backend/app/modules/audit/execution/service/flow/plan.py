@@ -14,7 +14,8 @@ from typing import Any
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED
 from app.domain.field_review import reviewed_extraction_keys
-from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
+from app.domain.execution_mode import MODE_EXTRACT, MODE_MATERIAL_CHECK, SOURCE_ONLY_MODES, execution_mode_label
+from app.domain.material_precheck import material_blocks, precheck_rule_keys
 from app.domain.rule_library import active, dependency_indexes, execution_order, rule_dependencies
 from app.modules.audit.rule.model import RuleResult
 from app.modules.audit.shared import _task_manifest
@@ -31,7 +32,7 @@ def enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) -> 
     ]
 
 
-def evaluation_plan(task: AuditTask, node_code: str) -> list[dict[str, Any]]:
+def evaluation_plan(task: AuditTask, node_code: str, *, execution: Any = None) -> list[dict[str, Any]]:
     """按依赖顺序排好的执行计划；预览与真实执行使用同一排序。
 
     这里不做执行方式的校验：那是「能不能开始执行」的判断，由执行入口自己明确拒绝。
@@ -39,7 +40,7 @@ def evaluation_plan(task: AuditTask, node_code: str) -> list[dict[str, Any]]:
     """
     manifest = _task_manifest(task)
     ordered = execution_order(enabled_rules(task, manifest, node_code), all_rules=manifest["rules"])
-    return [
+    plan = [
         {
             "cursor": index,
             "rule_key": rule.get("rule_key"),
@@ -49,6 +50,44 @@ def evaluation_plan(task: AuditTask, node_code: str) -> list[dict[str, Any]]:
         }
         for index, rule in enumerate(ordered)
     ]
+    if execution is None:
+        return plan
+    result = execution.result_json or {}
+    blocked = material_blocks(result)
+    early = precheck_rule_keys(result)
+    fields = {item["field_key"]: item for item in manifest["fields"]}
+    dependencies = plan_dependencies(plan, all_rules=manifest["rules"])
+    affected: dict[str, set[str]] = {}
+    for entry in plan:
+        rule, key = entry["rule"], entry["rule_key"]
+        if key in early or rule.get("kind") == "REPORT":
+            continue
+        if rule.get("execution_mode") in SOURCE_ONLY_MODES:
+            affected[key] = set()
+            continue
+        materials = set(rule.get("materials") or [])
+        materials.update(item["material_key"] for item in rule.get("output_definitions") or [] if item.get("material_key"))
+        materials.update(item.get("material_key") or fields.get(item["field_key"], {}).get("material_key")
+                         for item in rule.get("inputs") or [])
+        if rule.get("execution_mode") == MODE_MATERIAL_CHECK and not materials:
+            materials = {item["material_key"] for item in manifest["materials"]}
+        affected[key] = materials & blocked.keys()
+    # 显式依赖闭包，不依赖排序位置；报告继续描述已完成范围及未执行原因。
+    changed = True
+    while changed:
+        changed = False
+        for key, materials in affected.items():
+            inherited = set().union(*(affected.get(dep, set()) for dep in dependencies[key]))
+            if not inherited <= materials:
+                materials.update(inherited)
+                changed = True
+    for entry in plan:
+        keys = affected.get(entry["rule_key"])
+        if keys:
+            entry["rule"] = {**entry["rule"], "material_quality_block": [blocked[key] for key in sorted(keys)]}
+        elif entry["rule_key"] in early:
+            entry["rule"] = {**entry["rule"], "material_precheck": True}
+    return plan
 
 
 def rule_finished(result: RuleResult) -> bool:
@@ -118,6 +157,7 @@ class ReviewBoundary:
 
     extraction: tuple[str, ...]
     after: tuple[str, ...]
+    early: tuple[str, ...] = ()
 
     @property
     def required(self) -> bool:
@@ -132,12 +172,12 @@ class ReviewBoundary:
         已结束但尚未确认时本轮不执行任何规则，批次继续停在等待核对。
         """
         if not self.required:
-            return {*self.extraction, *self.after}
+            return {*self.extraction, *self.after, *self.early}
         if confirmed:
-            return set(self.after)
+            return {*self.after, *self.early}
         if extraction_closed:
             return set()
-        return set(self.extraction)
+        return {*self.extraction, *self.early}
 
     def summary(self) -> dict[str, int]:
         return {"extraction": len(self.extraction), "after_review": len(self.after)}
@@ -164,10 +204,12 @@ def field_review_boundary(
     """
     plan_keys = [entry["rule_key"] for entry in plan]
     by_key = {entry["rule_key"]: entry for entry in plan}
+    early = {entry["rule_key"] for entry in plan
+             if entry["rule"].get("material_precheck") or entry["rule"].get("material_quality_block")}
     extraction = {
         entry["rule_key"] for entry in plan
         if str(entry["rule"].get("execution_mode") or "") == MODE_EXTRACT
-    }
+    } - early
     if not extraction:
         return ReviewBoundary((), tuple(plan_keys))
     dependencies = plan_dependencies(plan, all_rules=all_rules)
@@ -180,6 +222,8 @@ def field_review_boundary(
             continue
         before.add(key)
         for dependency in sorted(dependencies.get(key, set())):
+            if dependency in early:
+                continue
             if dependency in extraction:
                 pending.append(dependency)
                 continue
@@ -205,8 +249,8 @@ def field_review_boundary(
             status_code=409,
             details={"conflicts": conflicts},
         )
-    after = [key for key in plan_keys if key not in before]
-    return ReviewBoundary(extraction=tuple(sorted(before)), after=tuple(after))
+    after = [key for key in plan_keys if key not in before and key not in early]
+    return ReviewBoundary(extraction=tuple(sorted(before)), after=tuple(after), early=tuple(sorted(early)))
 
 
 def reviewed_extraction_rule_keys(execution: Any) -> set[str]:

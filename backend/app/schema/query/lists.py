@@ -5,6 +5,7 @@
 
 from pydantic import BaseModel
 
+from app.domain.rulebook_generation import GenerationStatusFilter
 from app.schema.query.timestamps import FilterDateTime
 
 
@@ -46,6 +47,13 @@ class ImportJobListQueryParam(BaseModel):
     scenario_code: str | None = None
     filename: str | None = None
     status: str | None = None
+    created_from: FilterDateTime | None = None
+    created_to: FilterDateTime | None = None
+
+
+class RulebookGenerationListQueryParam(BaseModel):
+    filename: str | None = None
+    status: GenerationStatusFilter | None = None
     created_from: FilterDateTime | None = None
     created_to: FilterDateTime | None = None
 

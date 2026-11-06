@@ -6,7 +6,6 @@ import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vu
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { statusTextOf } from "@/constants/statusVocabulary";
-import { periodScopeLabel } from "@/constants/labels";
 import { evidenceIsValue, fieldMode, fieldReason, fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
 import { quoteInlineText } from "@/utils/quoteText";
 import { compareNaturalLabels } from "@/utils/naturalSort";
@@ -66,17 +65,6 @@ function forwardCorrect(field: AuditFieldView): void {
 
 const search = ref("");
 const statusFilter = ref("ALL");
-
-/** 实际识别与配置声明分开标注，不把配置值冒充正文识别结果。 */
-function scopeText(field: AuditFieldView): string {
-  const parts = [
-    field.actual_period_scope ? `期间：${field.actual_period_scope}` : "期间未识别",
-    field.actual_unit ? `单位：${field.actual_unit}` : "单位未识别",
-  ];
-  if (field.period_scope) parts.push(`要求期间：${periodScopeLabel(field.period_scope)}`);
-  if (field.unit) parts.push(`要求单位：${field.unit}`);
-  return parts.join(" · ");
-}
 
 function sourceFilesText(field: AuditFieldView): string {
   return fieldSourceFiles(field).join("、") || "未记录来源文件";
@@ -201,9 +189,6 @@ const emptyDescription = computed(() => {
         <template #default="{ row }">
           <div class="field-value" :class="{ 'field-value--empty': row.normalized_value === null || row.normalized_value === undefined || row.normalized_value === '' }">{{ extractedText(row) }}</div>
         </template>
-      </el-table-column>
-      <el-table-column label="期间 / 单位" width="210">
-        <template #default="{ row }">{{ scopeText(row) }}</template>
       </el-table-column>
       <el-table-column label="状态" width="140">
         <template #default="{ row }">

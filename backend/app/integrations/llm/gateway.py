@@ -32,6 +32,7 @@ import httpx
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
+from app.integrations.llm.pacing import LlmRequestPacer, http_retry_delay, retry_after_seconds, wait_before_retry
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ TURN_ERROR = "ERROR"
 # 响应契约错误不会因重复请求而恢复，必须直接暴露。
 LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 LLM_RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
+
+# 当前进程内的审核、编制、模板分析及状态探测共用窗口。
+_request_pacer = LlmRequestPacer()
 
 # 流式接收期间按固定间隔输出进度；该间隔只影响日志，不参与任何超时判断。
 LLM_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
@@ -760,18 +764,28 @@ def probe_connection(timeout_seconds: float = LLM_PROBE_TIMEOUT_SECONDS) -> Mode
         return ModelProbeResult(False, _elapsed_ms(started), exc.code, exc.message)
 
     try:
-        response = _http_client().post(
-            _endpoint(baseurl),
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": LLM_PROBE_MAX_TOKENS,
-                "stream": False,
-            },
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
+        settings = get_settings()
+        deadline = started + timeout_seconds
+        with _request_pacer.slot(interval_seconds=settings.llm_request_interval_seconds, deadline=deadline):
+            response = _http_client().post(
+                _endpoint(baseurl),
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": LLM_PROBE_MAX_TOKENS,
+                    "stream": False,
+                },
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+            if response.status_code in LLM_RETRYABLE_HTTP_STATUSES:
+                _request_pacer.defer(http_retry_delay(
+                    retry_after=response.headers.get("Retry-After"), attempt=1,
+                    base_seconds=settings.llm_retry_base_seconds,
+                ))
+            response.raise_for_status()
+    except BusinessError as exc:
+        return ModelProbeResult(False, _elapsed_ms(started), exc.code, exc.message)
     except httpx.TimeoutException:
         logger.warning("大模型连通探测超时 timeout_seconds=%s", timeout_seconds)
         return ModelProbeResult(
@@ -810,6 +824,25 @@ def _post(
     body: dict[str, Any], *, call: str, idempotency_key: str | None = None,
     log_context: RequestLogContext | None = None,
 ) -> dict[str, Any]:
+    """所有模型业务入口统一排队；排队时间也计入本次总时限。"""
+    _require_settings()
+    settings = get_settings()
+    short_id = _next_request_short_id()
+    deadline = time.monotonic() + settings.llm_max_seconds
+    with _request_pacer.slot(
+        interval_seconds=settings.llm_request_interval_seconds, deadline=deadline,
+        on_wait=lambda: logger.info("LLM等待 请求=%s%s 原因=请求排队或冷却", short_id, _context_text(log_context)),
+    ):
+        return _post_attempts(
+            body, call=call, idempotency_key=idempotency_key, log_context=log_context,
+            short_id=short_id, deadline=deadline,
+        )
+
+
+def _post_attempts(
+    body: dict[str, Any], *, call: str, short_id: str, deadline: float,
+    idempotency_key: str | None = None, log_context: RequestLogContext | None = None,
+) -> dict[str, Any]:
     """流式调用 chat/completions；沿用临时故障重试，每次独立组装响应。
 
     ``idempotency_key`` 标识一次逻辑模型请求，而不是某一次网络尝试；
@@ -822,7 +855,6 @@ def _post(
     request_started = time.monotonic()
     # 短编号只在当前进程内递增，同一次逻辑请求的所有重试共用它；
     # 完整标识沿用幂等键，没有时生成本地诊断编号，只写日志，不发给供应商。
-    short_id = _next_request_short_id()
     identity = idempotency_key or f"local-{uuid.uuid4().hex[:12]}"
     logger.info("LLM开始 请求=%s%s 标识=%s", short_id, _context_text(log_context), identity)
     logger.debug(
@@ -832,7 +864,6 @@ def _post(
     )
     # 总时限只兜住永不结束的流；读取超时按「连续多久收不到数据」判定卡住，
     # 仍在持续出块的长响应不会被总时长截断。
-    deadline = request_started + settings.llm_max_seconds
     client = _http_client()
     for attempt in range(1, max_attempts + 1):
         remaining = deadline - time.monotonic()
@@ -919,7 +950,7 @@ def _post(
                     delay,
                     type(exc).__name__,
                 )
-                time.sleep(delay)
+                wait_before_retry(delay, deadline=deadline)
                 continue
             if not safe_to_retry:
                 raise _request_result_unknown(exc) from exc
@@ -938,35 +969,50 @@ def _post(
             ) from exc
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
+            retry_after = retry_after_seconds(exc.response.headers.get("Retry-After"))
+            request_id = exc.response.headers.get("x-request-id")
+            details = {"service": "LLM", "http_status": status_code}
+            if request_id:
+                details["request_id"] = request_id
+            if retry_after is not None:
+                details["retry_after_seconds"] = retry_after
+            if status_code in LLM_RETRYABLE_HTTP_STATUSES:
+                delay = max(settings.llm_request_interval_seconds, http_retry_delay(
+                    retry_after=exc.response.headers.get("Retry-After"), attempt=attempt,
+                    base_seconds=settings.llm_retry_base_seconds,
+                ))
+                # 最后一次失败也保留冷却，其他任务或用户续跑不能立刻重新轰炸同一渠道。
+                _request_pacer.defer(delay)
             if status_code in LLM_RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
-                delay = LLM_RETRY_DELAYS_SECONDS[attempt - 1]
                 logger.warning(
-                    "远程大模型返回可重试 HTTP 错误，将重试 status_code=%s attempt=%s max_attempts=%s delay_seconds=%s",
+                    "远程大模型返回可重试 HTTP 错误，冷却后重试 status_code=%s attempt=%s max_attempts=%s delay_seconds=%.1f request_id=%s retry_after_seconds=%s",
                     status_code,
                     attempt,
                     max_attempts,
                     delay,
+                    request_id, retry_after,
                 )
-                time.sleep(delay)
+                wait_before_retry(delay, deadline=deadline)
                 continue
             logger.warning(
-                "远程大模型返回 HTTP 错误 status_code=%s attempt=%s retry_count=%s",
+                "远程大模型返回 HTTP 错误 status_code=%s attempt=%s retry_count=%s request_id=%s retry_after_seconds=%s",
                 status_code,
                 attempt,
                 attempt - 1,
+                request_id, retry_after,
             )
             if status_code in {401, 403}:
                 raise BusinessError(
                     "LLM_AUTH_FAILED",
                     "远程大模型鉴权失败",
                     status_code=502,
-                    details={"service": "LLM"},
+                    details=details,
                 ) from exc
             raise BusinessError(
                 "LLM_EXTERNAL_FAILED",
                 "远程大模型服务返回错误",
                 status_code=502,
-                details={"service": "LLM"},
+                details=details,
             ) from exc
         except httpx.RequestError as exc:
             # ConnectError / ProxyError 发生在请求建立前，可以安全重试；
@@ -981,7 +1027,7 @@ def _post(
                     delay,
                     type(exc).__name__,
                 )
-                time.sleep(delay)
+                wait_before_retry(delay, deadline=deadline)
                 continue
             if not safe_to_retry:
                 raise _request_result_unknown(exc) from exc

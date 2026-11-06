@@ -33,6 +33,8 @@ class AuditArtifactMaterialRetryService:
         upload = current_upload(db, document) if document else None
         if upload is None:
             raise BusinessError("TASK_DOCUMENT_UPLOAD_MISSING", "材料没有当前上传文件", status_code=409)
+        from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
+        AuditMaterialPrecheckService(db).assert_processing_allowed(task, upload)
         artifact = AuditArtifactArtifactsService(db)._artifact_for_upload( upload, artifact_type)
         if artifact is None or artifact.artifact_no != request["artifact_no"]:
             raise BusinessError("ARTIFACT_VERSION_CONFLICT", "处理产物已更新，请刷新后重试", status_code=409)

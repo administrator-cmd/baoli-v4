@@ -50,6 +50,9 @@ class ImportsJobProposalsService:
             raise BusinessError("IMPORT_PROPOSAL_NOT_FOUND", "解析结果中不存在该项配置", status_code=404,
                                 details={"group": group, "candidate_ref": candidate_ref})
         item.update(changes)
+        interpretation = item.get("business_context", {}).get("interpretation")
+        if interpretation is not None:
+            interpretation["edited_after_interpretation"] = True
         if group == "rules" and changes.get("rule_role") == "CHECK" and item.get("operator") == "RISK_TRIGGER":
             # 管理员明确改为普通核查后，不能仍被旧风险动作识别为风险规则。
             item["operator"] = OPERATOR_LLM_EXECUTE
@@ -70,21 +73,27 @@ class ImportsJobProposalsService:
         rule_names = {item["candidate_ref"]: item["name"] for item in proposals["rules"]}
         field_meta = {item["candidate_ref"]: item for item in proposals["fields"]}
         calculation_meta = {item["result_code"]: item for item in proposals["calculations"]}
+
+        def with_interpretation(item: dict[str, Any]) -> dict[str, Any]:
+            return {**item, "interpretation": item.get("business_context", {}).get("interpretation")}
+
         return {
-            "materials": proposals["materials"],
+            "materials": [with_interpretation(item) for item in proposals["materials"]],
             "fields": [
-                {**item, "material_name": material_names.get(item["material_ref"])}
+                {**with_interpretation(item), "material_name": material_names.get(item["material_ref"])}
                 for item in proposals["fields"]
             ],
             "rules": [
-                {**item, "comparison": rule_comparison_view(
+                {**with_interpretation(item), "comparison": rule_comparison_view(
                     item, material_names, field_labels, rule_names, field_meta,
                     calculation_meta=calculation_meta,
                 )}
                 for item in proposals["rules"]
             ],
-            "calculations": proposals["calculations"],
-            "report_sections": proposals["report_sections"],
+            "calculations": [with_interpretation(item) for item in proposals["calculations"]],
+            "report_sections": [with_interpretation(item) for item in proposals["report_sections"]],
+            # None 表示历史记录未保存识别结果，不能显示成“没有辅助资料”。
+            "supporting_content": proposals.get("supporting_content"),
             # 第二轮逐项核对后的未绑定输入：页面据此提示配置不完整，不改变启用状态。
             "binding_gaps": proposals.get("binding_gaps") or [],
         }

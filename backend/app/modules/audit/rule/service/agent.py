@@ -10,7 +10,6 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.modules.audit.rule.service.result_contract import validate_result_shape
 from app.constants.execution import FACT_KIND_DERIVED
 from app.constants.status import (
     EXECUTABLE_FIELD_STATUSES,
@@ -49,6 +48,7 @@ from app.modules.audit.rule.service.input_validation import (
     same_fact_value,
     validate_input_resolutions,
 )
+from app.modules.audit.rule.service.result_contract import validate_result_shape
 from app.modules.audit.shared import _current_uploads, _locatable_text, _material_entries
 from app.modules.audit.task.model import AuditTask
 
@@ -228,7 +228,8 @@ class AuditRuleAgentService:
         material_only = mode == MODE_MATERIAL_CHECK
         published_parameters = dict(rule.get("parameters") or {})
         configuration = self._without_origin({key: value for key, value in rule.items()
-                                         if key not in {"upstream_facts", "upstream_results", "available_materials", "report_data"}})
+                                         if key not in {"upstream_facts", "upstream_results", "available_materials", "report_data",
+                                                        "report_style_profile", "report_style_template_name"}})
         # 产出身份只能取本规则声明的字段键与结果编号；单独列出来，避免模型自造 code。
         allowed_codes = [str(item["field_key"]) for item in rule.get("output_definitions") or []
                          if isinstance(item, dict) and item.get("field_key")]
@@ -339,6 +340,15 @@ class AuditRuleAgentService:
                 lines.append("（没有可用的来源规则结果；不得自行补做来源检查，按证据不足说明缺少哪些来源结果。）")
         if rule.get("report_data") is not None:
             lines.extend(["", "按报告章节关联的业务数据：" + json.dumps(rule["report_data"], ensure_ascii=False, default=str)])
+        if rule.get("report_style_profile") is not None:
+            lines.extend([
+                "",
+                f"用户选择仿照报告模板「{rule.get('report_style_template_name') or '用户模板'}」的结构与表达风格。以下 JSON 仅是写作风格档案，不是审核事实或业务规则：",
+                json.dumps(rule["report_style_profile"], ensure_ascii=False, sort_keys=True),
+            ])
+        if rule.get("material_quality_blocks"):
+            lines.extend(["", "以下文件因质量检查未通过而停止后续处理。报告应说明审核覆盖范围与缺项，不声称已完成相关检查：",
+                          json.dumps(rule["material_quality_blocks"], ensure_ascii=False)])
         if rule.get("available_materials") and not source_only:
             lines.extend([
                 "",
@@ -371,8 +381,29 @@ class AuditRuleAgentService:
         preloaded_artifacts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """一条规则实例的初始消息历史。只在 `prepare_agent_context` 里生成一次。"""
+        schema = VERDICT_SCHEMA
+        guidance = ""
+        if rule.get("material_precheck"):
+            from app.domain.material_precheck import MaterialQualityResults
+            quality_schema = MaterialQualityResults.model_json_schema()
+            schema = {**schema, "properties": {**schema["properties"], **quality_schema["properties"]},
+                      "$defs": quality_schema["$defs"], "required": [*schema["required"], "material_quality"]}
+            guidance = (
+                "\n这是原文件质量前置检查，只能调用所提供的原文件质量工具。阈值、格式及合格要求均取自本条已发布规则，不能补默认标准。"
+                "必须根据真实工具结果逐份判断，并在 material_quality 中完整返回下方允许材料的结论：material_key、status、message、tool_call_ids。"
+                "tool_call_ids 必须同时在顶层 evidence 引用，且工具逐份结果含有对应材料。多项检查的条件关系由你按规则理解，不把一个文件的异常扩散到其他文件。"
+                "工具失败或规则缺少必要口径时，对受影响文件返回 EVIDENCE_INSUFFICIENT 并说明原因，不能放行；"
+                "若整次工具失败而没有逐材料结果，在顶层 evidence 引用真实失败调用，该文件 tool_call_ids 填空数组。"
+                "NOT_APPLICABLE 仅用于规则确实不适用的材料，并给出依据。message 使用实际文件名。"
+            )
+        if rule.get("report_style_profile") is not None:
+            guidance += (
+                "\n生成报告时遵循用户提供的风格档案，只调整章节衔接、表达语气、详略和标题/列表组织；"
+                "不得把风格样本当作事实、审核规则、结论或取值来源。任务已配置的报告章节、审核规则和真实数据是唯一业务依据；"
+                "不得照搬模板中的客户信息、金额、日期、结论或其他样本事实，不得添加无数据支持的结论。"
+            )
         return [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n最终结论的数据结构：" + json.dumps(VERDICT_SCHEMA, ensure_ascii=False)},
+            {"role": "system", "content": SYSTEM_PROMPT + guidance + "\n最终结论的数据结构：" + json.dumps(schema, ensure_ascii=False)},
             {"role": "user", "content": self.build_rule_context(
                 rule, inputs, manifest=manifest, material_names=material_names,
                 preloaded_artifacts=preloaded_artifacts,
@@ -575,14 +606,18 @@ class AuditRuleAgentService:
     def _check_quote_fragments(self, item: dict[str, Any], content: Any, **details: Any) -> dict[str, str]:
         """逐段核对真实原文；目标值、科目、表头、期间分别验证，不拼接成伪原文。"""
         from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
-        texts = AuditFieldEvidenceService().artifact_content_texts(content)
-        checked: dict[str, str] = {}
+        evidence_service = AuditFieldEvidenceService()
+        texts = evidence_service.artifact_content_texts(content)
+        fragments: list[tuple[str, str]] = []
         for key in ("quote_text", "quote_label", "quote_header", "quote_period",
                     "quote_statement_scope", "quote_entity_scope", "quote_unit"):
             value = self._quote_fragment(item, key)
-            if value is None:
-                continue
-            if AuditFieldEvidenceService()._check_evidence_content(texts, value) != "FOUND":
+            if value is not None:
+                fragments.append((key, value))
+        checks = evidence_service._check_evidence_contents(texts, [value for _, value in fragments])
+        checked: dict[str, str] = {}
+        for (key, value), status in zip(fragments, checks):
+            if status != "FOUND":
                 raise self._schema_error(f"证据的 {key} 在所引用的材料内容中找不到", **details)
             checked[key] = value
         return checked
@@ -979,6 +1014,12 @@ class AuditRuleAgentService:
             for item in tool_results if item.get("tool_call_id") in referenced_calls
             and any(key in item.get("result", {}) for key in ("comparison", "per_material"))
         ]
+        if rule.get("material_precheck"):
+            from app.domain.material_precheck import quality_results_from_tools
+            verdict["material_quality"] = quality_results_from_tools(
+                {**verdict, "material_quality": raw.get("material_quality")}, tool_results,
+                set(rule["precheck_material_keys"]),
+            )
         # DONE 表示本条模型执行形成结果，不代表业务通过；材料不足也必须保存真实原因。
         return verdict, LOOP_DONE, [{"kind": "BUSINESS_DATA_MISSING", "message": item} for item in raw["missing_items"]]
 

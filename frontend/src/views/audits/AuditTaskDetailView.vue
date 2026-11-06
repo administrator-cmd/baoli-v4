@@ -90,7 +90,7 @@ const {
   upload: uploadMaterial,
   remove: removeDocument,
   reset: resetMaterialActions,
-} = useMaterialActions({ taskNo, run, refresh: refreshTask, onOperationAccepted: trackOperation });
+} = useMaterialActions({ taskNo, run, refresh: refreshTask });
 
 const risks = ref<RiskList | null>(null);
 const risksError = ref<string | null>(null);
@@ -107,11 +107,13 @@ const tab = ref<DetailTab>("materials");
 /** 字段/规则页的筛选：由顶栏统计入口设置，页内改选后同步回来。 */
 const fieldFilter = ref("ALL");
 const ruleFilter = ref("ALL");
+const materialFilter = ref<"ALL" | "ATTENTION">("ALL");
 const fieldResultsPanel = ref<InstanceType<typeof AuditFieldResults> | null>(null);
 const ruleResultsPanel = ref<InstanceType<typeof AuditRuleResults> | null>(null);
 watch(taskNo, () => {
   fieldFilter.value = "ALL";
   ruleFilter.value = "ALL";
+  materialFilter.value = "ALL";
 });
 const loadingTask = ref(false);
 const correctionField = ref<AuditField | null>(null);
@@ -213,6 +215,19 @@ const uploadedDocumentCount = computed(() => task.value?.documents.filter((docum
 const missingRequiredMaterials = computed(
   () => task.value?.documents.filter((document) => document.required && !document.filename) ?? [],
 );
+const qualityStoppedMaterials = computed(() => task.value?.documents.filter(
+  (document) => document.filename && document.quality_precheck?.blocked,
+) ?? []);
+const qualityAbnormalCount = computed(() => qualityStoppedMaterials.value.filter(
+  (document) => document.quality_precheck?.status === "ABNORMAL",
+).length);
+const qualityUncertainCount = computed(() => qualityStoppedMaterials.value.length - qualityAbnormalCount.value);
+const qualityPassedCount = computed(() => task.value?.documents.filter(
+  (document) => document.filename && document.quality_precheck?.status === "PASSED",
+).length ?? 0);
+const qualityRunningCount = computed(() => task.value?.documents.filter(
+  (document) => document.filename && document.quality_precheck?.status === "RUNNING",
+).length ?? 0);
 const extractionFinished = computed(
   () =>
     task.value?.nodes.some(
@@ -369,6 +384,8 @@ const materialArtifactIssues = computed<MaterialArtifactIssue[]>(() => {
   const operationRunning = taskOperationActive.value;
   const issues: MaterialArtifactIssue[] = [];
   for (const document of current.documents) {
+    // 尚未放行的文件先走质量检查，不能用旧产物的失败引导用户绕过前置检查。
+    if (document.quality_precheck?.processing_allowed === false) continue;
     for (const [artifactType, artifact] of Object.entries(document.artifacts ?? {})) {
       if (artifact.status === "FAILED") {
         issues.push({ document, artifactType, message: artifact.message });
@@ -393,6 +410,17 @@ const materialArtifactIssues = computed<MaterialArtifactIssue[]>(() => {
   }
   return issues;
 });
+
+const materialAttentionDocuments = computed(() => {
+  const technicalIssues = new Set(materialArtifactIssues.value.map((item) => item.document.document_no));
+  return task.value?.documents.filter((document) => (
+    (document.required && !document.filename) || document.quality_precheck?.blocked
+    || ["ABNORMAL", "EVIDENCE_INSUFFICIENT"].includes(document.quality_precheck?.status ?? "")
+    || technicalIssues.has(document.document_no)
+  )) ?? [];
+});
+const visibleDocuments = computed(() => materialFilter.value === "ATTENTION"
+  ? materialAttentionDocuments.value : task.value?.documents ?? []);
 
 const prerequisites = computed(() => {
   if (!task.value) {
@@ -443,7 +471,8 @@ const resumeHint = computed(() => {
   if (rerunPending) parts.push(`补跑 ${rerunPending} 项未完成规则`);
   if (dependent) parts.push(`重算 ${dependent} 项受依赖影响的结果`);
   if (waitingReview) parts.push(`另有 ${waitingReview} 项要在字段核对确认后才执行`);
-  const text = `继续执行：${parts.join("，")}。`;
+  const text = `继续执行：${parts.join("，")}。${qualityStoppedMaterials.value.length
+    ? '已停止的文件仍受质量限制，继续执行不会放行这些文件；请先查看质量问题。' : ''}`;
   return state.channel_failure?.result_unknown
     ? `${text}上一次模型请求结果未知，可能已送达供应商，继续执行可能再次产生费用。`
     : text;
@@ -513,6 +542,20 @@ const primaryAction = computed<PrimaryAction>(() => {
         ? uploadBlockedReason.value
         : `「${first.document.material_name}」处理未完成：${first.message}`,
       loading: false,
+    };
+  }
+  if (qualityStoppedMaterials.value.length
+    && task.value.current_node.failure_code === "AUDIT_RULE_EXECUTION_INCOMPLETE") {
+    return {
+      label: "查看质量问题",
+      run: async () => {
+        await setTab("materials");
+        if (tab.value !== "materials") return;
+        materialFilter.value = "ATTENTION";
+        const first = qualityStoppedMaterials.value[0];
+        if (first) openProcessingDialog(first);
+      },
+      disabled: false, reason: null, loading: false,
     };
   }
   if (resumableExecutionId.value !== null) {
@@ -610,6 +653,18 @@ const blockers = computed<BlockerItem[]>(() => {
       tabLabel: "去处理材料",
     });
   }
+  if (qualityStoppedMaterials.value.length) {
+    const counts = [
+      qualityAbnormalCount.value ? `${qualityAbnormalCount.value} 份不合格` : '',
+      qualityUncertainCount.value ? `${qualityUncertainCount.value} 份无法判定` : '',
+    ].filter(Boolean).join('，');
+    items.push({
+      tone: qualityAbnormalCount.value ? "error" : "warning",
+      title: `${qualityStoppedMaterials.value.length} 份文件已停止后续处理（${counts}）`,
+      description: "请在材料明细中查看检查依据，处理问题或替换文件后重新审核。其他可继续的材料仍按流程执行；直接重试不会解除质量限制。",
+      tab: "materials", tabLabel: "查看质量问题",
+    });
+  }
   if (task.value.status === "FAILED") {
     items.push({
       tone: "error",
@@ -619,10 +674,14 @@ const blockers = computed<BlockerItem[]>(() => {
       tabLabel: "查看失败原因",
     });
   } else if (task.value.current_node.failure_message) {
+    const qualityLimited = qualityStoppedMaterials.value.length > 0
+      && task.value.current_node.failure_code === "AUDIT_RULE_EXECUTION_INCOMPLETE";
     items.push({
-      tone: "error",
-      title: `上次执行失败：${task.value.current_node.failure_message}`,
-      description: "节点执行失败不是业务结论，需要按失败原因处理后重新执行。",
+      tone: qualityLimited ? "warning" : "error",
+      title: qualityLimited ? "本批次还有未完成的规则" : "上次执行失败",
+      description: qualityLimited
+        ? `${task.value.current_node.failure_message}。其中受质量限制的规则，需先处理对应文件的问题；其他原因请查看执行记录。`
+        : `${task.value.current_node.failure_message}。需要按失败原因处理后重新执行。`,
       tab: "executions",
       tabLabel: "查看执行记录",
     });
@@ -672,6 +731,12 @@ const blockers = computed<BlockerItem[]>(() => {
     });
   }
   return items;
+});
+
+/** 上方已展示的失败原因只保留一份，其他操作的独立报错仍在进度面板展示。 */
+const operationFailureInNotice = computed(() => {
+  const message = operation.value?.failure_message;
+  return Boolean(message && blockers.value.some((item) => item.description.includes(message)));
 });
 
 /* 页签与 URL */
@@ -761,18 +826,10 @@ async function openRuleFilter(value: string): Promise<void> {
   await nextTick();
   ruleResultsPanel.value?.applyFilter(value);
 }
-const reportDownloadUrl = computed(() => {
-  if (!task.value || !report.value?.content || !report.value.report_generated || !report.value.current) return null;
-  return apiFileUrl(`/audit-tasks/${task.value.task_no}/reports/download?report_no=${encodeURIComponent(report.value.report_no ?? '')}`);
-});
-
-/** 全量重跑入口：存在可续跑批次时不提供，避免失败后的恢复被悄悄变成全部重新执行。 */
-const fullRerunOperation = computed(() => {
-  if (!task.value) return false;
-  if (operation.value?.status !== "FAILED" && operation.value?.status !== "INTERRUPTED") return false;
-  return (lastOperationType.value === "NODE_EXECUTE" || lastOperationType.value === "NODE_RESUME")
-    && resumableExecutionId.value === null && canExecuteNode.value;
-});
+function reportDownloadUrl(reportNo: string): string {
+  if (!task.value) return "";
+  return apiFileUrl(`/audit-tasks/${task.value.task_no}/reports/download?report_no=${encodeURIComponent(reportNo)}`);
+}
 
 function applyTask(auditTask: AuditTaskView): void {
   task.value = auditTask;
@@ -849,7 +906,8 @@ async function loadReport(currentTaskNo: string, token: number, reportNo?: strin
     report.value = value;
   } catch (error) {
     if (stale()) return;
-    report.value = null;
+    // 切换列表中的某份报告失败时保留已加载的报告清单，让弹窗显示读取失败原因并可关闭重试。
+    if (reportNo === undefined) report.value = null;
     reportError.value = error instanceof Error ? error.message : "未知原因";
   } finally {
     if (!stale()) reportLoading.value = false;
@@ -1144,21 +1202,6 @@ async function requestFullRerun(): Promise<void> {
   await executeCurrentNode();
 }
 
-async function retryOperation(operationType: string): Promise<void> {
-  // 有可续跑批次时，失败后的恢复操作同样是继续执行：不能因为操作类型是 NODE_EXECUTE
-  // 就悄悄重跑全部规则。只有没有可续跑批次时才给全量重跑入口。
-  if (operationType === "NODE_EXECUTE" || operationType === "NODE_RESUME" || operationType === "FIELD_REVIEW_CONFIRM") {
-    if (resumableExecutionId.value !== null) {
-      await resumeInterrupted();
-      return;
-    }
-    await requestFullRerun();
-    return;
-  }
-  formMessage.value = "该后台操作没有可用的重试入口，请用「再次查询」查看服务端真实状态。";
-}
-
-
 /* 字段纠错与证据 */
 function openCorrection(field: AuditField): void {
   correctionResult.value = null;
@@ -1317,9 +1360,8 @@ watch(
 
         <OperationPanel v-if="operation && (watching || operation.status !== 'SUCCEEDED' || operation.failure_code || operation.failure_message)"
           class="block-gap-sm" compact :operation="operation" :watching="watching" :label="operation.operation_type === 'DOCUMENT_CLASSIFY' ? '文件已保存，自动校验' : '执行进度'"
-          :poll-seconds="pollIntervalSeconds" :can-retry="fullRerunOperation" retry-label="全部重新执行"
-          :can-resume="canResumeExecution && !atFieldReview"
-          @requery="requery()" @retry="retryOperation" @resume="resumeInterrupted" />
+          :poll-seconds="pollIntervalSeconds" :show-failure-alert="!operationFailureInNotice"
+          @requery="requery()" />
       </template>
     </div>
 
@@ -1339,17 +1381,33 @@ watch(
             </div>
 
             <el-alert v-if="uploadBlockedReason" class="block-gap-sm" type="info" show-icon :closable="false" :title="uploadBlockedReason">
-              <div>同一时间只处理一份材料；该操作结束后即可继续上传其他材料。</div>
+              <div>当前操作结束后可继续上传、替换或移除文件。</div>
             </el-alert>
 
+            <template v-if="task.documents.length">
+              <div class="material-toolbar block-gap-sm">
+                <div class="material-filters" role="group" aria-label="材料筛选">
+                  <el-button size="small" :type="materialFilter === 'ALL' ? 'primary' : 'default'" :plain="materialFilter !== 'ALL'" :aria-pressed="materialFilter === 'ALL'" @click="materialFilter = 'ALL'">全部材料 {{ task.documents.length }}</el-button>
+                  <el-button size="small" :type="materialFilter === 'ATTENTION' ? 'primary' : 'default'" :plain="materialFilter !== 'ATTENTION'" :aria-pressed="materialFilter === 'ATTENTION'" @click="materialFilter = 'ATTENTION'">需关注 {{ materialAttentionDocuments.length }}</el-button>
+                </div>
+                <div class="material-counts" aria-live="polite">
+                  <span>已上传 {{ uploadedDocumentCount }} / {{ task.documents.length }}</span>
+                  <span>前置通过 {{ qualityPassedCount }}</span>
+                  <span v-if="qualityRunningCount">检查中 {{ qualityRunningCount }}</span>
+                  <span v-if="qualityStoppedMaterials.length" class="text-danger">已停止 {{ qualityStoppedMaterials.length }}</span>
+                </div>
+              </div>
+              <p class="text-hint">上传文件后开始审核，先检查前置质量，再处理可继续的文件。查看明细可了解判断依据及处理进度。</p>
+            </template>
             <div v-if="task.documents.length" class="material-table-scroll block-gap-sm">
               <table class="material-table">
+                <caption class="material-table-caption">任务材料、前置质量与处理状态</caption>
                 <thead>
-                  <tr><th scope="col">材料</th><th scope="col">当前文件</th><th scope="col">处理状态</th><th scope="col">上传类型</th><th scope="col">操作</th></tr>
+                  <tr><th scope="col">材料</th><th scope="col">当前文件</th><th scope="col">前置质量</th><th scope="col">材料处理</th><th scope="col">上传类型</th><th scope="col">操作</th></tr>
                 </thead>
                 <tbody>
                   <TaskMaterialRow
-                    v-for="document in task.documents"
+                    v-for="document in visibleDocuments"
                     :key="document.document_no"
                     :document="document"
                     :catalog="materialTypeCatalog"
@@ -1363,6 +1421,7 @@ watch(
                     @remove="removeDocument"
                     @inspect-processing="openProcessingDialog"
                   />
+                  <tr v-if="!visibleDocuments.length"><td colspan="6" class="text-muted">当前没有需要关注的材料；可切换到“全部材料”查看。</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1414,7 +1473,7 @@ watch(
           <el-tab-pane label="报告" name="report">
             <AuditReportPanel
               :report="report"
-              :download-url="reportDownloadUrl"
+              :download-url-for="reportDownloadUrl"
               :running="watching"
               :loading="reportLoading"
               :error="reportError"
@@ -1532,7 +1591,8 @@ watch(
 
 .material-table {
   width: 100%;
-  min-width: 940px;
+  min-width: 1080px;
+  table-layout: fixed;
   border-collapse: collapse;
   text-align: center;
   font-size: 13px;
@@ -1551,11 +1611,17 @@ watch(
   background: var(--el-fill-color-light);
 }
 
-.material-table th:nth-child(1) { width: 16%; }
-.material-table th:nth-child(2) { width: 20%; }
+.material-table th:nth-child(1) { width: 14%; }
+.material-table th:nth-child(2) { width: 17%; }
 .material-table th:nth-child(3) { width: 19%; }
-.material-table th:nth-child(4) { width: 21%; }
-.material-table th:nth-child(5) { width: 24%; }
+.material-table th:nth-child(4) { width: 18%; }
+.material-table th:nth-child(5) { width: 19%; }
+.material-table th:nth-child(6) { width: 13%; }
+.material-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.material-filters, .material-counts { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.material-filters :deep(.el-button + .el-button) { margin-left: 0; }
+.material-counts { color: var(--el-text-color-secondary); font-size: 13px; }
+.material-table-caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
 
 

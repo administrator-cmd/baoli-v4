@@ -181,6 +181,8 @@ export function factOriginLabel(origin: string | null | undefined): string {
 
 /** 后台操作阶段：区分已保存未执行 / 外部已受理 / 结果未知 / 业务已提交但图未推进。 */
 const operationPhaseLabels: Record<string, string> = {
+  COMMAND_ACCEPTED: "已受理",
+  LLM_REQUEST: "请求模型",
   EXTERNAL_SUBMITTED: "外部服务已受理",
   RESULT_UNKNOWN: "外部结果未知",
   BUSINESS_COMMITTED: "业务结果已提交",
@@ -269,12 +271,74 @@ const operationTypeLabels: Record<string, string> = {
   REVISE_FROM_VERSION: "基于版本创建修订",
   APPLY_DRAFT: "导入写入场景草稿",
   IMPORT_APPLY: "规则库写入场景草稿",
+  RULEBOOK_GENERATE: "生成规则库",
+  REPORT_TEMPLATE_ANALYZE: "分析报告模板",
+  RULEBOOK_REVISE: "AI 修改规则库",
   TASK_CREATE: "创建审核任务",
   FIELD_CORRECTION: "字段纠错",
   REPORT_REMARK: "编辑报告备注",
   REPORT_ARCHIVE: "归档报告",
   REPORT_UNARCHIVE: "取消归档",
+  TASK_COPY: "复制审核任务",
+  ABORT: "中止导入",
 };
+
+/**
+ * 操作日志筛选只列当前后端实际写入的操作类型。
+ *
+ * 标签表还保留少量历史/展示兼容文案，不能把它们全部当成筛选值，否则
+ * COPY、FIELD_CORRECTION 等没有生产者的选项会永远返回空结果。
+ */
+const producedOperationTypeValues = [
+  "IMPORT_CONVERT",
+  "NODE_EXECUTE",
+  "NODE_RESUME",
+  "FIELD_REVIEW_CONFIRM",
+  "DOCUMENT_CLASSIFY",
+  "DOCUMENT_ARTIFACT_RETRY",
+  "OCR_DOCUMENT_RETRY",
+  "CREATE",
+  "UPDATE",
+  "ENABLE",
+  "DISABLE",
+  "DELETE",
+  "RESTORE",
+  "PUBLISH",
+  "SAVE",
+  "DRAFT_MATERIAL_CREATE",
+  "DRAFT_MATERIAL_UPDATE",
+  "DRAFT_MATERIAL_DELETE",
+  "DRAFT_FIELD_CREATE",
+  "DRAFT_FIELD_UPDATE",
+  "DRAFT_FIELD_DELETE",
+  "DRAFT_RULE_CREATE",
+  "DRAFT_RULE_UPDATE",
+  "DRAFT_RULE_ENABLE",
+  "DRAFT_RULE_DISABLE",
+  "DRAFT_RULE_DELETE",
+  "DRAFT_CALCULATION_CREATE",
+  "DRAFT_CALCULATION_UPDATE",
+  "DRAFT_CALCULATION_DELETE",
+  "DRAFT_SECTION_CREATE",
+  "DRAFT_SECTION_UPDATE",
+  "DRAFT_SECTION_DELETE",
+  "APPLY_DRAFT",
+  "IMPORT_APPLY",
+  "RULEBOOK_GENERATE",
+  "REPORT_TEMPLATE_ANALYZE",
+  "RULEBOOK_REVISE",
+  "TASK_CREATE",
+  "REPORT_REMARK",
+  "REPORT_ARCHIVE",
+  "REPORT_UNARCHIVE",
+  "TASK_COPY",
+  "ABORT",
+] as const;
+
+export const operationTypeFilterOptions = producedOperationTypeValues.map((value) => ({
+  value,
+  label: operationTypeLabels[value],
+}));
 
 export function operationTypeLabel(operationType: string | null | undefined): string {
   return operationType ? operationTypeLabels[operationType] ?? "后台操作" : "后台操作";
@@ -286,8 +350,13 @@ const objectTypeLabels: Record<string, string> = {
   AUDIT_PLAN: "审核方案",
   AUDIT_TASK: "审核任务",
   IMPORT_JOB: "规则库导入",
+  RULEBOOK_GENERATION: "AI生成规则库",
+  REPORT_TEMPLATE: "报告模板",
   AUDIT_REPORT: "审核报告",
 };
+
+/** 对象类型筛选与展示标签共用同一份来源。 */
+export const objectTypeFilterOptions = Object.entries(objectTypeLabels).map(([value, label]) => ({ value, label }));
 
 export function objectTypeLabel(objectType: string | null | undefined): string {
   return objectType ? objectTypeLabels[objectType] ?? objectType : "未知对象";

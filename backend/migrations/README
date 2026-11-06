@@ -1,6 +1,6 @@
 # 数据库迁移
 
-`0001_baseline` 是历史起点，当前 head 为 `0003_report_and_attempt_backfill`。
+`0001_baseline` 是历史起点，当前 head 为 `0009_report_template_upload_key`。
 `backend/resource/schema.sql` 是当前完整结构，与 head 保持同步。
 基线本身不建表：它只把已有结构登记为迁移起点。
 
@@ -12,8 +12,7 @@ python -m alembic current
 python -m alembic upgrade head
 ```
 
-停在 `0001_baseline` 的库会依次应用 `0002_schema_cleanup` 与
-`0003_report_and_attempt_backfill`；已在 head 的库无需操作。
+停在旧版本的库会按版本顺序应用后续迁移；已在 head 的库无需操作。
 迁移前会检查孤立业务编号与空字段值。
 
 ## 空数据库

@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.modules.imports.job.crud import ImportsJobCRUD
 from app.modules.imports.job.model import ImportJob
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD
@@ -17,9 +18,6 @@ from app.modules.system.operation.service.operation_types import OBJECT_IMPORT_J
 from app.services.shared.storage import resolve_storage_path
 
 logger = logging.getLogger(__name__)
-
-ACTIVE_OPERATION_STATUSES = ("PENDING", "RUNNING")
-
 
 def _stage_tree(relative_path: str) -> tuple[Path, Path] | None:
     """把作业目录改名到同根的暂存位置；不存在时返回 None。

@@ -44,7 +44,7 @@ from app.modules.system.operation.schema import OperationAcceptedResponse
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.schema.query.lists import ImportJobListQueryParam
 from app.schema.query.pagination import PaginationQueryParam
-from app.services.shared.storage import resolve_storage_path
+from app.services.shared.storage import resolve_storage_path, rulebook_media_type
 
 router = APIRouter(prefix="/import-jobs", tags=["规则库导入"])
 
@@ -114,14 +114,6 @@ def create_job(
         return ok(ImportJobResponse.model_validate(ImportsJobQueryService(db).import_job_view( job)), request)
 
 
-# 规则库文件只接受 Excel；按扩展名给出真实的下载类型，未知扩展名按二进制流返回。
-_RULEBOOK_MEDIA_TYPES = {
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
-    ".xls": "application/vnd.ms-excel",
-}
-
-
 @router.get("/{job_no}/file")
 def download_job_file(job_no: str, db: Session = Depends(get_db)) -> FileResponse:
     """下载该导入作业当时上传的原始规则库 Excel。
@@ -137,7 +129,7 @@ def download_job_file(job_no: str, db: Session = Depends(get_db)) -> FileRespons
         )
     return FileResponse(
         path,
-        media_type=_RULEBOOK_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+        media_type=rulebook_media_type(path),
         filename=job.source_filename,
     )
 

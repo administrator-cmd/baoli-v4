@@ -22,6 +22,7 @@ const artifactStatuses: Record<string, { label: string; tone: StatusTone }> = {
   READY: { label: "已就绪", tone: "success" },
   FAILED: { label: "处理失败", tone: "danger" },
   INVALIDATED: { label: "已失效", tone: "neutral" },
+  SKIPPED: { label: "已停止处理", tone: "warning" },
 };
 
 export function processingStatusLabel(artifact: ProcessingArtifact): string {
@@ -40,9 +41,9 @@ export function processingStatusTone(artifact: ProcessingArtifact): StatusTone {
 
 export function processingArtifactLabel(artifactType: ProcessingArtifact["artifact_type"]): string {
   return {
-    MATERIAL_CLASSIFY: "8018 文件校验",
-    DOCUMENT_PARSE: "8010 去除印章",
-    OCR: "PaddleOCR 正文识别",
-    SEAL: "8003 印章识别",
+    MATERIAL_CLASSIFY: "材料类型识别",
+    DOCUMENT_PARSE: "去除印章",
+    OCR: "正文识别",
+    SEAL: "印章识别",
   }[artifactType];
 }

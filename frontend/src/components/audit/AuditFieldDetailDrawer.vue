@@ -30,6 +30,8 @@ const emit = defineEmits<{
 }>();
 
 const mode = computed<FieldMode>(() => (props.field ? fieldMode(props.field) : "NOT_RUN"));
+const declaredScope = computed(() => props.field ? declaredScopeText(props.field) : "");
+const recognizedScope = computed(() => props.field ? recognizedScopeText(props.field) : "");
 const reason = computed(() => {
   const field = props.field;
   if (!field) return "";
@@ -105,24 +107,31 @@ function sourceFilesText(field: AuditFieldView): string {
   return fieldSourceFiles(field).join("、") || "未记录来源文件";
 }
 
-/** 配置声明与正文实际识别到的期间/单位分开显示；未识别不写成“不适用”。 */
+const emptyScopeValues = new Set(["NOT_APPLICABLE", "N/A", "不适用", "未识别", "未声明", "—", "-"]);
+
+/** 只整理展示文本；缺失或不适用的元信息不占一行，识别值与配置要求仍分开。 */
+function scopePart(label: string, value: string | null | undefined, format = (text: string) => text): string | null {
+  const text = value?.trim();
+  return text && !emptyScopeValues.has(text.toUpperCase()) ? `${label} ${format(text)}` : null;
+}
+
 function declaredScopeText(field: AuditFieldView): string {
-  const parts: string[] = [];
-  parts.push(`期间 ${periodScopeLabel(field.period_scope)}`);
-  parts.push(`报表口径 ${statementScopeLabel(field.statement_scope)}`);
-  if (field.entity_scope && field.entity_scope !== "SELF") parts.push(`主体 ${field.entity_scope}`);
-  if (field.unit) parts.push(`单位 ${field.unit}`);
-  if (field.currency) parts.push(`币种 ${field.currency}`);
-  return parts.join(" · ");
+  return [
+    scopePart("期间", field.period_scope, periodScopeLabel),
+    scopePart("报表口径", field.statement_scope, statementScopeLabel),
+    scopePart("主体", field.entity_scope === "SELF" ? null : field.entity_scope),
+    scopePart("单位", field.unit),
+    scopePart("币种", field.currency),
+  ].filter(Boolean).join(" · ");
 }
 
 function recognizedScopeText(field: AuditFieldView): string {
-  const parts: string[] = [];
-  if (field.actual_period_scope) parts.push(`期间 ${field.actual_period_scope}`);
-  if (field.actual_statement_scope) parts.push(`报表口径 ${field.actual_statement_scope}`);
-  if (field.actual_entity_scope) parts.push(`主体 ${field.actual_entity_scope}`);
-  if (field.actual_unit) parts.push(`单位 ${field.actual_unit}`);
-  return parts.join(" · ") || "未识别";
+  return [
+    scopePart("期间", field.actual_period_scope),
+    scopePart("报表口径", field.actual_statement_scope),
+    scopePart("主体", field.actual_entity_scope === "SELF" ? null : field.actual_entity_scope),
+    scopePart("单位", field.actual_unit),
+  ].filter(Boolean).join(" · ");
 }
 </script>
 
@@ -188,10 +197,14 @@ function recognizedScopeText(field: AuditFieldView): string {
           </template>
           <dt>来源文件</dt>
           <dd>{{ sourceFilesText(field) }}</dd>
-          <dt>识别口径</dt>
-          <dd>{{ recognizedScopeText(field) }}</dd>
-          <dt>配置口径</dt>
-          <dd>{{ declaredScopeText(field) }}</dd>
+          <template v-if="recognizedScope">
+            <dt>识别口径</dt>
+            <dd>{{ recognizedScope }}</dd>
+          </template>
+          <template v-if="declaredScope">
+            <dt>配置口径</dt>
+            <dd>{{ declaredScope }}</dd>
+          </template>
           <template v-if="field.manual_review?.business_note">
             <dt>人工说明</dt>
             <dd>{{ field.manual_review.business_note }}</dd>

@@ -27,6 +27,8 @@ class AuditTaskCreationService:
         remark: str | None,
         task_no: str | None = None,
         expected_scope_hash: str | None = None,
+        report_generation_mode: str = "RULES",
+        report_template_no: str | None = None,
     ) -> AuditTask:
         """使用审核方案创建审核任务。这是新任务的唯一创建服务。
 
@@ -129,6 +131,34 @@ class AuditTaskCreationService:
                   # 方案身份随任务冻结：方案后来改名或删除都不影响任务展示与幂等回放。
                   "plan_code": plan.plan_code, "plan_name": plan.plan_name,
                   "plan_scope_hash": plan.scope_hash}
+        if report_generation_mode == "TEMPLATE":
+            from app.modules.audit.report_template.crud import ReportTemplateCRUD
+            from app.modules.audit.report_template.service.analysis import validate_style_profile
+
+            template = ReportTemplateCRUD(self.db).by_no(str(report_template_no or ""))
+            if template is None:
+                raise BusinessError("REPORT_TEMPLATE_NOT_FOUND", "所选报告模板不存在", status_code=404)
+            if template.status != "READY":
+                raise BusinessError("REPORT_TEMPLATE_NOT_READY", "所选报告模板尚未完成风格分析", status_code=409)
+            try:
+                style_profile = validate_style_profile(template.style_profile_json)
+            except BusinessError as exc:
+                raise BusinessError(
+                    "REPORT_TEMPLATE_NOT_READY", "所选报告模板档案无效，请重新分析或修复档案", status_code=409,
+                ) from exc
+            # 任务冻结创建时的风格档案，模板后续修改不会影响已创建任务。
+            manifest = deepcopy(manifest)
+            manifest["report_generation"] = {
+                "mode": "TEMPLATE",
+                "template_no": template.template_no,
+                "template_name": template.name,
+                "style_profile": style_profile,
+            }
+        elif report_generation_mode == "RULES":
+            manifest = deepcopy(manifest)
+            manifest["report_generation"] = {"mode": "RULES"}
+        else:
+            raise BusinessError("REPORT_GENERATION_MODE_INVALID", "报告生成方式无效", status_code=422)
         first_node = execution_container_of(manifest)
         task = AuditTask(
             task_no=task_no or public_no("TASK"),
@@ -194,6 +224,9 @@ class AuditTaskCreationService:
             )
         # 不在这里提交：由调用方的 finish_task_command 把任务与命令成功状态同一次提交，
         # 避免任务已落库、命令仍是 PENDING 的中间态。
+        report_generation = source.manifest_json.get("report_generation") or {}
         return self.create_task_from_plan(
             plan, task_name=task_name, remark=source.remark, task_no=new_task_no,
+            report_generation_mode=str(report_generation.get("mode") or "RULES"),
+            report_template_no=report_generation.get("template_no"),
         )

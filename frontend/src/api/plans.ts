@@ -115,6 +115,8 @@ export function createTaskFromPlan(
     /** 页面预览到的方案范围指纹；服务端锁定方案后比对，不一致时拒绝创建。 */
     expected_scope_hash: string;
     idempotency_key: string;
+    report_generation_mode?: "RULES" | "TEMPLATE";
+    report_template_no?: string | null;
   },
 ): Promise<TaskCreatedResult> {
   return request<TaskCreatedResult>(`/plans/${encodeURIComponent(planCode)}/tasks`, {

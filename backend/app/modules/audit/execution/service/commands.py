@@ -32,6 +32,7 @@ from app.modules.audit.execution.dto import ExecuteNodeRequest
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import fail_running_execution, raise_graph_error
 from app.modules.audit.execution.service.flow.runner import audit_runner
+from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
 from app.modules.audit.execution.service.state import _scenario_nodes
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.dto import FieldCorrectionRequest, FieldReviewCorrection, FieldReviewSaveRequest
@@ -202,8 +203,11 @@ class AuditExecutionCommandsService:
         它们读到的就是核对后的有效值。
         """
         task = AuditTaskLookupService(self.db).task_or_404( task_no, lock=True)
-        self._assert_field_review_editable( task, request.input_revision)
+        execution = self._assert_field_review_editable( task, request.input_revision)
+        previous_revision = int(task.input_revision)
         applied = field_review_service.AuditFieldReviewService(self.db).apply_corrections(task, list(request.corrections))
+        if applied:
+            AuditMaterialPrecheckService(self.db).retain_after_field_review(task, execution, previous_revision=previous_revision)
         AuditExecutionCRUD(self.db).flush()
         missing = field_review_service.AuditFieldReviewService(self.db).missing_fields(task)
         return {
@@ -251,8 +255,11 @@ class AuditExecutionCommandsService:
                 details={"execution_id": execution.id, "status": execution.status},
             )
         reviewed_extraction_keys(execution.result_json or {}, waiting=True)
+        previous_revision = int(task.input_revision)
         applied = field_review_service.AuditFieldReviewService(self.db).apply_corrections(task, corrections, operation_no=operation_no,
         )
+        if applied:
+            AuditMaterialPrecheckService(self.db).retain_after_field_review(task, execution, previous_revision=previous_revision)
         confirmation = field_review_service.AuditFieldReviewService(self.db).record_confirmation(task, execution, note=note, operation_no=operation_no,
         )
         commit_transaction(self.db)
@@ -450,6 +457,8 @@ class AuditExecutionCommandsService:
         upload = current_upload(self.db, document)
         if upload is None:
             raise BusinessError("OCR_UPLOAD_MISSING", "该材料位没有当前上传文件", status_code=409)
+        from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
+        AuditMaterialPrecheckService(self.db).assert_processing_allowed(task, upload)
         artifact = AuditArtifactArtifactsService(self.db)._artifact_for_upload( upload, "OCR")
         if (artifact.artifact_no if artifact else None) != artifact_no:
             raise BusinessError("OCR_ARTIFACT_STALE", "OCR 作业记录已变化，请刷新后重试", status_code=409)

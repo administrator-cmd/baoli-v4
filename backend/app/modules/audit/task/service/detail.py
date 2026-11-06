@@ -259,6 +259,8 @@ class AuditTaskDetailService:
         # 历史批次仍保留在执行记录中追溯。
         current_execution_ids = {item.id for item in executions.values()}
         rule_results = crud.AuditTaskCRUD(self.db).rule_results(task.id, current_execution_ids)
+        # 质量放行仍以当前文件的已保存结论为准；续跑范围不能将其抹成「尚未检查」。
+        quality_rule_results = [item for item in rule_results if (item.result_json or {}).get("material_precheck")]
         # 待重跑的规则写着重跑前的旧结论，与风险、报告同一口径：它不是本轮结果，
         # 不能出现在任务详情里被当成已判定。
         pending_by_execution = pending_rerun_by_execution(self.db, current_execution_ids)
@@ -283,8 +285,21 @@ class AuditTaskDetailService:
         scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
         scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
         current_execution = executions.get(current_node_definition["node_code"])
+        from app.domain.material_precheck import material_blocks
+        from app.modules.audit.task.service.processing import MATERIAL_ARTIFACT_TYPES, quality_block_message
+        quality_blocks = material_blocks(current_execution.result_json if current_execution else None)
+        precheck_state = (current_execution.result_json or {}).get("material_precheck") if current_execution else None
+        if precheck_state is None or precheck_state["input_revision"] != task.input_revision:
+            quality_blocks = {}
+        quality_blocks = {key: block for key, block in quality_blocks.items()
+                          if any(upload.id == block["upload_id"] for upload in current_by_document.values())}
+        for block in quality_blocks.values():
+            artifact_summary[block["upload_id"]] = {
+                kind: {"status": "SKIPPED", "artifact_no": None, "deadline_at": None,
+                       "message": quality_block_message(block)} for kind in MATERIAL_ARTIFACT_TYPES
+            }
         # 执行计划在本请求内只编译一次：续跑范围、字段核对边界与页面数字都取自它。
-        plan_entries = evaluation_plan(task, task.current_node)
+        plan_entries = evaluation_plan(task, task.current_node, execution=current_execution)
         # 当前字段事实同样只配对一次：续跑范围、核对状态与字段视图共用这一份。
         current_field_pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
         # 能否原地继续、继续时保留多少项、重跑多少项，统一由 resume 模块判断；
@@ -316,6 +331,7 @@ class AuditTaskDetailService:
         current_node = {
             **current_node_definition,
             "status": current_execution.status if current_execution else "CURRENT",
+            "failure_code": current_execution.failure_code if current_execution else None,
             "failure_message": self._execution_failure_message(current_execution),
             "resumable_execution_id": resume["execution_id"],
             "resume": resume,
@@ -329,6 +345,14 @@ class AuditTaskDetailService:
                           for item in current_field_facts.values()}
         rule_value_of = {item.id: task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_RULE_RESULT, item.id)
                          for item in rule_results}
+        quality_views = AuditTaskProcessingService(self.db).material_quality_views(
+            task, pairs=pairs, execution=current_execution, plan=plan_entries,
+            rule_results=quality_rule_results,
+            rule_values={item.id: rule_value_of[item.id] if item.id in rule_value_of else
+                         task_value_service.AuditFieldValueStoreService(self.db).value_of(
+                             task, task_value_service.RECORD_RULE_RESULT, item.id)
+                         for item in quality_rule_results},
+        )
         current_fact_value_of = {item.id: task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_TASK_FACT, item.id)
                                  for item in current_task_facts.values()}
         documents_by_material_key = {item.material_key: item for item in documents}
@@ -615,6 +639,7 @@ class AuditTaskDetailService:
                     ),
                     # 该材料位的 8018 识别结论（含置信度）：只作展示，不影响材料状态与后续执行。
                     "material_classify": material_classify.get(item.material_key),
+                    "quality_precheck": quality_views[item.material_key],
                     # 当前上传的四项产物状态；没有产物时为空对象。
                     "artifacts": artifact_summary.get(current_by_document[item.id].id, {}) if item.id in current_by_document else {},
                 }

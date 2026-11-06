@@ -8,7 +8,7 @@ from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.constants.status import TASK_STATUS_READY
+from app.constants.status import TASK_STATUS_COMPLETED, TASK_STATUS_READY, TASK_STATUS_RUNNING
 from app.core.config import get_settings
 from app.core.transactions import after_rollback
 from app.domain.identity import public_no
@@ -25,12 +25,19 @@ from app.modules.audit.task.model import AuditTask
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
 from app.modules.material.document.crud import MaterialDocumentCRUD
 from app.modules.material.document.model import DocumentUpload, TaskDocument
-from app.modules.system.operation.model import BackgroundOperation
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TASK
 from app.services.shared.storage import DOCUMENT_EXTENSIONS, resolve_storage_path, save_upload_sync
 
 logger = logging.getLogger(__name__)
+
+
+def _assert_task_input_editable(task: AuditTask, *, action: str) -> None:
+    """已完成任务保留原报告；失败任务可修订输入并回到起点重新执行。"""
+    if task.status == TASK_STATUS_COMPLETED:
+        raise BusinessError("TASK_DOCUMENT_LOCKED", f"已完成的任务不能{action}", status_code=409)
+    if task.status == TASK_STATUS_RUNNING:
+        raise BusinessError("AUDIT_TASK_RUNNING", f"任务正在执行当前节点，不能{action}", status_code=409)
 
 
 class AuditTaskDocumentsService:
@@ -141,7 +148,7 @@ class AuditTaskDocumentsService:
         *,
         material_type: str,
         replace: bool = False,
-    ) -> tuple[TaskDocument, DocumentUpload, dict[str, Any] | None, BackgroundOperation]:
+    ) -> tuple[TaskDocument, DocumentUpload, dict[str, Any] | None]:
         """上传或替换材料文件：落库、失效下游结果，并返回本次输入修订的真实影响范围。
 
         `material_type` 是用户本次上传时从 8018 支持目录中选择的材料类型。它随本次上传
@@ -155,10 +162,7 @@ class AuditTaskDocumentsService:
         document = MaterialDocumentCRUD(self.db).by_task_and_no(task.id, document_no)
         if not document:
             raise BusinessError("TASK_DOCUMENT_NOT_FOUND", "任务材料位不存在", status_code=404)
-        if task.status in {"COMPLETED", "FAILED"}:
-            raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能替换材料")
-        if task.status == "RUNNING":
-            raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能替换材料", status_code=409)
+        _assert_task_input_editable(task, action="替换材料")
         previous_upload = current_upload(self.db, document)
         previous_upload_id = previous_upload.id if previous_upload else None
         if previous_upload_id and not replace:
@@ -216,7 +220,7 @@ class AuditTaskDocumentsService:
         MaterialDocumentCRUD(self.db).add(record)
         # 首次上传且任务尚未越过起始节点时没有失效范围；其余情况给出真实影响范围供页面展示。
         impact: dict[str, Any] | None = None
-        if input_changed:
+        if input_changed or task.status == "FAILED":
             # 补传/替换文件是明确的新版本输入：受影响的处理产物、字段事实、后续结果与报告一起失效。
             impact = self._invalidate_for_input_change(
 
@@ -226,10 +230,8 @@ class AuditTaskDocumentsService:
                 action_label="已替换" if previous_upload_id else "已补传此前缺失的",
             )
         document.status = "UPLOADED"
-        # 文件保存、输入失效和分类命令一起提交；活跃命令占位消除提交后的替换/执行竞态。
-        from app.modules.audit.execution.service.operations import AuditExecutionOperationsService
-        operation, _ = AuditExecutionOperationsService(self.db).submit_document_classification(task, record)
-        return document, record, impact, operation
+        # 上传只保存原文件；启动审核后先做质量检查，通过后才调分类及后续服务。
+        return document, record, impact
 
 
     def remove_current_document_file(self, task_no: str,
@@ -237,7 +239,7 @@ class AuditTaskDocumentsService:
     ) -> tuple[TaskDocument, dict[str, Any]]:
         """移除材料位的当前文件（输入修订：旧文件保留历史，依赖结果失效）。
 
-        - 与后台执行互斥；任务已结束或正在执行时拒绝。
+        - 与后台执行互斥；已完成或正在执行时拒绝，失败任务可通过输入修订后重新执行。
         - 没有当前文件时明确报错，不产生任何副作用。
         - 历史上传版本保留为历史，不删除文件；任务回到规则执行等待重新上传。
         """
@@ -249,10 +251,7 @@ class AuditTaskDocumentsService:
         previous_upload = current_upload(self.db, document)
         if previous_upload is None:
             raise BusinessError("TASK_DOCUMENT_NO_CURRENT_FILE", "该材料位没有当前文件，无法移除", status_code=409)
-        if task.status in {"COMPLETED", "FAILED"}:
-            raise BusinessError("TASK_DOCUMENT_LOCKED", "任务已结束，不能移除材料文件", status_code=409)
-        if task.status == "RUNNING":
-            raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行当前节点，不能移除材料文件", status_code=409)
+        _assert_task_input_editable(task, action="移除材料文件")
         previous_upload_id = previous_upload.id
         MaterialDocumentCRUD(self.db).invalidate_upload(previous_upload_id)
         document.status = "WAITING_UPLOAD"

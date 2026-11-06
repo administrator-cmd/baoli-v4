@@ -1,15 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DocumentDetail, DocumentRow } from "@/api/contracts";
 import { uploadTaskDocument } from "@/api/audits";
-import { isOperationActive } from "@/api/http";
 import { getDocument, listDocuments } from "@/api/materials";
 import { usePagedList } from "@/composables/usePagedList";
-import { useOperationTracker } from "@/composables/useOperationTracker";
-import OperationPanel from "@/components/OperationPanel.vue";
 import MaterialTypeSelect from "@/components/audit/MaterialTypeSelect.vue";
 import { formatDate, formatFileSize, statusLabel } from "@/constants/labels";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -53,37 +50,11 @@ const uploadImpact = ref<string | null>(null);
 /** 真实上传进度百分比；上传中由浏览器 XHR 进度事件驱动。 */
 const uploadPercent = ref<number | null>(null);
 const uploadError = ref<string | null>(null);
-const classificationError = ref<string | null>(null);
-const { operation: classificationOperation, watching: classificationWatching, track: trackClassification,
-  requery: requeryClassification, reset: resetClassification } = useOperationTracker();
 let uploadGeneration = 0;
-
-/**
- * 分类校验进行中时，同一任务不能再发起第二次上传：后端按任务互斥，
- * 这里提前禁用，避免用户传完整个文件才收到 409。
- */
-const classificationActive = computed(
-  () => classificationWatching.value || isOperationActive(classificationOperation.value?.status),
-);
-
-/**
- * 校验状态查询失败后，操作是否仍在运行无法确认：按钮保持禁用以免重复提交，
- * 但必须在列表页提供重新查询入口，否则用户只能刷新整页才能恢复上传。
- */
-const classificationQueryFailed = computed(
-  () => classificationError.value !== null && classificationActive.value,
-);
-
-function requeryClassificationStatus(): void {
-  classificationError.value = null;
-  requeryClassification();
-}
 
 function openUpload(row: DocumentRow): void {
   uploadGeneration += 1;
   uploadSaving.value = false;
-  resetClassification();
-  classificationError.value = null;
   uploadRow.value = row;
   uploadFile.value = null;
   uploadMaterialType.value = "";
@@ -102,10 +73,6 @@ function onFileChange(file: { raw?: File }): void {
 async function submitUpload(): Promise<void> {
   if (!uploadRow.value || !uploadFile.value) {
     ElMessage.warning("请选择文件");
-    return;
-  }
-  if (classificationActive.value) {
-    ElMessage.warning("上一份文件仍在自动校验，完成后再上传其他材料");
     return;
   }
   // 材料类型必填：8018 的 doc_type 是严格枚举，没有类型就无法执行材料校验。
@@ -156,17 +123,10 @@ async function submitUpload(): Promise<void> {
   }
   if (token !== uploadGeneration) return;
   uploadPercent.value = 100;
-  uploadImpact.value = uploaded.impact?.description ?? "文件已保存；自动校验状态见下方。";
+  uploadImpact.value = uploaded.impact?.description ?? "文件已保存；启动审核后先检查材料质量，再处理可继续的文件。";
   ElMessage.success(replacing ? "已替换为新的文件版本" : "文件已保存");
   uploadFile.value = null;
   uploadMaterialType.value = "";
-  classificationError.value = null;
-  trackClassification(uploaded.classification_operation, {
-    onFinished: async () => { if (token === uploadGeneration) await list.load(); },
-    onError: (failure) => {
-      if (token === uploadGeneration) classificationError.value = failure instanceof Error ? failure.message : "校验状态查询失败";
-    },
-  });
   await list.load();
 }
 
@@ -227,12 +187,6 @@ onMounted(() => {
     </el-form>
 
 
-    <el-alert v-if="classificationQueryFailed" type="warning" show-icon :closable="false"
-      :title="`文件已保存，但校验状态查询失败：${classificationError}`">
-      <div>上传入口保持禁用，避免同一任务重复提交；请重新查询校验状态。</div>
-      <el-button size="small" @click="requeryClassificationStatus()">重新查询校验状态</el-button>
-    </el-alert>
-
     <el-alert v-if="error" type="error" show-icon :closable="false" :title="`读取失败：${error}`">
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
@@ -275,8 +229,7 @@ onMounted(() => {
       </el-table-column>
       <el-table-column label="操作" width="156" class-name="table-actions" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" :disabled="classificationActive"
-            :title="classificationActive ? '上一份文件仍在自动校验，完成后再上传其他材料' : ''"
+          <el-button link type="primary" size="small" :disabled="uploadSaving"
             @click="openUpload(row)">{{ row.filename ? "替换" : "上传" }}</el-button>
           <el-button link type="primary" size="small" @click="openHistory(row)">历史版本</el-button>
         </template>
@@ -303,12 +256,12 @@ onMounted(() => {
         <el-descriptions-item label="当前文件">{{ uploadRow.filename || "未上传" }}</el-descriptions-item>
       </el-descriptions>
       <div class="block-gap-sm">
-        <el-alert v-if="classificationActive" type="info" show-icon :closable="false"
-          title="上一份文件仍在自动校验；本任务校验完成前不能上传或替换其他材料。" />
+        <el-alert type="info" show-icon :closable="false"
+          title="上传仅保存文件；启动审核后先检查材料质量，未通过的文件停止后续处理。" />
         <!-- 材料类型随本次上传声明：系统据此让 8018 校验文件是否放对材料位。 -->
         <MaterialTypeSelect v-model="uploadMaterialType" :disabled="uploadSaving" />
       </div>
-      <el-upload class="block-gap-sm" drag :auto-upload="false" :limit="1" :disabled="classificationActive"
+      <el-upload class="block-gap-sm" drag :auto-upload="false" :limit="1" :disabled="uploadSaving"
         :on-change="onFileChange" :on-remove="() => (uploadFile = null)">
         <div class="upload-block__icon">⬆</div>
         <div class="el-upload__text">拖拽文件到此处，或<em>点击选择文件</em></div>
@@ -321,14 +274,9 @@ onMounted(() => {
       </div>
       <el-alert v-if="uploadImpact" class="block-gap-sm" type="warning" show-icon :closable="false" :title="uploadImpact" />
       <el-alert v-if="uploadError" class="block-gap-sm" type="error" show-icon :closable="false" :title="`上传失败：${uploadError}`" />
-      <OperationPanel v-if="classificationOperation" class="block-gap-sm" compact
-        :operation="classificationOperation" :watching="classificationWatching" label="文件已保存，自动校验"
-        @requery="classificationError = null; requeryClassification()" />
-      <el-alert v-if="classificationError" class="block-gap-sm" type="error" show-icon :closable="false"
-        :title="`文件已保存；校验状态查询失败：${classificationError}`" />
       <template #footer>
         <el-button @click="uploadVisible = false">关闭</el-button>
-        <el-button type="primary" :loading="uploadSaving" :disabled="classificationActive" @click="submitUpload">
+        <el-button type="primary" :loading="uploadSaving" @click="submitUpload">
           {{ uploadRow?.filename ? "确认替换" : "上传" }}
         </el-button>
       </template>

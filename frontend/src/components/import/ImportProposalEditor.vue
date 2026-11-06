@@ -3,12 +3,13 @@ import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import type {
   ConfigOrigin, ImportJob, ImportProposalChanges, ImportProposalGroup, ImportProposalStatus,
-  ProposalCalculation, ProposalRule,
+  ProposalCalculation, ProposalInterpretationView, ProposalRule, ProposalSupportingContent,
 } from "@/api/contracts";
 import { updateImportProposal } from "@/api/imports";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import FailureNotice from "@/components/FailureNotice.vue";
 import PlanConfigList from "@/components/plans/PlanConfigList.vue";
+import ImportSupportingContentPanel from "./ImportSupportingContentPanel.vue";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { sourceSheetLabel } from "@/composables/useRuleSourceFilter";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
@@ -17,13 +18,14 @@ import { formatBusinessValue, periodScopeLabel, statementScopeLabel, valueTypeLa
 const props = defineProps<{ job: ImportJob; readonly: boolean }>();
 const emit = defineEmits<{ saved: [job: ImportJob]; busy: [value: boolean] }>();
 const { pending, failure, run, clear } = useRequestRunner();
-const activeGroup = ref<ImportProposalGroup>("rules");
+const activeGroup = ref<ImportProposalGroup | "supporting_content">("rules");
 const savingRef = ref<string | null>(null);
 const editing = ref<ProposalRow | null>(null);
 const editRevision = ref(0);
 const form = reactive({ name: "", text: "", formula: "", required: false, role: "CHECK" as "CHECK" | "RISK", mode: "UNKNOWN", status: "" });
 
 interface ProposalRow {
+  interpretation?: ProposalInterpretationView["interpretation"];
   ref: string;
   group: ImportProposalGroup;
   name: string;
@@ -98,12 +100,12 @@ function rowsOf(group: ImportProposalGroup): ProposalRow[] {
   if (!proposals) return [];
   switch (group) {
     case "materials": return proposals.materials.map<ProposalRow>((item) => ({
-      ref: item.candidate_ref, group: "materials", name: item.name, text: item.description ?? "",
+      ref: item.candidate_ref, group: "materials", name: item.name, text: item.description ?? "", interpretation: item.interpretation,
       ruleCode: item.source_id ?? null, origin: item.origin,
       context: item.required ? "必传" : "按需上传", required: item.required, status: null, details: [],
     }));
     case "fields": return proposals.fields.map<ProposalRow>((item) => ({
-      ref: item.candidate_ref, group: "fields", name: item.name, text: item.instruction,
+      ref: item.candidate_ref, group: "fields", name: item.name, text: item.instruction, interpretation: item.interpretation,
       ruleCode: item.source_id ?? null, origin: item.origin,
       materialKeys: item.material_name ? [item.material_name] : [],
       context: item.material_name ?? "未关联材料",
@@ -115,7 +117,7 @@ function rowsOf(group: ImportProposalGroup): ProposalRow[] {
         { label: "期间 / 报表 / 主体", value: [periodScopeLabel(item.period_scope), statementScopeLabel(item.statement_scope), item.entity_scope].filter(Boolean).join(" / ") }],
     }));
     case "rules": return proposals.rules.map<ProposalRow>((item) => ({
-      ref: item.candidate_ref, group: "rules", name: item.name, text: item.requirement,
+      ref: item.candidate_ref, group: "rules", name: item.name, text: item.requirement, interpretation: item.interpretation,
       ruleCode: item.rule_code ?? item.source_id ?? null, origin: item.origin,
       materialKeys: ruleMaterialNames(item),
       context: ruleRole(item) === "RISK" ? "风险结论" : "普通核查", role: ruleRole(item), mode: item.execution_mode ?? "UNKNOWN", status: item.config_status ?? null,
@@ -133,14 +135,14 @@ function rowsOf(group: ImportProposalGroup): ProposalRow[] {
       ],
     }));
     case "calculations": return proposals.calculations.map<ProposalRow>((item) => ({
-      ref: item.candidate_ref, group: "calculations", name: item.rule_name, text: item.requirement,
+      ref: item.candidate_ref, group: "calculations", name: item.rule_name, text: item.requirement, interpretation: item.interpretation,
       ruleCode: item.rule_code, origin: item.origin,
       context: parametersText(item), formula: item.formula, status: item.status,
       fieldType: valueTypeLabel(item.result_type), inputFields: parametersText(item),
       details: [{ label: "参数来源", value: parametersText(item) || "未声明" }],
     }));
     case "report_sections": return proposals.report_sections.map<ProposalRow>((item) => ({
-      ref: item.candidate_ref, group: "report_sections", name: item.section_name, text: item.content_instruction,
+      ref: item.candidate_ref, group: "report_sections", name: item.section_name, text: item.content_instruction, interpretation: item.interpretation,
       ruleCode: item.report_code ?? null, origin: item.origin,
       context: item.report_name ?? "未命名报告", status: item.config_status ?? null,
       formats: item.formats.join("、"),
@@ -157,6 +159,20 @@ const calculationRows = computed(() => rowsOf("calculations"));
 const sectionRows = computed(() => rowsOf("report_sections"));
 /** 第二轮逐项核对后仍未建立绑定的输入；不改变启用状态，只暴露配置不完整。 */
 const bindingGaps = computed(() => props.job.proposals?.binding_gaps ?? []);
+const supportingContent = computed(() => props.job.proposals?.supporting_content);
+const incompleteRows = computed(() => [...materialRows.value, ...fieldRows.value, ...ruleRows.value,
+  ...calculationRows.value, ...sectionRows.value].filter((row) => row.interpretation?.missing_details.length));
+
+function supportingTargetLabel(target: ProposalSupportingContent["targets"][number]): string {
+  const row = rowsOf(target.group).find((item) => item.ref === target.candidate_ref);
+  return row ? `${groupLabels[target.group]} · ${row.name}${row.context ? `（${row.context}）` : ''}` : "关联对象已不存在";
+}
+function openSupportingTarget(target: ProposalSupportingContent["targets"][number]): void {
+  const row = rowsOf(target.group).find((item) => item.ref === target.candidate_ref);
+  if (!row) { ElMessage.error("关联对象已不存在，请重新读取解析记录"); return; }
+  if (pending.value) return;
+  openEditor(row);
+}
 
 /** 材料筛选按名称匹配：表格里的「适用材料 / 所属材料」显示的就是名称。 */
 const materialOptions = computed(() => (props.job.proposals?.materials ?? [])
@@ -263,6 +279,16 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
         ：缺少「{{ gap.missing_input }}」——{{ gap.reason }}
         <div v-if="gap.original_requirement" class="text-hint">原文要求：{{ gap.original_requirement }}</div>
       </div>
+    </el-alert>
+    <el-alert v-if="incompleteRows.length" class="block-gap-sm" type="warning" :closable="false" show-icon title="部分业务要求在解析时尚未给出完整口径，已保留对应配置">
+      <details class="interpretation-gaps">
+        <summary>查看 {{ incompleteRows.length }} 项解析时未明确的口径</summary>
+        <div v-for="row in incompleteRows" :key="row.ref" class="interpretation-gap">
+          <el-button link type="primary" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button>
+          <span>{{ row.interpretation?.missing_details.join('；') }}</span>
+          <span v-if="row.interpretation?.edited_after_interpretation" class="text-hint">此后已有人工修改，以当前配置为准。</span>
+        </div>
+      </details>
     </el-alert>
     <el-tabs v-model="activeGroup">
       <el-tab-pane :label="`材料（${materialRows.length}）`" name="materials" lazy>
@@ -420,11 +446,20 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           </el-table-column>
         </PlanConfigList>
       </el-tab-pane>
+      <el-tab-pane :label="supportingContent == null ? '辅助资料（未记录）' : `辅助资料（${supportingContent.length}）`" name="supporting_content" lazy>
+        <el-alert v-if="supportingContent == null" type="info" :closable="false" show-icon title="此历史记录未保存辅助资料的识别与归属，无法据此判断是否存在材料说明、字典或映射。" />
+        <ImportSupportingContentPanel v-else :items="supportingContent" :target-label="supportingTargetLabel" @select="openSupportingTarget" />
+      </el-tab-pane>
     </el-tabs>
 
     <DrawerPanel :open="Boolean(editing)" :title="`${readonly ? '查看' : '编辑'}${editing ? groupLabels[editing.group] : ''}`" size="min(640px, 100vw)" @close="editing = null">
       <template v-if="editing">
         <FailureNotice :error="failure" @dismiss="failure = null" />
+        <div v-if="editing.interpretation" class="proposal-interpretation">
+          <strong>AI 识别依据（解析时）</strong><p>{{ editing.interpretation.basis }}</p>
+          <p v-if="editing.interpretation.missing_details.length">解析时未明确：{{ editing.interpretation.missing_details.join('；') }}</p>
+          <p v-if="editing.interpretation.edited_after_interpretation" class="text-hint">此后已有人工修改，请以当前配置内容为准。</p>
+        </div>
         <el-form label-position="top" :disabled="readonly || pending" class="proposal-edit-form" @submit.prevent="saveEditor">
           <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
           <div class="proposal-edit-meta">
@@ -461,6 +496,11 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
 .proposal-edit-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .proposal-edit-form :deep(.el-select) { width: 100%; }
 .proposal-context { margin-top: 12px; }
+.proposal-interpretation { margin: 0 0 18px; padding: 12px; background: var(--el-fill-color-light); }
+.proposal-interpretation p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.interpretation-gaps summary { cursor: pointer; line-height: 1.7; }
+.interpretation-gap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 8px; line-height: 1.7; overflow-wrap: anywhere; }
+.interpretation-gap :deep(.el-button) { white-space: normal; height: auto; text-align: left; line-height: 1.7; }
 .proposal-context :deep(.el-descriptions__content) { overflow-wrap: anywhere; white-space: pre-wrap; }
 .binding-gap { margin-top: 4px; font-size: 12px; line-height: 1.6; }
 @media (max-width: 640px) {

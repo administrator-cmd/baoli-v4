@@ -26,7 +26,10 @@ interface MaterialProcessingOptions {
 /** 材料处理状态查询与单项重试，沿用任务页面的响应代次。 */
 export function useMaterialProcessing(options: MaterialProcessingOptions) {
   const processingDialogVisible = ref(false);
-  const processingDocument = ref<AuditDocument | null>(null);
+  const selectedDocumentNo = ref<string | null>(null);
+  const processingDocument = computed(() => options.task.value?.documents.find(
+    (document) => document.document_no === selectedDocumentNo.value,
+  ) ?? null);
   const processingStatuses = ref<ProcessingArtifact[]>([]);
   const processingLoading = ref(false);
   const processingErrors = ref<Array<{ artifact_type: ProcessingArtifact["artifact_type"]; message: string }>>([]);
@@ -39,6 +42,7 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
   const processingRetryAllowed = computed(() => {
     const current = options.task.value;
     return Boolean(current
+      && processingDocument.value?.quality_precheck?.processing_allowed === true
       && !["RUNNING", "COMPLETED"].includes(current.status)
       && !isOperationActive(current.latest_operation?.status)
       && !options.watching.value && !options.pending.value && !processingLoading.value && !processingSubmitting.value);
@@ -97,7 +101,7 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
   }
 
   function openProcessingDialog(document: AuditDocument): void {
-    processingDocument.value = document;
+    selectedDocumentNo.value = document.document_no;
     processingDialogVisible.value = true;
     processingStatuses.value = [];
     processingError.value = null;
@@ -162,7 +166,7 @@ export function useMaterialProcessing(options: MaterialProcessingOptions) {
 
   function reset(): void {
     processingDialogVisible.value = false;
-    processingDocument.value = null;
+    selectedDocumentNo.value = null;
     processingStatuses.value = [];
     processingLoading.value = false;
     processingErrors.value = [];

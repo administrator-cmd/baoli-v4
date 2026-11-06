@@ -108,7 +108,7 @@ def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]
     return {
         "agent_mode": loaded["agent_mode"], "evaluation_plan": loaded["evaluation_plan"],
         "field_review": loaded["field_review"],
-        "rule_outcomes": [], "loop_count": 0, "last_error": loaded["last_error"],
+        "rule_outcomes": loaded["rule_outcomes"], "loop_count": loaded["loop_count"], "last_error": loaded["last_error"],
     }
 
 
@@ -131,7 +131,10 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
     else:
         allowed = set(review.get("allowed_rule_keys") or [])
         plan = [entry for entry in state["evaluation_plan"] if entry["rule_key"] in allowed]
-    outcomes: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = list(state.get("rule_outcomes") or [])
+    completed = {item["rule_key"] for item in outcomes}
+    covered = [entry["rule_key"] for entry in plan]
+    plan = [entry for entry in plan if entry["rule_key"] not in completed]
     index = 0
     channel_failure: dict[str, Any] | None = None
     while index < len(plan):
@@ -171,7 +174,7 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
             and not review.get("confirmed")
             and channel_failure is None
         ),
-        "covered_rule_keys": [entry["rule_key"] for entry in plan],
+        "covered_rule_keys": covered,
     }
 
 

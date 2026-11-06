@@ -197,7 +197,7 @@ class ExtractionBatchChannelFailureTests(unittest.TestCase):
 
     def test_tool_channel_failure_stops_batch_without_second_model_request(self):
         db = MagicMock()
-        task = SimpleNamespace(task_no="task-test", id=1)
+        task = SimpleNamespace(task_no="task-test", task_name="测试任务", id=1)
         execution = SimpleNamespace(id=5, result_json={"attempt_no": 1})
         rules = [
             {"rule_key": "r1", "output_definitions": [{"field_key": "f1", "material_key": "m1"}]},

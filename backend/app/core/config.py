@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # 批量抽取等长响应会被截断；这里显式设置为模型上限（deepseek-v4.1-flash 为 384K = 393216）。
     # 超过模型上限时供应商直接返回 400，需要按实际模型调整。
     llm_max_output_tokens: int = Field(default=393216, gt=0)
+    # 单进程所有模型入口串行发送；上一轮结束后至少等待此间隔（可设 0 关闭间隔）。
+    llm_request_interval_seconds: float = Field(default=2.0, ge=0, allow_inf_nan=False)
+    # 可重试 HTTP 错误的退避基数；再按尝试次数指数增长并加入抖动。
+    llm_retry_base_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
 
     service_8018_url: str | None = None
     service_8010_url: str | None = None

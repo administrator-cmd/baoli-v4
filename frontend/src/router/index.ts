@@ -5,11 +5,14 @@ import AuditTaskListView from "@/views/audits/AuditTaskListView.vue";
 import ExecutionListView from "@/views/audits/ExecutionListView.vue";
 import DocumentListView from "@/views/documents/DocumentListView.vue";
 import RulebookFilesView from "@/views/documents/RulebookFilesView.vue";
+import RulebookGenerateView from "@/views/documents/RulebookGenerateView.vue";
+import RulebookGenerationDetailView from "@/views/documents/RulebookGenerationDetailView.vue";
 import ImportWorkbenchView from "@/views/imports/ImportWorkbenchView.vue";
 import NotFoundView from "@/views/NotFoundView.vue";
 import PlanEditView from "@/views/plans/PlanEditView.vue";
 import PlanListView from "@/views/plans/PlanListView.vue";
 import ReportListView from "@/views/reports/ReportListView.vue";
+import ReportTemplateListView from "@/views/reports/ReportTemplateListView.vue";
 import RiskResultListView from "@/views/reports/RiskResultListView.vue";
 import SceneDetailView from "@/views/scenes/SceneDetailView.vue";
 import SceneImportsView from "@/views/scenes/SceneImportsView.vue";
@@ -83,9 +86,23 @@ const routes: RouteRecordRaw[] = [
   // 资料管理
   { path: "/documents", name: "documents", component: DocumentListView, meta: { title: "审核材料", group: "资料管理", menu: "/documents" } },
   { path: "/rulebooks", name: "rulebooks", component: RulebookFilesView, meta: { title: "规则库管理", group: "资料管理", menu: "/rulebooks" } },
+  {
+    // 生成页与详情页同属「资料管理 → 规则库管理」，不增加顶级菜单。
+    path: "/rulebooks/generate",
+    name: "rulebook-generate",
+    component: RulebookGenerateView,
+    meta: { title: "AI辅助生成规则库", group: "资料管理", menu: "/rulebooks" },
+  },
+  {
+    path: "/rulebooks/generations/:jobNo",
+    name: "rulebook-generation-detail",
+    component: RulebookGenerationDetailView,
+    meta: { title: "生成详情", group: "资料管理", menu: "/rulebooks" },
+  },
 
   // 报告管理
   { path: "/reports", name: "reports", component: ReportListView, meta: { title: "审核报告", group: "报告管理", menu: "/reports" } },
+  { path: "/report-templates", name: "report-templates", component: ReportTemplateListView, meta: { title: "报告模板", group: "报告管理", menu: "/report-templates" } },
   { path: "/risk-results", name: "risk-results", component: RiskResultListView, meta: { title: "风险结果", group: "报告管理", menu: "/risk-results" } },
 
   // 系统管理

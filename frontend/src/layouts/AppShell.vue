@@ -52,6 +52,7 @@ const menuGroups = [
     icon: ChartNoAxesCombined,
     items: [
       { path: "/reports", title: "审核报告" },
+      { path: "/report-templates", title: "报告模板" },
       { path: "/risk-results", title: "风险结果" },
     ],
   },
@@ -111,8 +112,18 @@ onMounted(() => {
   mediaQuery.addEventListener("change", onViewportChange);
 });
 
+watch(
+  collapsed,
+  (value) => {
+    // Dialog 弹到 body 下时，让需要在工作区居中的弹窗读取当前侧栏宽度。
+    document.body.style.setProperty("--app-dialog-main-center-offset", value ? "32px" : "110px");
+  },
+  { immediate: true },
+);
+
 onUnmounted(() => {
   mediaQuery?.removeEventListener("change", onViewportChange);
+  document.body.style.removeProperty("--app-dialog-main-center-offset");
 });
 </script>
 

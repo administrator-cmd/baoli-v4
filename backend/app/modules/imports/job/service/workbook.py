@@ -22,7 +22,7 @@ class ImportsJobWorkbookService:
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
 
-    def _file_sha256(self, path: Path) -> str:
+    def file_sha256(self, path: Path) -> str:
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -76,7 +76,7 @@ class ImportsJobWorkbookService:
         # 文件身份必须与数据库记录一致：解析和重试都按上传时的哈希生成工作表键，
         # 磁盘文件被替换或损坏时不能沿用旧身份继续解析。
         try:
-            actual_sha256 = self._file_sha256(path)
+            actual_sha256 = self.file_sha256(path)
         except OSError as exc:
             raise BusinessError("WORKBOOK_UNREADABLE", "规则库文件无法读取，请重新上传", status_code=409) from exc
         if actual_sha256 != source_sha256:

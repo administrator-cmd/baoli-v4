@@ -34,10 +34,10 @@ IMPLEMENTED_QUALITY_ITEMS = frozenset({CHECK_FILE_FORMAT, CHECK_FILE_SIZE, CHECK
 
 # 检查项目依赖的产物类型。它是「这条检查能不能执行」的事实前提：
 # 产物缺失时明确不可判定，不默认通过。
-QUALITY_ITEM_ARTIFACT: dict[str, str] = {
-    CHECK_FILE_FORMAT: "MATERIAL_CLASSIFY",
-    CHECK_FILE_SIZE: "MATERIAL_CLASSIFY",
-    CHECK_FILE_DUPLICATE: "MATERIAL_CLASSIFY",
+QUALITY_ITEM_ARTIFACT: dict[str, str | None] = {
+    CHECK_FILE_FORMAT: None,
+    CHECK_FILE_SIZE: None,
+    CHECK_FILE_DUPLICATE: None,
     CHECK_PAGE_INTEGRITY: "OCR",
     CHECK_SEAL_PARTY_A: "SEAL",
     CHECK_SEAL_PARTY_B: "SEAL",
@@ -164,7 +164,7 @@ def _failed(code: str, message: str, details: dict[str, Any] | None = None) -> B
     return BusinessError(code, message, status_code=500, details=details or {})
 
 
-def parse_size_limit(standard_value: str | None, unit: str | None) -> Decimal:
+def _parse_size_limit(standard_value: str | None, unit: str | None) -> tuple[Decimal, str]:
     """把「标准值 + 单位」换算成字节数上限。
 
     标准值可以写成 `50`（单位另填）或 `50MB`（单位随标准值给出）；导入的原文常见后一种。
@@ -193,7 +193,12 @@ def parse_size_limit(standard_value: str | None, unit: str | None) -> Decimal:
             "RULE_QUALITY_UNIT_UNSUPPORTED",
             f"文件大小检查的「单位」“{resolved_unit}”无法识别，只支持 {'、'.join(sorted(SIZE_UNITS))}",
         )
-    return number * factor
+    return number * factor, f"{number}{resolved_unit}"
+
+
+def parse_size_limit(standard_value: str | None, unit: str | None) -> Decimal:
+    """按显式标准值及有效单位换算字节上限。"""
+    return _parse_size_limit(standard_value, unit)[0]
 
 
 def parse_format_set(standard_value: str | None) -> set[str]:
@@ -308,7 +313,7 @@ def check_file_format(upload: Any, *, standard_value: str | None) -> dict[str, A
 
 def check_file_size(upload: Any, *, standard_value: str | None, unit: str | None) -> dict[str, Any]:
     """文件大小：真实字节数不大于标准值换算后的字节数。"""
-    limit = parse_size_limit(standard_value, unit)
+    limit, limit_label = _parse_size_limit(standard_value, unit)
     size = getattr(upload, "size_bytes", None)
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
         raise _failed("RULE_QUALITY_SIZE_UNKNOWN", "上传记录没有可用的文件字节数，无法判定文件大小")
@@ -317,9 +322,9 @@ def check_file_size(upload: Any, *, standard_value: str | None, unit: str | None
     return {
         "status": "PASSED" if passed else "ABNORMAL",
         "message": (
-            f"文件大小 {size} 字节在允许上限内（{standard_value}{unit}）"
+            f"文件大小 {size} 字节在允许上限内（{limit_label}）"
             if passed
-            else f"文件大小 {size} 字节超过允许上限（{standard_value}{unit}）"
+            else f"文件大小 {size} 字节超过允许上限（{limit_label}）"
         ),
         "actual_bytes": size,
         "limit_bytes": str(limit),

@@ -358,6 +358,9 @@ class AuditExecutionOperationsService:
                 raise BusinessError(
                     "INPUT_REVISION_CONFLICT", "任务输入已更新，请刷新任务后再重试材料识别", status_code=409,
                 )
+            AuditExecutionCommandsService(self.db)._document_ocr_retry_target(
+                task, document_no, artifact_no, resubmit_unknown=resubmit_unknown,
+            )
 
         def runner(session: Session, command: background_service.CommandHandle) -> dict[str, Any]:
             current = AuditTaskCRUD(session).lock_by_no(command.request["task_no"])

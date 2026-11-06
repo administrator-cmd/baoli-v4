@@ -6,6 +6,21 @@ import type { ConfigOrigin } from "./scenes";
 export type ImportProposalStatus = "CLEAR" | "PENDING" | "DISABLED";
 export type ImportProposalGroup = "materials" | "fields" | "rules" | "calculations" | "report_sections";
 
+export interface ProposalInterpretationView {
+  interpretation?: { basis: string; missing_details: string[]; edited_after_interpretation?: boolean } | null;
+}
+
+export interface ProposalSupportingContent {
+  support_ref: string;
+  kind: "MATERIAL_SCOPE" | "DICTIONARY" | "MAPPING" | "EXPLANATION";
+  title: string;
+  content: string;
+  reason: string;
+  targets: Array<{ group: ImportProposalGroup; candidate_ref: string; usage: string }>;
+  unresolved_references: string[];
+  origin: ConfigOrigin;
+}
+
 export interface ImportProposalChanges {
   name?: string;
   description?: string;
@@ -70,7 +85,7 @@ export interface RuleComparison {
   input_currencies: Array<string | null>;
 }
 
-export interface ProposalMaterial {
+export interface ProposalMaterial extends ProposalInterpretationView {
   candidate_ref: string;
   source_id?: string | null;
   origin?: ConfigOrigin | null;
@@ -79,7 +94,7 @@ export interface ProposalMaterial {
   description?: string | null;
 }
 
-export interface ProposalField {
+export interface ProposalField extends ProposalInterpretationView {
   candidate_ref: string;
   source_id?: string | null;
   origin?: ConfigOrigin | null;
@@ -112,7 +127,7 @@ export interface ProposalBindingGap {
   original_requirement?: string;
 }
 
-export interface ProposalRule {
+export interface ProposalRule extends ProposalInterpretationView {
   candidate_ref: string;
   source_id?: string | null;
   origin?: ConfigOrigin | null;
@@ -126,7 +141,7 @@ export interface ProposalRule {
   comparison: RuleComparison;
 }
 
-export interface ProposalReportSection {
+export interface ProposalReportSection extends ProposalInterpretationView {
   candidate_ref: string;
   report_code?: string | null;
   origin?: ConfigOrigin | null;
@@ -137,7 +152,7 @@ export interface ProposalReportSection {
   config_status?: string | null;
 }
 
-export interface ProposalCalculation {
+export interface ProposalCalculation extends ProposalInterpretationView {
   candidate_ref: string;
   source_id?: string | null;
   origin?: ConfigOrigin | null;
@@ -176,6 +191,8 @@ export interface ImportJob {
     calculations: ProposalCalculation[];
     report_sections: ProposalReportSection[];
     binding_gaps?: ProposalBindingGap[];
+    /** 未记录与已识别但为空应明确区分；辅助资料不计入执行规则。 */
+    supporting_content?: ProposalSupportingContent[] | null;
   } | null;
   /** 草稿修订号：解析结果变更时递增。 */
   draft_revision: number;

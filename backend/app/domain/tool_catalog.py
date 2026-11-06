@@ -405,7 +405,8 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
         label=metadata.label,
         description=(
             f"{metadata.label}（文件质量检查）。"
-            f"依赖的处理产物：{artifact}；判定按材料位逐份完成。"
+            + (f"依赖的处理产物：{artifact}。" if artifact else "只读取原始上传的格式声明、字节数或内容哈希，无需处理产物。")
+            + "判定按材料位逐份完成。"
             + ("" if implemented else "本项没有实际判定实现，不能作为工具调用。")
         ),
         input_schema={
@@ -426,7 +427,7 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
             "check_item": check_item,
         },
         allowed_scenes=None,
-        required_evidence=(artifact or "",),
+        required_evidence=(artifact,) if artifact else (),
         side_effect=False,
         idempotent=True,
         supports_query=False,

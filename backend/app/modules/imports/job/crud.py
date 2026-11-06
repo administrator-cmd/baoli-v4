@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
+from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.core.base_crud import CRUDBase
 from app.modules.imports.job.model import ImportJob
 from app.modules.scenario.template.model import ScenarioTemplate, ScenarioVersion
@@ -92,7 +93,7 @@ class ImportsJobCRUD(CRUDBase):
                 .where(
                     BackgroundOperation.object_type == "IMPORT_JOB",
                     BackgroundOperation.object_no.in_(job_nos),
-                    BackgroundOperation.status.in_(("PENDING", "RUNNING")),
+                    BackgroundOperation.status.in_(ACTIVE_OPERATION_STATUSES),
                 )
                 .group_by(BackgroundOperation.object_no)
             ).all()

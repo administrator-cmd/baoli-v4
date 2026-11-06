@@ -274,6 +274,11 @@ a {
   margin-left: 0;
 }
 
+/* 报告详情弹窗的水平中心与左侧导航后的主工作区对齐。 */
+.report-dialog {
+  transform: translateX(var(--app-dialog-main-center-offset, 0px));
+}
+
 .execution-result-summary {
   display: flex;
   flex-wrap: wrap;

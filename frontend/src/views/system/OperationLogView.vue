@@ -10,7 +10,9 @@ import {
   formatDate,
   formatDuration,
   objectTypeLabel,
+  objectTypeFilterOptions,
   operationTypeLabel,
+  operationTypeFilterOptions,
   statusFilterOptions,
 } from "@/constants/labels";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
@@ -48,32 +50,7 @@ const list = usePagedList<OperationLogRow, { object_type: string; operation_type
 
 const { filters, page, pageSize, total, items, loading, error } = list;
 
-const objectTypeOptions = ["SCENARIO", "AUDIT_PLAN", "AUDIT_TASK", "IMPORT_JOB", "AUDIT_REPORT"].map(
-  (value) => ({ value, label: objectTypeLabel(value) }),
-);
-
 const resultOptions = statusFilterOptions(["SUCCEEDED", "ACCEPTED", "FAILED"]);
-
-const operationTypeOptions = [
-  "CREATE",
-  "UPDATE",
-  "PUBLISH",
-  "DELETE",
-  "RESTORE",
-  "COPY",
-  "TASK_CREATE",
-  "SAVE",
-  "ENABLE",
-  "DISABLE",
-  "NODE_EXECUTE",
-  "NODE_RESUME",
-  "FIELD_REVIEW_CONFIRM",
-  "DOCUMENT_CLASSIFY",
-  "DOCUMENT_ARTIFACT_RETRY",
-  "OCR_DOCUMENT_RETRY",
-  "IMPORT_CONVERT",
-  "REPORT_ARCHIVE",
-].map((value) => ({ value, label: operationTypeLabel(value) }));
 
 const detail = ref<OperationLogRow | null>(null);
 
@@ -94,12 +71,12 @@ onMounted(() => {
     <el-form inline class="app-query" @submit.prevent="list.search()">
       <el-form-item label="对象类型">
         <el-select v-model="filters.object_type" clearable placeholder="全部" style="width: 150px">
-          <el-option v-for="item in objectTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
+          <el-option v-for="item in objectTypeFilterOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
       <el-form-item label="操作类型">
         <el-select v-model="filters.operation_type" clearable filterable placeholder="全部" style="width: 170px">
-          <el-option v-for="item in operationTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
+          <el-option v-for="item in operationTypeFilterOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
       <el-form-item label="结果">

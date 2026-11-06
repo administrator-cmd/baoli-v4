@@ -138,7 +138,7 @@ def graph_call_model(
         next_loop_count = loop_count
         try:
             # 抽取所需的真实产物已由后端预读并注入上下文；这里不再强制首轮工具调用。
-            tool_choice = "auto"
+            tool_choice = "required" if rule.get("material_precheck") and not executed else "auto"
             next_loop_count += 1
             # 同一条规则的同一轮模型请求在网络重试期间必须复用幂等键；
             # 轮次递增后键也随之变化，避免把不同上下文误识别为同一请求。

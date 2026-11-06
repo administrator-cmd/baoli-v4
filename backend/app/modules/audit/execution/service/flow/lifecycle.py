@@ -309,7 +309,7 @@ def graph_finalize_node_execution(
         # 抽取段的规则键与关闭时间一起落库：收尾判定、失败提示与续跑范围都据此排除。
         if not extraction_already_closed:
             boundary = field_review_boundary(
-                evaluation_plan(task, task.current_node), all_rules=_task_manifest(task)["rules"],
+                evaluation_plan(task, task.current_node, execution=execution), all_rules=_task_manifest(task)["rules"],
             )
             execution.result_json = {
                 **(execution.result_json or {}),

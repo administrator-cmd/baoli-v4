@@ -84,7 +84,8 @@ class ArtifactPreprocessingExecution:
             return artifact.id, artifact.artifact_no
 
 
-    def prepare_task_materials(self, task: AuditTask, execution: NodeExecution) -> dict[str, Any]:
+    def prepare_task_materials(self, task: AuditTask, execution: NodeExecution, *,
+                               blocked_materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
         """跨材料流水线；全部分支收尾且四项成功后，才进入业务规则。
 
         某步骤失败仅停止该材料的依赖步骤，独立分支和其他材料继续落真实结果。
@@ -143,6 +144,12 @@ class ArtifactPreprocessingExecution:
                 "stages": {stage: {"status": "WAITING"} for stage in STAGES},
             }
             progress["materials"].append(item)
+            block = blocked_materials.get(document.material_key)
+            if block is not None:
+                reason = "；".join(entry["message"] for entry in block["reasons"])
+                item.update(status="SKIPPED", stage="QUALITY_CHECK", reason=reason)
+                item["stages"] = {stage: {"status": "SKIPPED", "reason": reason} for stage in STAGES}
+                continue
             documents[upload.id] = document
             if not resolve_storage_path(upload.relative_path).is_file():
                 fail(item, "SOURCE", BusinessError("DOCUMENT_SOURCE_MISSING", "当前上传文件不存在，无法进行前置处理", status_code=500))

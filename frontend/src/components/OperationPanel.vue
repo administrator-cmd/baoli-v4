@@ -43,8 +43,12 @@ const props = withDefaults(
     eyebrow?: string;
     /** 业务页面使用简洁布局，内部操作信息默认折叠。 */
     compact?: boolean;
+    /** 业务页面可提供简短异常文案，原始原因仍在技术信息中读取。 */
+    failureMessage?: string;
+    /** 页面已展示相同失败原因时隐藏重复提示，原始原因保留在技术信息中。 */
+    showFailureAlert?: boolean;
   }>(),
-  { label: null, pollSeconds: 2, canRetry: false, retryLabel: "重新执行", canResume: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false },
+  { label: null, pollSeconds: 2, canRetry: false, retryLabel: "重新执行", canResume: false, canAbort: false, aborting: false, percent: null, eyebrow: "后台操作", compact: false, showFailureAlert: true },
 );
 
 defineEmits<{
@@ -144,6 +148,9 @@ const elapsedText = computed(() => {
           <span class="mono">{{ operation.operation_no }}</span>
         </el-descriptions-item>
         <el-descriptions-item v-if="operation.failure_code" label="错误码">{{ operation.failure_code }}</el-descriptions-item>
+        <el-descriptions-item v-if="operation.failure_message && (!showFailureAlert || (failureMessage && failureMessage !== operation.failure_message))" label="详细原因" :span="2">
+          <span class="operation-failure-detail">{{ operation.failure_message }}</span>
+        </el-descriptions-item>
       </el-descriptions>
     </details>
 
@@ -173,12 +180,12 @@ const elapsedText = computed(() => {
     />
 
     <el-alert
-      v-if="operation.failure_code || operation.failure_message"
+      v-if="showFailureAlert && (operation.failure_code || operation.failure_message)"
       class="block-gap"
       type="error"
       show-icon
       :closable="false"
-      :title="operation.failure_message || '本次操作未完成'"
+      :title="failureMessage || operation.failure_message || '本次操作未完成'"
     >
       <template v-if="!compact">
         <div>错误码：{{ operation.failure_code ?? "未提供错误码" }}</div>
@@ -225,4 +232,6 @@ const elapsedText = computed(() => {
 .operation-details[open] summary {
   margin-bottom: 12px;
 }
+
+.operation-failure-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

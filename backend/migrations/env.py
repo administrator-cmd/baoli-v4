@@ -11,8 +11,10 @@ from app.modules.audit.artifact import model as audit_artifacts  # noqa: F401
 from app.modules.audit.execution import model as audit_executions  # noqa: F401
 from app.modules.audit.field import model as audit_fields  # noqa: F401
 from app.modules.audit.report import model as audit_reports  # noqa: F401
+from app.modules.audit.report_template import model as report_templates  # noqa: F401
 from app.modules.audit.rule import model as audit_rules  # noqa: F401
 from app.modules.audit.task import model as audit_tasks  # noqa: F401
+from app.modules.imports.generation import model as generations  # noqa: F401
 from app.modules.imports.job import model as imports  # noqa: F401
 from app.modules.material.document import model as documents  # noqa: F401
 from app.modules.plan.config import model as plan_config  # noqa: F401

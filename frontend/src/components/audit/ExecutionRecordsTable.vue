@@ -67,7 +67,7 @@ function timeText(value: string | null): string {
     <el-table-column label="开始时间" width="195">
       <template #default="{ row }"><span class="table-nowrap">{{ timeText(row.started_at) }}</span></template>
     </el-table-column>
-    <el-table-column label="耗时" width="140">
+    <el-table-column label="耗时" width="180">
       <template #default="{ row }"><span class="table-nowrap">{{ formatDuration(row.duration_ms) }}</span></template>
     </el-table-column>
     <el-table-column label="执行概况" min-width="250">

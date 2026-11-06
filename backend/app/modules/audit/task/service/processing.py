@@ -13,12 +13,99 @@ from app.modules.material.document.crud import MaterialDocumentCRUD
 MATERIAL_ARTIFACT_TYPES = ("MATERIAL_CLASSIFY", "DOCUMENT_PARSE", "OCR", "SEAL")
 
 
+def quality_block_message(block: dict[str, Any]) -> str:
+    prefix = "质量不合格，已停止处理" if block["status"] == "ABNORMAL" else "质量暂时无法判定，已停止处理"
+    return prefix + "：" + "；".join(item["message"] for item in block["reasons"])
+
+
 
 class AuditTaskProcessingService:
     """本实体的服务方法；db 由构造时注入。"""
 
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
+
+    def _quality_block(self, task, upload) -> dict[str, Any] | None:
+        from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
+        state = AuditMaterialPrecheckService(self.db).current_state(task)
+        return next((item for item in (state or {}).get("blocked_materials", {}).values()
+                     if item["upload_id"] == upload.id), None)
+
+    def material_quality_views(self, task, *, pairs, execution, plan, rule_results, rule_values
+    ) -> dict[str, dict[str, Any]]:
+        """投影当前文件的前置检查；复用详情已读的 CSV，不另存业务结论。"""
+        from app.domain.material_precheck import PRECHECK_KEY
+
+        state = (execution.result_json or {}).get(PRECHECK_KEY) if execution is not None else None
+        if state is not None and state["input_revision"] != task.input_revision:
+            state = None
+        selected = set(state["rule_keys"]) if state is not None else set()
+        entries = [entry for entry in plan if entry["rule_key"] in selected]
+        records = {record.rule_key: record for record in rule_results
+                   if execution is not None and record.node_execution_id == execution.id}
+        verdicts = {}
+        for key, record in records.items():
+            if key not in selected or not (record.result_json or {}).get(PRECHECK_KEY):
+                continue
+            verdicts[key] = {item["material_key"]: item
+                             for item in rule_values[record.id].get("material_quality", [])}
+
+        views = {}
+        for document, upload in pairs:
+            checks = []
+            block = (state or {}).get("blocked_materials", {}).get(document.material_key)
+            if block is not None and (upload is None or block["upload_id"] != upload.id):
+                block = None
+            reasons = block["reasons"] if block is not None else []
+            for entry in entries:
+                scope = entry["rule"].get("materials") or []
+                if scope and document.material_key not in scope:
+                    continue
+                key = entry["rule_key"]
+                verdict = verdicts.get(key, {}).get(document.material_key) if upload is not None else None
+                reason = next((item for item in reasons if item["rule_key"] == key), None)
+                checks.append({
+                    "rule_key": key,
+                    "rule_name": entry["rule"]["name"],
+                    "requirement": entry["rule"].get("requirement"),
+                    "status": verdict["status"] if verdict is not None else (
+                        "EVIDENCE_INSUFFICIENT" if reason is not None else "NOT_CHECKED"),
+                    "message": verdict["message"] if verdict is not None else (
+                        reason["message"] if reason is not None else "尚未形成该文件的检查结论"),
+                })
+
+            completed = sum(item["status"] != "NOT_CHECKED" for item in checks)
+            ready = state is not None and state["status"] == "READY"
+            if upload is None:
+                status, message = "NO_FILE", "上传文件后，开始审核时进行前置质量检查。"
+            elif state is None:
+                status, message = "NOT_CHECKED", "当前文件尚无前置质量检查记录；开始或继续审核后检查。"
+            elif not ready:
+                running = execution.status == "RUNNING"
+                status = "RUNNING" if running else "NOT_CHECKED"
+                message = (f"已取得 {completed} / {len(checks)} 项检查结论，完成后再处理材料。"
+                           if running and checks else "正在完成本批次的前置检查，完成后再处理材料。"
+                           if running else "前置检查尚未完成，请先按执行记录中的原因恢复审核。")
+            elif block is not None:
+                status, message = block["status"], quality_block_message(block)
+            elif not checks:
+                status, message = "NOT_CONFIGURED", "当前材料没有需在处理前执行的检查；如有正文、印章等检查，将在后续执行。"
+            elif completed != len(checks):
+                status, message = "NOT_CHECKED", "当前文件的前置检查记录不完整，不能显示为通过。"
+            elif any(item["status"] in {"ABNORMAL", "EVIDENCE_INSUFFICIENT"} for item in checks):
+                status, message = "EVIDENCE_INSUFFICIENT", "检查结果与放行记录不一致，请查看检查明细和执行记录。"
+            elif all(item["status"] == "NOT_APPLICABLE" for item in checks):
+                status, message = "NOT_APPLICABLE", "已检查，当前文件不适用这些前置要求。"
+            else:
+                status, message = "PASSED", "适用的前置检查已通过；后续仍按规则检查材料内容。"
+            views[document.material_key] = {
+                "status": status, "message": message, "checks": checks,
+                "completed_checks": completed, "total_checks": len(checks),
+                "blocked": block is not None,
+                "processing_allowed": upload is not None and ready and block is None,
+                "reasons": reasons,
+            }
+        return views
 
     def material_artifacts_summary(self, upload_ids: list[int]
     ) -> dict[int, dict[str, dict[str, Any]]]:
@@ -80,6 +167,9 @@ class AuditTaskProcessingService:
         upload = current_upload(self.db, document)
         if upload is None:
             return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件"}
+        block = self._quality_block(task, upload)
+        if block is not None:
+            return {**base, "status": "SKIPPED", "message": quality_block_message(block)}
         artifact = AuditArtifactCRUD(self.db).by_upload_and_type(upload.id, artifact_type)
         if artifact is None:
             return {**base, "status": "NOT_SUBMITTED", "message": "当前上传文件尚无该处理产物"}
@@ -116,6 +206,9 @@ class AuditTaskProcessingService:
         upload = current_upload(self.db, document)
         if upload is None:
             return {**base, "status": "NOT_SUBMITTED", "message": "该材料位尚未上传文件，没有 OCR 产物"}
+        block = self._quality_block(task, upload)
+        if block is not None:
+            return {**base, "status": "SKIPPED", "message": quality_block_message(block)}
         # OCR 正文较大，先取最新记录 ID，再按主键读取，避免 MySQL 对整行 JSON 排序。
         artifact_id = AuditArtifactCRUD(self.db).latest_id_by_upload_type(upload.id, "OCR")
         artifact = AuditArtifactCRUD(self.db).by_id(artifact_id) if artifact_id is not None else None

@@ -15,6 +15,7 @@ import {
 import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import StatusBadge from "@/components/StatusBadge.vue";
+import ReportGenerationNotice from "@/components/audit/ReportGenerationNotice.vue";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
@@ -138,23 +139,37 @@ async function toggleArchive(row: ReportRow): Promise<void> {
   }
 }
 
-/** reason 字段是结构化原因集合：把非空原因转成可读列表。 */
+/** 按后端结构化原因契约读取，避免把内部字段名当作面向用户的原因。 */
 const detailReasons = computed(() => {
   if (!detail.value) return [] as string[];
-  const labels: Record<string, string> = {
-    unfinished_fields: "存在未形成有效结果的字段",
-    unfinished_rules: "存在未执行、证据不足或待复核的规则",
-    pending_reviews: "存在待处理的人工复核项",
-    material_type_mismatches: "存在材料类型待复核项",
-    risk_not_configured: "当前场景未配置风险评级规则",
-    risk_inconclusive: "已配置的风险规则尚未全部形成可用结论",
-    missing_rule_keys: "有已启用规则尚未形成任何结果",
-    missing_required_materials: "存在尚未上传的必传材料",
-    failed_nodes: "存在失败或被阻断的执行批次",
-  };
-  return Object.entries(detail.value.reasons ?? {})
-    .filter(([, value]) => (Array.isArray(value) ? value.length > 0 : Boolean(value)))
-    .map(([key]) => labels[key] ?? key);
+  const reasons = detail.value.reasons ?? {};
+  const messages: string[] = [];
+  const unresolved = reasons.unresolved;
+  let unresolvedFormat = false;
+  if (Array.isArray(unresolved)) {
+    for (const item of unresolved) {
+      const reason = item && typeof item === "object" && !Array.isArray(item) ? item : null;
+      const message = reason?.message;
+      if (reason?.status === "NOT_GENERATED") unresolvedFormat = true;
+      if (typeof message === "string" && message.trim()) {
+        messages.push(message.trim());
+      } else {
+        messages.push("存在尚未形成有效结果的审核项");
+      }
+    }
+  }
+
+  const formatSupport = reasons.format_support;
+  if (!unresolvedFormat && Array.isArray(formatSupport)) {
+    for (const item of formatSupport) {
+      const formatReason = item && typeof item === "object" && !Array.isArray(item) ? item : null;
+      if (formatReason?.supported !== false) continue;
+      const message = typeof formatReason.message === "string" ? formatReason.message.trim() : "";
+      const format = typeof formatReason.format === "string" ? formatReason.format.trim() : "";
+      messages.push(message || (format ? `尚未生成 ${format} 格式文件` : "尚未生成要求的报告格式文件"));
+    }
+  }
+  return [...new Set(messages)];
 });
 
 onMounted(async () => {
@@ -321,6 +336,7 @@ onMounted(async () => {
               <el-button v-if="detail.content" size="small" tag="a" :href="reportDownloadUrl(detail.report_no)">下载 Markdown</el-button>
             </div>
           </div>
+          <ReportGenerationNotice :generation="detail.report_generation" class="block-gap-sm" />
           <el-alert
             v-if="detailReasons.length"
             class="block-gap-sm"

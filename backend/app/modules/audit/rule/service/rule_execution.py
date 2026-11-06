@@ -32,6 +32,7 @@ from app.modules.audit.field.model import TaskFact, TaskFieldValue
 from app.modules.audit.field.service import value_store as task_value_service
 from app.modules.audit.report.crud import AuditReportCRUD
 from app.modules.audit.report.model import AuditReport
+from app.modules.audit.report_template.service.generation import resolve_report_generation
 from app.modules.audit.rule.crud import AuditRuleCRUD
 from app.modules.audit.rule.service.agent import AuditRuleAgentService
 from app.modules.audit.shared import current_upload
@@ -88,6 +89,10 @@ class AuditRuleExecutionService:
         ]
         result_values = {r.id: task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_RULE_RESULT, r.id) for r in results}
         projected = AuditFieldFactContextService(self.db).project_task_facts( task, facts, definitions=fields)
+        from app.domain.material_precheck import material_blocks
+        blocks = material_blocks(current_execution.result_json if current_execution else None)
+        # 人工补值不会解除文件质量限制；报告同样不把被停止材料的字段当作可用输入。
+        projected = [fact for fact in projected if fact.get("material_key") not in blocks]
         context = {"upstream_facts": [
             {**fact, "value": task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_TASK_FACT, fact["fact_id"]).get("value")}
             for fact in projected
@@ -107,6 +112,11 @@ class AuditRuleExecutionService:
                 rule["report_definition"]["sections"], task.manifest_json,
                 context["upstream_facts"], context["upstream_results"],
             )
+            report_generation, style_profile = resolve_report_generation(task.manifest_json.get("report_generation"))
+            if style_profile is not None:
+                context["report_style_profile"] = style_profile
+                context["report_style_template_name"] = report_generation.get("template_name")
+            context["material_quality_blocks"] = list(blocks.values())
         return context
 
 
@@ -369,7 +379,8 @@ class AuditRuleExecutionService:
             risk_available = bool(risk_keys) and risk_keys <= result_by_key.keys() and all(result_by_key[k].status in CONCLUSIVE_RESULT_STATUSES for k in risk_keys)
             snapshot = {"rule_key": rule["rule_key"], "task_input_revision": task.input_revision,
                         "rule_result_ids": [r.id for r in result_by_key.values()],
-                        "evaluation_id": evaluation_id}
+                        "evaluation_id": evaluation_id,
+                        "report_generation": resolve_report_generation(task.manifest_json.get("report_generation"))[0]}
             generated_at = datetime.now(UTC)
             if existing is None:
                 AuditReportCRUD(self.db).add(AuditReport(report_no=public_no("REP"), audit_task_id=task.id, node_execution_id=execution.id,

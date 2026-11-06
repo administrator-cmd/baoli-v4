@@ -73,7 +73,7 @@ def _batch_key(rule: dict[str, Any]) -> tuple[str, str | None] | None:
         return None
     if any(rule.get(key) for key in (
         "dependency_error", "unavailable_dependencies", "source_rule_key",
-        "source_rule_keys", "source_rule_codes", "input_gaps",
+        "source_rule_keys", "source_rule_codes", "input_gaps", "material_quality_block",
     )):
         return None
     definitions = rule.get("output_definitions") or []
@@ -113,6 +113,19 @@ def run_rule_evaluation(
     state = nodes.graph_load_rule_instance(db, task_no, node_code, rule_cursor, execution_id, planned_rule)
     rule_key = state["rule_instance"]["rule_key"]
     logger.info("开始执行审核规则 task_no=%s rule_key=%s cursor=%s", task_no, rule_key, rule_cursor)
+
+    if planned_rule.get("material_quality_block"):
+        materials = planned_rule["material_quality_block"]
+        message = "；".join(
+            f"文件「{item['filename']}」质量检查未通过：" + "；".join(reason["message"] for reason in item["reasons"])
+            for item in materials
+        )
+        saved = nodes.graph_save_evaluation_result(
+            db, task_no, node_code, execution_id, state["rule_instance"], None, LOOP_BLOCKED,
+            [{"kind": "MATERIAL_QUALITY_BLOCKED", "message": message, "materials": materials}],
+            state["evaluation_id"], 0,
+        )
+        return saved["rule_outcome"]
 
     if str(planned_rule.get("execution_mode") or "") == MODE_AGGREGATE:
         built = nodes.graph_build_aggregate_verdict(

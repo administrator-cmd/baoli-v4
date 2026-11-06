@@ -317,6 +317,29 @@ CREATE TABLE `audit_report` (
   CONSTRAINT `fk_audit_report_task` FOREIGN KEY (`audit_task_id`) REFERENCES `audit_task` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- 可复用报告模板：原始 PDF 与模型提炼的结构/表达风格 JSON。
+CREATE TABLE `report_template` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `template_no` varchar(40) NOT NULL,
+  `upload_idempotency_key` varchar(120) DEFAULT NULL,
+  `name` varchar(255) NOT NULL,
+  `source_filename` varchar(255) NOT NULL,
+  `source_path` varchar(500) NOT NULL,
+  `source_size` bigint NOT NULL,
+  `source_sha256` varchar(64) NOT NULL,
+  `page_count` bigint NOT NULL DEFAULT '0',
+  `status` varchar(24) NOT NULL DEFAULT 'PROCESSING',
+  `style_profile_json` json DEFAULT NULL,
+  `analysis_error` text,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_report_template_no` (`template_no`),
+  UNIQUE KEY `uq_report_template_upload_idempotency_key` (`upload_idempotency_key`),
+  KEY `idx_report_template_status_updated` (`status`,`updated_at`),
+  CONSTRAINT `chk_report_template_status` CHECK ((`status` in ('PROCESSING','READY','FAILED')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 
 -- 6. 材料位、上传与处理产物
 
@@ -552,6 +575,107 @@ CREATE TABLE `field_review_confirmation` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
+-- AI 辅助生成规则库：生成作业、冻结导出与导入关联。与审核任务 CSV 无关。
+
+-- 生成作业：原文件、冻结生成输入、当前可编辑文档；不保存可由文档派生的状态列。
+CREATE TABLE `rulebook_generation_job` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `job_no` varchar(40) NOT NULL,
+  `idempotency_key` varchar(120) NOT NULL,
+  `request_hash` char(64) NOT NULL,
+  `source_filename` varchar(255) NOT NULL,
+  `source_path` varchar(500) NOT NULL,
+  `source_sha256` char(64) NOT NULL,
+  `source_size` bigint NOT NULL,
+  `business_background` text NOT NULL,
+  `generation_requirements` text NOT NULL,
+  `document_schema_version` varchar(40) NOT NULL,
+  `prompt_version` varchar(40) NOT NULL,
+  `document_json` json DEFAULT NULL,
+  `revision` int NOT NULL DEFAULT 0,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_rulebook_generation_job_no` (`job_no`),
+  UNIQUE KEY `uq_rulebook_generation_job_idempotency` (`idempotency_key`),
+  KEY `idx_rulebook_generation_created_at_id` (`created_at`,`id`),
+  CONSTRAINT `ck_rulebook_generation_source_size` CHECK ((`source_size` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 冻结导出：同一修订只产生一份规范导出；快照不可变。
+CREATE TABLE `rulebook_generation_export` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `export_no` varchar(40) NOT NULL,
+  `generation_job_id` bigint NOT NULL,
+  `revision` int NOT NULL,
+  `document_snapshot_json` json NOT NULL,
+  `export_format_version` varchar(40) NOT NULL,
+  `filename` varchar(255) NOT NULL,
+  `relative_path` varchar(500) NOT NULL,
+  `sha256` char(64) NOT NULL,
+  `size` bigint NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_rulebook_generation_export_no` (`export_no`),
+  UNIQUE KEY `uq_rulebook_generation_export_revision` (`generation_job_id`,`revision`),
+  KEY `idx_rulebook_generation_export_job` (`generation_job_id`,`created_at`),
+  CONSTRAINT `ck_rulebook_generation_export_size` CHECK ((`size` >= 0)),
+  CONSTRAINT `fk_rulebook_generation_export_job` FOREIGN KEY (`generation_job_id`) REFERENCES `rulebook_generation_job` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 导出与真实导入作业的关系；导入被删除后只解除关联。
+CREATE TABLE `rulebook_generation_import` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `generation_export_id` bigint NOT NULL,
+  `import_job_id` bigint DEFAULT NULL,
+  `idempotency_key` varchar(120) NOT NULL,
+  `request_hash` char(64) NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_rulebook_generation_import_request` (`generation_export_id`,`idempotency_key`),
+  UNIQUE KEY `uq_rulebook_generation_import_job` (`import_job_id`),
+  KEY `idx_rulebook_generation_import_export` (`generation_export_id`),
+  CONSTRAINT `fk_rulebook_generation_import_export` FOREIGN KEY (`generation_export_id`) REFERENCES `rulebook_generation_export` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  CONSTRAINT `fk_rulebook_generation_import_job` FOREIGN KEY (`import_job_id`) REFERENCES `import_job` (`id`) ON DELETE SET NULL ON UPDATE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- 规则库修订为只追加快照；job.document_json 是唯一可编辑入口。
+CREATE TABLE `rulebook_generation_revision` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `generation_job_id` bigint NOT NULL,
+  `revision` int NOT NULL,
+  `document_json` json NOT NULL,
+  `summary` text NOT NULL,
+  `origin` varchar(16) NOT NULL,
+  `operation_id` bigint DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_generation_revision_job` (`generation_job_id`,`revision`),
+  UNIQUE KEY `uq_generation_revision_operation` (`operation_id`),
+  CONSTRAINT `fk_generation_revision_job` FOREIGN KEY (`generation_job_id`) REFERENCES `rulebook_generation_job` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_generation_revision_operation` FOREIGN KEY (`operation_id`) REFERENCES `background_operation` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `ck_generation_revision_origin` CHECK ((`origin` in (_utf8mb4'INITIAL',_utf8mb4'MANUAL',_utf8mb4'AI',_utf8mb4'RESTORE',_utf8mb4'BASELINE'))),
+  CONSTRAINT `ck_generation_revision_positive` CHECK ((`revision` >= 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `rulebook_generation_message` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `generation_job_id` bigint NOT NULL,
+  `revision` int NOT NULL,
+  `operation_id` bigint NOT NULL,
+  `role` varchar(16) NOT NULL,
+  `content` text NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_generation_message_operation_role` (`operation_id`,`role`),
+  KEY `fk_generation_message_revision` (`generation_job_id`,`revision`),
+  KEY `idx_generation_message_job_id` (`generation_job_id`,`id`),
+  CONSTRAINT `fk_generation_message_operation` FOREIGN KEY (`operation_id`) REFERENCES `background_operation` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_generation_message_revision` FOREIGN KEY (`generation_job_id`, `revision`) REFERENCES `rulebook_generation_revision` (`generation_job_id`, `revision`) ON DELETE RESTRICT,
+  CONSTRAINT `ck_generation_message_role` CHECK ((`role` in (_utf8mb4'USER',_utf8mb4'ASSISTANT')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 -- 8. 结构确认：预期不返回任何行。
 
 SELECT expected.table_name AS missing_table
@@ -567,6 +691,7 @@ SELECT 'scenario_template' AS table_name
     UNION ALL SELECT 'audit_task' AS table_name
     UNION ALL SELECT 'node_execution' AS table_name
     UNION ALL SELECT 'audit_report' AS table_name
+    UNION ALL SELECT 'report_template' AS table_name
     UNION ALL SELECT 'task_document' AS table_name
     UNION ALL SELECT 'document_upload' AS table_name
     UNION ALL SELECT 'stored_artifact' AS table_name
@@ -575,6 +700,11 @@ SELECT 'scenario_template' AS table_name
     UNION ALL SELECT 'rule_result' AS table_name
     UNION ALL SELECT 'manual_review' AS table_name
     UNION ALL SELECT 'field_review_confirmation' AS table_name
+    UNION ALL SELECT 'rulebook_generation_job' AS table_name
+    UNION ALL SELECT 'rulebook_generation_export' AS table_name
+    UNION ALL SELECT 'rulebook_generation_import' AS table_name
+    UNION ALL SELECT 'rulebook_generation_revision' AS table_name
+    UNION ALL SELECT 'rulebook_generation_message' AS table_name
 ) AS expected
 LEFT JOIN information_schema.tables AS actual
        ON actual.table_schema = DATABASE()
@@ -600,4 +730,6 @@ ORDER BY expected.table_name;
 --                              SKIPPED / RUNNING
 -- rule_result.loop_status      RUNNING / DONE / BLOCKED / NEEDS_HUMAN
 -- audit_report.archived_at     非空表示已归档；报告行存在即表示正文已保存
+-- report_template.status       PROCESSING / READY / FAILED
+-- rulebook_generation_job.revision 0=尚未生成，1=首次生成完成，之后每次保存递增
 -- manual_review.status         PENDING / RESOLVED / INVALIDATED

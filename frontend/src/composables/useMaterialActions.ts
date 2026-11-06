@@ -4,7 +4,6 @@ import { ElMessageBox } from "element-plus";
 import type { AuditDocument } from "@/api/contracts";
 import type { ReplacementImpact } from "@/api/audits";
 import { removeTaskDocumentFile, uploadTaskDocument } from "@/api/audits";
-import type { OperationView } from "@/api/http";
 
 export interface MaterialActionsState {
   /** 正在上传/移除的材料位编号；null 表示没有进行中的操作。 */
@@ -30,7 +29,6 @@ export function useMaterialActions(options: {
   run: (action: () => Promise<void>) => Promise<void>;
   /** 每次输入变化后重新读取任务状态。 */
   refresh: (taskNo: string) => Promise<void>;
-  onOperationAccepted: (operation: OperationView) => void;
 }): MaterialActionsState {
   const busyDocumentNo = ref<string | null>(null);
   const uploadPercent = ref<number | null>(null);
@@ -60,7 +58,6 @@ export function useMaterialActions(options: {
         if (!isCurrent()) return;
         uploadPercent.value = 100;
         replacementImpact.value = uploaded.impact ? { ...uploaded.impact, materialName: document.material_name } : null;
-        options.onOperationAccepted(uploaded.classification_operation);
         await options.refresh(taskNo);
       });
     } finally {

@@ -65,10 +65,19 @@ function httpFailure(payload: unknown, statusCode: number, requestId: string): A
 
 /** 统一请求入口：沿用 60 秒超时；取消、网络、HTTP 和响应格式错误分别暴露。 */
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return requestResponse<T>(path, init, "json");
+}
+
+/** 文件请求沿用相同的超时与错误解析，错误 JSON 不能被保存成 Excel。 */
+export async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  return requestResponse<Blob>(path, init, "blob");
+}
+
+async function requestResponse<T>(path: string, init: RequestInit, format: "json" | "blob"): Promise<T> {
   const headers = new Headers(init.headers);
   const requestId = headers.get("X-Request-ID") || newId();
   headers.set("X-Request-ID", requestId);
-  if (!headers.has("Accept")) headers.set("Accept", "application/json");
+  if (!headers.has("Accept")) headers.set("Accept", format === "blob" ? "application/octet-stream" : "application/json");
 
   const controller = new AbortController();
   let timedOut = false;
@@ -91,7 +100,14 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     });
     statusCode = response.status;
     responseRequestId = response.headers.get("X-Request-ID") || requestId;
-    if (response.status === 204) return undefined as T;
+    if (response.status === 204) {
+      if (format === "blob") throw invalidResponse(statusCode, responseRequestId, null);
+      return undefined as T;
+    }
+    if (format === "blob" && response.ok
+      && !response.headers.get("Content-Type")?.includes("application/json")) {
+      return await response.blob() as T;
+    }
 
     let payload: unknown;
     try {
@@ -104,6 +120,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     if (!response.ok) throw httpFailure(payload, statusCode, responseRequestId);
     if (!isApiEnvelope(payload)) throw invalidResponse(statusCode, responseRequestId, payload);
     if (!payload.success) throw new ApiError(payload as ApiFailure, statusCode);
+    if (format === "blob") throw invalidResponse(statusCode, responseRequestId, payload);
     return payload.data as T;
   } catch (error) {
     if (error instanceof ApiError) throw error;

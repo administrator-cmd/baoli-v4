@@ -7,7 +7,7 @@ import type { FieldReviewCorrection, FieldReviewMissing, FieldReviewState } from
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { formatBusinessValue, periodScopeLabel, statementScopeLabel } from "@/constants/labels";
+import { formatBusinessValue } from "@/constants/labels";
 import { fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
@@ -94,21 +94,6 @@ function extractedText(field: AuditFieldView): string {
   if (field.extraction_enabled === false) return "本方案未启用该字段抽取";
   if (field.material_uploaded === false) return "材料未上传";
   return "未取到取值";
-}
-
-/** 区分正文识别值与配置要求，不按字段名称推断。 */
-function scopeText(field: AuditFieldView): string {
-  const parts: string[] = [];
-  parts.push(`识别单位：${field.actual_unit || '未识别'}`);
-  if (field.unit) parts.push(`要求单位：${field.unit}`);
-  if (field.currency) parts.push(`币种：${field.currency}`);
-  parts.push(`识别期间：${field.actual_period_scope || '未识别'}`);
-  if (field.period_scope) parts.push(`要求期间：${periodScopeLabel(field.period_scope)}`);
-  parts.push(`识别口径：${field.actual_statement_scope || '未识别'}`);
-  if (field.statement_scope) parts.push(`要求口径：${statementScopeLabel(field.statement_scope)}`);
-  parts.push(`识别主体：${field.actual_entity_scope || '未识别'}`);
-  if (field.entity_scope && field.entity_scope !== "SELF") parts.push(`要求主体：${field.entity_scope}`);
-  return parts.join(" · ");
 }
 
 function sourceFilesText(field: AuditFieldView): string {
@@ -396,18 +381,11 @@ function countOf(value: string): number {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="单位与口径" min-width="170">
+        <el-table-column label="详情" width="120" align="center">
           <template #default="{ row }">
-            <span v-if="scopeText(row)">{{ scopeText(row) }}</span>
-            <span v-else class="text-hint">未声明</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="原文依据" width="120" align="center">
-          <template #default="{ row }">
-            <el-button v-if="row.evidence.length" link type="primary" size="small" @click="detailField = row">
+            <el-button link type="primary" size="small" @click="detailField = row">
               查看{{ row.evidence.length ? `（${row.evidence.length}）` : "" }}
             </el-button>
-            <span v-else class="text-hint">无</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="150">

@@ -40,7 +40,7 @@ def upload_task_document(
     """
     # 同步入口由 FastAPI 放入工作线程；Session 在执行它的线程创建和关闭。
     with request_session() as db:
-        document, record, impact, operation = AuditTaskDocumentsService(db).upload_document(
+        document, record, impact = AuditTaskDocumentsService(db).upload_document(
              task_no, document_no, file, material_type=material_type, replace=replace
         )
         return ok(DocumentUploadResponse(
@@ -49,7 +49,6 @@ def upload_task_document(
             filename=record.original_filename,
             size_bytes=record.size_bytes,
             status=record.status,
-            classification_operation=OperationBackgroundService().operation_view(operation),
             impact=impact,
         ), request)
 
