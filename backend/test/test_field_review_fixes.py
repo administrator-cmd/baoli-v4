@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.common.exceptions import BusinessError
-from app.domain.rule_library import _validate_field_fact_identity
+from app.domain.configuration.rule_library import _validate_field_fact_identity
 from app.modules.audit.execution.service import resume
 from app.modules.audit.execution.service.flow import extraction_batch
 from app.modules.audit.execution.service.flow.plan import ReviewBoundary

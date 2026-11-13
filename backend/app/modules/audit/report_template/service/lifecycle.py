@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
 from app.core.transactions import after_rollback
-from app.domain.identity import public_no
+from app.domain.shared.identity import public_no
 from app.modules.audit.report_template.crud import ReportTemplateCRUD
 from app.modules.audit.report_template.model import ReportTemplate
 from app.modules.audit.report_template.service.analysis import validate_style_profile

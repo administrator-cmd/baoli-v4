@@ -6,10 +6,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.constants.status import SCENARIO_VERSION_STATUS_PUBLISHED
-from app.domain import manifest as manifest_module
-from app.domain.plan_calculations import plan_calculation_config
-from app.domain.report_data import report_data_refs
-from app.domain.rule_library import active
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration.plan_calculations import plan_calculation_config
+from app.domain.configuration.report_data import report_data_refs
+from app.domain.configuration.rule_library import active
 from app.modules.plan.config import crud
 from app.modules.plan.plan.model import AuditPlan
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD

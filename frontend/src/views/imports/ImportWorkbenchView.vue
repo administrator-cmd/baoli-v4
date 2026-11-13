@@ -111,7 +111,7 @@ const canResumeRefinement = computed(
 
 const conversionActionLabel = computed(() => {
   if (parsing.value) return "正在解析";
-  return canResumeRefinement.value ? "重试第二轮" : "开始解析";
+  return canResumeRefinement.value ? "重试第二轮" : jobFailure.value ? "重新解析" : "开始解析";
 });
 
 const conversionDisabledReason = computed(() => {
@@ -609,6 +609,19 @@ watch(
           </div>
         </template>
 
+        <div v-if="importMutable" class="card-actions block-gap-sm">
+          <el-button v-if="canResumeRefinement" :disabled="!canSubmitConversion" @click="reparseFromStart">从头重新解析</el-button>
+          <el-button
+            type="primary"
+            :loading="pending || parsing"
+            :disabled="!canSubmitConversion"
+            :title="conversionDisabledReason ?? ''"
+            @click="submitConversion()"
+          >
+            {{ conversionActionLabel }}
+          </el-button>
+        </div>
+
         <StateBlock v-if="loadingJob" kind="loading" />
         <StateBlock v-else-if="operationRunning && !hasProposals" kind="loading" title="正在解析规则库" description="完成后将显示材料、字段、规则和报告配置。" />
         <ImportProposalEditor
@@ -618,7 +631,12 @@ watch(
           @saved="receiveProposalUpdate"
           @busy="proposalSaving = $event"
         />
-        <StateBlock v-else kind="empty" title="还没有解析结果" description="回到上一步开始解析。" />
+        <StateBlock
+          v-else
+          :kind="jobFailure ? 'error' : 'empty'"
+          :title="jobFailure ? '解析未完成' : '还没有解析结果'"
+          description="请使用上方按钮提交解析。"
+        />
 
         <div class="sticky-actions">
           <div class="sticky-actions__bar">

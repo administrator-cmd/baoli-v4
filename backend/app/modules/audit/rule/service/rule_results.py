@@ -4,9 +4,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.domain.manifest import comparison_label
-from app.domain.parameter_contract import OPERATOR_LABELS
-from app.domain.rule_library import is_risk_rule
+from app.domain.configuration.manifest import comparison_label
+from app.domain.configuration.parameter_contract import OPERATOR_LABELS
+from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.field.service import value_store as task_value_service
 from app.modules.audit.field.service.evidence import AuditFieldEvidenceService

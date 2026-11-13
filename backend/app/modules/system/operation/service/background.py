@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import ACTIVE_OPERATION_STATUSES
-from app.domain.identity import public_no
+from app.domain.shared.identity import public_no
 from app.modules.system.operation.crud import SystemOperationCRUD
 from app.modules.system.operation.model import BackgroundOperation
 from app.modules.system.operation.service.operation_log import OperationLogService

@@ -9,7 +9,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.common.exceptions import BusinessError
 from app.core.base_crud import SessionCRUD
-from app.domain.config_changes import FieldChanges, GeneratedRuleChanges, MaterialChanges, RuleChanges, SectionChanges
+from app.domain.configuration.config_changes import FieldChanges, GeneratedRuleChanges, MaterialChanges, RuleChanges, SectionChanges
 from app.modules.plan.plan.model import AuditPlan
 from app.modules.scenario.draft.model import ScenarioDraft
 

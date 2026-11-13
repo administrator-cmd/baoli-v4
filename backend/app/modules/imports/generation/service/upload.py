@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
 from app.core.transactions import after_rollback
-from app.domain.identity import public_no
-from app.domain.rulebook_generation import (
+from app.domain.shared.identity import public_no
+from app.domain.generation.document import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_INPUT_MAX_LENGTH,
     GENERATION_PROMPT_VERSION,

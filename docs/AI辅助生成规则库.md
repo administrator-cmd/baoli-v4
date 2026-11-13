@@ -163,7 +163,7 @@ openpyxl 从已保存业务文档生成普通 `.xlsx`，模型不返回二进制
 
 `POST /{job_no}/messages` 受理一句话修改/询问；可选 issue_id 表示对既有事项提交业务答案，目标与答案一并进入现有后台命令 JSON 和消息记录，无需新增表，`GET /{job_no}/messages` 分页读取对话，`GET /{job_no}/revisions` 读取版本摘要，`POST /{job_no}/restore` 恢复指定版本。导出接口可下载指定真实快照，不把旧版本请求替换成当前正文。
 
-- 后端契约：`backend/app/domain/rulebook_generation.py`。
+- 后端契约：`backend/app/domain/generation/document.py`。
 - 后端业务：`backend/app/modules/imports/generation/`。
 - 前端页面：`frontend/src/views/documents/RulebookGenerateView.vue`、`RulebookGenerationDetailView.vue`。
 - 前端业务编辑器：`frontend/src/components/generation/`。

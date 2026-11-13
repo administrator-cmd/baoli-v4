@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING, PRODUCED_RESULT_STATUSES
 from app.core.transactions import commit_transaction
-from app.domain.audit_state import RuleExecutionState, RuleOutcome, RuleSaveResult
-from app.domain.rule_library import is_risk_rule
+from app.domain.audit.audit_state import RuleExecutionState, RuleOutcome, RuleSaveResult
+from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
 from app.modules.audit.execution.service.flow.shared import agent_module, rule_of_instance

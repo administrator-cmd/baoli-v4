@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.execution import ORIGIN_HUMAN_CORRECTION
 from app.constants.status import LOOP_RUNNING
-from app.domain.audit_state import AuditGraphState, EvaluationContext, RuleExecutionState
-from app.domain.execution_mode import EXECUTION_MODES, MODE_EXTRACT, MODE_UNKNOWN
-from app.domain.material_precheck import PRECHECK_KEY, PRECHECK_TOOLS, precheck_rule_keys
+from app.domain.audit.audit_state import AuditGraphState, EvaluationContext, RuleExecutionState
+from app.domain.configuration.execution_mode import EXECUTION_MODES, MODE_EXTRACT, MODE_UNKNOWN
+from app.domain.materials.material_precheck import PRECHECK_KEY, PRECHECK_TOOLS, precheck_rule_keys
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
@@ -164,7 +164,7 @@ def graph_load_rule_instance(
         if rule.get(PRECHECK_KEY):
             scope = set(rule.get("materials") or [item["material_key"] for item in data["materials"]])
             data["materials"] = [item for item in data["materials"] if item["material_key"] in scope]
-        from app.domain.material_precheck import material_blocks
+        from app.domain.materials.material_precheck import material_blocks
         blocked = material_blocks(execution.result_json)
         data["facts"] = [item for item in data["facts"] if item.get("material_key") not in blocked]
         data["inputs"] = [item for item in data["inputs"] if item.get("material_key") not in blocked]
@@ -243,7 +243,7 @@ def graph_prepare_agent_context(
         context_rule.update(execution_context)
         context_rule["available_materials"] = instance.get("materials") or []
         # 引用校验使用模型实际看到的版本，不在保存时重查替换。
-        from app.domain.fact_projection import fact_identity
+        from app.domain.audit.fact_projection import fact_identity
         visible_facts = {fact_identity(fact): fact
                          for fact in [*execution_context["upstream_facts"], *list(instance.get("facts") or [])]}
         instance = {**instance, "facts": list(visible_facts.values()),

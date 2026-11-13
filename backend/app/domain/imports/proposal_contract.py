@@ -3,7 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.constants.execution import OPERATOR_LLM_EXECUTE
-from app.domain.execution_mode import ExecutionMode
+from app.domain.configuration.execution_mode import ExecutionMode
 
 # 普通数值 DECIMAL 不带财务假设；AMOUNT 与大写金额 DECIMAL_CN 保留单位、币种口径。
 ValueType = Literal["STRING", "DECIMAL", "AMOUNT", "DECIMAL_CN", "DATE", "BOOLEAN", "CLAUSE"]

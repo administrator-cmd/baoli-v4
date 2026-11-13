@@ -8,8 +8,8 @@ from langgraph.runtime import Runtime
 
 from app.common.exceptions import BusinessError, exception_summary
 from app.core.database import is_storage_unavailable
-from app.domain.audit_state import AgentSummary, AuditGraphState, EvaluationContext, EvaluationPlanEntry, RuleOutcome
-from app.domain.llm_failure import ChannelFailure
+from app.domain.audit.audit_state import AgentSummary, AuditGraphState, EvaluationContext, EvaluationPlanEntry, RuleOutcome
+from app.domain.shared.llm_failure import ChannelFailure
 from app.graphs.audit_rule_runner import RuleEvaluationRunner, extraction_group, run_rule_evaluation
 
 logger = logging.getLogger(__name__)

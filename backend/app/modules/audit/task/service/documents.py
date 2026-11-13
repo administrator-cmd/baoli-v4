@@ -11,8 +11,8 @@ from app.common.exceptions import BusinessError
 from app.constants.status import TASK_STATUS_COMPLETED, TASK_STATUS_READY, TASK_STATUS_RUNNING
 from app.core.config import get_settings
 from app.core.transactions import after_rollback
-from app.domain.identity import public_no
-from app.domain.rule_library import execution_container_of
+from app.domain.shared.identity import public_no
+from app.domain.configuration.rule_library import execution_container_of
 from app.integrations.documents.material_classify import list_material_types
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.execution.crud import AuditExecutionCRUD

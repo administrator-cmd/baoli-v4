@@ -13,11 +13,11 @@ from typing import Any
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED
-from app.domain.audit_state import EvaluationPlanEntry
-from app.domain.execution_mode import MODE_EXTRACT, MODE_MATERIAL_CHECK, SOURCE_ONLY_MODES, execution_mode_label
-from app.domain.field_review import reviewed_extraction_keys
-from app.domain.material_precheck import material_blocks, precheck_rule_keys
-from app.domain.rule_library import active, dependency_indexes, execution_order, rule_dependencies
+from app.domain.audit.audit_state import EvaluationPlanEntry
+from app.domain.configuration.execution_mode import MODE_EXTRACT, MODE_MATERIAL_CHECK, SOURCE_ONLY_MODES, execution_mode_label
+from app.domain.audit.field_review import reviewed_extraction_keys
+from app.domain.materials.material_precheck import material_blocks, precheck_rule_keys
+from app.domain.configuration.rule_library import active, dependency_indexes, execution_order, rule_dependencies
 from app.modules.audit.rule.model import RuleResult
 from app.modules.audit.shared import _task_manifest
 from app.modules.audit.task.model import AuditTask

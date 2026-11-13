@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.execution import FACT_KIND_DERIVED, FACT_KIND_EXTRACTED
-from app.domain.fact_projection import fact_identity, field_fact_identity
-from app.domain.task_value_csv import (
+from app.domain.audit.fact_projection import fact_identity, field_fact_identity
+from app.domain.audit.task_value_csv import (
     COUNT_COLUMNS,
     ITEM_CATEGORY,
     ITEM_FILE,

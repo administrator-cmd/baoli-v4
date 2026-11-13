@@ -19,9 +19,9 @@ from app.constants.status import (
     TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from app.core.transactions import commit_transaction, rollback_transaction
-from app.domain.audit_state import AgentSummary, AuditGraphState
-from app.domain.field_review import reviewed_extraction_keys
-from app.domain.llm_failure import ChannelFailure
+from app.domain.audit.audit_state import AgentSummary, AuditGraphState
+from app.domain.audit.field_review import reviewed_extraction_keys
+from app.domain.shared.llm_failure import ChannelFailure
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import agent_step, graph_error_state

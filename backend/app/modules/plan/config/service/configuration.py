@@ -8,17 +8,17 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import SCOPE_NOT_APPLICABLE
-from app.domain import field_strategy
-from app.domain import manifest as manifest_module
-from app.domain.calculation_config import (
+from app.domain.configuration import field_strategy
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration.calculation_config import (
     calculation_store,
     calculations_referencing_field,
     remap_calculation_field_codes,
 )
-from app.domain.manifest import FORM_VALUE_TYPES
-from app.domain.plan_calculations import plan_calculation_config
-from app.domain.report_data import report_data_refs
-from app.domain.rule_library import active
+from app.domain.configuration.manifest import FORM_VALUE_TYPES
+from app.domain.configuration.plan_calculations import plan_calculation_config
+from app.domain.configuration.report_data import report_data_refs
+from app.domain.configuration.rule_library import active
 from app.modules.plan.config.crud import PlanConfigCRUD
 from app.modules.plan.config.model import PlanField, PlanMaterial, PlanRule, PlanSection
 from app.modules.plan.config.service.views import PlanConfigViewsService

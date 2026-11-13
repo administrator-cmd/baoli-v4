@@ -7,13 +7,13 @@ from typing import Any
 from app.common.exceptions import BusinessError
 from app.constants.execution import NODE_RULE_EXECUTION
 from app.constants.status import SCOPE_NOT_APPLICABLE
-from app.domain import field_strategy
-from app.domain.field_strategy import normalize_field_scope
-from app.domain.identity import stable_key
-from app.domain.parameter_contract import OPERATOR_LABELS
-from app.domain.proposals import FieldProposal, MaterialProposal, ReportSectionProposal, RuleProposal
-from app.domain.report_data import report_data_refs
-from app.domain.rule_library import active, is_risk_rule
+from app.domain.configuration import field_strategy
+from app.domain.configuration.field_strategy import normalize_field_scope
+from app.domain.shared.identity import stable_key
+from app.domain.configuration.parameter_contract import OPERATOR_LABELS
+from app.domain.imports.proposal_contract import FieldProposal, MaterialProposal, ReportSectionProposal, RuleProposal
+from app.domain.configuration.report_data import report_data_refs
+from app.domain.configuration.rule_library import active, is_risk_rule
 
 
 def _proposal_context(item: dict[str, Any], model: type) -> dict[str, Any]:
@@ -205,7 +205,7 @@ def draft_config_of_import(
     namespace: str,
 ) -> dict[str, Any]:
     """将模型业务配置投影为草稿，保留原始业务编号与来源。"""
-    from app.domain.rule_library import EXECUTION_VERSION, execution_container
+    from app.domain.configuration.rule_library import EXECUTION_VERSION, execution_container
 
     resolved = deepcopy(proposals)
     materials = resolved["materials"]
@@ -414,7 +414,7 @@ def editable_config_of(manifest: dict[str, Any], *, namespace: str) -> dict[str,
 
     返回的每项都是不含归属 id 的字典；`rules` 不跳过系统派生规则，是否保留由调用方决定。
     """
-    from app.domain.rule_library import execution_container_of
+    from app.domain.configuration.rule_library import execution_container_of
     execution_container_of(manifest)
 
     def applicability_of(rule: dict[str, Any]) -> dict[str, Any]:
@@ -803,5 +803,5 @@ def compile_form_manifest(
     source_kind: str = "FORM",
 ) -> dict[str, Any]:
     """只组织规则库执行项，不编译九类业务节点或固定算子路径。"""
-    from app.domain.rule_library import compile_library
+    from app.domain.configuration.rule_library import compile_library
     return compile_library(**locals())

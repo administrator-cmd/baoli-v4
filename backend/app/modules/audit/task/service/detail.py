@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.execution import NODE_RULE_EXECUTION, ORIGIN_HUMAN_CORRECTION
 from app.constants.status import EXECUTABLE_FIELD_STATUSES
-from app.domain.execution_scope import result_state
-from app.domain.manifest import enabled_extraction_field_keys
-from app.domain.rule_library import active, execution_container_of
+from app.domain.audit.execution_scope import result_state
+from app.domain.configuration.manifest import enabled_extraction_field_keys
+from app.domain.configuration.rule_library import active, execution_container_of
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.execution_scope import current_executions, pending_rerun_by_execution
@@ -188,7 +188,7 @@ class AuditTaskDetailService:
         scope_enabled_keys = list(task.task_schema_json["enabled_rule_keys"])
         scope_unenabled_keys = list(task.task_schema_json["unenabled_rule_keys"])
         current_execution = executions.get(current_node_definition["node_code"])
-        from app.domain.material_precheck import material_blocks
+        from app.domain.materials.material_precheck import material_blocks
         from app.modules.audit.task.service.processing import MATERIAL_ARTIFACT_TYPES, quality_block_message
         quality_blocks = material_blocks(current_execution.result_json if current_execution else None)
         precheck_state = (current_execution.result_json or {}).get("material_precheck") if current_execution else None

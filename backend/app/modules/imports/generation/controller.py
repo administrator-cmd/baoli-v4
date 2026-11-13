@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.common.response import ResponseSchema, ok
 from app.core.database import get_db, request_session
-from app.domain.rulebook_generation import GENERATION_INPUT_MAX_LENGTH
+from app.domain.generation.document import GENERATION_INPUT_MAX_LENGTH
 from app.modules.imports.generation.crud import GenerationMessageCRUD, GenerationRevisionCRUD
 from app.modules.imports.generation.dto import (
     AssistantMessageRequest,

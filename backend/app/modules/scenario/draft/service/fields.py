@@ -6,10 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.execution import ENTITY_SCOPE_SELF, NODE_RULE_EXECUTION
-from app.domain import field_strategy
-from app.domain.calculation_config import calculations_referencing_field, remap_calculation_field_codes
-from app.domain.identity import stable_key
-from app.domain.rule_library import active
+from app.domain.configuration import field_strategy
+from app.domain.configuration.calculation_config import calculations_referencing_field, remap_calculation_field_codes
+from app.domain.shared.identity import stable_key
+from app.domain.configuration.rule_library import active
 from app.modules.scenario.draft.model import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule, ScenarioDraftSection
 from app.modules.scenario.draft.service.draft import ScenarioDraftService
 from app.modules.scenario.draft.service.materials import ScenarioDraftMaterialsService

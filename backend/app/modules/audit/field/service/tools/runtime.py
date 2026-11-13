@@ -10,8 +10,8 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from langchain_core.tools import BaseTool
 
 from app.common.exceptions import BusinessError
-from app.domain import tool_catalog
-from app.domain.tool_context import ToolExecutionContext
+from app.domain.tools import tool_catalog
+from app.domain.tools.tool_context import ToolExecutionContext
 
 logger = logging.getLogger(__name__)
 

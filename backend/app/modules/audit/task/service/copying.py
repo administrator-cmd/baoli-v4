@@ -3,7 +3,7 @@
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.identity import public_no
+from app.domain.shared.identity import public_no
 from app.modules.audit.task.model import AuditTask
 from app.modules.audit.task.service.command_records import AuditTaskCommandRecordsService
 from app.modules.audit.task.service.creation import AuditTaskCreationService

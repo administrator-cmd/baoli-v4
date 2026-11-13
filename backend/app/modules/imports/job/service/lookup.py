@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain import scenario_schema
+from app.domain.configuration import scenario_schema
 from app.modules.imports.job import crud
 from app.modules.imports.job.model import ImportJob
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD

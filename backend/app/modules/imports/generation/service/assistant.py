@@ -3,7 +3,7 @@
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.generation_assistant import ASSISTANT_PROMPT_VERSION
+from app.domain.generation.assistant import ASSISTANT_PROMPT_VERSION
 from app.modules.imports.generation.crud import GenerationMessageCRUD
 from app.modules.imports.generation.model import RulebookGenerationMessage
 from app.modules.imports.generation.service.history import GenerationHistoryService

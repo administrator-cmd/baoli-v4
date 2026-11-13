@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
 from app.core.transactions import commit_transaction, rollback_transaction
-from app.domain.generation_assistant import (
+from app.domain.generation.assistant import (
     ASSISTANT_PROMPT_VERSION,
     AssistantReply,
     AssistantReview,
@@ -16,7 +16,7 @@ from app.domain.generation_assistant import (
     apply_review_text_repairs,
     document_changes,
 )
-from app.domain.rulebook_generation import (
+from app.domain.generation.document import (
     GenerationDocument,
     collect_document_problems,
     normalize_business_codes,

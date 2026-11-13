@@ -18,8 +18,8 @@ from app.constants.execution import (
     ORIGIN_HUMAN_CORRECTION,
 )
 from app.constants.status import EXECUTABLE_FIELD_STATUSES, FIELD_STATUS_REVIEWED
-from app.domain import fact_projection
-from app.domain.field_strategy import normalize_field_scope
+from app.domain.audit import fact_projection
+from app.domain.configuration.field_strategy import normalize_field_scope
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.model import TaskFact, TaskFieldValue
 from app.modules.audit.field.service import value_store as task_value_service

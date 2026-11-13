@@ -23,7 +23,7 @@ class AuditFieldCRUD(CRUDBase):
         from sqlalchemy import false, tuple_
 
         from app.constants.execution import FACT_KIND_EXTRACTED
-        from app.domain import fact_projection
+        from app.domain.audit import fact_projection
 
         if owner_keys is not None:
             definitions = {key: field for key, field in definitions.items() if key in owner_keys}

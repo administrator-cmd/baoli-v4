@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.domain.execution_mode import ExecutionMode
+from app.domain.configuration.execution_mode import ExecutionMode
 
 ImportProposalGroup = Literal["materials", "fields", "rules", "calculations", "report_sections"]
 

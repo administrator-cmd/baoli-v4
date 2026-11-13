@@ -23,8 +23,8 @@ from app.constants.status import (
     TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from app.core.transactions import commit_transaction
-from app.domain.audit_state import EvaluationPlanEntry, RuleOutcome
-from app.domain.llm_failure import ChannelFailure
+from app.domain.audit.audit_state import EvaluationPlanEntry, RuleOutcome
+from app.domain.shared.llm_failure import ChannelFailure
 from app.graphs.audit_graph import collect_agent_summary
 from app.graphs.audit_rule_runner import extraction_group, run_rule_evaluation
 from app.modules.audit.execution.crud import AuditExecutionCRUD
@@ -217,7 +217,7 @@ class AuditExecutionResumeService:
         allowed = boundary.phase_keys(
             confirmed=confirmed, extraction_closed=AuditFieldReviewService().extraction_closed(execution),
         )
-        from app.domain.material_precheck import precheck_rule_keys
+        from app.domain.materials.material_precheck import precheck_rule_keys
         allowed |= precheck_rule_keys(execution.result_json)
         return boundary, confirmed, allowed, entries
 
@@ -384,7 +384,7 @@ class AuditExecutionResumeService:
                 return advanced["last_execution"]
             # 重跑范围与详情页预览出自同一个函数：待重跑清单、未完成项与依赖下游不再各算一份。
             # 字段核对边界同样取自服务端：未确认时本轮只跑抽取段，确认后才是完整计划。
-            from app.domain.material_precheck import PRECHECK_KEY
+            from app.domain.materials.material_precheck import PRECHECK_KEY
             precheck = (execution.result_json or {}).get(PRECHECK_KEY)
             prepared = precheck is None or precheck["status"] != "READY"
             if prepared:
@@ -408,7 +408,7 @@ class AuditExecutionResumeService:
                 plan, review = loaded["evaluation_plan"], loaded["field_review"]
                 resume = self.resume_plan(task, execution, plan=plan, allowed_keys=set(review["allowed_rule_keys"]),
                                           deferred_keys=set(review.get("after_rule_keys") or ()))
-                from app.domain.material_precheck import precheck_rule_keys
+                from app.domain.materials.material_precheck import precheck_rule_keys
                 rerun_keys = resume.rerun_keys - precheck_rule_keys(execution.result_json)
                 covered = resume.scope
             saved = self._saved_results( execution)

@@ -5,9 +5,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.constants.execution import NODE_RULE_EXECUTION
-from app.domain import field_strategy, scenario_schema
-from app.domain import manifest as manifest_module
-from app.domain.rule_library import active
+from app.domain.configuration import field_strategy, scenario_schema
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration.rule_library import active
 from app.modules.scenario.draft.crud import ScenarioDraftCRUD
 from app.modules.scenario.draft.model import (
     ScenarioDraft,
@@ -95,7 +95,7 @@ class ScenarioDraftService:
         业务配置事实必须完整带过来：产物来源、币种、报告分组属性、检查等级与风险成立条件
         都是人工维护的配置。少带一项，页面保存一次就会把它永久丢掉。
         """
-        # 映射口径只有一份：domain.manifest.editable_config_of（方案复制走同一份）。
+        # 映射口径只有一份：domain.configuration.manifest.editable_config_of（方案复制走同一份）。
         config = manifest_module.editable_config_of(manifest, namespace=draft.scenario_code)
         # 协议版本随 manifest 一起带入（系统只有一份协议）。
         profile_version = manifest.get("profile_version")

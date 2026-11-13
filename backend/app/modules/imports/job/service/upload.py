@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
 from app.core.transactions import after_rollback
-from app.domain import scenario_schema
-from app.domain.identity import public_no
+from app.domain.configuration import scenario_schema
+from app.domain.shared.identity import public_no
 from app.modules.imports.job import crud
 from app.modules.imports.job.model import ImportJob
 from app.modules.imports.job.service.workbook import ImportsJobWorkbookService

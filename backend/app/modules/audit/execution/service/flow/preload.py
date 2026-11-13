@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.execution_mode import MODE_EXTRACT
+from app.domain.configuration.execution_mode import MODE_EXTRACT
 from app.modules.audit.execution.service.flow.shared import agent_module
 from app.modules.audit.field.service.tools.handlers import read_artifact_items
 from app.modules.audit.shared import _scenario

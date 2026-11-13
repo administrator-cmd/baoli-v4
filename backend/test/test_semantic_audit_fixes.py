@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.common.exceptions import BusinessError
-from app.domain.rule_library import execution_order
+from app.domain.configuration.rule_library import execution_order
 from app.modules.audit.field.service import evidence
 from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
 from app.modules.audit.task.service.documents import _assert_task_input_editable

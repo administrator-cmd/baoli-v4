@@ -5,8 +5,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
-from app.domain.execution_mode import ExecutionMode
-from app.domain.parameter_contract import ReportContentType, ReportResultSort
+from app.domain.configuration.execution_mode import ExecutionMode
+from app.domain.configuration.parameter_contract import ReportContentType, ReportResultSort
 
 
 class DraftMaterialRequest(BaseModel):

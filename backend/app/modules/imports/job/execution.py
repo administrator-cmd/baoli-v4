@@ -2,7 +2,7 @@
 
 from app.common.exceptions import BusinessError
 from app.core.transactions import commit_transaction, rollback_transaction
-from app.domain.identity import public_no
+from app.domain.shared.identity import public_no
 from app.modules.imports.job.model import ImportJob
 from app.modules.imports.job.service.conversion import ImportsJobConversionService
 from app.modules.imports.job.service.llm import CONVERSION_MODE_FULL, CONVERSION_MODE_RESUME, ImportsJobLlmService

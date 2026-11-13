@@ -4,7 +4,7 @@
 适配器负责把它归一化成这里的形状，业务层只读这个结构。
 
 因此它属于内部契约而非集成细节，放在 domain 供两侧共同引用：
-`integrations/*` 产出它，`services/audit/*` 消费它；两边都不必依赖对方。
+`integrations/*` 产出它，`modules/audit/*` 消费它；两边都不必依赖对方。
 """
 
 from dataclasses import dataclass

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
-from app.domain.identity import stable_key
+from app.domain.shared.identity import stable_key
 from app.modules.scenario.draft.model import ScenarioDraft, ScenarioDraftRule
 from app.modules.scenario.draft.service.draft import ScenarioDraftService
 from app.modules.scenario.template.service.common import ScenarioTemplateCommonService

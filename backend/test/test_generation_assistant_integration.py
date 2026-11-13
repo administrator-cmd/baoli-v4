@@ -17,7 +17,7 @@ from sqlalchemy import delete, select
 from app.common.exceptions import BusinessError
 from app.core.database import SessionLocal
 from app.core.transactions import commit_transaction, rollback_transaction
-from app.domain.rulebook_generation import GenerationDocument
+from app.domain.generation.document import GenerationDocument
 from app.modules.imports.generation.crud import GenerationMessageCRUD, GenerationRevisionCRUD
 from app.modules.imports.generation.model import (
     RulebookGenerationExport, RulebookGenerationJob, RulebookGenerationMessage, RulebookGenerationRevision,

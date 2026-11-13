@@ -20,8 +20,8 @@ from app.constants.status import (
 )
 from app.core.config import get_settings
 from app.core.transactions import commit_transaction
-from app.domain.field_review import reviewed_extraction_keys
-from app.domain.identity import public_no
+from app.domain.audit.field_review import reviewed_extraction_keys
+from app.domain.shared.identity import public_no
 from app.graphs.audit_graph import run_audit_node
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.artifact.execution import ArtifactExecution

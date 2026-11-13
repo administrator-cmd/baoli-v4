@@ -6,9 +6,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.calculation_config import calculation_store
-from app.domain.identity import stable_key
-from app.domain.report_data import report_data_refs
+from app.domain.configuration.calculation_config import calculation_store
+from app.domain.shared.identity import stable_key
+from app.domain.configuration.report_data import report_data_refs
 from app.modules.scenario.draft.model import ScenarioDraft, ScenarioDraftRule, ScenarioDraftSection
 from app.modules.scenario.draft.service.draft import ScenarioDraftService
 from app.services.shared import configuration as config_store

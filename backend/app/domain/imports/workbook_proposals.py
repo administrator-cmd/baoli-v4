@@ -6,8 +6,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.common.exceptions import BusinessError
-from app.domain.execution_mode import ExecutionMode
-from app.domain.proposals import (
+from app.domain.configuration.execution_mode import ExecutionMode
+from app.domain.imports.proposal_contract import (
     BindingGap,
     CalculationCandidate,
     FieldProposal,
@@ -17,7 +17,7 @@ from app.domain.proposals import (
     RuleProposal,
     SourceOrigin,
 )
-from app.domain.workbook import WorkbookIR, WorkbookSheet
+from app.domain.imports.workbook import WorkbookIR, WorkbookSheet
 
 ProposalGroup = Literal["materials", "fields", "rules", "calculations", "report_sections"]
 

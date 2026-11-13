@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.common.response import ResponseSchema, ok
 from app.constants.status import SCENARIO_VERSION_STATUS_PUBLISHED
 from app.core.database import get_db
-from app.domain.manifest import build_task_schema
+from app.domain.configuration.manifest import build_task_schema
 from app.modules.audit.task.dto import TaskSchemaPreviewRequest
 from app.modules.audit.task.schema import TaskSchemaPreviewResponse
 from app.modules.scenario.template.dto import ScenarioPublishRequest

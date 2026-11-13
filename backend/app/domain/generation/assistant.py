@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from app.common.exceptions import BusinessError
-from app.domain.rulebook_generation import (
+from app.domain.generation.document import (
     GenerationColumn,
     GenerationDocument,
     GenerationEntry,

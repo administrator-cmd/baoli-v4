@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.rulebook_generation import GENERATION_DOCUMENT_SCHEMA_VERSION, GENERATION_PROMPT_VERSION
+from app.domain.generation.document import GENERATION_DOCUMENT_SCHEMA_VERSION, GENERATION_PROMPT_VERSION
 from app.modules.imports.generation import crud
 from app.modules.imports.generation.model import RulebookGenerationJob
 from app.modules.imports.generation.service.upload import GenerationUploadService

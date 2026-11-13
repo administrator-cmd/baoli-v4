@@ -7,10 +7,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain import manifest as manifest_module
-from app.domain import node_profile
-from app.domain.calculation_config import calculation_store
-from app.domain.manifest import compile_form_manifest, manifest_scope_hash
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration import node_profile
+from app.domain.configuration.calculation_config import calculation_store
+from app.domain.configuration.manifest import compile_form_manifest, manifest_scope_hash
 from app.modules.imports.job.crud import ImportsJobCRUD
 from app.modules.scenario.draft.crud import ScenarioDraftCRUD
 from app.modules.scenario.draft.model import ScenarioDraft
@@ -124,7 +124,7 @@ class ScenarioTemplatePublishingService:
         """把草稿编译成规则库快照，供发布、草稿导出与草稿视图使用。"""
         nodes, materials, fields, rules, sections = ScenarioDraftService(self.db).draft_rows( draft.id)
         calculation_candidates = calculation_store(draft.calculation_json)
-        # 配置行 → 编译入参的映射口径只有一份：domain.manifest.compile_inputs_of_config。
+        # 配置行 → 编译入参的映射口径只有一份：domain.configuration.manifest.compile_inputs_of_config。
         # 方案保存走同一份，两条路径的编译产物因此必然同形。
         inputs = manifest_module.compile_inputs_of_config(
             materials=materials,

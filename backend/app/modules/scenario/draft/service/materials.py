@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.identity import stable_key
+from app.domain.shared.identity import stable_key
 from app.modules.scenario.draft.model import (
     ScenarioDraft,
     ScenarioDraftField,

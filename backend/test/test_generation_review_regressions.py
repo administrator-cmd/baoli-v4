@@ -10,10 +10,10 @@ from unittest.mock import MagicMock, patch
 from openpyxl import Workbook
 
 from app.common.exceptions import BusinessError
-from app.domain.file_quality import check_file_size
-from app.domain.generation_assistant import ReviewTextRepair, apply_edits, apply_review_text_repairs, document_changes
-from app.domain.material_precheck import PRECHECK_KEY
-from app.domain.rulebook_generation import GenerationColumn, GenerationIssue, GenerationSource, mark_user_edits, normalize_business_codes
+from app.domain.materials.file_quality import check_file_size
+from app.domain.generation.assistant import ReviewTextRepair, apply_edits, apply_review_text_repairs, document_changes
+from app.domain.materials.material_precheck import PRECHECK_KEY
+from app.domain.generation.document import GenerationColumn, GenerationIssue, GenerationSource, mark_user_edits, normalize_business_codes
 from app.modules.audit.execution.service.commands import AuditExecutionCommandsService
 from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
 from app.modules.imports.generation.assistant_execution import GenerationAssistantExecution

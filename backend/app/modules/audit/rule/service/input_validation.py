@@ -8,8 +8,8 @@ from typing import Any
 from app.common.exceptions import BusinessError
 from app.constants.execution import FACT_KIND_DERIVED
 from app.constants.status import EXECUTABLE_FIELD_STATUSES, PRODUCED_RESULT_STATUSES
-from app.domain import fact_projection
-from app.domain.execution_mode import MODE_CALCULATE, MODE_CROSS_SCOPE_COMPARE, MODE_VALUE_COMPARE
+from app.domain.audit import fact_projection
+from app.domain.configuration.execution_mode import MODE_CALCULATE, MODE_CROSS_SCOPE_COMPARE, MODE_VALUE_COMPARE
 from app.modules.audit.shared import _locatable_text
 
 

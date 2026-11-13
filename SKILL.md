@@ -16,7 +16,7 @@ description: baoli-v4 全栈开发指南，覆盖 FastAPI 后端分层、Vue 前
 | `backend/app/api/routes.py` | 集中汇总各模块 router，默认统一挂载到 `/api` |
 | `backend/app/modules/<业务>/<实体>/` | 按实体组织 controller、dto、schema、model、crud、service |
 | `backend/app/core/` | 配置、数据库会话、事务回调、CRUD/ORM/响应基类 |
-| `backend/app/domain/` | 配置结构、身份与引用、执行契约、值转换；不访问数据库 |
+| `backend/app/domain/<职责>/` | 按职责组织配置编译、业务契约与纯判定；不访问数据库 |
 | `backend/app/graphs/` | LangGraph 固定任务图与单条规则执行器，无持久化 checkpoint |
 | `backend/app/integrations/` | LLM 网关、请求节流、文档处理、OCR 等外部服务适配 |
 | `backend/app/operators/`、`backend/app/services/shared/` | 本地工具算子，以及存储、文件锁、命令等共用能力 |
@@ -106,9 +106,10 @@ Vite 默认开发端口为 5173，实际以终端输出为准；`/api` 代理到
 - `dto.py` 放 `XxxRequest`，`schema.py` 放 `XxxResponse`；列表筛选与分页参数复用 `app/schema/query/`。
 - SQL 只写在 `crud.py`。Service 编排业务，跨实体读写调用对应 CRUD，不直接执行 SQL；CRUD 查询、写入和 flush，不代理 commit/rollback。
 - 配置条目使用普通数据类，序列化到 `config_json`；不要把 JSON 内的材料、字段等配置项声明为虚拟 SQL 表。
-- `ConfigItem` 只作读取视图；固定字段修改使用 `services/shared/configuration.py` 的 `update_material/field/rule/section`，允许字段在 `domain/config_changes.py` 声明。编译派生规则通过 `update_generated_rule` 同步身份与来源，动态业务元数据通过 `update_extensions` 保存；引用检查沿用所属业务 Service。
-- 执行计划、核对边界、规则结果和图/单规则状态复用 `domain/audit_state.py`；调度结构有明确类型，冻结业务配置、模型消息与取值内容保持动态。主执行与续跑共用类型，不增加持久化 checkpoint。
+- `ConfigItem` 只作读取视图；固定字段修改使用 `services/shared/configuration.py` 的 `update_material/field/rule/section`，允许字段在 `domain/configuration/config_changes.py` 声明。编译派生规则通过 `update_generated_rule` 同步身份与来源，动态业务元数据通过 `update_extensions` 保存；引用检查沿用所属业务 Service。
+- 执行计划、核对边界、规则结果和图/单规则状态复用 `domain/audit/audit_state.py`；调度结构有明确类型，冻结业务配置、模型消息与取值内容保持动态。主执行与续跑共用类型，不增加持久化 checkpoint。
 - `domain` 不导入 `modules`，不读取数据库；外部服务适配沿已有 service/端口调用，graph 调用 flow 函数，不把业务堆进图定义。
+- domain 按 `configuration/`、`generation/`、`imports/`、`audit/`、`materials/`、`tools/`、`shared/` 归属；完整文件导航见 [domain 文件归属](docs/后端分层约定.md#domain-文件归属)。新文件按业务职责放置，不在根目录平铺，不增设杂项工具文件；跨业务复用仍从所属模块导入，不因调用方多而移入 `shared/`。搬迁同步源码、测试、脚本和文档引用，不保留旧路径转发层。
 - 包目录不新增 `__init__.py`，从具体模块导入，不做包级符号重导出；不额外搭建空接口、repository 层或纯转发包装。
 - JSON 接口统一使用 `app/common/response.py` 的 `ResponseSchema[T]` 和 `ok(data, request)`，信封为 `{code, message, data, request_id, success}`。文件响应、流与 204 按现有独立契约处理。
 - 业务错误抛 `BusinessError(code, message, status_code=..., details=...)`，复用统一异常处理；保留真实错误，不吞异常或构造成功结果。敏感配置、原始请求与响应不放进客户端错误详情。

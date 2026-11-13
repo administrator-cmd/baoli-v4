@@ -9,8 +9,8 @@ from pydantic import ValidationError
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
-from app.domain.generation_assistant import AssistantReply, apply_edits
-from app.domain.rulebook_generation import (
+from app.domain.generation.assistant import AssistantReply, apply_edits
+from app.domain.generation.document import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_PROMPT_VERSION,
     GenerationContentReview,
@@ -26,8 +26,8 @@ from app.domain.rulebook_generation import (
     source_record_coverage_problems,
     summarize_generation_problems,
 )
-from app.domain.workbook import WorkbookIR
-from app.domain.workbook_proposals import prepare_sheets
+from app.domain.imports.workbook import WorkbookIR
+from app.domain.imports.workbook_proposals import prepare_sheets
 from app.integrations.llm.gateway import call_json
 from app.modules.imports.generation.service.prompts import (
     GENERATION_DOCUMENT_PROMPT,

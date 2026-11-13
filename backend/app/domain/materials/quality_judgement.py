@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.domain import file_quality
+from app.domain.materials import file_quality
 
 
 def summarize_per_material(per_material: list[dict[str, Any]]) -> dict[str, Any]:

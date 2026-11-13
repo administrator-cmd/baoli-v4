@@ -3,8 +3,8 @@
 from typing import Any
 
 from app.common.exceptions import BusinessError
-from app.domain.calculation_config import calculation_store
-from app.domain.rule_library import active
+from app.domain.configuration.calculation_config import calculation_store
+from app.domain.configuration.rule_library import active
 
 
 def plan_calculation_config(

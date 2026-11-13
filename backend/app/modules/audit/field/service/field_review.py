@@ -19,8 +19,8 @@ from app.constants.status import (
     FIELD_STATUS_NOT_PRESENT,
     FIELD_STATUS_REVIEWED,
 )
-from app.domain.field_review import reviewed_extraction_keys
-from app.domain.identity import public_no
+from app.domain.audit.field_review import reviewed_extraction_keys
+from app.domain.shared.identity import public_no
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.model import FieldReviewConfirmation, ManualReview, TaskFieldValue

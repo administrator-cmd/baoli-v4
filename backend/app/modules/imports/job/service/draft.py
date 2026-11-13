@@ -3,8 +3,8 @@
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain import scenario_schema
-from app.domain.manifest import draft_config_of_import
+from app.domain.configuration import scenario_schema
+from app.domain.configuration.manifest import draft_config_of_import
 from app.modules.imports.job import crud
 from app.modules.imports.job.model import ImportJob
 from app.modules.imports.job.service.lookup import ImportsJobLookupService

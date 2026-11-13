@@ -34,7 +34,7 @@ class AuditTaskProcessingService:
     def material_quality_views(self, task, *, pairs, execution, plan, rule_results, rule_values
     ) -> dict[str, dict[str, Any]]:
         """投影当前文件的前置检查；复用详情已读的 CSV，不另存业务结论。"""
-        from app.domain.material_precheck import PRECHECK_KEY
+        from app.domain.materials.material_precheck import PRECHECK_KEY
 
         state = (execution.result_json or {}).get(PRECHECK_KEY) if execution is not None else None
         if state is not None and state["input_revision"] != task.input_revision:

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Literal, get_args
 
-from app.domain import file_quality
+from app.domain.materials import file_quality
 
 ReportContentType = Literal["FIELD_DETAIL", "AUDIT_RESULT", "FIELD_AND_RESULT", "RISK_LIST", "CONCLUSION"]
 ReportResultSort = Literal["RISK_LEVEL_DESC", "MATERIAL_ORDER", "MATERIAL_ORDER_RISK_LEVEL_DESC"]

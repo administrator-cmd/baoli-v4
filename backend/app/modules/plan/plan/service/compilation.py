@@ -7,12 +7,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain import manifest as manifest_module
-from app.domain import node_profile
-from app.domain.calculation_config import calculation_store
-from app.domain.manifest import build_task_schema, compile_form_manifest
-from app.domain.plan_calculations import selected_calculations
-from app.domain.rule_library import active
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration import node_profile
+from app.domain.configuration.calculation_config import calculation_store
+from app.domain.configuration.manifest import build_task_schema, compile_form_manifest
+from app.domain.configuration.plan_calculations import selected_calculations
+from app.domain.configuration.rule_library import active
 from app.modules.plan.config.crud import PlanConfigCRUD
 from app.modules.plan.config.model import PlanField, PlanMaterial, PlanRule, PlanSection
 from app.modules.plan.plan.crud import PlanCRUD

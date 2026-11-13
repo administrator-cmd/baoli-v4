@@ -2,7 +2,7 @@
 
 “当前批次”只有一个口径：每个（任务, 节点）最新一条未失效执行。失效批次保留历史但
 退出当前位，所以判断当前结果不能只看 is_current 或 enabled。批次选取在
-`services.audit.execution_scope` 的 SQL 里实现，这里只判单条结果是否仍代表本次执行。
+`modules/audit/execution/crud.py` 的 SQL 里实现，这里只判单条结果是否仍代表本次执行。
 """
 
 import json

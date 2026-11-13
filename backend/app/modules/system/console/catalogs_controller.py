@@ -5,7 +5,8 @@ from fastapi import APIRouter, Request
 from app.common.response import ResponseSchema, ok
 from app.constants.status import STATUS_CATEGORY_LABELS
 from app.core.config import get_settings
-from app.domain import audit_vocab, tool_catalog
+from app.domain.audit import audit_vocab
+from app.domain.tools import tool_catalog
 from app.integrations.documents.material_classify import list_material_types
 from app.modules.system.console.schema import (
     MaterialTypeCatalogResponse,

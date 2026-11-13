@@ -5,7 +5,7 @@
 
 from pydantic import BaseModel
 
-from app.domain.rulebook_generation import GenerationStatusFilter
+from app.domain.generation.document import GenerationStatusFilter
 from app.schema.query.timestamps import FilterDateTime
 
 

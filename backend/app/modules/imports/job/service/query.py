@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.pagination import PageResult, page_result
-from app.domain import node_profile
+from app.domain.configuration import node_profile
 from app.modules.imports.job import crud
 from app.modules.imports.job.model import ImportJob
 from app.modules.imports.job.service.lookup import ImportsJobLookupService

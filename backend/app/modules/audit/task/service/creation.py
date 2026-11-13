@@ -5,9 +5,9 @@ from copy import deepcopy
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.identity import public_no
-from app.domain.manifest import build_task_schema
-from app.domain.rule_library import execution_container_of
+from app.domain.shared.identity import public_no
+from app.domain.configuration.manifest import build_task_schema
+from app.domain.configuration.rule_library import execution_container_of
 from app.modules.audit.task import crud
 from app.modules.audit.task.model import AuditTask
 from app.modules.audit.task.service.lookup import AuditTaskLookupService

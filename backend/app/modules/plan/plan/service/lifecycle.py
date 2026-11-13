@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.identity import public_no
+from app.domain.shared.identity import public_no
 from app.modules.plan.plan.crud import PlanCRUD
 from app.modules.plan.plan.model import AuditPlan
 from app.modules.plan.plan.service.compilation import PlanCompilationService

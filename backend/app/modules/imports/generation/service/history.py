@@ -3,7 +3,7 @@
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.rulebook_generation import GenerationDocument
+from app.domain.generation.document import GenerationDocument
 from app.modules.imports.generation.crud import GenerationRevisionCRUD
 from app.modules.imports.generation.model import RulebookGenerationJob, RulebookGenerationRevision
 from app.modules.imports.generation.service.query import GenerationQueryService

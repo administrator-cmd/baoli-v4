@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.pagination import PageResult, page_result
-from app.domain import manifest as manifest_module
+from app.domain.configuration import manifest as manifest_module
 from app.modules.scenario.draft.model import ScenarioDraft
 from app.modules.scenario.template.service import crud
 from app.modules.scenario.template.service.common import DRAFT_SOURCE_LABELS

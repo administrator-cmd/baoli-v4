@@ -5,10 +5,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.constants.status import SCOPE_NOT_APPLICABLE
-from app.domain import manifest as manifest_module
-from app.domain import node_profile
-from app.domain.identity import public_no
-from app.domain.manifest import FORM_VALUE_TYPES
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration import node_profile
+from app.domain.shared.identity import public_no
+from app.domain.configuration.manifest import FORM_VALUE_TYPES
 
 SYSTEM_OPERATORS = manifest_module.SYSTEM_OPERATORS
 

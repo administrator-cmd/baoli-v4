@@ -10,7 +10,7 @@ from typing import Iterable
 from sqlalchemy.orm import Session
 
 from app.constants.status import LOOP_DONE
-from app.domain.execution_scope import (
+from app.domain.audit.execution_scope import (
     RESULT_STALE_EXECUTION,
     RESULT_STALE_PENDING_RERUN,
     result_state,

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import TASK_PHASE_AWAITING_CONFIRMATION, TASK_PHASE_COMPLETED, TASK_STATUS_COMPLETED
-from app.domain.audit_vocab import is_type_unavailable
+from app.domain.audit.audit_vocab import is_type_unavailable
 from app.modules.audit.shared import _scenario, _task_manifest
 from app.modules.audit.task.model import AuditTask
 from app.modules.material.document.model import DocumentUpload, TaskDocument

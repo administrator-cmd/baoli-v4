@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.common.pagination import PageResult, page_result
-from app.domain.identity import public_no
+from app.domain.shared.identity import public_no
 from app.modules.system.operation import crud
 from app.modules.system.operation.model import OperationLog
 

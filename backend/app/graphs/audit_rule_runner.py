@@ -4,9 +4,9 @@ import logging
 from typing import Any, Protocol
 
 from app.constants.status import LOOP_BLOCKED, LOOP_DONE, LOOP_RUNNING
-from app.domain.audit_state import EvaluationPlanEntry, RuleExecutionState, RuleOutcome, RuleSaveResult
-from app.domain.execution_mode import MODE_AGGREGATE
-from app.domain.llm_failure import ChannelFailure
+from app.domain.audit.audit_state import EvaluationPlanEntry, RuleExecutionState, RuleOutcome, RuleSaveResult
+from app.domain.configuration.execution_mode import MODE_AGGREGATE
+from app.domain.shared.llm_failure import ChannelFailure
 
 logger = logging.getLogger(__name__)
 

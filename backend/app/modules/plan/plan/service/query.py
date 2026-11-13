@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.common.pagination import PageResult, page_result
 from app.constants.status import SCENARIO_VERSION_STATUS_PUBLISHED
-from app.domain.plan_calculations import plan_calculation_config
-from app.domain.rule_library import active
+from app.domain.configuration.plan_calculations import plan_calculation_config
+from app.domain.configuration.rule_library import active
 from app.modules.plan.config.model import PlanMaterial, PlanRule
 from app.modules.plan.plan import crud
 from app.modules.plan.plan.model import AuditPlan

@@ -6,7 +6,7 @@ from sqlalchemy import case, func, select
 
 from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.core.base_crud import CRUDBase
-from app.domain.rulebook_generation import (
+from app.domain.generation.document import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_STATUS_EDITABLE,
     GENERATION_STATUS_FAILED,

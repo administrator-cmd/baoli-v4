@@ -5,8 +5,8 @@ from typing import Any, Callable
 
 from app.common.exceptions import BusinessError, exception_summary
 from app.core.transactions import commit_transaction, rollback_transaction
-from app.domain.external_artifacts import ExternalServiceResult
-from app.domain.identity import public_no
+from app.domain.materials.external_artifacts import ExternalServiceResult
+from app.domain.shared.identity import public_no
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.artifact.model import StoredArtifact
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService

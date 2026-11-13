@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.common.exceptions import BusinessError
-from app.domain.file_quality import IMPLEMENTED_QUALITY_ITEMS
+from app.domain.materials.file_quality import IMPLEMENTED_QUALITY_ITEMS
 
 PRECHECK_TOOLS = IMPLEMENTED_QUALITY_ITEMS
 PRECHECK_KEY = "material_precheck"

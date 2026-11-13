@@ -4,7 +4,7 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from app.domain.execution_scope import pending_rerun_keys_of
+from app.domain.audit.execution_scope import pending_rerun_keys_of
 from app.modules.audit.execution.crud import AuditExecutionCRUD, json_text
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.shared import _task_manifest

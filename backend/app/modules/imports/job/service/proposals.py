@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.execution import OPERATOR_LLM_EXECUTE
-from app.domain.manifest import rule_comparison_view
+from app.domain.configuration.manifest import rule_comparison_view
 from app.modules.imports.job import crud
 from app.modules.imports.job.model import ImportJob
 from app.modules.imports.job.service.lookup import ImportsJobLookupService

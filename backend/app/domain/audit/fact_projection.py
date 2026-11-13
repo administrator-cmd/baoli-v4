@@ -10,7 +10,7 @@ from typing import Any
 from app.common.exceptions import BusinessError
 from app.constants.execution import FACT_KIND_DERIVED, FACT_KIND_EXTRACTED
 from app.constants.status import EXECUTABLE_FIELD_STATUSES
-from app.domain import field_strategy
+from app.domain.configuration import field_strategy
 
 # 被显式编码的标量类型。`kind` 取值即这几个，解码时据此还原。
 ENCODED_KINDS = ("decimal", "date", "datetime")

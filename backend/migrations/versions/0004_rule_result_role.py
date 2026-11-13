@@ -19,7 +19,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-# 判定口径与 domain.rule_library.is_risk_rule 一致：清单里声明为风险角色，
+# 判定口径与 domain.configuration.rule_library.is_risk_rule 一致：清单里声明为风险角色，
 # 或执行算子就是风险触发。
 ROLE_OF_TASK = (
     "UPDATE rule_result rr "

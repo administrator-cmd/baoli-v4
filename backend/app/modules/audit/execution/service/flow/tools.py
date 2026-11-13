@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.transactions import commit_transaction
-from app.domain.audit_state import RuleExecutionState
+from app.domain.audit.audit_state import RuleExecutionState
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.shared import agent_module, rule_of_instance
 from app.modules.audit.shared import _scenario, _task_manifest

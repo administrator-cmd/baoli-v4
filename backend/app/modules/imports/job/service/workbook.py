@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
-from app.domain.identity import stable_key
-from app.domain.workbook import WorkbookIR, WorkbookRow, WorkbookSheet
+from app.domain.shared.identity import stable_key
+from app.domain.imports.workbook import WorkbookIR, WorkbookRow, WorkbookSheet
 
 
 class ImportsJobWorkbookService:

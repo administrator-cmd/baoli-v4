@@ -3,7 +3,7 @@
 from typing import Any
 
 from app.common.exceptions import BusinessError
-from app.domain.node_profile import NODE_PROFILE_VERSION
+from app.domain.configuration.node_profile import NODE_PROFILE_VERSION
 
 DEFAULT_SCHEMA_KEY = "scenario_json"
 DEFAULT_SCHEMA_VERSION = "1"

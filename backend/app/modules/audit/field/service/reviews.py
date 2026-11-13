@@ -19,8 +19,8 @@ from app.constants.execution import (
     ORIGIN_DOCUMENT_EXTRACTION,
 )
 from app.constants.status import FIELD_STATUS_REVIEWED
-from app.domain.manifest import enabled_extraction_field_keys
-from app.domain.rule_library import active, execution_container_of
+from app.domain.configuration.manifest import enabled_extraction_field_keys
+from app.domain.configuration.rule_library import active, execution_container_of
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.service.execution_history import AuditExecutionHistoryService
 from app.modules.audit.field.crud import AuditFieldCRUD

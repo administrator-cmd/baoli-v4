@@ -21,10 +21,10 @@ from app.constants.status import (
     MODEL_FIELD_STATUSES,
     PRODUCED_RESULT_STATUSES,
 )
-from app.domain import fact_projection
-from app.domain.identity import public_no
-from app.domain.report_data import report_data_refs, report_format_support
-from app.domain.rule_library import is_risk_rule
+from app.domain.audit import fact_projection
+from app.domain.shared.identity import public_no
+from app.domain.configuration.report_data import report_data_refs, report_format_support
+from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.execution.service.execution_scope import latest_execution
 from app.modules.audit.execution.service.flow.plan import reviewed_extraction_rule_keys
 from app.modules.audit.field.crud import AuditFieldCRUD
@@ -46,7 +46,7 @@ class AuditRuleExecutionService:
         self.db = db
 
     def evaluation_context(self, task, rule) -> dict[str, Any]:
-        from app.domain.execution_mode import MODE_MATERIAL_CHECK, MODE_UNKNOWN, SOURCE_ONLY_MODES
+        from app.domain.configuration.execution_mode import MODE_MATERIAL_CHECK, MODE_UNKNOWN, SOURCE_ONLY_MODES
         from app.modules.audit.field.service.fact_context import AuditFieldFactContextService
         mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
         source_only = mode in SOURCE_ONLY_MODES or mode == MODE_MATERIAL_CHECK
@@ -89,7 +89,7 @@ class AuditRuleExecutionService:
         ]
         result_values = {r.id: task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_RULE_RESULT, r.id) for r in results}
         projected = AuditFieldFactContextService(self.db).project_task_facts( task, facts, definitions=fields)
-        from app.domain.material_precheck import material_blocks
+        from app.domain.materials.material_precheck import material_blocks
         blocks = material_blocks(current_execution.result_json if current_execution else None)
         # 人工补值不会解除文件质量限制；报告同样不把被停止材料的字段当作可用输入。
         projected = [fact for fact in projected if fact.get("material_key") not in blocks]
@@ -311,7 +311,7 @@ class AuditRuleExecutionService:
                 if len(reviewed) != 1 or manual.status not in {FIELD_STATUS_REVIEWED, FIELD_STATUS_NOT_PRESENT}:
                     raise BusinessError("TASK_MANUAL_FACT_INCONSISTENT", "人工结论与当前字段事实不一致，无法继续保存模型产出", status_code=500,
                                         details={"output": code})
-                from app.domain.fact_projection import canonical_field_value
+                from app.domain.audit.fact_projection import canonical_field_value
                 saved_value = task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_TASK_FACT, reviewed[0].id).get("value")
                 expected_status = FIELD_STATUS_PRESENT if manual.status == FIELD_STATUS_REVIEWED else FIELD_STATUS_NOT_PRESENT
                 if field_status != expected_status or canonical_field_value(value, field) != canonical_field_value(saved_value, field):

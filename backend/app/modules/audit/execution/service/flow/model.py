@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED, LOOP_RUNNING
-from app.domain.audit_state import RuleExecutionState
-from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
-from app.domain.llm_failure import channel_failure_detail, is_channel_failure
+from app.domain.audit.audit_state import RuleExecutionState
+from app.domain.configuration.execution_mode import MODE_EXTRACT, execution_mode_label
+from app.domain.shared.llm_failure import channel_failure_detail, is_channel_failure
 from app.integrations.llm.gateway import RequestLogContext
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.shared import agent_module, openai_tools

@@ -3,7 +3,7 @@
 import unittest
 
 from app.common.exceptions import BusinessError
-from app.domain.rule_library import _validate_execution_modes, execution_order
+from app.domain.configuration.rule_library import _validate_execution_modes, execution_order
 from app.graphs.audit_rule_runner import run_rule_evaluation
 from app.modules.audit.execution.service.flow.aggregate import build_aggregate_verdict
 

@@ -16,7 +16,7 @@ import requests
 
 from app.common.exceptions import BusinessError
 from app.core.config import Settings, get_settings
-from app.domain.external_artifacts import ExternalArtifact, ExternalServiceResult, OcrJobSubmission
+from app.domain.materials.external_artifacts import ExternalArtifact, ExternalServiceResult, OcrJobSubmission
 from app.integrations.documents.http import contract_error, json_object, non_empty_string, required_service_url
 
 logger = logging.getLogger(__name__)

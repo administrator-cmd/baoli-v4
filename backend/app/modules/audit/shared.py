@@ -6,8 +6,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain import fact_projection
-from app.domain.execution_scope import pending_rerun_keys_of
+from app.domain.audit import fact_projection
+from app.domain.audit.execution_scope import pending_rerun_keys_of
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.task.model import AuditTask
 from app.modules.material.document.crud import MaterialDocumentCRUD

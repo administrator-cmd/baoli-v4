@@ -61,6 +61,7 @@ const tabs = computed({
 
 const canEditBasic = computed(() => detail.value !== null);
 const calculations = computed(() => configuration.value?.calculations ?? []);
+const ruleIssues = computed(() => configuration.value?.sync_error?.details.rule_issues ?? []);
 
 interface BasicForm {
   scenario_name: string;
@@ -331,9 +332,24 @@ function openPlanCreation(): void {
             <el-tag v-else-if="configuration?.configuration_kind === 'PUBLISHED'" type="success" effect="plain">已发布</el-tag>
             <span class="text-muted">已发布版本：{{ detail.latest_version_no > 0 ? `第 ${detail.latest_version_no} 版` : "无" }}</span>
             <span v-if="configError" class="text-danger">{{ configError }}</span>
-            <span v-else-if="configuration?.sync_error" class="text-danger">{{ configuration.sync_error.message }}</span>
+            <span v-else-if="configuration?.sync_error && !ruleIssues.length" class="text-danger">{{ configuration.sync_error.message }}</span>
           </div>
         </div>
+
+        <el-alert v-if="ruleIssues.length" type="warning" show-icon :closable="false" title="以下规则需要完善，当前草稿暂不能发布">
+          <div v-for="issue in ruleIssues" :key="issue.rule_key" class="rule-issue">
+            <div class="rule-issue__content">
+              <strong>{{ issue.name }}（{{ issue.rule_code }}）</strong>
+              <div>{{ issue.message }}</div>
+            </div>
+            <el-button
+              type="primary"
+              link
+              :aria-label="`完善规则：${issue.name}`"
+              @click="router.push({ name: 'scene-rule-edit', params: { scenarioCode: detail.scenario_code, ruleKey: issue.rule_key } })"
+            >去完善</el-button>
+          </div>
+        </el-alert>
 
         <el-tabs v-model="tabs">
           <el-tab-pane label="基本信息" name="basic">
@@ -429,6 +445,23 @@ function openPlanCreation(): void {
 </template>
 
 <style scoped>
+.rule-issue {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.rule-issue__content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rule-issue > .el-button {
+  flex-shrink: 0;
+}
+
 .gap-row {
   display: flex;
   justify-content: space-between;

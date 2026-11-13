@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.core.transactions import commit_transaction, rollback_transaction
-from app.domain.identity import public_no
-from app.domain.rulebook_generation import (
+from app.domain.shared.identity import public_no
+from app.domain.generation.document import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_PROMPT_VERSION,
     GENERATION_WORKBOOK_PROFILE,

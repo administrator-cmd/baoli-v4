@@ -16,8 +16,9 @@ from app.constants.status import (
     FIELD_STATUS_PRESENT,
     LOOP_DONE,
 )
-from app.domain import fact_projection, tool_catalog
-from app.domain.execution_mode import (
+from app.domain.audit import fact_projection
+from app.domain.tools import tool_catalog
+from app.domain.configuration.execution_mode import (
     MODE_AGGREGATE,
     MODE_CALCULATE,
     MODE_CROSS_SCOPE_COMPARE,
@@ -30,8 +31,8 @@ from app.domain.execution_mode import (
     SOURCE_ONLY_MODES,
     execution_mode_label,
 )
-from app.domain.llm_failure import channel_failure_detail, is_channel_failure
-from app.domain.tool_context import ToolExecutionContext
+from app.domain.shared.llm_failure import channel_failure_detail, is_channel_failure
+from app.domain.tools.tool_context import ToolExecutionContext
 from app.integrations.llm.gateway import ModelTurn, RequestLogContext, call_chat
 from app.modules.audit.execution.service.state import _material_states
 from app.modules.audit.field.service.prompts import (
@@ -384,7 +385,7 @@ class AuditRuleAgentService:
         schema = VERDICT_SCHEMA
         guidance = ""
         if rule.get("material_precheck"):
-            from app.domain.material_precheck import MaterialQualityResults
+            from app.domain.materials.material_precheck import MaterialQualityResults
             quality_schema = MaterialQualityResults.model_json_schema()
             schema = {**schema, "properties": {**schema["properties"], **quality_schema["properties"]},
                       "$defs": quality_schema["$defs"], "required": [*schema["required"], "material_quality"]}
@@ -1015,7 +1016,7 @@ class AuditRuleAgentService:
             and any(key in item.get("result", {}) for key in ("comparison", "per_material"))
         ]
         if rule.get("material_precheck"):
-            from app.domain.material_precheck import quality_results_from_tools
+            from app.domain.materials.material_precheck import quality_results_from_tools
             verdict["material_quality"] = quality_results_from_tools(
                 {**verdict, "material_quality": raw.get("material_quality")}, tool_results,
                 set(rule["precheck_material_keys"]),

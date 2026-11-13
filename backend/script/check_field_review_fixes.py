@@ -27,7 +27,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 from sqlalchemy import select  # noqa: E402
 
 from app.core.database import SessionLocal  # noqa: E402
-from app.domain import fact_projection  # noqa: E402
+from app.domain.audit import fact_projection  # noqa: E402
 from app.modules.audit.task.model import AuditTask  # noqa: E402
 from app.modules.audit.task.service.detail import AuditTaskDetailService  # noqa: E402
 from app.modules.scenario.template.model import ScenarioVersion  # noqa: E402

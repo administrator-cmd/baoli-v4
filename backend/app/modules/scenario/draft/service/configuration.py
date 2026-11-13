@@ -6,10 +6,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain import manifest as manifest_module
-from app.domain.calculation_config import calculation_store
-from app.domain.report_data import report_data_refs
-from app.domain.rule_library import active, is_risk_rule
+from app.domain.configuration import manifest as manifest_module
+from app.domain.configuration.calculation_config import calculation_store
+from app.domain.configuration.report_data import report_data_refs
+from app.domain.configuration.rule_library import active, is_risk_rule
 from app.modules.scenario.draft.crud import ScenarioDraftCRUD
 from app.modules.scenario.draft.model import ScenarioDraft, ScenarioDraftField, ScenarioDraftRule
 from app.modules.scenario.draft.service.draft import ScenarioDraftService

@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.domain.rule_library import is_risk_rule
+from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
 from app.modules.audit.rule.model import RuleResult
 from app.modules.audit.rule.service.rule_results import AuditRuleResultsService

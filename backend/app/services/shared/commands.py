@@ -10,7 +10,7 @@ def _idempotency_key(provided: str | None) -> str:
     这样同一对象的并发提交由活跃操作互斥拦下（明确 409），而不是被误当成同一请求复用。
     调用方提供标识时（前端每次点击生成一个），重复请求才会返回已有操作。
     """
-    from app.domain.identity import public_no
+    from app.domain.shared.identity import public_no
 
     return (provided or "").strip() or public_no("IDEM")
 

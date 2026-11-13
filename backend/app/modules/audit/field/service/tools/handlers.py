@@ -1,7 +1,7 @@
 """工具 adapter：把共享领域服务接到 Agent 工具接口上。
 
 adapter 把 `ToolExecutionContext` 中的真实任务数据与模型给出的工具参数交给实际工具实现。
-文件质量工具的判定实现统一在 `domain/quality_judgement.py`，不按业务节点分发。
+文件质量工具的判定实现统一在 `domain/materials/quality_judgement.py`，不按业务节点分发。
 
 模型能填的只有业务口径（要检查的材料角色、检查项目、标准值/单位）；任务 ID、任务配置、
 会话全部由运行时经 `ToolExecutionContext` 注入，模型看不到也填不了
@@ -18,8 +18,8 @@ from typing import Annotated, Any
 from langchain_core.tools import InjectedToolArg, tool
 
 from app.common.exceptions import BusinessError
-from app.domain import file_quality, quality_judgement
-from app.domain.rule_library import active
+from app.domain.materials import file_quality, quality_judgement
+from app.domain.configuration.rule_library import active
 from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD
 

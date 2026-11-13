@@ -9,8 +9,9 @@ from typing import Any
 from app.common.exceptions import BusinessError
 from app.constants.execution import NODE_RULE_EXECUTION, OPERATOR_LLM_EXECUTE
 from app.constants.status import CONFIG_STATUS_DISABLED, CONFIG_STATUS_PENDING
-from app.domain import fact_projection, scenario_schema
-from app.domain.execution_mode import (
+from app.domain.audit import fact_projection
+from app.domain.configuration import scenario_schema
+from app.domain.configuration.execution_mode import (
     EXECUTION_MODE_ORDER,
     EXECUTION_MODES,
     MODE_AGGREGATE,
@@ -22,9 +23,9 @@ from app.domain.execution_mode import (
     MODE_UNKNOWN,
     MODE_VALUE_COMPARE,
 )
-from app.domain.identity import stable_key
-from app.domain.node_profile import NODE_PROFILE_VERSION
-from app.domain.report_data import report_data_refs
+from app.domain.shared.identity import stable_key
+from app.domain.configuration.node_profile import NODE_PROFILE_VERSION
+from app.domain.configuration.report_data import report_data_refs
 
 EXECUTION_CODE = NODE_RULE_EXECUTION
 EXECUTION_VERSION = NODE_PROFILE_VERSION
@@ -61,28 +62,38 @@ def _validate_execution_modes(rules: list[dict[str, Any]]) -> None:
     """
     missing: list[dict[str, str]] = []
     problems: list[str] = []
+    rule_issues: list[dict[str, str]] = []
     for rule in rules:
         if not rule.get("enabled"):
             continue
         name = str(rule.get("name") or rule.get("rule_key") or "")
         mode = str(rule.get("execution_mode") or MODE_UNKNOWN)
+        identity = {"rule_key": rule["rule_key"], "name": name, "rule_code": rule["rule_code"]}
         if mode == MODE_UNKNOWN or mode not in EXECUTION_MODES:
             missing.append({"rule_key": str(rule.get("rule_key") or ""), "name": name})
+            rule_issues.append({**identity, "message": "尚未确定如何执行，请在编辑页选择执行方式。"})
             continue
         if rule.get("kind") != "RULE":
             continue
+        reasons: list[str] = []
         if mode in {MODE_AGGREGATE, MODE_DERIVE_RISK} and not (
             rule.get("source_rule_keys") or rule.get("source_rule_codes")
         ):
-            problems.append(f"{name}（{mode}）没有来源规则引用")
+            reasons.append("没有来源规则引用，请选择依赖规则。")
         if mode == MODE_DERIVE_RISK and not (rule.get("risk_condition") or rule.get("requirement")):
-            problems.append(f"{name}（{mode}）没有风险成立条件")
+            reasons.append("没有风险成立条件，请补充执行要求。")
         if mode in {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE} and not (rule.get("inputs") or rule.get("materials")):
-            problems.append(f"{name}（{mode}）没有输入字段或材料范围")
+            reasons.append("没有输入字段或材料范围，请选择输入字段或适用材料。")
         if mode == MODE_EXTRACT and not rule.get("outputs"):
-            problems.append(f"{name}（{mode}）没有输出字段")
+            reasons.append("没有输出字段，请选择需要产出的字段。")
         if mode == MODE_REPORT and not rule.get("report_definition"):
-            problems.append(f"{name}（{mode}）没有报告定义")
+            reasons.append("没有报告定义，请完善报告配置。")
+        if reasons:
+            problems.extend(f"{name}（{mode}）{reason}" for reason in reasons)
+            rule_issues.append({
+                **identity,
+                "message": "；".join([*reasons, *(gap["reason"] for gap in rule.get("input_gaps") or [])]),
+            })
     if missing:
         names = "、".join(item["name"] for item in missing[:8])
         more = f" 等 {len(missing)} 条" if len(missing) > 8 else ""
@@ -90,13 +101,13 @@ def _validate_execution_modes(rules: list[dict[str, Any]]) -> None:
             "RULE_EXECUTION_MODE_MISSING",
             f"以下规则没有确定执行方式：{names}{more}。请在场景规则编辑中补填或重新导入规则库；"
             "旧配置不会默认按普通核查执行。",
-            details={"rules": missing},
+            details={"rules": missing, "rule_issues": rule_issues},
         )
     if problems:
         raise BusinessError(
             "RULE_EXECUTION_MODE_INVALID",
             "规则执行方式与配置不匹配：" + "；".join(problems[:8]),
-            details={"problems": problems},
+            details={"problems": problems, "rule_issues": rule_issues},
         )
 
 

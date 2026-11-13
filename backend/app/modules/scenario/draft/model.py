@@ -15,7 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.base_model import TimestampMixin
 from app.core.database import Base
-from app.domain.configuration import config_property, empty_config
+from app.domain.configuration.configuration import config_property, empty_config
 
 
 class ScenarioDraft(Base, TimestampMixin):

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.external_artifacts import ExternalArtifact, ExternalServiceResult, OcrContent
+from app.domain.materials.external_artifacts import ExternalArtifact, ExternalServiceResult, OcrContent
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.artifact.model import StoredArtifact
 from app.modules.audit.task.model import AuditTask

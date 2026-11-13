@@ -21,9 +21,9 @@ from app.common.exceptions import BusinessError
 from app.constants.execution import ORIGIN_HUMAN_CORRECTION
 from app.constants.status import LOOP_BLOCKED, LOOP_DONE
 from app.core.transactions import commit_transaction
-from app.domain.audit_state import EvaluationPlanEntry, RuleOutcome
-from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
-from app.domain.llm_failure import ChannelFailure
+from app.domain.audit.audit_state import EvaluationPlanEntry, RuleOutcome
+from app.domain.configuration.execution_mode import MODE_EXTRACT, execution_mode_label
+from app.domain.shared.llm_failure import ChannelFailure
 from app.integrations.llm.gateway import RequestLogContext
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.context import execution_attempt_no

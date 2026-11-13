@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 
 from app.common.exceptions import BusinessError
-from app.domain.rulebook_generation import GenerationSource, is_business_code_column
+from app.domain.generation.document import GenerationSource, is_business_code_column
 
 
 def _heading(value: Any) -> str:

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.common.exceptions import BusinessError
-from app.domain import file_quality
+from app.domain.materials import file_quality
 
 # 工具的名称、输出与描述元数据；输入参数以本文件的 JSON Schema 为准。
 KIND_OPERATOR = "OPERATOR"
@@ -382,7 +382,7 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
     选错检查项目就是调了另一个工具。模型只需给要检查的材料位与合格标准。
 
     判定调 `services.audit.tools.handlers.check_file_quality_tool`，
-    使用 `domain/quality_judgement` 的实现。
+    使用 `domain/materials/quality_judgement.py` 的实现。
     """
     check_item = metadata.tool_id
     artifact = file_quality.QUALITY_ITEM_ARTIFACT.get(check_item)

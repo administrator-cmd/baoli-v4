@@ -8,8 +8,8 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from app.common.exceptions import BusinessError
-from app.domain.generation_assistant import AssistantReply, apply_edits
-from app.domain.rulebook_generation import (
+from app.domain.generation.assistant import AssistantReply, apply_edits
+from app.domain.generation.document import (
     GenerationDocument,
     GenerationSource,
     business_code_column,

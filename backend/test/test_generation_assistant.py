@@ -11,10 +11,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Border, Font, PatternFill, Side
 
 from app.common.exceptions import BusinessError
-from app.domain.generation_assistant import (
+from app.domain.generation.assistant import (
     AssistantReply, ReviewTextRepair, apply_edits, apply_review_text_repairs, document_changes,
 )
-from app.domain.rulebook_generation import (
+from app.domain.generation.document import (
     GenerationColumn, GenerationDocument, GenerationEntry, GenerationSource, collect_document_problems, normalize_business_codes,
     source_record_coverage_problems,
 )
@@ -281,7 +281,7 @@ class EditBoundaryTests(unittest.TestCase):
 
     def test_issue_scope_update_preserves_position_and_keeps_revised_evidence(self):
         before = document()
-        from app.domain.rulebook_generation import GenerationIssue
+        from app.domain.generation.document import GenerationIssue
         before.issues = [GenerationIssue(
             issue_id=f"UNC-00{index}", title="口径未明确", affected_row_ids=["r1"],
             source=GenerationSource(kind="ORIGINAL_EXCEL", origin={"sheet_name": "原始规则", "row_no": 1}),
@@ -370,7 +370,7 @@ class WorkbookTests(unittest.TestCase):
                     workbook.close()
 
     def test_edit_tracking_note_does_not_add_an_export_column(self):
-        from app.domain.rulebook_generation import GenerationIssue
+        from app.domain.generation.document import GenerationIssue
         current = apply_edits(document(), edit({"op": "update_cells", "row_id": "r1", "cells": {"name": "违约金计算"}}))
         self.assertIn("AI按用户要求整理", current.sheets[0].rows[1].source.note)
         current.issues = [GenerationIssue(issue_id="UNC-001", title="算法口径", affected_row_ids=["r1"],

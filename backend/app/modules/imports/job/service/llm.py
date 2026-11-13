@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
-from app.domain import field_strategy
-from app.domain.workbook import WorkbookIR
-from app.domain.workbook_proposals import PreparedSheet, WorkbookInventory, WorkbookProposals, prepare_sheets
+from app.domain.configuration import field_strategy
+from app.domain.imports.workbook import WorkbookIR
+from app.domain.imports.workbook_proposals import PreparedSheet, WorkbookInventory, WorkbookProposals, prepare_sheets
 from app.integrations.llm.gateway import call_json
 from app.modules.imports.job.response_execution import save_raw_response
 from app.modules.imports.job.service.prompts import CONVERSION_PROMPT, REFINEMENT_PROMPT
@@ -113,6 +113,7 @@ class ImportsJobLlmService:
 
         模型漏写或抄错 candidate_ref 时，如果只等编译/执行阶段暴露，用户看到的是内部身份错误；
         这里在写入提案前给出具体对象和引用位置，不猜测、不自动补引用。
+        已声明缺项的空引用参数仅保留在缺项清单，不作为已绑定参数传入编译。
         """
         groups = PROPOSAL_GROUPS
         refs_by_group = {
@@ -135,6 +136,7 @@ class ImportsJobLlmService:
         allowed_report_refs = field_refs | rule_refs | result_codes | calculation_refs
 
         problems: list[dict[str, Any]] = []
+        result["binding_gaps"] = self._binding_gaps(result, problems)
         if any(not code for code in raw_result_codes):
             problems.append({"owner": "calculations", "kind": "calculation.result_code", "reference": ""})
         duplicate_result_codes = sorted({
@@ -164,6 +166,12 @@ class ImportsJobLlmService:
                     check(owner, "rule.source_rule_ref", reference, rule_refs)
         for calculation in result.get("calculations") or []:
             owner = calculation.get("candidate_ref")
+            declared_gaps = {
+                gap["parameter_code"] for gap in result["binding_gaps"]
+                if gap["owner_group"] == "calculations" and gap["owner_ref"] == owner
+                and gap.get("parameter_code")
+            }
+            parameters = []
             for parameter in calculation.get("parameters") or []:
                 if not isinstance(parameter.get("parameter_code"), str) or not parameter["parameter_code"].strip():
                     problems.append({"owner": owner, "kind": "calculation.parameter.parameter_code"})
@@ -174,6 +182,15 @@ class ImportsJobLlmService:
                         "reference": source_type,
                     })
                     continue
+                if (source_type in {"FIELD", "CALC_RESULT"}
+                        and parameter.get("source_code") in (None, "")
+                        and parameter.get("parameter_code") in declared_gaps):
+                    logger.info(
+                        "计算未绑定参数按已声明缺项保留 owner=%s parameter_code=%s",
+                        owner, parameter["parameter_code"],
+                    )
+                    continue
+                parameters.append(parameter)
                 if source_type == "FIELD":
                     check(owner, "calculation.parameter.field", parameter.get("source_code"),
                           field_refs | field_source_ids)
@@ -184,6 +201,7 @@ class ImportsJobLlmService:
                         "owner": owner, "kind": "calculation.parameter.constant_value",
                         "reference": parameter.get("parameter_code"),
                     })
+            calculation["parameters"] = parameters
             for reference in calculation.get("depends_on_result_codes") or []:
                 check(owner, "calculation.depends_on_result_codes", reference, result_codes)
         for section in result.get("report_sections") or []:
@@ -193,7 +211,6 @@ class ImportsJobLlmService:
             for reference in section.get("material_refs") or []:
                 check(owner, "report.material_refs", reference, material_refs)
         self._check_field_identities(result, problems)
-        result["binding_gaps"] = self._binding_gaps(result, problems)
         if problems:
             raise BusinessError(
                 "LLM_CONTRACT_INVALID",

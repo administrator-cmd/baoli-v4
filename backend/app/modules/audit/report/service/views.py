@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import CONCLUSIVE_RESULT_STATUSES
-from app.domain.execution_scope import RESULT_STALE_PENDING_RERUN, result_state
-from app.domain.rule_library import is_risk_rule
+from app.domain.audit.execution_scope import RESULT_STALE_PENDING_RERUN, result_state
+from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.execution.service.execution_scope import current_execution_ids, pending_rerun_by_execution
 from app.modules.audit.field.service import value_store as task_value_service
 from app.modules.audit.field.service.evidence import AuditFieldEvidenceService

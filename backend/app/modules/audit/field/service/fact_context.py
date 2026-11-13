@@ -7,8 +7,8 @@ from app.constants.execution import (
     ORIGIN_DOCUMENT_EXTRACTION,
     ORIGIN_HUMAN_CORRECTION,
 )
-from app.domain import fact_projection
-from app.domain.manifest import enabled_extraction_field_keys
+from app.domain.audit import fact_projection
+from app.domain.configuration.manifest import enabled_extraction_field_keys
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.service import value_store as task_value_service
 

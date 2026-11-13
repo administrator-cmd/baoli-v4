@@ -8,10 +8,10 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.status import AUDIT_LLM_CHANNEL_UNAVAILABLE
 from app.core.transactions import commit_transaction
-from app.domain.audit_state import RuleOutcome
-from app.domain.execution_mode import MODE_MATERIAL_CHECK
-from app.domain.llm_failure import channel_failure_detail, is_channel_failure
-from app.domain.material_precheck import (
+from app.domain.audit.audit_state import RuleOutcome
+from app.domain.configuration.execution_mode import MODE_MATERIAL_CHECK
+from app.domain.shared.llm_failure import channel_failure_detail, is_channel_failure
+from app.domain.materials.material_precheck import (
     PRECHECK_KEY,
     PRECHECK_PLANNING_PROMPT,
     PRECHECK_TOOLS,

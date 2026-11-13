@@ -2,7 +2,7 @@
 
 from typing import Any, NotRequired, TypedDict
 
-from app.domain.llm_failure import ChannelFailure
+from app.domain.shared.llm_failure import ChannelFailure
 
 
 class EvaluationPlanEntry(TypedDict):

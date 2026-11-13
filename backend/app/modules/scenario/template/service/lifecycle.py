@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.core.transactions import after_commit, before_rollback
-from app.domain import scenario_schema
-from app.domain.identity import public_no
+from app.domain.configuration import scenario_schema
+from app.domain.shared.identity import public_no
 from app.modules.scenario.draft.crud import ScenarioDraftCRUD
 from app.modules.scenario.draft.model import ScenarioDraft
 from app.modules.scenario.draft.service.draft import ScenarioDraftService

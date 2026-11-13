@@ -7,7 +7,7 @@ from typing import Any
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
-from app.domain.external_artifacts import ExternalArtifact, ExternalServiceResult
+from app.domain.materials.external_artifacts import ExternalArtifact, ExternalServiceResult
 from app.integrations.documents.http import (
     client,
     confidence,

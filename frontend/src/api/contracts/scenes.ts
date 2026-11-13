@@ -51,7 +51,9 @@ export interface ScenarioListItem {
 export interface ConfigSyncError {
   code: string;
   message: string;
-  details: Record<string, JsonValue>;
+  details: Record<string, JsonValue> & {
+    rule_issues?: { rule_key: string; name: string; rule_code: string; message: string }[];
+  };
 }
 
 export interface ScenarioDraftInfo {
