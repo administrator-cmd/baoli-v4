@@ -18,6 +18,7 @@ from app.common.exceptions import (
 )
 from app.core.config import PROJECT_DIR, get_settings
 from app.core.database import SessionLocal, check_database_connection
+from app.core.transactions import commit_transaction
 from app.integrations.documents.material_classify import list_material_types, validate_material_type
 from app.integrations.documents.ocr import poll_ocr_job, submit_processed_document
 from app.integrations.documents.parsing import detect_seals, process_document
@@ -25,7 +26,6 @@ from app.middleware.request_context import RequestContextMiddleware
 from app.modules.audit.artifact.service import document_ports
 from app.modules.audit.execution.service.commands import AuditExecutionCommandsService
 from app.modules.system.operation.execution import OperationExecution
-from app.core.transactions import commit_transaction
 from app.runtime.schema_check import verify_schema
 
 

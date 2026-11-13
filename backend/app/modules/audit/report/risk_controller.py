@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.common.response import ResponseSchema, ok
-from app.core.base_schema import RiskResultPageResponse
 from app.core.database import get_db, request_session
+from app.modules.audit.report.schema import RiskResultPageResponse
 from app.modules.audit.report.service import risks as report_risks
 from app.schema.query.lists import RiskResultListQueryParam
 from app.schema.query.pagination import PaginationQueryParam

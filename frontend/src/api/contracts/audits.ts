@@ -1,7 +1,7 @@
 /** 审核任务：任务详情、节点、字段、规则结果、证据与字段纠错。 */
 
 import type { JsonValue, OperationAccepted } from "./common";
-import type { TaskScope } from "./scenes";
+import type { DocumentUploadResponse, TaskScope } from "./scenes";
 import type { TaskPlanInfo } from "./plans";
 
 /** 继续执行的范围：四类互斥，数量由服务端按真实重跑计划给出。 */
@@ -99,6 +99,7 @@ export interface ResumeState {
 }
 
 export interface AuditNode {
+  result_summary?: Record<string, JsonValue> | null;
   /** 节点实例码：用户配置的实例，同一能力类型可以有多个。 */
   node_code: string;
   /** 能力类型：决定这个节点由谁执行、属于哪个业务工作区。 */
@@ -193,6 +194,54 @@ export interface MaterialArtifactStatus {
 }
 
 export interface AuditField {
+  /** 任务冻结的字段类型，用于格式化数值，避免把账号等文本加上千分位。 */
+  value_type?: string | null;
+  /** 本任务是否启用该字段的自动抽取，独立于已有人工或历史有效值。 */
+  extraction_enabled?: boolean;
+  material_uploaded?: boolean;
+  material_required?: boolean;
+  field_key?: string | null;
+  material_key?: string | null;
+  fact_revision_no?: number | null;
+  /** 事实来源：人工纠错 / 文档抽取。 */
+  origin?: string | null;
+  /** 当前有效值是否由人工修正产生；与抽取原值分开显示。 */
+  corrected?: boolean;
+  /** 原抽取结果：当前有效值是人工值时，这里仍是模型当次抽取到的值。 */
+  extracted_raw_value?: string | null;
+  extracted_normalized_value?: JsonValue;
+  extracted_status?: string | null;
+  /** 该字段最近一次人工记录的修改前后值与说明。 */
+  manual_review?: {
+    review_no: string;
+    decision: string | null;
+    before_value: string | null;
+    after_value: string | null;
+    business_note: string | null;
+    basis_type: string | null;
+    created_at: string | null;
+  } | null;
+  /** 已声明的口径：只显示配置里写明的值，不按字段名称推断。 */
+  unit?: string | null;
+  currency?: string | null;
+  period_scope?: string | null;
+  statement_scope?: string | null;
+  entity_scope?: string | null;
+  /** 模型从正文实际识别到的期间、口径、主体和单位；未识别时为空。 */
+  actual_period_scope?: string | null;
+  actual_statement_scope?: string | null;
+  actual_entity_scope?: string | null;
+  actual_unit?: string | null;
+  /** 该结果实际证据对应的上传文件名；不是材料位当前文件名。 */
+  source_files?: string[];
+  source_file?: string | null;
+  /** 取值方式：文档抽取 / 人工纠错。 */
+  value_source?: string | null;
+  /** 抽取规则没有形成字段值时保存的真实执行原因。 */
+  extraction_message?: string | null;
+  /** 方案冻结的抽取要求；用于解释本次按什么要求检查。 */
+  instruction?: string | null;
+  extraction_presentation_version?: number | null;
   /** 规则库中的字段业务编号。 */
   source_ref?: string | null;
   name: string;
@@ -312,6 +361,20 @@ export interface AuditRule {
 }
 
 export interface AuditTask {
+  /** 字段结果统计与按材料/期间/单位汇总的缺项；服务端统一计算。 */
+  field_summary?: {
+    total: number;
+    valid: number;
+    missing: number;
+    not_executed: number;
+    gap_groups: Array<{
+      material_name: string;
+      period: string;
+      unit: string;
+      field_names: string[];
+      affected_rules: string[];
+    }>;
+  } | null;
   task_no: string;
   task_name: string;
   scenario_name: string;
@@ -404,13 +467,78 @@ export interface DocumentRemoveResult {
   material_name: string;
   status: string;
   input_revision: number;
-  impact: {
-    affected_artifacts: number;
-    stale_field_values: number;
-    invalidated_rule_results: number;
-    invalidated_node_executions: number;
-    invalidated_reviews: number;
-    reset_to_node: string | null;
-    description: string;
-  } | null;
+  impact: ReplacementImpact | null;
+}
+
+/** 只读 OCR 状态查询结果。 */
+export interface DocumentOcrStatus {
+  document_no: string;
+  artifact_no: string | null;
+  status: string;
+  job_id: string | null;
+  deadline_at: string | null;
+  provider_state: string | null;
+  extract_progress: { totalPages?: number; extractedPages?: number; [key: string]: unknown } | null;
+  progress_updated_at: string | null;
+  message: string;
+}
+/** 当前上传文件的同步处理产物状态。 */
+export interface DocumentArtifactStatus {
+  document_no: string;
+  artifact_type: "MATERIAL_CLASSIFY" | "DOCUMENT_PARSE" | "SEAL";
+  artifact_no: string | null;
+  status: string;
+  message: string;
+}
+/** 替换上传的真实影响范围：由服务端计算，页面只负责显示。 */
+export interface ReplacementImpact {
+  affected_artifacts: number;
+  stale_field_values: number;
+  invalidated_rule_results: number;
+  invalidated_node_executions: number;
+  invalidated_reviews: number;
+  reset_to_node: string | null;
+  description: string;
+}
+export type AuditDocumentUploadResponse = DocumentUploadResponse & {
+  impact?: ReplacementImpact | null;
+};
+/** 审核任务列表查询（真实后端筛选/排序/分页）。 */
+export interface TaskQuery {
+  name?: string;
+  scenario_code?: string;
+  plan_code?: string;
+  status?: string;
+  current_node?: string;
+  created_from?: string;
+  created_to?: string;
+  page: number;
+  page_size: number;
+}
+/** 任务基本资料修改；执行快照不随之改变。 */
+export interface AuditTaskUpdateRequest {
+  task_name?: string;
+  remark?: string | null;
+}
+
+export interface FieldReviewSaveRequest {
+  input_revision: number;
+  corrections: FieldReviewCorrection[];
+}
+
+export interface FieldReviewConfirmRequest extends FieldReviewSaveRequest {
+  idempotency_key: string;
+  acknowledge_missing: boolean;
+  note?: string | null;
+}
+
+export interface DocumentOcrRetryRequest {
+  artifact_no?: string | null;
+  input_revision: number;
+  idempotency_key: string;
+  resubmit_unknown: boolean;
+}
+
+export interface DocumentArtifactRetryRequest extends DocumentOcrRetryRequest {
+  artifact_no: string;
 }

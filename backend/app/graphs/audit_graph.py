@@ -8,74 +8,51 @@ from langgraph.runtime import Runtime
 
 from app.common.exceptions import BusinessError, exception_summary
 from app.core.database import is_storage_unavailable
+from app.domain.audit_state import AgentSummary, AuditGraphState, EvaluationContext, EvaluationPlanEntry, RuleOutcome
+from app.domain.llm_failure import ChannelFailure
 from app.graphs.audit_rule_runner import RuleEvaluationRunner, extraction_group, run_rule_evaluation
 
 logger = logging.getLogger(__name__)
 STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE"
 
 
-class AuditGraphState(TypedDict, total=False):
-    """本次任务的执行引用、固定规则计划与汇总，不保存单条模型消息。"""
-
-    task_no: str
-    current_node: str
-    node_index: int
-    phase: str
-    executed_node: str | None
-    last_execution: dict[str, Any] | None
-    last_error: dict[str, Any] | None
-    execution_id: int | None
-    execution_mode: str | None
-    node_result: dict[str, Any] | None
-    execution_status: str
-    execution_failure_code: str | None
-    agent_mode: bool
-    evaluation_plan: list[dict[str, Any]]
-    field_review: dict[str, Any] | None
-    rule_outcomes: list[dict[str, Any]]
-    loop_count: int
-    channel_failure: dict[str, Any] | None
-    field_review_paused: bool
-    covered_rule_keys: list[str]
-
-
 class AuditNodeRunner(RuleEvaluationRunner, Protocol):
     """任务生命周期和单条规则入口由服务层注入，图不导入服务实现。"""
 
-    def graph_load_task(self, db: Any, task_no: str) -> dict[str, Any]: ...
+    def graph_load_task(self, db: Any, task_no: str) -> AuditGraphState: ...
 
     def graph_execute_current_node(
         self, db: Any, task_no: str, current_node: str,
-    ) -> dict[str, Any]: ...
+    ) -> AuditGraphState: ...
 
     def graph_prepare_materials(
         self, db: Any, task_no: str, execution_id: int | None,
-    ) -> dict[str, Any]: ...
+    ) -> AuditGraphState: ...
 
     def graph_load_evaluation(
         self, db: Any, task_no: str, node_code: str, execution_id: int | None,
-    ) -> dict[str, Any]: ...
+    ) -> EvaluationContext: ...
 
     def graph_execute_extraction_batch(
         self, db: Any, task_no: str, node_code: str, execution_id: int | None,
-        entries: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]: ...
+        entries: list[EvaluationPlanEntry],
+    ) -> list[RuleOutcome]: ...
 
     def graph_pause_scheduling(
         self, db: Any, task_no: str, execution_id: int | None,
-        failure: dict[str, Any],
-    ) -> dict[str, Any]: ...
+        failure: ChannelFailure,
+    ) -> AuditGraphState: ...
 
     def graph_finalize_node_execution(
         self, db: Any, task_no: str, execution_id: int | None, execution_mode: str,
-        node_result: dict[str, Any] | None, agent_summary: dict[str, Any] | None,
-    ) -> dict[str, Any]: ...
+        node_result: dict[str, Any] | None, agent_summary: AgentSummary | None,
+    ) -> AuditGraphState: ...
 
     def graph_advance_workflow(
         self, db: Any, task_no: str, execution_id: int | None,
-    ) -> dict[str, Any]: ...
+    ) -> AuditGraphState: ...
 
-    def graph_save_node_result(self, db: Any, task_no: str) -> dict[str, Any]: ...
+    def graph_save_node_result(self, db: Any, task_no: str) -> AuditGraphState: ...
 
 
 class AuditGraphContext(TypedDict):
@@ -85,23 +62,23 @@ class AuditGraphContext(TypedDict):
     nodes: AuditNodeRunner
 
 
-def _load_task(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _load_task(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     return runtime.context["nodes"].graph_load_task(runtime.context["db"], state["task_no"])
 
 
-def _execute_current_node(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _execute_current_node(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     return runtime.context["nodes"].graph_execute_current_node(
         runtime.context["db"], state["task_no"], state["current_node"],
     )
 
 
-def _prepare_materials(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _prepare_materials(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     return runtime.context["nodes"].graph_prepare_materials(
         runtime.context["db"], state["task_no"], state["execution_id"],
     )
 
 
-def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     loaded = runtime.context["nodes"].graph_load_evaluation(
         runtime.context["db"], state["task_no"], state["current_node"], state["execution_id"],
     )
@@ -112,7 +89,7 @@ def _load_evaluation(state: AuditGraphState, runtime: Runtime[AuditGraphContext]
     }
 
 
-def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     """按依赖计划串行执行；同一材料上相邻的无输入抽取合并为一次调用。
 
     合并只发生在连续的、同材料同产物来源的单字段抽取之间：它们互不依赖，逐个执行会把同一份
@@ -131,12 +108,12 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
     else:
         allowed = set(review.get("allowed_rule_keys") or [])
         plan = [entry for entry in state["evaluation_plan"] if entry["rule_key"] in allowed]
-    outcomes: list[dict[str, Any]] = list(state.get("rule_outcomes") or [])
+    outcomes: list[RuleOutcome] = list(state.get("rule_outcomes") or [])
     completed = {item["rule_key"] for item in outcomes}
     covered = [entry["rule_key"] for entry in plan]
     plan = [entry for entry in plan if entry["rule_key"] not in completed]
     index = 0
-    channel_failure: dict[str, Any] | None = None
+    channel_failure: ChannelFailure | None = None
     while index < len(plan):
         group = extraction_group(plan, index)
         index += len(group)
@@ -179,8 +156,8 @@ def _execute_rules(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) 
 
 
 def collect_agent_summary(
-    plan_keys: set[str], outcomes: list[dict[str, Any]], loop_count: int,
-) -> dict[str, Any]:
+    plan_keys: set[str], outcomes: list[RuleOutcome], loop_count: int,
+) -> AgentSummary:
     """按真实逐条结果汇总批次：遍历完不等于业务通过，未执行项与阻断原因照实记录。"""
     missing_keys = plan_keys - {item["rule_key"] for item in outcomes}
     statuses = {item["loop_status"] for item in outcomes}
@@ -191,7 +168,7 @@ def collect_agent_summary(
             break
     if missing_keys:
         overall = "BLOCKED"
-    summary = {
+    summary: AgentSummary = {
         "agent_rule_count": len(outcomes),
         "missing_rule_keys": sorted(missing_keys), "rule_outcomes": outcomes,
         "loop_status": overall, "loop_count": loop_count,
@@ -203,7 +180,7 @@ def collect_agent_summary(
     return summary
 
 
-def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
+def _collect_agent_summary(state: AuditGraphState) -> AgentSummary:
     """遍历完不等于业务通过，未执行项与阻断原因按真实结果汇总。
 
     本轮只覆盖计划的一部分时（停在字段核对等待点），缺项判定也只按这一部分算：
@@ -219,20 +196,20 @@ def _collect_agent_summary(state: AuditGraphState) -> dict[str, Any]:
     return summary
 
 
-def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _finalize_node_execution(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     return runtime.context["nodes"].graph_finalize_node_execution(
         runtime.context["db"], state["task_no"], state["execution_id"], state["execution_mode"],
         state["node_result"], _collect_agent_summary(state),
     )
 
 
-def _advance_workflow(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _advance_workflow(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     return runtime.context["nodes"].graph_advance_workflow(
         runtime.context["db"], state["task_no"], state["execution_id"],
     )
 
 
-def _save_node_result(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> dict[str, Any]:
+def _save_node_result(state: AuditGraphState, runtime: Runtime[AuditGraphContext]) -> AuditGraphState:
     return runtime.context["nodes"].graph_save_node_result(runtime.context["db"], state["task_no"])
 
 
@@ -295,7 +272,7 @@ def _graph_failure(exc: Exception) -> BusinessError:
     )
 
 
-def run_audit_node(task_no: str, db: Any, nodes: AuditNodeRunner) -> dict[str, Any]:
+def run_audit_node(task_no: str, db: Any, nodes: AuditNodeRunner) -> AuditGraphState:
     """执行任务当前节点：一次调用跑完它的全部规则。"""
     try:
         return _compiled().invoke(

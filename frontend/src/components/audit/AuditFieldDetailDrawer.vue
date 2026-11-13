@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import type { AuditFieldView } from "@/api/audits";
+import type { AuditField } from "@/api/contracts";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import QuoteBlock from "@/components/audit/QuoteBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -20,13 +20,13 @@ import {
 /** 字段详情：按字段状态决定展示取值、原文还是未抽取原因。 */
 const props = defineProps<{
   open: boolean;
-  field: AuditFieldView | null;
+  field: AuditField | null;
   correctionEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
   close: [];
-  correct: [field: AuditFieldView];
+  correct: [field: AuditField];
 }>();
 
 const mode = computed<FieldMode>(() => (props.field ? fieldMode(props.field) : "NOT_RUN"));
@@ -39,7 +39,7 @@ const reason = computed(() => {
 });
 
 /** 原文内容。没有原文时说明属于哪一种缺失，不留空白。 */
-function rawText(field: AuditFieldView): string {
+function rawText(field: AuditField): string {
   if (field.corrected || field.origin === "HUMAN_CORRECTION") {
     return field.extracted_raw_value !== null && field.extracted_raw_value !== undefined && field.extracted_raw_value !== ""
       ? field.extracted_raw_value : "原抽取未取得原始值";
@@ -69,7 +69,7 @@ function rawText(field: AuditFieldView): string {
 }
 
 /** 标准化结果。它是按字段类型对原文确定性算出的可比对值，不代表审核通过。 */
-function normalizedText(field: AuditFieldView): string {
+function normalizedText(field: AuditField): string {
   const normalized = field.normalized_value;
   if (normalized !== null && normalized !== undefined && normalized !== "") {
     return formatFieldValue(field);
@@ -83,12 +83,12 @@ function normalizedText(field: AuditFieldView): string {
   return "没有可标准化的原文";
 }
 
-function hasNormalizedValue(field: AuditFieldView): boolean {
+function hasNormalizedValue(field: AuditField): boolean {
   return field.normalized_value !== null && field.normalized_value !== undefined && field.normalized_value !== "";
 }
 
 /** 原始值与标准化结果文本相同时只保留一个区块，避免重复展示。 */
-function showRawSection(field: AuditFieldView): boolean {
+function showRawSection(field: AuditField): boolean {
   if (field.corrected || field.origin === "HUMAN_CORRECTION") {
     return !(hasNormalizedValue(field) && rawText(field) === normalizedText(field));
   }
@@ -103,7 +103,7 @@ function reasonTone(current: FieldMode): string {
 }
 
 /** 来源文件只取该结果实际证据对应的上传文件，不用材料位名称冒充。 */
-function sourceFilesText(field: AuditFieldView): string {
+function sourceFilesText(field: AuditField): string {
   return fieldSourceFiles(field).join("、") || "未记录来源文件";
 }
 
@@ -115,7 +115,7 @@ function scopePart(label: string, value: string | null | undefined, format = (te
   return text && !emptyScopeValues.has(text.toUpperCase()) ? `${label} ${format(text)}` : null;
 }
 
-function declaredScopeText(field: AuditFieldView): string {
+function declaredScopeText(field: AuditField): string {
   return [
     scopePart("期间", field.period_scope, periodScopeLabel),
     scopePart("报表口径", field.statement_scope, statementScopeLabel),
@@ -125,7 +125,7 @@ function declaredScopeText(field: AuditFieldView): string {
   ].filter(Boolean).join(" · ");
 }
 
-function recognizedScopeText(field: AuditFieldView): string {
+function recognizedScopeText(field: AuditField): string {
   return [
     scopePart("期间", field.actual_period_scope),
     scopePart("报表口径", field.actual_statement_scope),

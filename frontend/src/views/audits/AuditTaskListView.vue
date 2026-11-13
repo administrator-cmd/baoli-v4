@@ -117,7 +117,13 @@ const createVisible = ref(false);
 const createSaving = ref(false);
 const createOptionsLoading = ref(false);
 const createError = ref<string | null>(null);
-const createForm = reactive({ plan_code: "", task_name: "", remark: "", report_generation_mode: "RULES" as "RULES" | "TEMPLATE", report_template_no: "" });
+const createForm = reactive({
+  plan_code: "",
+  task_name: "",
+  remark: "",
+  report_generation_mode: "RULES" as "RULES" | "TEMPLATE",
+  report_template_no: "",
+});
 const reportTemplateOptions = ref<ReportTemplateOption[]>([]);
 const reportTemplateOptionsError = ref<string | null>(null);
 let createAttemptKey: string | null = null;
@@ -143,9 +149,12 @@ async function openCreate(planCode?: string): Promise<void> {
     if (request !== createOpenRequest || !createVisible.value) return;
     planOptions.value = planPayload.items;
     try {
-      reportTemplateOptions.value = (await listReportTemplateOptions()).items;
+      const templatePayload = await listReportTemplateOptions();
+      if (request !== createOpenRequest || !createVisible.value) return;
+      reportTemplateOptions.value = templatePayload.items;
       reportTemplateOptionsError.value = null;
     } catch (failure) {
+      if (request !== createOpenRequest || !createVisible.value) return;
       reportTemplateOptions.value = [];
       reportTemplateOptionsError.value = failure instanceof Error ? failure.message : "报告模板读取失败";
     }
@@ -176,8 +185,13 @@ async function openCreate(planCode?: string): Promise<void> {
 const createSnapshot = computed(() =>
   planOptions.value.find((item) => item.plan_code === createForm.plan_code) ?? null,
 );
-const canCreateTask = computed(() => Boolean(createSnapshot.value?.scope_hash)
-  && (createForm.report_generation_mode === "RULES" || reportTemplateOptions.value.some((item) => item.template_no === createForm.report_template_no)));
+const canCreateTask = computed(() =>
+  Boolean(createSnapshot.value?.scope_hash)
+  && (
+    createForm.report_generation_mode === "RULES"
+    || reportTemplateOptions.value.some((item) => item.template_no === createForm.report_template_no)
+  ),
+);
 
 watch(
   () => route.query.createPlan,
@@ -209,7 +223,14 @@ async function submitCreate(): Promise<void> {
     ElMessage.warning("请选择要仿照的报告模板");
     return;
   }
-  const attemptPayload = JSON.stringify([createForm.plan_code, taskName, remark, snapshot.scope_hash, createForm.report_generation_mode, createForm.report_template_no]);
+  const attemptPayload = JSON.stringify([
+    createForm.plan_code,
+    taskName,
+    remark,
+    snapshot.scope_hash,
+    createForm.report_generation_mode,
+    createForm.report_template_no,
+  ]);
   const attemptKey = createAttemptPayload === attemptPayload && createAttemptKey
     ? createAttemptKey
     : operationIdempotencyKey("TASK_CREATE", createForm.plan_code, taskName);

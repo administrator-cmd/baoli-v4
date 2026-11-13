@@ -6,11 +6,17 @@ from pydantic import Field
 
 from app.common.exceptions import BusinessError
 from app.domain.rulebook_generation import (
-    GenerationModel, GenerationDocument, GenerationSheet, GenerationColumn, GenerationEntry, GenerationIssue,
+    GenerationColumn,
+    GenerationDocument,
+    GenerationEntry,
+    GenerationIssue,
+    GenerationModel,
+    GenerationSheet,
+    business_code_column,
     normalize_business_codes,
 )
 
-ASSISTANT_PROMPT_VERSION = "generation_assistant_v11"
+ASSISTANT_PROMPT_VERSION = "generation_assistant_v12"
 
 
 class SetDocument(GenerationModel):
@@ -30,6 +36,7 @@ class UpdateSheet(GenerationModel):
     name: str | None = None
     description: str | None = None
     columns: list[GenerationColumn] | None = None
+    business_code_scope: Literal["DOCUMENT", "SHEET"] | None = None
 
 
 class RemoveSheet(GenerationModel):
@@ -52,7 +59,7 @@ class UpdateCells(GenerationModel):
 class UpdateRowMetadata(GenerationModel):
     op: Literal["update_row_metadata"]
     row_id: str
-    business_code: str | None = Field(default=None, max_length=80, description="仅缺少原编号时由模型补充合适的业务编号；已有编号沿用，不生成第二套。")
+    business_code: str | None = Field(default=None, max_length=80, description="已有自身编号沿用，仅缺号时补充；无独立编号的辅助记录留空，纠正误用批次或引用号时可清空，不改其原业务单元格。")
     entry_kind: Literal["RULE", "MATERIAL", "REFERENCE", "OTHER"] | None = None
     related_row_ids: list[str] | None = Field(default=None, description="该条目的完整新关联列表；未提供则保留，空数组则清空。")
     source_note: str | None = Field(default=None, description="当前编制说明，可更新过时描述；原始出处位置保持不变。")
@@ -236,7 +243,7 @@ def apply_edits(previous: GenerationDocument, reply: AssistantReply) -> Generati
             result.sheets.append(edit.sheet.model_copy(deep=True))
         elif isinstance(edit, UpdateSheet):
             target = sheet_for(edit.sheet_id)
-            for field in ("name", "description", "columns"):
+            for field in ("name", "description", "columns", "business_code_scope"):
                 value = getattr(edit, field)
                 if value is not None:
                     setattr(target, field, value)
@@ -312,9 +319,10 @@ def apply_edits(previous: GenerationDocument, reply: AssistantReply) -> Generati
         old_sheet = next((item for item in previous.sheets if item.sheet_id == sheet.sheet_id), None)
         if old_sheet:
             sheet.source = old_sheet.source.model_copy(deep=True)
+        identity_column = business_code_column(sheet)
         for row in sheet.rows:
             old = old_items.get(row.row_id)
-            if old is None and not row.business_code:
+            if old is None and not row.business_code and (row.entry_kind in {"RULE", "MATERIAL"} or identity_column):
                 invalid("新增条目缺少业务编号，请沿用原编号，或由模型按现有编号规律和业务内容补充")
             if old:
                 row.source = old.source.model_copy(deep=True)

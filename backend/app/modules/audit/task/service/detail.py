@@ -9,7 +9,7 @@ from app.constants.execution import NODE_RULE_EXECUTION, ORIGIN_HUMAN_CORRECTION
 from app.constants.status import EXECUTABLE_FIELD_STATUSES
 from app.domain.execution_scope import result_state
 from app.domain.manifest import enabled_extraction_field_keys
-from app.domain.rule_library import active, execution_container_of, is_risk_rule
+from app.domain.rule_library import active, execution_container_of
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.execution_scope import current_executions, pending_rerun_by_execution
@@ -21,18 +21,68 @@ from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
 from app.modules.audit.field.service.facts import AuditFieldFactsService
 from app.modules.audit.field.service.field_review import AuditFieldReviewService
 from app.modules.audit.rule.model import RuleResult
-from app.modules.audit.rule.service.rule_results import AuditRuleResultsService
 from app.modules.audit.shared import _current_uploads
 from app.modules.audit.task import crud
 from app.modules.audit.task.model import AuditTask
 from app.modules.audit.task.service.processing import AuditTaskProcessingService
-from app.modules.material.document.model import TaskDocument
+from app.modules.audit.task.service.rule_views import AuditTaskRuleViewsService
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TASK
 
 
+def _field_summary(
+    field_view: list[dict[str, Any]], manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """按材料、期间和单位汇总字段缺项，并保留受影响规则的展示顺序。"""
+    rule_targets_by_field: dict[str, list[str]] = {}
+    for rule in manifest.get("rules") or []:
+        if not rule.get("enabled", True):
+            continue
+        name = str(rule.get("name") or rule.get("rule_key"))
+        for entry in rule.get("inputs") or []:
+            field_key = str(entry.get("field_key") or "")
+            if field_key:
+                rule_targets_by_field.setdefault(field_key, []).append(name)
+    gap_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in field_view:
+        if item.get("normalized_value") not in (None, ""):
+            continue
+        if item.get("status") == "NOT_APPLICABLE":
+            continue
+        key = (
+            str(item.get("material_name") or ""),
+            str(item.get("actual_period_scope") or (
+                item.get("period_scope")
+                if item.get("period_scope") not in (None, "", "NOT_APPLICABLE")
+                else "未识别期间"
+            )),
+            str(item.get("actual_unit") or item.get("unit") or "单位未识别"),
+        )
+        group = gap_groups.setdefault(key, {
+            "material_name": key[0], "period": key[1], "unit": key[2],
+            "field_names": [], "affected_rules": [],
+        })
+        if item.get("name") not in group["field_names"]:
+            group["field_names"].append(item.get("name"))
+        for rule_name in rule_targets_by_field.get(str(item.get("field_key")), []):
+            if rule_name not in group["affected_rules"]:
+                group["affected_rules"].append(rule_name)
+    field_summary = {
+        "total": len(field_view),
+        "valid": sum(1 for item in field_view if item.get("normalized_value") not in (None, "")),
+        "missing": sum(
+            1 for item in field_view
+            if item.get("normalized_value") in (None, "")
+            and item.get("status") not in {"NOT_EXECUTED", "PENDING", "NOT_APPLICABLE"}
+        ),
+        "not_executed": sum(1 for item in field_view if item.get("status") in {"NOT_EXECUTED", "PENDING"}),
+        "gap_groups": list(gap_groups.values()),
+    }
+    return field_summary
+
+
 class AuditTaskDetailService:
-    """本实体的服务方法；db 由构造时注入。"""
+    """组装任务当前执行、材料、字段与规则的只读详情。"""
 
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
@@ -44,92 +94,6 @@ class AuditTaskDetailService:
         if execution.failure_code == "AUDIT_RULE_EXECUTION_INCOMPLETE":
             return incomplete_failure_message(execution.result_json) or execution.failure_message
         return execution.failure_message
-
-
-    def _named_rule_result(self, value: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
-        """把历史结果里的内部规则键替换成规则名再展示。
-
-        组合汇总的来源规则在早期记录里只保存了 `rule_...` 键，页面无法据字面理解；
-        名称取自任务冻结的 manifest，只影响展示，不改写已保存的结果。
-        """
-        def named(text: Any) -> Any:
-            if not isinstance(text, str) or "rule_" not in text:
-                return text
-            for key, name in names.items():
-                if key in text:
-                    text = text.replace(key, name)
-            return text
-
-        result = dict(value)
-        basis = result.get("basis")
-        if isinstance(basis, list):
-            result["basis"] = [
-                {**row, "label": named(row.get("label"))} if isinstance(row, dict) else row
-                for row in basis
-            ]
-        missing = result.get("missing_items")
-        if isinstance(missing, list):
-            result["missing_items"] = [named(item) for item in missing]
-        return result
-
-
-    def _comparison_sources(self, result: dict[str, Any], *, task: AuditTask, documents_by_material_key: dict[str, TaskDocument],
-    ) -> dict[str, Any]:
-        """给比较双方的来源标签补上材料与字段中文名。
-
-        比较结果里的左右下标指向本次真实输入；名称取自任务冻结配置与材料位。
-        早期结果保存时没有带上名称，这里只补展示字段，不改写已经算出的取值与算式。
-        """
-        findings = result.get("tool_findings")
-        if not isinstance(findings, list):
-            return result
-        field_names = {
-            str(field["field_key"]): str(field.get("name") or field["field_key"])
-            for field in task.task_schema_json["fields"]
-        }
-        material_names = {
-            key: str(document.material_name) for key, document in documents_by_material_key.items()
-        }
-        changed = False
-        updated: list[Any] = []
-        for finding in findings:
-            comparison = finding.get("comparison") if isinstance(finding, dict) else None
-            snapshot = finding.get("input_snapshot") if isinstance(finding, dict) else None
-            if not isinstance(comparison, dict) or not isinstance(snapshot, list):
-                updated.append(finding)
-                continue
-            fixed = dict(comparison)
-            for side in ("left", "right"):
-                index = fixed.get(f"{side}_index")
-                if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(snapshot):
-                    continue
-                source = snapshot[index] if isinstance(snapshot[index], dict) else {}
-                if not fixed.get(f"{side}_label"):
-                    label = " · ".join(name for name in (
-                        material_names.get(str(source.get("material_key") or "")),
-                        field_names.get(str(source.get("field_key") or "")),
-                    ) if name)
-                    if label:
-                        fixed[f"{side}_label"] = label
-                        changed = True
-                if fixed.get(f"{side}_raw_value") is None and source.get("raw_value") is not None:
-                    fixed[f"{side}_raw_value"] = source.get("raw_value")
-                    changed = True
-            if fixed.get("addends") and not any(fixed.get("addend_labels") or ()):
-                # 加总比较的加数按输入顺序排列：第一个输入是左侧合计，其余为加数。
-                # 早期结果保存的是空字符串占位，列表非空但没有任何可用标签，这里同样补齐。
-                labels = [
-                    " · ".join(name for name in (
-                        material_names.get(str(source.get("material_key") or "")),
-                        field_names.get(str(source.get("field_key") or "")),
-                    ) if name)
-                    for source in (item if isinstance(item, dict) else {} for item in snapshot[1:])
-                ]
-                if any(labels):
-                    fixed["addend_labels"] = labels
-                    changed = True
-            updated.append({**finding, "comparison": fixed})
-        return {**result, "tool_findings": updated} if changed else result
 
 
     def _task_display_structure(self, task: AuditTask) -> dict[str, Any]:
@@ -170,66 +134,6 @@ class AuditTaskDetailService:
         return reason if isinstance(reason, str) and reason else None
 
 
-    def _rule_result_view(self, item: RuleResult,
-        *,
-        db: Session,
-        task: AuditTask,
-        rule_definitions: dict[tuple[str, str], dict[str, Any]],
-        execution_node_by_id: dict[int, str],
-        node_type_by_code: dict[str, str],
-        documents_by_material_key: dict[str, TaskDocument],
-        rule_name_by_key: dict[str, str],
-        rule_value_of: dict[int, dict[str, Any]],
-        rule_sources: dict[int, list[dict[str, Any]]],
-    ) -> dict[str, Any]:
-        """单条规则结果的展示视图；规则定义只按节点与规则键读取一次。"""
-        node_code = execution_node_by_id[item.node_execution_id]
-        definition = rule_definitions.get((node_code, item.rule_key), {})
-        return {
-            "rule_key": item.rule_key,
-            "name": item.rule_name,
-            "source_ref": definition.get("source_ref"),
-            "kind": definition.get("kind"),
-            # 执行方式决定模型上下文与允许动作；旧快照没有该字段时前端显示未判定。
-            "execution_mode": definition.get("execution_mode"),
-            "is_risk_rule": is_risk_rule(definition),
-            # 规则来源工作表：页面按它分组，不同场景使用各自的 Sheet 名。
-            "source_sheet": (definition.get("origin") or {}).get("sheet_name"),
-            "material_names": [
-                documents_by_material_key[key].material_name
-                for key in definition.get("materials") or []
-                if key in documents_by_material_key
-            ],
-            "status": item.status,
-            "message": item.message,
-            "turn_count": item.turn_count,
-            "result": self._comparison_sources(
-                self._named_rule_result({
-                    # 诊断来自数据库，业务结论来自任务 CSV；状态与风险等级只存数据库。
-                    **rule_value_of[item.id],
-                    "status": item.status,
-                    "message": item.message,
-                    "risk_level": item.risk_level,
-                    **AuditRuleResultsService(db).restore_diagnostic_inputs(
-                         task,
-                        AuditFieldEvidenceService().result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
-                    ),
-                    # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
-                    # node_code 保留用户配置的实例码，两个字段都不由规则名称推断。
-                    "node": node_type_by_code.get(node_code),
-                    "node_type": node_type_by_code.get(node_code),
-                    "node_code": node_code,
-                }, rule_name_by_key),
-                task=task, documents_by_material_key=documents_by_material_key,
-            ),
-            "evidence": rule_sources[item.id],
-            # 旧结果没有 standard 快照时，单独返回任务绑定配置的要求，不改写执行结果。
-            "configured_requirement": definition.get("requirement"),
-            # 解析阶段记录的未绑定输入；页面据此解释计算为何不能形成正式结果。
-            "input_gaps": list(definition.get("input_gaps") or []),
-        }
-
-
     def task_view(self, task: AuditTask) -> dict[str, Any]:
         """任务详情视图：节点、材料位、字段、规则、执行范围与最近一次后台操作。"""
         scenario = crud.AuditTaskCRUD(self.db).scenario_version(task.scenario_version_id)
@@ -245,10 +149,9 @@ class AuditTaskDetailService:
         documents = [document for document, _ in pairs]
         # 材料识别来自该材料当前上传的真实产物，不依赖文件处理业务阶段。
         current_by_document = {document.id: upload for document, upload in pairs if upload is not None}
-        material_classify = {
-            item.material_key: AuditArtifactArtifactsService(self.db)._material_classify_content( current_by_document[item.id])
-            for item in documents if item.id in current_by_document
-        }
+        material_classify = AuditArtifactArtifactsService(self.db).material_classifications(
+            [upload.id for upload in current_by_document.values()]
+        )
         # 四项处理产物的状态一次汇总返回：页面据此显示识别进度并定位失败项，
         # 不再为每份材料发四个只读请求。
         artifact_summary = AuditTaskProcessingService(self.db).material_artifacts_summary(
@@ -301,7 +204,7 @@ class AuditTaskDetailService:
         # 执行计划在本请求内只编译一次：续跑范围、字段核对边界与页面数字都取自它。
         plan_entries = evaluation_plan(task, task.current_node, execution=current_execution)
         # 当前字段事实同样只配对一次：续跑范围、核对状态与字段视图共用这一份。
-        current_field_pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+        current_field_pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         # 能否原地继续、继续时保留多少项、重跑多少项，统一由 resume 模块判断；
         # 页面只展示服务端算出的范围，不自行推导依赖关系。
         resume = AuditExecutionResumeService(self.db).resume_state(
@@ -356,8 +259,7 @@ class AuditTaskDetailService:
         current_fact_value_of = {item.id: task_value_service.AuditFieldValueStoreService(self.db).value_of(task, task_value_service.RECORD_TASK_FACT, item.id)
                                  for item in current_task_facts.values()}
         documents_by_material_key = {item.material_key: item for item in documents}
-        # 证据可能引用历史上传与产物，它们不在本请求已加载的当前上传集合里。先按引用批量载入，
-        # 后面逐条解析走会话身份映射，不再为每个证据项单独查询。
+        # 收集证据引用的历史上传与产物，供后续批量预读。
         referenced_upload_ids: set[int] = set()
         referenced_artifact_ids: set[int] = set()
         for payload in (*field_value_of.values(), *rule_value_of.values()):
@@ -375,8 +277,8 @@ class AuditTaskDetailService:
         # 证据可能引用历史上传与产物，它们不在本请求已加载的当前上传集合里。先按引用批量载入，
         # 后面逐条解析走会话身份映射，不再为每个证据项单独查询。列表必须持有强引用：
         # 会话身份映射对未修改对象只保留弱引用，丢掉列表会让预读失效。
-        prefetched_uploads = crud.AuditTaskCRUD(self.db).uploads_by_ids(referenced_upload_ids)
-        prefetched_artifacts = crud.AuditTaskCRUD(self.db).artifacts_by_ids(referenced_artifact_ids)
+        _prefetched_uploads = crud.AuditTaskCRUD(self.db).uploads_by_ids(referenced_upload_ids)
+        _prefetched_artifacts = crud.AuditTaskCRUD(self.db).artifacts_by_ids(referenced_artifact_ids)
         # 原文及其来源随 CSV 业务记录保存，引用只解析到当时的字段/规则版本。
         rule_sources = {
             item.id: AuditFieldEvidenceService(self.db).evidence_source_views( task, AuditFieldEvidenceService(self.db).rule_evidence( task, item.id, memo))
@@ -518,54 +420,9 @@ class AuditTaskDetailService:
                         "normalized_value": normalized_value,
                     }
                 )
-        # 缺项按材料、期间和单位汇总，并列出受影响规则：同一缺项不逐条重复。
-        rule_targets_by_field: dict[str, list[str]] = {}
-        for rule in manifest.get("rules") or []:
-            if not rule.get("enabled", True):
-                continue
-            name = str(rule.get("name") or rule.get("rule_key"))
-            for entry in rule.get("inputs") or []:
-                field_key = str(entry.get("field_key") or "")
-                if field_key:
-                    rule_targets_by_field.setdefault(field_key, []).append(name)
-        gap_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for item in field_view:
-            if item.get("normalized_value") not in (None, ""):
-                continue
-            if item.get("status") == "NOT_APPLICABLE":
-                continue
-            key = (
-                str(item.get("material_name") or ""),
-                str(item.get("actual_period_scope") or (
-                    item.get("period_scope")
-                    if item.get("period_scope") not in (None, "", "NOT_APPLICABLE")
-                    else "未识别期间"
-                )),
-                str(item.get("actual_unit") or item.get("unit") or "单位未识别"),
-            )
-            group = gap_groups.setdefault(key, {
-                "material_name": key[0], "period": key[1], "unit": key[2],
-                "field_names": [], "affected_rules": [],
-            })
-            if item.get("name") not in group["field_names"]:
-                group["field_names"].append(item.get("name"))
-            for rule_name in rule_targets_by_field.get(str(item.get("field_key")), []):
-                if rule_name not in group["affected_rules"]:
-                    group["affected_rules"].append(rule_name)
-        field_summary = {
-            "total": len(field_view),
-            "valid": sum(1 for item in field_view if item.get("normalized_value") not in (None, "")),
-            "missing": sum(
-                1 for item in field_view
-                if item.get("normalized_value") in (None, "")
-                and item.get("status") not in {"NOT_EXECUTED", "PENDING", "NOT_APPLICABLE"}
-            ),
-            "not_executed": sum(1 for item in field_view if item.get("status") in {"NOT_EXECUTED", "PENDING"}),
-            "gap_groups": list(gap_groups.values()),
-        }
+        field_summary = _field_summary(field_view, manifest)
         return {
             "task_no": task.task_no,
-            "task_name": task.task_name,
             "task_name": task.task_name,
             # 任务备注是可编辑的基本资料；执行快照不随重命名或备注修改变化。
             "remark": task.remark,
@@ -638,7 +495,9 @@ class AuditTaskDetailService:
                         if item.id in current_by_document else None
                     ),
                     # 该材料位的 8018 识别结论（含置信度）：只作展示，不影响材料状态与后续执行。
-                    "material_classify": material_classify.get(item.material_key),
+                    "material_classify": (
+                        material_classify.get(current_by_document[item.id].id) if item.id in current_by_document else None
+                    ),
                     "quality_precheck": quality_views[item.material_key],
                     # 当前上传的四项产物状态；没有产物时为空对象。
                     "artifacts": artifact_summary.get(current_by_document[item.id].id, {}) if item.id in current_by_document else {},
@@ -651,9 +510,8 @@ class AuditTaskDetailService:
             # 可主动纠错的字段事实清单（供页面提供纠错入口）。
             "field_correction_candidates": field_correction_candidates,
             "rules": [
-                self._rule_result_view(
+                AuditTaskRuleViewsService(self.db).rule_result_view(
                     item,
-                    db=self.db,
                     task=task,
                     rule_definitions=rule_definitions,
                     execution_node_by_id=execution_node_by_id,

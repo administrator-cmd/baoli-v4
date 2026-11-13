@@ -1,8 +1,8 @@
-import type { AuditFieldView } from "@/api/audits";
+import type { AuditField } from "@/api/contracts";
 import { formatBusinessValue } from "@/constants/labels";
 
 /** 只格式化声明为数值的字段；按字符串分组，保留全部小数位且不改变计算精度。 */
-export function formatFieldValue(field: AuditFieldView): string {
+export function formatFieldValue(field: AuditField): string {
   return formatTypedValue(field.normalized_value, field.value_type);
 }
 
@@ -25,7 +25,6 @@ export function formatTypedValue(value: unknown, valueType: string | null | unde
   if (PERCENT_TYPES.has(type)) {
     const text = String(value).trim();
     if (!text) return formatBusinessValue(value);
-    if (text.endsWith("%")) return text;
     return text;
   }
   if (MULTIPLE_TYPES.has(type)) {
@@ -36,7 +35,7 @@ export function formatTypedValue(value: unknown, valueType: string | null | unde
   if (!DECIMAL_TYPES.has(type)) {
     return formatBusinessValue(value);
   }
-  const text = typeof value === "number" || typeof value === "string" ? String(value) : "";
+  const text = String(value);
   const decimal = /^([+-]?)(0|[1-9]\d*)(\.\d+)?$/.exec(text);
   if (!decimal) return formatBusinessValue(value);
   const [, sign, integer, fraction = ""] = decimal;
@@ -44,12 +43,12 @@ export function formatTypedValue(value: unknown, valueType: string | null | unde
 }
 
 /** 有效值包含 0 和 false；仅有候选值或原文不代表已经形成有效事实。 */
-export function hasEffectiveFieldValue(field: AuditFieldView): boolean {
+export function hasEffectiveFieldValue(field: AuditField): boolean {
   return ["PRESENT", "REVIEWED"].includes(field.status)
     && field.normalized_value !== null && field.normalized_value !== undefined && field.normalized_value !== "";
 }
 
-export function fieldSourceFiles(field: AuditFieldView): string[] {
+export function fieldSourceFiles(field: AuditField): string[] {
   return [...new Set([
     ...(field.source_files ?? []),
     ...field.evidence.map((item) => item.document_name),
@@ -69,11 +68,11 @@ export function fieldSourceFiles(field: AuditFieldView): string[] {
  */
 export type FieldMode = "VALUE" | "NOT_FOUND" | "UNCERTAIN" | "FAILED" | "UNNORMALIZED" | "NOT_RUN" | "NOT_APPLICABLE";
 
-function hasRawValue(field: AuditFieldView): boolean {
+function hasRawValue(field: AuditField): boolean {
   return field.raw_value !== null && field.raw_value !== undefined && field.raw_value !== "";
 }
 
-export function fieldMode(field: AuditFieldView): FieldMode {
+export function fieldMode(field: AuditField): FieldMode {
   if (field.status === "NOT_APPLICABLE") return "NOT_APPLICABLE";
   if (field.status === "NOT_EXECUTED" || field.status === "PENDING") return "NOT_RUN";
   if (field.status === "EXTRACTION_FAILED") return "FAILED";
@@ -86,7 +85,7 @@ export function fieldMode(field: AuditFieldView): FieldMode {
 }
 
 /** 未形成取值时，直接展示给用户的原因。优先使用服务端保存的抽取说明。 */
-export function fieldReason(field: AuditFieldView): string {
+export function fieldReason(field: AuditField): string {
   const mode = fieldMode(field);
   if (mode === "UNNORMALIZED") return "已取得原文，但无法按字段类型标准化";
   if (field.extraction_message) return field.extraction_message;

@@ -1,20 +1,18 @@
+import type {
+  AuditTask,
+  AuditDocument,
+} from "@/api/contracts";
 import { computed, ref, type Ref, type ShallowUnwrapRef } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type { AuditDocument } from "@/api/contracts";
-import {
-  getDocumentArtifact,
-  getDocumentOcr,
-  retryDocumentOcr,
-  retryDocumentArtifact,
-  type AuditTaskView,
-} from "@/api/audits";
+
+import { getDocumentArtifact, getDocumentOcr, retryDocumentOcr, retryDocumentArtifact } from "@/api/audits";
 import { isOperationActive, operationIdempotencyKey, type OperationView } from "@/api/http";
 
 import { processingStatusLabel, processingStatusTone, processingArtifactLabel, type ProcessingArtifact } from "@/constants/materialProcessing";
 
 interface MaterialProcessingOptions {
-  task: Readonly<Ref<AuditTaskView | null>>;
+  task: Readonly<Ref<AuditTask | null>>;
   watching: Readonly<Ref<boolean>>;
   pending: Readonly<Ref<boolean>>;
   generation: () => number;

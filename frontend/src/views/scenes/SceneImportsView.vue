@@ -17,6 +17,7 @@ import BackButton from "@/components/BackButton.vue";
 import { formatDate, statusLabel } from "@/constants/labels";
 import { importJobStatusOptions } from "@/constants/imports";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 
 /**
  * 规则库导入（入口列表）：文件名、所属场景、状态与待处理数来自真实作业。
@@ -262,7 +263,7 @@ watch(scopedScenarioCode, () => {
           <el-button link type="primary" class="table-link" @click="openJob(row)">{{ row.source_filename }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="所属场景" min-width="180" show-overflow-tooltip>
+      <el-table-column label="所属场景" :width="TABLE_COLUMN_WIDTHS.scenarioName" show-overflow-tooltip>
         <template #default="{ row }">{{ sceneText(row) }}</template>
       </el-table-column>
       <el-table-column label="导入状态" width="140">

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from "vue";
 
-import type { AuditFieldView } from "@/api/audits";
+import type { AuditField } from "@/api/contracts";
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -12,7 +12,7 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /** 字段列表展示业务编号、名称、关联材料、抽取结果和状态；原文、说明和纠错入口在详情抽屉中。 */
 const props = defineProps<{
-  fields: AuditFieldView[];
+  fields: AuditField[];
   /** 字段抽取是否已经执行过；未执行时说明原因，而不是显示成空值。 */
   extractionFinished: boolean;
   /** 任务是否允许发起纠错（未结束的任务才可）。 */
@@ -22,13 +22,13 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  correct: [field: AuditFieldView];
+  correct: [field: AuditField];
   "update:filter": [value: string];
 }>();
 
-const detailField = shallowRef<AuditFieldView | null>(null);
+const detailField = shallowRef<AuditField | null>(null);
 
-function extractedText(field: AuditFieldView): string {
+function extractedText(field: AuditField): string {
   if (hasEffectiveFieldValue(field)) return formatFieldValue(field);
   if (field.status === "NOT_PRESENT") return "材料未载明";
   if (field.status === "NOT_APPLICABLE") return "本次不适用";
@@ -37,7 +37,7 @@ function extractedText(field: AuditFieldView): string {
   return "未取到有效值";
 }
 
-function searchText(field: AuditFieldView): string {
+function searchText(field: AuditField): string {
   const mode = fieldMode(field);
   return [
     field.source_ref,
@@ -59,14 +59,14 @@ function searchText(field: AuditFieldView): string {
     .toLocaleLowerCase();
 }
 
-function forwardCorrect(field: AuditFieldView): void {
+function forwardCorrect(field: AuditField): void {
   emit("correct", field);
 }
 
 const search = ref("");
 const statusFilter = ref("ALL");
 
-function sourceFilesText(field: AuditFieldView): string {
+function sourceFilesText(field: AuditField): string {
   return fieldSourceFiles(field).join("、") || "未记录来源文件";
 }
 
@@ -87,7 +87,7 @@ const filters = [
   { value: "NOT_EXECUTED", label: "未执行", statuses: ["NOT_EXECUTED", "PENDING"] },
 ];
 
-function matchesFilter(field: AuditFieldView, filter: (typeof filters)[number]): boolean {
+function matchesFilter(field: AuditField, filter: (typeof filters)[number]): boolean {
   if (filter.value === "ALL") return true;
   if (filter.value === "EXTRACTED") return hasEffectiveFieldValue(field);
   if (filter.value === "NO_VALUE") {
@@ -171,7 +171,7 @@ const emptyDescription = computed(() => {
       <el-button @click="search = ''; statusFilter = 'ALL'">清除筛选</el-button>
     </el-empty>
 
-    <el-table v-else :data="rows" border stripe class="audit-result-table field-table" @row-click="(field: AuditFieldView) => detailField = field">
+    <el-table v-else :data="rows" border stripe class="audit-result-table field-table" @row-click="(field: AuditField) => detailField = field">
       <el-table-column label="字段编号" width="140">
         <template #default="{ row }">{{ row.source_ref || "—" }}</template>
       </el-table-column>

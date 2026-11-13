@@ -190,7 +190,7 @@ class AuditExecutionOperationsService:
         """页面看到的字段版本必须仍是当前版本，旧页面不能覆盖新输入。"""
         from app.modules.audit.field.service.facts import AuditFieldFactsService
 
-        pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+        pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         for correction in corrections:
             current = pairs.get((correction.field_key, correction.material_key))
             revision = current[0].revision_no if current is not None else None

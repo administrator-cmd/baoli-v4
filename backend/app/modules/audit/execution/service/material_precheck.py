@@ -8,17 +8,21 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.status import AUDIT_LLM_CHANNEL_UNAVAILABLE
 from app.core.transactions import commit_transaction
+from app.domain.audit_state import RuleOutcome
 from app.domain.execution_mode import MODE_MATERIAL_CHECK
-from app.domain.material_precheck import (
-    PRECHECK_KEY, PRECHECK_PLANNING_PROMPT, PRECHECK_TOOLS, MaterialPrecheckPlan,
-)
 from app.domain.llm_failure import channel_failure_detail, is_channel_failure
+from app.domain.material_precheck import (
+    PRECHECK_KEY,
+    PRECHECK_PLANNING_PROMPT,
+    PRECHECK_TOOLS,
+    MaterialPrecheckPlan,
+)
 from app.integrations.llm.gateway import RequestLogContext, call_json
+from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
 from app.modules.audit.execution.service.flow.plan import evaluation_plan, rule_finished
-from app.modules.audit.field.service.value_store import AuditFieldValueStoreService, RECORD_RULE_RESULT
+from app.modules.audit.field.service.value_store import RECORD_RULE_RESULT, AuditFieldValueStoreService
 from app.modules.audit.rule.crud import AuditRuleCRUD
-from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.shared import _current_uploads
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
 
@@ -139,7 +143,7 @@ class AuditMaterialPrecheckService:
         saved = {item.rule_key: item for item in AuditRuleCRUD(self.db).results_for_execution(execution.id)}
         uploads = {document.material_key: (document, upload) for document, upload in _current_uploads(self.db, task)}
         blocked: dict[str, dict[str, Any]] = {}
-        outcomes = []
+        outcomes: list[RuleOutcome] = []
         for entry in plan:
             if entry["rule_key"] not in selected:
                 continue

@@ -5,11 +5,12 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from app.core.transactions import commit_transaction
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING, PRODUCED_RESULT_STATUSES
+from app.core.transactions import commit_transaction
+from app.domain.audit_state import RuleExecutionState, RuleOutcome, RuleSaveResult
 from app.domain.rule_library import is_risk_rule
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
@@ -66,7 +67,7 @@ def graph_produce_candidate_verdict(
     unresolved_items: list[dict[str, Any]] | None,
     messages: list[dict[str, Any]] | None,
     verdict_errors: list[dict[str, Any]] | None,
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """校验模型给出的候选结论，形成可采信的结论或明确的未解决事项。
 
     服务端只核对 `services.audit.agent.validate_verdict` 所定义的结果结构与真实引用。
@@ -187,7 +188,7 @@ def graph_save_evaluation_result(
     loop_count: int,
     last_model_response: dict[str, Any] | None = None,
     verdict_errors: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> RuleSaveResult:
     """保存这一条规则实例的评估结果。
 
     保存是确定性生命周期的一部分：Agent 不能跳过或改写。按
@@ -263,10 +264,10 @@ def graph_save_evaluation_result(
                 **(execution.result_json or {}),
                 "pending_rerun_keys": sorted(pending_rerun_keys(execution) - {rules[0]["rule_key"]}),
             }
-        outcome["status"] = saved_result.status
+        saved_outcome: RuleOutcome = {**outcome, "status": saved_result.status}
         commit_transaction(db)
         return {
-            "rule_outcome": outcome,
+            "rule_outcome": saved_outcome,
             "unresolved_items": [],
             "pending_tool_calls": [],
             "tool_results": [],

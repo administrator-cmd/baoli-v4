@@ -83,10 +83,8 @@ class GenerationJobRowResponse(BaseModel):
     updated_at: datetime
 
 
-class GenerationJobPageResponse(PagedResponse):
+class GenerationJobPageResponse(PagedResponse[GenerationJobRowResponse]):
     """生成记录分页：total 与筛选范围一致。"""
-
-    items: list[GenerationJobRowResponse] = Field(default_factory=list)
 
 
 class GenerationCreatedResponse(BaseModel):

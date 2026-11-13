@@ -16,6 +16,7 @@ import {
   statusFilterOptions,
 } from "@/constants/labels";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 
 /**
  * 操作日志：业务写操作与后台命令并列展示。
@@ -53,6 +54,7 @@ const { filters, page, pageSize, total, items, loading, error } = list;
 const resultOptions = statusFilterOptions(["SUCCEEDED", "ACCEPTED", "FAILED"]);
 
 const detail = ref<OperationLogRow | null>(null);
+const errorDetail = ref<OperationLogRow | null>(null);
 
 onMounted(() => {
   // 从任务页带 keyword 跳转过来时强制按该编号筛选；否则沿用上次的查询条件。
@@ -133,23 +135,10 @@ onMounted(() => {
       <el-table-column label="耗时" width="200">
         <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
       </el-table-column>
-      <el-table-column label="操作编号 / 命令编号" width="190">
+      <el-table-column label="错误信息" :width="TABLE_COLUMN_WIDTHS.errorMessage" class-name="table-actions" align="center">
         <template #default="{ row }">
-          <span class="mono">{{ row.command_no ?? row.entry_no }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="错误信息" min-width="220" show-overflow-tooltip>
-        <template #default="{ row }">
-          <template v-if="row.failure_code || row.failure_message">
-            <el-tag type="danger" size="small" effect="plain" disable-transitions>{{ row.failure_code || "失败" }}</el-tag>
-            <span v-if="row.failure_message" class="text-danger"> {{ row.failure_message }}</span>
-          </template>
+          <el-button v-if="row.failure_code || row.failure_message" link type="primary" size="small" @click="errorDetail = row">查看错误信息</el-button>
           <span v-else class="text-hint">—</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="90" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="detail = row">详情</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -166,6 +155,17 @@ onMounted(() => {
         @size-change="list.setPageSize"
       />
     </div>
+
+    <el-dialog :model-value="Boolean(errorDetail)" title="错误信息" width="680px" style="max-width: calc(100vw - 32px)" @close="errorDetail = null">
+      <el-descriptions v-if="errorDetail" :column="1" border>
+        <el-descriptions-item v-if="errorDetail.failure_code" label="错误码">
+          <div class="error-content">{{ errorDetail.failure_code }}</div>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="errorDetail.failure_message" label="错误原因">
+          <div class="error-content">{{ errorDetail.failure_message }}</div>
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-dialog>
 
     <el-drawer :model-value="Boolean(detail)" title="操作详情" size="520px" @close="detail = null">
       <el-descriptions v-if="detail" :column="1" border size="small">
@@ -184,3 +184,12 @@ onMounted(() => {
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.error-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow: auto;
+}
+</style>

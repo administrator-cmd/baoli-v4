@@ -54,7 +54,7 @@ class ScenarioDraftMaterialsService:
         return draft
 
 
-    def _draft_material_or_404(self, draft_id: int, material_key: str) -> ScenarioDraftMaterial:
+    def _draft_material_or_404(self, draft_id: int, material_key: str) -> config_store.ConfigItem:
         item = next(iter([item for item in config_store.rows(self.db, ScenarioDraftMaterial, draft_id) if (item.material_key == material_key)]), None)
         if not item:
             raise BusinessError("DRAFT_MATERIAL_NOT_FOUND", "材料配置不存在", status_code=404, details={"material_key": material_key})
@@ -69,14 +69,14 @@ class ScenarioDraftMaterialsService:
             name = str(payload["name"]).strip()
             if not name:
                 raise BusinessError("MATERIAL_NAME_REQUIRED", "材料名称不能为空", status_code=400)
-            item.name = name
+            config_store.update_material(item, name=name)
         if "required" in payload and payload["required"] is not None:
-            item.required = bool(payload["required"])
+            config_store.update_material(item, required=bool(payload["required"]))
         if "description" in payload and payload["description"] is not None:
-            item.description = str(payload["description"])
+            config_store.update_material(item, description=str(payload["description"]))
         if "source_ref" in payload:
             source_ref = ScenarioTemplateCommonService()._normalized_source_ref(payload.get("source_ref"))
-            item.source_ref = source_ref
+            config_store.update_material(item, source_ref=source_ref)
         ScenarioDraftService(self.db)._save_draft(
             
             template,

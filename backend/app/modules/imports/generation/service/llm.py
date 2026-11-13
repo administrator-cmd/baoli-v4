@@ -9,19 +9,22 @@ from pydantic import ValidationError
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
+from app.domain.generation_assistant import AssistantReply, apply_edits
 from app.domain.rulebook_generation import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_PROMPT_VERSION,
-    GenerationDocument,
     GenerationContentReview,
+    GenerationDocument,
+    GenerationIssue,
+    GenerationSource,
     GenerationRequirementInventory,
     collect_document_problems,
     collect_requirement_inventory_problems,
-    requirement_identity_problems,
-    summarize_generation_problems,
-    normalize_business_codes,
     is_business_code_column,
+    normalize_business_codes,
+    requirement_identity_problems,
     source_record_coverage_problems,
+    summarize_generation_problems,
 )
 from app.domain.workbook import WorkbookIR
 from app.domain.workbook_proposals import prepare_sheets
@@ -30,6 +33,7 @@ from app.modules.imports.generation.service.prompts import (
     GENERATION_DOCUMENT_PROMPT,
     GENERATION_REQUIREMENTS_PROMPT,
     GENERATION_REVIEW_PROMPT,
+    GENERATION_REPAIR_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -220,10 +224,15 @@ class GenerationLlmService:
             + source_record_coverage_problems([row for sheet in value.sheets for row in sheet.rows], source_records, require_code=True),
             operation_no=operation_no, stage="document",
             reasoning_effort=reasoning_effort,
-            review=lambda value, attempt: self._review_document(
-                document_payload, value, operation_no=operation_no, attempt=attempt, reasoning_effort=reasoning_effort,
-            ),
         )
+
+        def check_document(value):
+            return (requirement_identity_problems(inventory, value)
+                + collect_document_problems(value, source_rows, require_coverage=True, require_codes=True)
+                + source_record_coverage_problems([row for sheet in value.sheets for row in sheet.rows], source_records, require_code=True))
+
+        document = self._repair_document(document_payload, document, check_document,
+                                         operation_no=operation_no, reasoning_effort=reasoning_effort)
 
         identity_problems = requirement_identity_problems(inventory, document)
         if identity_problems:
@@ -248,6 +257,57 @@ class GenerationLlmService:
             sum(len(sheet.rows) for sheet in document.sheets), len(document.issues),
         )
         return document.model_dump(mode="json")
+
+    def _repair_document(self, payload, document, check, *, operation_no: str, reasoning_effort):
+        """局部补修合法候选稿，并保留仍未解决的复核意见。"""
+        problems = self._review_document(payload, document, operation_no=operation_no, attempt=0, reasoning_effort=reasoning_effort)
+        history, diagnostics, seen = [], [], set()
+        for attempt in range(3):
+            if not problems:
+                return document
+            signature = tuple(sorted(str(p.get("reference", "")) for p in problems))
+            if signature in seen:
+                break
+            seen.add(signature)
+            history.append(problems)
+            request = {**payload, "document": document.model_dump(mode="json"), "review_problems": problems,
+                       "review_history": history, "previous_diagnostics": diagnostics,
+                       "response_schema": AssistantReply.model_json_schema()}
+            response = call_json(request, GENERATION_REPAIR_PROMPT,
+                                 idempotency_key=f"{operation_no}:document-repair:{attempt}", reasoning_effort=reasoning_effort)
+            try:
+                reply = AssistantReply.model_validate(response)
+                candidate = apply_edits(document, reply)
+                invalid = check(candidate)
+                if invalid:
+                    diagnostics = invalid[:50]
+                    seen.discard(signature)
+                    continue
+            except (ValidationError, BusinessError) as exc:
+                diagnostics = [{"kind": "repair.invalid", "reference": str(exc)}]
+                seen.discard(signature)
+                continue
+            if candidate == document:
+                break
+            document = candidate
+            diagnostics = []
+            problems = self._review_document(payload, document, operation_no=operation_no,
+                                             attempt=attempt + 1, reasoning_effort=reasoning_effort)
+        if problems:
+            existing = {item.issue_id for item in document.issues}
+            for index, problem in enumerate(problems, 1):
+                issue_id = f"REVIEW-{index}"
+                while issue_id in existing:
+                    issue_id += "-1"
+                existing.add(issue_id)
+                document.issues.append(GenerationIssue(issue_id=issue_id, title="编制内容待核对",
+                    detail="自动复核仍有疑点，请结合原始资料核对：" + str(problem.get("reference", "")),
+                    source=GenerationSource(kind="DERIVED", note="自动复核疑点，原文位置未确定")))
+            invalid = check(document)
+            if invalid:
+                self._raise_contract_error("document", invalid)
+            logger.warning("编制保留复核疑点 operation_no=%s problems=%s", operation_no, problems)
+        return document
 
     def _review_document(self, payload, document, *, operation_no: str, attempt: int, reasoning_effort):
         request = {**payload, "document": document.model_dump(mode="json"),

@@ -251,16 +251,17 @@ class PlanConfigConfigurationService:
                     sort_no=index,
                 )
             )
+        configured_field_keys = {field["field_key"] for field in fields}
         for index, item in enumerate(sections, start=1):
+            data_refs = report_data_refs(item)
             config_store.add(
                 self.db, PlanSection(
                     plan_id=plan.id,
                     section_key=self._required_key(item, "section_key", f"第 {index} 个章节"),
                     title=self._required_key(item, "title", f"第 {index} 个章节"),
                     content_instruction=str(item.get("content_instruction") or ""),
-                    field_keys=[ref for ref in report_data_refs(item)
-                                if ref in {field["field_key"] for field in fields}],
-                    data_refs=report_data_refs(item),
+                    field_keys=[ref for ref in data_refs if ref in configured_field_keys],
+                    data_refs=data_refs,
                     report_code=item.get("report_code"),
                     report_name=item.get("report_name"),
                     material_keys=[str(key) for key in (item.get("material_keys") or [])] or None,
@@ -277,8 +278,7 @@ class PlanConfigConfigurationService:
         PlanCRUD(self.db).flush()
         for model, identity in ((PlanMaterial, "material_key"), (PlanField, "field_key"), (PlanRule, "rule_key"), (PlanSection, "section_key")):
             for row in config_store.rows(self.db, model, plan.id):
-                for key, value in extensions[model.__name__].get(getattr(row, identity), {}).items():
-                    setattr(row, key, value)
+                config_store.update_extensions(row, extensions[model.__name__].get(getattr(row, identity), {}))
         calculation_json = remap_calculation_field_codes(calculation_definitions, field_code_changes)
         for calculation in calculation_store(calculation_json):
             code = str(calculation["rule_code"])

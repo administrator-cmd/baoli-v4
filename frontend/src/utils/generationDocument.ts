@@ -73,10 +73,11 @@ export function generationCounts(document: GenerationDocument | null) {
 export function businessCodeColumn(sheet: GenerationSheet) {
   const prefixes = ["规则", "材料", "条目", "映射", "字典", "风险", "报告", "字段", "原始", "原", "材料规则", "质量规则", "抽取规则", "计算规则", "核验规则", "校验规则", "风险规则"];
   const names = new Set(["编号", "原编号", "原始编号", "业务编号", "编制编号", "id", ...prefixes.flatMap(prefix => [prefix + "编号", prefix + "id"])]);
-  const marked = sheet.columns.find(column => column.is_business_code);
+  const candidates = sheet.columns.filter(column => column.code_role == null || column.code_role === "IDENTITY");
+  const marked = candidates.find(column => column.code_role === "IDENTITY" || column.is_business_code);
   if (marked) return marked;
-  const candidates = sheet.columns.filter(column => names.has(column.name.replace(/\s+/g, "").toLowerCase()));
-  return candidates.find(column => column.name.replace(/\s+/g, "") !== "编制编号") ?? candidates[0];
+  const inferred = candidates.filter(column => names.has(column.name.replace(/\s+/g, "").toLowerCase()));
+  return inferred.find(column => column.name.replace(/\s+/g, "") !== "编制编号") ?? inferred[0];
 }
 export function entryBusinessCode(sheet: GenerationSheet, row: GenerationEntry): string {
   const column = businessCodeColumn(sheet);
@@ -87,7 +88,12 @@ export function entryCellValue(sheet: GenerationSheet, row: GenerationEntry, col
 }
 export function entryLabel(sheet: GenerationSheet, row: GenerationEntry): string {
   const values = sheet.columns.map(column => entryCellValue(sheet, row, column.column_id)).filter(value => value.trim());
-  return values.slice(0, 2).join(" · ") || "空白条目";
+  return (entryBusinessCode(sheet, row) ? values.slice(0, 2).join(" · ") : values.join(" · ").slice(0, 160)) || "空白条目";
+}
+export function entryReferenceLabel(sheet: GenerationSheet, row: GenerationEntry): string {
+  const code = entryBusinessCode(sheet, row);
+  if (code) return sheet.business_code_scope === "SHEET" ? `${sheet.name} · ${code}` : code;
+  return `${sheet.name} · ${entryLabel(sheet, row)}`;
 }
 export function findEntry(document: GenerationDocument, reference: string) {
   for (const sheet of document.sheets) {

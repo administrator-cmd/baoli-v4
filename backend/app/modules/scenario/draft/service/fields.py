@@ -27,7 +27,7 @@ class ScenarioDraftFieldsService:
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
 
-    def _draft_field_identity(self, item: ScenarioDraftField) -> tuple[Any, ...]:
+    def _draft_field_identity(self, item: config_store.ConfigItem) -> tuple[Any, ...]:
         """草稿字段的完整事实身份，与编译后的字段身份同口径；主体口径在草稿层固定为 SELF。"""
         return (
             ScenarioTemplateCommonService()._normalized_source_ref(item.source_ref) or item.field_key,
@@ -106,7 +106,7 @@ class ScenarioDraftFieldsService:
                 sort_no=ScenarioDraftService(self.db).next_sort_no( ScenarioDraftField, draft.id),
             )
         )
-        field.node_code = NODE_RULE_EXECUTION
+        config_store.update_field(field, node_code=NODE_RULE_EXECUTION)
         ScenarioDraftService(self.db)._save_draft(
             
             template,
@@ -118,7 +118,7 @@ class ScenarioDraftFieldsService:
         return draft
 
 
-    def _draft_field_or_404(self, draft_id: int, field_key: str) -> ScenarioDraftField:
+    def _draft_field_or_404(self, draft_id: int, field_key: str) -> config_store.ConfigItem:
         item = next(iter([item for item in config_store.rows(self.db, ScenarioDraftField, draft_id) if (item.field_key == field_key)]), None)
         if not item:
             raise BusinessError("DRAFT_FIELD_NOT_FOUND", "字段配置不存在", status_code=404, details={"field_key": field_key})
@@ -149,12 +149,12 @@ class ScenarioDraftFieldsService:
                     details={"field_name": item.name, "rule_keys": referencing},
                 )
             ScenarioDraftMaterialsService(self.db)._draft_material_or_404( draft.id, str(payload["material_key"]))
-            item.material_key = str(payload["material_key"])
+            config_store.update_field(item, material_key=str(payload["material_key"]))
         if "name" in payload and payload["name"] is not None:
             name = str(payload["name"]).strip()
             if not name:
                 raise BusinessError("FIELD_NAME_REQUIRED", "字段名称不能为空", status_code=400)
-            item.name = name
+            config_store.update_field(item, name=name)
         if "value_type" in payload and payload["value_type"] is not None:
             value_type = str(payload["value_type"])
             if value_type not in DRAFT_VALUE_TYPES:
@@ -164,7 +164,7 @@ class ScenarioDraftFieldsService:
                     status_code=400,
                     details={"value_type": value_type, "allowed": sorted(DRAFT_VALUE_TYPES)},
                 )
-            item.value_type = value_type
+            config_store.update_field(item, value_type=value_type)
         if "extraction_strategy" in payload or "structure_schema" in payload or "value_type" in payload:
             extraction_strategy, structure_schema = field_strategy.validate_field_strategy(
                 value_type=item.value_type,
@@ -181,14 +181,14 @@ class ScenarioDraftFieldsService:
                 field_name=item.name,
                 enabled=active(item.data),
             )
-            item.extraction_strategy = extraction_strategy
-            item.structure_schema_json = structure_schema
+            config_store.update_field(item, extraction_strategy=extraction_strategy)
+            config_store.update_field(item, structure_schema_json=structure_schema)
         if "unit" in payload:
             unit = payload.get("unit")
-            item.unit = (str(unit).strip() or None) if unit else None
+            config_store.update_field(item, unit=(str(unit).strip() or None) if unit else None)
         if "currency" in payload:
             currency = payload.get("currency")
-            item.currency = (str(currency).strip() or None) if currency else None
+            config_store.update_field(item, currency=(str(currency).strip() or None) if currency else None)
         if "artifact_source" in payload:
             # 产物来源：留空表示字段由常规字段抽取提供，不表示“未声明所以随便猜”。
             artifact_source = payload.get("artifact_source")
@@ -200,19 +200,19 @@ class ScenarioDraftFieldsService:
                     status_code=400,
                     details={"artifact_source": normalized_source, "allowed": sorted(FIELD_ARTIFACT_SOURCES)},
                 )
-            item.artifact_source = normalized_source
+            config_store.update_field(item, artifact_source=normalized_source)
         if "period_scope" in payload and payload["period_scope"] is not None:
-            item.period_scope = ScenarioTemplateCommonService()._field_scope(payload, "period_scope")
+            config_store.update_field(item, period_scope=ScenarioTemplateCommonService()._field_scope(payload, "period_scope"))
         if "statement_scope" in payload and payload["statement_scope"] is not None:
-            item.statement_scope = ScenarioTemplateCommonService()._field_scope(
+            config_store.update_field(item, statement_scope=ScenarioTemplateCommonService()._field_scope(
                 payload, "statement_scope"
-            )
+            ))
         if "entity_scope" in payload and payload["entity_scope"] is not None:
-            item.entity_scope = str(payload["entity_scope"]).strip() or ENTITY_SCOPE_SELF
+            config_store.update_field(item, entity_scope=str(payload["entity_scope"]).strip() or ENTITY_SCOPE_SELF)
         if "required" in payload and payload["required"] is not None:
-            item.required = bool(payload["required"])
+            config_store.update_field(item, required=bool(payload["required"]))
         if "instruction" in payload and payload["instruction"] is not None:
-            item.instruction = str(payload["instruction"])
+            config_store.update_field(item, instruction=str(payload["instruction"]))
         if "source_ref" in payload:
             source_ref = ScenarioTemplateCommonService()._normalized_source_ref(payload.get("source_ref"))
             previous_code = ScenarioTemplateCommonService()._normalized_source_ref(item.source_ref) or field_key
@@ -222,7 +222,7 @@ class ScenarioDraftFieldsService:
                 draft.calculation_json = remap_calculation_field_codes(
                     draft.calculation_json, {previous_code: next_code},
                 )
-            item.source_ref = source_ref
+            config_store.update_field(item, source_ref=source_ref)
         # 材料、期间、报表口径与业务编号任一变化都会改变完整身份，统一按最终状态判重。
         self._assert_field_identity_available( draft.id, self._draft_field_identity(item), field_key=field_key)
         ScenarioDraftService(self.db)._save_draft(

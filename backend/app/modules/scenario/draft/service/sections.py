@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
+from app.domain.config_changes import SectionChanges
 from app.domain.identity import stable_key
 from app.domain.report_data import report_data_refs
 from app.modules.scenario.draft.model import (
@@ -24,7 +25,7 @@ class ScenarioDraftSectionsService:
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
 
-    def _section_group_fields(self, draft_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    def _section_group_fields(self, draft_id: int, payload: dict[str, Any]) -> SectionChanges:
         """报告章节的分组属性：报告编号、报告名称、材料范围、输出格式、结果排序、
         章节顺序、内容类型与业务配置状态。
 
@@ -32,7 +33,7 @@ class ScenarioDraftSectionsService:
         """
         materials = config_store.rows(self.db, ScenarioDraftMaterial, draft_id)
         known_materials = {item.material_key for item in materials}
-        result: dict[str, Any] = {}
+        result: SectionChanges = {}
         if "report_code" in payload:
             value = payload.get("report_code")
             result["report_code"] = str(value).strip() or None if value is not None else None
@@ -115,17 +116,16 @@ class ScenarioDraftSectionsService:
             title = str(payload["title"]).strip()
             if not title:
                 raise BusinessError("SECTION_TITLE_REQUIRED", "章节名称不能为空", status_code=400)
-            item.title = title
+            config_store.update_section(item, title=title)
         if "content_instruction" in payload and payload["content_instruction"] is not None:
-            item.content_instruction = str(payload["content_instruction"])
+            config_store.update_section(item, content_instruction=str(payload["content_instruction"]))
         if "data_refs" in payload or "field_keys" in payload:
-            item.data_refs = report_data_refs(payload)
+            config_store.update_section(item, data_refs=report_data_refs(payload))
             known_fields = {field.field_key for field in config_store.rows(self.db, ScenarioDraftField, draft.id)}
-            item.field_keys = [ref for ref in item.data_refs if ref in known_fields]
+            config_store.update_section(item, field_keys=[ref for ref in item.data_refs if ref in known_fields])
         # 报告分组属性：本次提交未覆盖的键保持原值，避免页面保存一次就丢掉报告编号、
         # 材料范围、输出格式或结果排序。
-        for key, value in self._section_group_fields( draft.id, payload).items():
-            setattr(item, key, value)
+        config_store.update_section(item, **self._section_group_fields(draft.id, payload))
         ScenarioDraftService(self.db)._save_draft(
             
             template,

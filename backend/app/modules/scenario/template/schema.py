@@ -8,6 +8,26 @@ from pydantic import BaseModel, Field
 from app.modules.scenario.draft.schema import ScenarioDraftViewResponse
 
 
+class ScenarioRowResponse(BaseModel):
+    scenario_code: str
+    scenario_name: str
+    category: str | None
+    description: str | None
+    enabled: bool
+    published_version_no: int | None
+    published_at: datetime | None
+    latest_version_no: int
+    material_count: int
+    field_count: int
+    rule_count: int
+    configuration_kind: str
+    draft_revision: int | None
+    draft_source: str | None
+    draft_base_version_no: int | None
+    sync_error: dict[str, Any] | None
+    updated_at: datetime
+
+
 class ScenarioConfigurationViewResponse(ScenarioDraftViewResponse):
     revision_no: int | None
 

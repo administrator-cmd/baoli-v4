@@ -3,6 +3,28 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from app.core.base_schema import PagedResponse
+
+
+class OperationLogRowResponse(BaseModel):
+    entry_no: str
+    source: Literal["BUSINESS", "COMMAND"]
+    object_type: str
+    object_no: str
+    object_name: str
+    operation_type: str
+    result: Literal["SUCCEEDED", "FAILED", "ACCEPTED"]
+    duration_ms: int | None
+    command_no: str | None
+    failure_code: str | None
+    failure_message: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class OperationLogPageResponse(PagedResponse[OperationLogRowResponse]):
+    pass
+
 
 class OperationAcceptedResponse(BaseModel):
     """长操作的受理状态。它只表示操作已被受理，绝不表示业务已经成功。"""

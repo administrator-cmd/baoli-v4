@@ -23,6 +23,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import { formatDate, formatFileSize } from "@/constants/labels";
 import { importJobStatusOptions } from "@/constants/imports";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 import {
   generationStatusLabel,
   generationStatusOptions,
@@ -203,7 +204,7 @@ onMounted(() => {
               <span class="text-hint rulebook-table__size">{{ formatFileSize(row.source_size) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="所属场景" width="180" show-overflow-tooltip>
+          <el-table-column label="所属场景" :width="TABLE_COLUMN_WIDTHS.scenarioName" show-overflow-tooltip>
             <template #default="{ row }">{{ scenarioText(row) }}</template>
           </el-table-column>
           <el-table-column label="上传时间" width="200">

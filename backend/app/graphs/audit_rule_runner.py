@@ -4,7 +4,9 @@ import logging
 from typing import Any, Protocol
 
 from app.constants.status import LOOP_BLOCKED, LOOP_DONE, LOOP_RUNNING
+from app.domain.audit_state import EvaluationPlanEntry, RuleExecutionState, RuleOutcome, RuleSaveResult
 from app.domain.execution_mode import MODE_AGGREGATE
+from app.domain.llm_failure import ChannelFailure
 
 logger = logging.getLogger(__name__)
 
@@ -15,36 +17,36 @@ class RuleEvaluationRunner(Protocol):
     def graph_load_rule_instance(
         self, db: Any, task_no: str, node_code: str, rule_cursor: int,
         execution_id: int | None, planned_rule: dict[str, Any],
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_prepare_agent_context(
         self, db: Any, task_no: str, node_code: str, planned_rule: dict[str, Any],
         rule_instance: dict[str, Any] | None, messages: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_build_aggregate_verdict(
         self, db: Any, task_no: str, node_code: str, execution_id: int | None,
         rule_instance: dict[str, Any] | None, planned_rule: dict[str, Any],
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_call_model(
         self, db: Any, task_no: str, node_code: str, planned_rule: dict[str, Any],
         messages: list[dict[str, Any]] | None, allowed_tools: list[dict[str, Any]] | None,
         loop_count: int, state_evaluation_id: str | None,
         executed_tool_results: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_execute_tool_calls(
         self, db: Any, task_no: str, node_code: str,
         pending_tool_calls: list[dict[str, Any]] | None,
         allowed_tools: list[dict[str, Any]] | None, rule_instance: dict[str, Any] | None,
         existing_unresolved: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_append_tool_results(
         self, messages: list[dict[str, Any]] | None,
         tool_results: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_produce_candidate_verdict(
         self, db: Any, task_no: str, node_code: str,
@@ -52,7 +54,7 @@ class RuleEvaluationRunner(Protocol):
         tool_results: list[dict[str, Any]] | None,
         loop_status: str, unresolved_items: list[dict[str, Any]] | None,
         messages: list[dict[str, Any]] | None, verdict_errors: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]: ...
+    ) -> RuleExecutionState: ...
 
     def graph_save_evaluation_result(
         self, db: Any, task_no: str, node_code: str, execution_id: int | None,
@@ -61,7 +63,7 @@ class RuleEvaluationRunner(Protocol):
         evaluation_id: str | None, loop_count: int,
         last_model_response: dict[str, Any] | None = None,
         verdict_errors: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> RuleSaveResult: ...
 
 
 def _batch_key(rule: dict[str, Any]) -> tuple[str, str | None] | None:
@@ -82,7 +84,7 @@ def _batch_key(rule: dict[str, Any]) -> tuple[str, str | None] | None:
     return definitions[0]["material_key"], definitions[0].get("artifact_source")
 
 
-def extraction_group(plan: list[dict[str, Any]], start: int) -> list[dict[str, Any]]:
+def extraction_group(plan: list[EvaluationPlanEntry], start: int) -> list[EvaluationPlanEntry]:
     """从 start 起连续同键的抽取项；第一个不是可批量项时只返回它自己。
 
     抽取项之间没有依赖，因此同键的抽取在计划里总是相邻的；不跨过其他规则合并，
@@ -103,7 +105,7 @@ def extraction_group(plan: list[dict[str, Any]], start: int) -> list[dict[str, A
 def run_rule_evaluation(
     db: Any, nodes: RuleEvaluationRunner, *, task_no: str, node_code: str,
     execution_id: int | None, rule_cursor: int, planned_rule: dict[str, Any],
-) -> dict[str, Any]:
+) -> RuleOutcome:
     """加载一条规则，完成模型/工具循环并提交结果，再释放本条消息与工具内容。
 
     每次调用独立创建状态，不携带上一条规则的消息、产物或轮次。
@@ -144,7 +146,7 @@ def run_rule_evaluation(
         db, task_no, node_code, planned_rule, state["rule_instance"], state["messages"],
     ))
 
-    channel_failure: dict[str, Any] | None = None
+    channel_failure: ChannelFailure | None = None
     while True:
         turn = nodes.graph_call_model(
             db, task_no, node_code, planned_rule, state["messages"], state["allowed_tools"],

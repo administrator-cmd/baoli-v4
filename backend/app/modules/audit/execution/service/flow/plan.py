@@ -13,8 +13,9 @@ from typing import Any
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED
-from app.domain.field_review import reviewed_extraction_keys
+from app.domain.audit_state import EvaluationPlanEntry
 from app.domain.execution_mode import MODE_EXTRACT, MODE_MATERIAL_CHECK, SOURCE_ONLY_MODES, execution_mode_label
+from app.domain.field_review import reviewed_extraction_keys
 from app.domain.material_precheck import material_blocks, precheck_rule_keys
 from app.domain.rule_library import active, dependency_indexes, execution_order, rule_dependencies
 from app.modules.audit.rule.model import RuleResult
@@ -32,7 +33,7 @@ def enabled_rules(task: AuditTask, manifest: dict[str, Any], node_code: str) -> 
     ]
 
 
-def evaluation_plan(task: AuditTask, node_code: str, *, execution: Any = None) -> list[dict[str, Any]]:
+def evaluation_plan(task: AuditTask, node_code: str, *, execution: Any = None) -> list[EvaluationPlanEntry]:
     """按依赖顺序排好的执行计划；预览与真实执行使用同一排序。
 
     这里不做执行方式的校验：那是「能不能开始执行」的判断，由执行入口自己明确拒绝。
@@ -40,7 +41,7 @@ def evaluation_plan(task: AuditTask, node_code: str, *, execution: Any = None) -
     """
     manifest = _task_manifest(task)
     ordered = execution_order(enabled_rules(task, manifest, node_code), all_rules=manifest["rules"])
-    plan = [
+    plan: list[EvaluationPlanEntry] = [
         {
             "cursor": index,
             "rule_key": rule.get("rule_key"),
@@ -99,7 +100,7 @@ def rule_finished(result: RuleResult) -> bool:
 
 
 def plan_dependencies(
-    plan: list[dict[str, Any]], *, all_rules: list[dict[str, Any]],
+    plan: list[EvaluationPlanEntry], *, all_rules: list[dict[str, Any]],
 ) -> dict[str, set[str]]:
     """计划内每条规则直接依赖的计划内规则键；报告依赖全部非报告项。
 
@@ -119,7 +120,7 @@ def plan_dependencies(
 
 
 def rerun_split(
-    plan: list[dict[str, Any]], saved: dict[str, RuleResult], *, all_rules: list[dict[str, Any]],
+    plan: list[EvaluationPlanEntry], saved: dict[str, RuleResult], *, all_rules: list[dict[str, Any]],
 ) -> tuple[set[str], set[str]]:
     """(未完成项, 因依赖受影响需要重跑的已完成项)。
 
@@ -194,7 +195,7 @@ def _rule_evidence(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def field_review_boundary(
-    plan: list[dict[str, Any]], *, all_rules: list[dict[str, Any]],
+    plan: list[EvaluationPlanEntry], *, all_rules: list[dict[str, Any]],
 ) -> ReviewBoundary:
     """按显式依赖拆出「字段核对前」与「核对后」两段。
 
@@ -262,7 +263,7 @@ def reviewed_extraction_rule_keys(execution: Any) -> set[str]:
     )
 
 
-def assert_results_match_plan(plan: list[dict[str, Any]], saved: dict[str, RuleResult]) -> None:
+def assert_results_match_plan(plan: list[EvaluationPlanEntry], saved: dict[str, RuleResult]) -> None:
     """已提交结果必须能由当前执行计划解释。
 
     出现计划外的规则结果说明任务快照与批次对不上，此时任何重跑范围都是猜的，

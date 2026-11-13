@@ -10,7 +10,12 @@ from app.common.response import ResponseSchema, ok
 from app.core.base_schema import ItemsResponse, PagedResponse
 from app.core.database import get_db
 from app.modules.scenario.template.dto import ScenarioCreateRequest, ScenarioEnabledRequest, ScenarioUpdateRequest
-from app.modules.scenario.template.schema import AdminScenarioOptionItem, ScenarioDetailResponse, ScenarioOptionItem
+from app.modules.scenario.template.schema import (
+    AdminScenarioOptionItem,
+    ScenarioDetailResponse,
+    ScenarioOptionItem,
+    ScenarioRowResponse,
+)
 from app.modules.scenario.template.service.lifecycle import ScenarioTemplateLifecycleService
 from app.modules.scenario.template.service.query import ScenarioTemplateQueryService
 from app.schema.query.lists import ScenarioListQueryParam
@@ -19,13 +24,13 @@ from app.schema.query.pagination import PaginationQueryParam
 router = APIRouter(prefix="/scenarios", tags=["审核场景"])
 
 
-@router.get("", response_model=ResponseSchema[PagedResponse])
+@router.get("", response_model=ResponseSchema[PagedResponse[ScenarioRowResponse]])
 def list_scenarios(
     request: Request,
     page: Annotated[PaginationQueryParam, Depends()],
     search: Annotated[ScenarioListQueryParam, Query()],
     db: Session = Depends(get_db),
-) -> ResponseSchema[PagedResponse]:
+) -> ResponseSchema[PagedResponse[ScenarioRowResponse]]:
     """场景分页列表：按名称、业务类型、启用状态与发布时间筛选。"""
     result = ScenarioTemplateQueryService(db).list_scenarios_page(
         
@@ -37,7 +42,7 @@ def list_scenarios(
         page=page.page,
         page_size=page.page_size,
     )
-    return ok(PagedResponse.model_validate(result), request)
+    return ok(PagedResponse[ScenarioRowResponse].model_validate(result), request)
 
 
 @router.get("/options", response_model=ResponseSchema[ItemsResponse[ScenarioOptionItem]])

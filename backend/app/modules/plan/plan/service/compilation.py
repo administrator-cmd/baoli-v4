@@ -138,7 +138,7 @@ class PlanCompilationService:
         plan.sync_error = None
 
 
-    def _sync_plan_system_rules(self, plan: AuditPlan, stored_rules: list[PlanRule], manifest: dict[str, Any]
+    def _sync_plan_system_rules(self, plan: AuditPlan, stored_rules: list[config_store.ConfigItem], manifest: dict[str, Any]
     ) -> None:
         """派生结构以编译结果为准，方案只保留每条系统规则的启停选择。"""
         compiled_config = manifest_module.editable_config_of(manifest, namespace=plan.plan_code)
@@ -165,12 +165,15 @@ class PlanCompilationService:
                     node_code=item["node_code"], operator_code=item["operator_code"], rule_json=item["rule_json"],
                 )
                 row = config_store.add(self.db, row)
-            row.rule_key = item["rule_key"]
-            row.name = item["name"]
-            row.node_code = item["node_code"]
-            row.operator_code = item["operator_code"]
-            row.enabled = item["enabled"]
-            row.rule_json = item["rule_json"]
-            row.source_ref = item["source_ref"]
-            row.origin_json = item["origin_json"]
+            config_store.update_generated_rule(
+                row,
+                rule_key=item["rule_key"],
+                name=item["name"],
+                node_code=item["node_code"],
+                operator_code=item["operator_code"],
+                enabled=item["enabled"],
+                rule_json=item["rule_json"],
+                source_ref=item["source_ref"],
+                origin_json=item["origin_json"],
+            )
         PlanCRUD(self.db).flush()

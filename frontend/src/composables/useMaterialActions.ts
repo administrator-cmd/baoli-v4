@@ -1,8 +1,11 @@
 import { ref, type Ref } from "vue";
 import { ElMessageBox } from "element-plus";
 
-import type { AuditDocument } from "@/api/contracts";
-import type { ReplacementImpact } from "@/api/audits";
+import type {
+  AuditDocument,
+  ReplacementImpact,
+} from "@/api/contracts";
+
 import { removeTaskDocumentFile, uploadTaskDocument } from "@/api/audits";
 
 export interface MaterialActionsState {

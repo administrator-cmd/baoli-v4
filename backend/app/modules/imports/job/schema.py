@@ -4,6 +4,23 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class ImportJobRowResponse(BaseModel):
+    job_no: str
+    source_filename: str
+    status: str
+    profile_version: str
+    scenario_code: str | None
+    scenario_name: str | None
+    draft_revision: int
+    source_size: int
+    published_version_no: int | None
+    active_operation_count: int
+    failure_code: str | None
+    failure_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class ImportJobResponse(BaseModel):
     job_no: str
     source_filename: str

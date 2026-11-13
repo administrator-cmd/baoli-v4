@@ -23,6 +23,8 @@ from app.constants.status import (
     TASK_STATUS_WAITING_FIELD_REVIEW,
 )
 from app.core.transactions import commit_transaction
+from app.domain.audit_state import EvaluationPlanEntry, RuleOutcome
+from app.domain.llm_failure import ChannelFailure
 from app.graphs.audit_graph import collect_agent_summary
 from app.graphs.audit_rule_runner import extraction_group, run_rule_evaluation
 from app.modules.audit.execution.crud import AuditExecutionCRUD
@@ -152,7 +154,7 @@ class AuditExecutionResumeService:
 
 
     def resume_plan(self, task: AuditTask, execution: NodeExecution, *,
-        plan: list[dict[str, Any]] | None = None,
+        plan: list[EvaluationPlanEntry] | None = None,
         allowed_keys: set[str] | None = None,
         deferred_keys: set[str] | None = None,
     ) -> ResumePlan:
@@ -196,7 +198,7 @@ class AuditExecutionResumeService:
 
 
     def review_scope(self, task: AuditTask, execution: NodeExecution,
-        plan: list[dict[str, Any]] | None = None,
+        plan: list[EvaluationPlanEntry] | None = None,
         pairs: dict[tuple[str, str], Any] | None = None,
     ) -> tuple[ReviewBoundary, bool, set[str], list[dict[str, Any]]]:
         """(字段核对边界, 当前字段版本是否已确认, 本轮允许执行范围, 执行计划)。
@@ -221,7 +223,7 @@ class AuditExecutionResumeService:
 
 
     def resume_state(self, task: AuditTask, execution: NodeExecution | None, *,
-        plan: list[dict[str, Any]] | None = None,
+        plan: list[EvaluationPlanEntry] | None = None,
         pairs: dict[tuple[str, str], Any] | None = None,
     ) -> dict[str, Any]:
         """统一的恢复判断：能否续跑、不能的原因、续跑范围与渠道故障信息。
@@ -290,7 +292,7 @@ class AuditExecutionResumeService:
         return self.resume_state( task, latest_execution(self.db, task.id, node_code=task.current_node))
 
 
-    def _saved_outcome(self, result: RuleResult, counted_batches: set[str]) -> dict[str, Any]:
+    def _saved_outcome(self, result: RuleResult, counted_batches: set[str]) -> RuleOutcome:
         """已提交规则的原样结果，用于恢复时汇总，不重新调用模型。"""
         diagnostics = result.result_json or {}
         loop_count = result.turn_count or 0
@@ -413,9 +415,9 @@ class AuditExecutionResumeService:
             assert_results_match_plan(plan, saved)
             # 先落库再逐条执行：上游成功后进程再中断，下游的重算意图仍然保留。
             self._save_pending_rerun_keys( execution, rerun_keys)
-            outcomes: dict[str, dict[str, Any]] = {}
+            outcomes: dict[str, RuleOutcome] = {}
             counted_batches: set[str] = set()
-            channel_failure: dict[str, Any] | None = None
+            channel_failure: ChannelFailure | None = None
             # 本轮允许执行的计划项：核对后才执行的规则不参与，也不能按「已保存结果」取。
             scoped = [entry for entry in plan if entry["rule_key"] in covered]
             # 与主执行路径同一套调度：同一材料上相邻的无输入抽取合并为一次模型调用。
@@ -429,7 +431,7 @@ class AuditExecutionResumeService:
                         outcomes[entry["rule_key"]] = self._saved_outcome(saved[entry["rule_key"]], counted_batches)
                 if not pending:
                     continue
-                produced: list[dict[str, Any]] = []
+                produced: list[RuleOutcome] = []
                 if len(pending) > 1:
                     produced = list(audit_runner.graph_execute_extraction_batch(
                         self.db, task_no, task.current_node, execution.id, pending,

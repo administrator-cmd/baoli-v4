@@ -22,8 +22,8 @@ from app.modules.audit.field.service import field_review
 from app.modules.audit.field.service.facts import AuditFieldFactsService
 from app.modules.audit.rule.service.rule_execution import AuditRuleExecutionService
 from app.modules.audit.rule.service.rule_results import AuditRuleResultsService
-from app.modules.audit.task.service.detail import AuditTaskDetailService
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
+from app.modules.audit.task.service.rule_views import AuditTaskRuleViewsService
 
 
 def _field(key: str, **extra):
@@ -79,7 +79,7 @@ class ComparisonSourceTests(unittest.TestCase):
             ],
         }]}
         documents = {"m1": SimpleNamespace(material_name="主合同")}
-        fixed = AuditTaskDetailService()._comparison_sources(result, task=self._task(), documents_by_material_key=documents)
+        fixed = AuditTaskRuleViewsService().comparison_sources(result, task=self._task(), documents_by_material_key=documents)
         self.assertEqual(fixed["tool_findings"][0]["comparison"]["addend_labels"], ["主合同 · 分项金额"])
 
     def test_existing_labels_are_kept(self):
@@ -91,7 +91,7 @@ class ComparisonSourceTests(unittest.TestCase):
             ],
         }]}
         documents = {"m1": SimpleNamespace(material_name="主合同")}
-        fixed = AuditTaskDetailService()._comparison_sources(result, task=self._task(), documents_by_material_key=documents)
+        fixed = AuditTaskRuleViewsService().comparison_sources(result, task=self._task(), documents_by_material_key=documents)
         self.assertEqual(fixed["tool_findings"][0]["comparison"]["addend_labels"], ["原标签"])
 
 
@@ -169,7 +169,7 @@ class FieldReviewPairReuseTests(unittest.TestCase):
     )
 
     def test_digest_and_confirmation_view_use_provided_pairs(self):
-        with patch.object(AuditFieldFactsService, "_current_field_fact_pairs") as pairs_fn:
+        with patch.object(AuditFieldFactsService, "current_field_fact_pairs") as pairs_fn:
             digest = field_review.AuditFieldReviewService(MagicMock()).field_review_digest(self.task, {})
             view = field_review.AuditFieldReviewService(MagicMock()).confirmation_view(
                 self.task, None,
@@ -182,7 +182,7 @@ class FieldReviewPairReuseTests(unittest.TestCase):
 
     def test_missing_fields_without_upload_reports_reason(self):
         document = SimpleNamespace(id=10, material_key="m1", material_name="主合同")
-        with patch.object(AuditFieldFactsService, "_current_field_fact_pairs") as pairs_fn, \
+        with patch.object(AuditFieldFactsService, "current_field_fact_pairs") as pairs_fn, \
                 patch.object(field_review, "_current_upload_map", return_value={}), \
                 patch.object(field_review, "_task_documents", return_value=[document]):
             missing = field_review.AuditFieldReviewService(MagicMock()).missing_fields(self.task, {})

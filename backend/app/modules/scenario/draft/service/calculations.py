@@ -85,9 +85,9 @@ class ScenarioDraftCalculationsService:
             if old_result != new_result:
                 items = [self._remap_results(item, old_result, new_result) for item in items]
                 for rule in config_store.rows(self.db, ScenarioDraftRule, draft.id):
-                    rule.rule_json = self._remap_results(rule.rule_json, old_result, new_result)
+                    config_store.update_rule(rule, rule_json=self._remap_results(rule.rule_json, old_result, new_result))
                 for section in config_store.rows(self.db, ScenarioDraftSection, draft.id):
-                    section.data_refs = [new_result if ref == old_result else ref for ref in section.data_refs or []]
+                    config_store.update_section(section, data_refs=[new_result if ref == old_result else ref for ref in section.data_refs or []])
         draft.calculation_json = items
         return ScenarioDraftService(self.db)._save_draft(
              template, draft,

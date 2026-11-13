@@ -3,7 +3,115 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.modules.system.operation.schema import OperationAcceptedResponse
+
+
+class TaskRowResponse(BaseModel):
+    task_no: str
+    task_name: str
+    remark: str | None
+    scenario_code: str
+    scenario_name: str
+    scenario_version_no: int
+    plan_code: str | None
+    plan_name: str | None
+    current_node: str
+    current_node_name: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskPlanResponse(BaseModel):
+    plan_code: str
+    plan_name: str
+    scenario_version_no: int
+
+
+class TaskNodeResponse(BaseModel):
+    """固定节点身份与运行状态；保留冻结配置中的扩展属性。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    node_code: str
+    name: str
+    sequence_no: int
+    enabled: bool
+    status: str
+    failure_code: str | None
+    failure_message: str | None
+
+
+class TaskDocumentResponse(BaseModel):
+    """材料位的固定身份；质量与处理详情保留原有业务结构。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    document_no: str
+    material_key: str
+    material_name: str
+    required: bool
+    status: str
+    filename: str | None
+
+
+class TaskFieldResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    field_key: str
+    material_key: str
+    name: str
+    material_name: str
+    status: str
+    raw_value: str | None
+    normalized_value: Any
+    evidence: list[dict[str, Any]]
+
+
+class TaskRuleResponse(BaseModel):
+    rule_key: str
+    name: str
+    source_ref: str | None
+    kind: str | None
+    execution_mode: str | None
+    is_risk_rule: bool
+    source_sheet: str | None
+    material_names: list[str]
+    status: str
+    message: str | None
+    turn_count: int
+    result: dict[str, Any]
+    evidence: list[dict[str, Any]]
+    configured_requirement: str | None
+    input_gaps: list[dict[str, Any]]
+
+
+class FieldGapGroupResponse(BaseModel):
+    material_name: str
+    period: str
+    unit: str
+    field_names: list[str]
+    affected_rules: list[str]
+
+
+class TaskFieldSummaryResponse(BaseModel):
+    total: int
+    valid: int
+    missing: int
+    not_executed: int
+    gap_groups: list[FieldGapGroupResponse]
+
+
+class FieldCorrectionCandidateResponse(BaseModel):
+    field_key: str
+    material_key: str
+    field_name: str
+    material_name: str
+    status: str
+    raw_value: str | None
+    normalized_value: Any
 
 
 class TaskSchemaPreviewResponse(BaseModel):
@@ -25,19 +133,19 @@ class AuditTaskResponse(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # 任务创建时冻结的方案身份。
-    plan: dict[str, Any] | None = None
+    plan: TaskPlanResponse | None = None
     scenario_code: str
     scenario_name: str
     version_no: int
     status: str
-    current_node: dict[str, Any]
-    nodes: list[dict[str, Any]]
-    documents: list[dict[str, Any]]
-    fields: list[dict[str, Any]]
+    current_node: TaskNodeResponse
+    nodes: list[TaskNodeResponse]
+    documents: list[TaskDocumentResponse]
+    fields: list[TaskFieldResponse]
     # 字段结果统计与按材料/期间/单位汇总的缺项；页面统计与筛选用同一口径。
-    field_summary: dict[str, Any] | None = None
-    field_correction_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    rules: list[dict[str, Any]]
+    field_summary: TaskFieldSummaryResponse | None = None
+    field_correction_candidates: list[FieldCorrectionCandidateResponse] = Field(default_factory=list)
+    rules: list[TaskRuleResponse]
     # 任务输入修订号：首次补传、替换材料、人工有效值变化都会递增。
     # 提交执行/复核命令时带上它，过期修订的命令会被明确拒绝。
     input_revision: int = 0
@@ -46,7 +154,7 @@ class AuditTaskResponse(BaseModel):
     # 任务冻结的技术容器、字段与展示结构；页面按它通用渲染。
     display: dict[str, Any] = Field(default_factory=dict)
     # 该任务上最近一次后台操作的受理状态；有活跃操作时页面据此继续查询。
-    latest_operation: dict[str, Any] | None = None
+    latest_operation: OperationAcceptedResponse | None = None
 
 
 class TaskOptionItem(BaseModel):

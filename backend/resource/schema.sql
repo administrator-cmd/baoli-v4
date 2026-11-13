@@ -23,13 +23,13 @@ CREATE TABLE `scenario_template` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `scenario_code` varchar(80) NOT NULL,
   `scenario_name` varchar(255) NOT NULL,
-  `schema_key` varchar(80) NOT NULL,
-  `schema_version` varchar(40) NOT NULL,
-  `schema_json` json NOT NULL,
+  `schema_key` varchar(80) NOT NULL, -- 数据结构标识
+  `schema_version` varchar(40) NOT NULL, -- 数据结构版本
+  `schema_json` json NOT NULL, -- 对应的数据结构定义
   `category` varchar(80) DEFAULT NULL,
   `description` text,
   `enabled` tinyint(1) NOT NULL DEFAULT '1',
-  `latest_version_no` int NOT NULL DEFAULT '0',
+  `latest_version_no` int NOT NULL DEFAULT '0', -- 已分配的最新场景版本号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -42,19 +42,19 @@ CREATE TABLE `scenario_template` (
 CREATE TABLE `background_operation` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `operation_no` varchar(40) NOT NULL,
-  `object_type` varchar(30) NOT NULL,
-  `object_no` varchar(40) NOT NULL,
-  `operation_type` varchar(40) NOT NULL,
-  `idempotency_key` varchar(120) NOT NULL,
-  `target_node` varchar(40) DEFAULT NULL,
-  `input_version` varchar(120) DEFAULT NULL,
-  `request_hash` char(64) DEFAULT NULL,
-  `phase` varchar(40) DEFAULT NULL,
-  `external_job_ref` varchar(120) DEFAULT NULL,
-  `status` varchar(30) NOT NULL,
-  `request_json` json NOT NULL,
-  `result_json` json DEFAULT NULL,
-  `raw_response_path` varchar(500) DEFAULT NULL,
+  `object_type` varchar(30) NOT NULL, -- 操作对象类型
+  `object_no` varchar(40) NOT NULL, -- 操作对象编号
+  `operation_type` varchar(40) NOT NULL, -- 操作类型
+  `idempotency_key` varchar(120) NOT NULL, -- 请求幂等标识
+  `target_node` varchar(40) DEFAULT NULL, -- 目标执行节点
+  `input_version` varchar(120) DEFAULT NULL, -- 请求对应的输入版本
+  `request_hash` char(64) DEFAULT NULL, -- 请求内容摘要
+  `phase` varchar(40) DEFAULT NULL, -- 后台操作当前阶段
+  `external_job_ref` varchar(120) DEFAULT NULL, -- 外部服务作业编号
+  `status` varchar(30) NOT NULL, -- 操作状态
+  `request_json` json NOT NULL, -- 原始请求参数
+  `result_json` json DEFAULT NULL, -- 操作结果摘要
+  `raw_response_path` varchar(500) DEFAULT NULL, -- 模型原始响应文件路径
   `failure_code` varchar(80) DEFAULT NULL,
   `failure_message` text,
   `started_at` datetime(6) DEFAULT NULL,
@@ -76,17 +76,17 @@ CREATE TABLE `import_job` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `job_no` varchar(40) NOT NULL,
   `source_filename` varchar(255) NOT NULL,
-  `source_path` varchar(500) NOT NULL,
-  `source_sha256` char(64) NOT NULL,
-  `source_size` bigint NOT NULL,
-  `profile_version` varchar(40) NOT NULL,
+  `source_path` varchar(500) NOT NULL, -- 上传文件存储路径
+  `source_sha256` char(64) NOT NULL, -- 上传文件 SHA-256
+  `source_size` bigint NOT NULL, -- 上传文件大小（字节）
+  `profile_version` varchar(40) NOT NULL, -- 导入解析配置版本
   `schema_key` varchar(80) NOT NULL,
   `schema_version` varchar(40) NOT NULL,
   `schema_json` json NOT NULL,
   `scenario_code` varchar(80) DEFAULT NULL,
   `status` varchar(40) NOT NULL,
-  `proposals_json` json DEFAULT NULL,
-  `draft_revision` int NOT NULL DEFAULT '0',
+  `proposals_json` json DEFAULT NULL, -- 待确认的导入提案
+  `draft_revision` int NOT NULL DEFAULT '0', -- 当前草稿修订号
   `failure_code` varchar(80) DEFAULT NULL,
   `failure_message` text,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -112,11 +112,11 @@ CREATE TABLE `scenario_version` (
   `schema_key` varchar(80) NOT NULL,
   `schema_version` varchar(40) NOT NULL,
   `schema_json` json NOT NULL,
-  `version_no` int NOT NULL,
-  `source` varchar(20) NOT NULL DEFAULT 'IMPORT',
-  `base_version_id` bigint DEFAULT NULL,
-  `change_summary` varchar(500) DEFAULT NULL,
-  `manifest_json` json NOT NULL,
+  `version_no` int NOT NULL, -- 场景版本号
+  `source` varchar(20) NOT NULL DEFAULT 'IMPORT', -- 版本来源
+  `base_version_id` bigint DEFAULT NULL, -- 派生自哪个版本
+  `change_summary` varchar(500) DEFAULT NULL, -- 本次版本变更说明
+  `manifest_json` json NOT NULL, -- 发布后的完整场景配置
   `published_at` datetime(6) NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -138,8 +138,8 @@ CREATE TABLE `scenario_node` (
   `node_type` varchar(40) NOT NULL,
   `name` varchar(120) NOT NULL,
   `sequence_no` int NOT NULL,
-  `depends_on` json NOT NULL,
-  `config_json` json DEFAULT NULL,
+  `depends_on` json NOT NULL, -- 前置节点编号列表
+  `config_json` json DEFAULT NULL, -- 节点专属配置
   `enabled` tinyint(1) NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -161,12 +161,12 @@ CREATE TABLE `scenario_draft` (
   `schema_key` varchar(80) NOT NULL,
   `schema_version` varchar(40) NOT NULL,
   `schema_json` json NOT NULL,
-  `revision_no` int NOT NULL DEFAULT '0',
-  `source` varchar(20) NOT NULL DEFAULT 'FORM',
-  `base_version_no` int DEFAULT NULL,
-  `profile_version` varchar(40) DEFAULT NULL,
-  `sync_error` json DEFAULT NULL,
-  `config_json` json NOT NULL,
+  `revision_no` int NOT NULL DEFAULT '0', -- 草稿修订号
+  `source` varchar(20) NOT NULL DEFAULT 'FORM', -- 草稿来源
+  `base_version_no` int DEFAULT NULL, -- 草稿基于的已发布版本
+  `profile_version` varchar(40) DEFAULT NULL, -- 导入配置版本
+  `sync_error` json DEFAULT NULL, -- 与外部规则库同步错误
+  `config_json` json NOT NULL, -- 可编辑的场景配置
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -186,10 +186,10 @@ CREATE TABLE `audit_plan` (
   `description` text,
   `enabled` tinyint(1) NOT NULL DEFAULT '1',
   `deleted_at` datetime(6) DEFAULT NULL,
-  `config_json` json NOT NULL,
-  `manifest_json` json DEFAULT NULL,
-  `sync_error` json DEFAULT NULL,
-  `scope_hash` char(64) DEFAULT NULL,
+  `config_json` json NOT NULL, -- 可编辑的方案配置
+  `manifest_json` json DEFAULT NULL, -- 编译后的执行配置
+  `sync_error` json DEFAULT NULL, -- 配置同步错误
+  `scope_hash` char(64) DEFAULT NULL, -- 执行范围指纹
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -204,17 +204,17 @@ CREATE TABLE `audit_plan` (
 CREATE TABLE `operation_log` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `log_no` varchar(40) NOT NULL,
-  `object_type` varchar(30) NOT NULL,
-  `object_no` varchar(40) NOT NULL,
-  `object_name` varchar(255) NOT NULL,
+  `object_type` varchar(30) NOT NULL, -- 操作对象类型
+  `object_no` varchar(40) NOT NULL, -- 操作对象编号
+  `object_name` varchar(255) NOT NULL, -- 操作对象名称快照
   `operation_type` varchar(40) NOT NULL,
   `result` varchar(20) NOT NULL DEFAULT 'SUCCEEDED',
-  `idempotency_key` varchar(120) DEFAULT NULL,
-  `request_hash` char(64) DEFAULT NULL,
-  `duration_ms` int DEFAULT NULL,
-  `command_no` varchar(40) DEFAULT NULL,
-  `permanent` tinyint(1) NOT NULL DEFAULT '0',
-  `detail_json` json DEFAULT NULL,
+  `idempotency_key` varchar(120) DEFAULT NULL, -- 请求幂等标识
+  `request_hash` char(64) DEFAULT NULL, -- 请求内容摘要
+  `duration_ms` int DEFAULT NULL, -- 操作耗时（毫秒）
+  `command_no` varchar(40) DEFAULT NULL, -- 对应的后台命令编号
+  `permanent` tinyint(1) NOT NULL DEFAULT '0', -- 是否为永久删除
+  `detail_json` json DEFAULT NULL, -- 操作详情
   `failure_code` varchar(80) DEFAULT NULL,
   `failure_message` text,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -239,12 +239,12 @@ CREATE TABLE `audit_task` (
   `plan_id` bigint DEFAULT NULL,
   `task_name` varchar(255) NOT NULL,
   `remark` text,
-  `status` varchar(40) NOT NULL,
-  `current_node` varchar(80) NOT NULL,
-  `manifest_json` json NOT NULL,
-  `task_schema_json` json NOT NULL,
-  `value_file_json` json DEFAULT NULL,
-  `input_revision` int NOT NULL DEFAULT '0',
+  `status` varchar(40) NOT NULL, -- 任务状态
+  `current_node` varchar(80) NOT NULL, -- 当前执行节点编号
+  `manifest_json` json NOT NULL, -- 创建任务时冻结的执行配置
+  `task_schema_json` json NOT NULL, -- 任务启用范围的结构摘要
+  `value_file_json` json DEFAULT NULL, -- 任务取值 CSV 文件索引
+  `input_revision` int NOT NULL DEFAULT '0', -- 输入材料修订号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -264,16 +264,16 @@ CREATE TABLE `node_execution` (
   `audit_task_id` bigint NOT NULL,
   `scenario_version_id` bigint NOT NULL,
   `node_code` varchar(80) NOT NULL,
-  `sequence_no` int NOT NULL,
-  `status` varchar(30) NOT NULL,
+  `sequence_no` int NOT NULL, -- 任务内执行批次序号
+  `status` varchar(30) NOT NULL, -- 本批次执行状态
   `started_at` datetime(6) DEFAULT NULL,
   `finished_at` datetime(6) DEFAULT NULL,
-  `result_json` json DEFAULT NULL,
+  `result_json` json DEFAULT NULL, -- 执行进度与结果摘要
   `failure_code` varchar(80) DEFAULT NULL,
   `failure_message` text,
-  `invalidated_from` varchar(30) DEFAULT NULL,
+  `invalidated_from` varchar(30) DEFAULT NULL, -- 使本批次失效的原因类型
   `invalidated_at` datetime(6) DEFAULT NULL,
-  `invalidation_reason` varchar(200) DEFAULT NULL,
+  `invalidation_reason` varchar(200) DEFAULT NULL, -- 失效原因说明
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -296,15 +296,15 @@ CREATE TABLE `audit_report` (
   `audit_task_id` bigint NOT NULL,
   `node_execution_id` bigint DEFAULT NULL,
   `report_name` varchar(255) NOT NULL,
-  `content_type` varchar(60) NOT NULL DEFAULT 'text/markdown',
-  `content_md` mediumtext,
-  `scope_execution_complete` tinyint(1) NOT NULL DEFAULT '0',
-  `risk_conclusion_available` tinyint(1) NOT NULL DEFAULT '0',
-  `reasons_json` json DEFAULT NULL,
-  `snapshot_json` json DEFAULT NULL,
-  `input_revision` int DEFAULT NULL,
+  `content_type` varchar(60) NOT NULL DEFAULT 'text/markdown', -- 正文格式
+  `content_md` mediumtext, -- 报告正文
+  `scope_execution_complete` tinyint(1) NOT NULL DEFAULT '0', -- 生成时执行范围是否完整
+  `risk_conclusion_available` tinyint(1) NOT NULL DEFAULT '0', -- 生成时风险结论是否可判定
+  `reasons_json` json DEFAULT NULL, -- 未完成原因与格式支持信息
+  `snapshot_json` json DEFAULT NULL, -- 生成时所依据的结果范围快照
+  `input_revision` int DEFAULT NULL, -- 生成报告时的输入修订号
   `remark` text,
-  `archived_at` datetime(6) DEFAULT NULL,
+  `archived_at` datetime(6) DEFAULT NULL, -- 非空表示报告已归档
   `generated_at` datetime(6) NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -321,7 +321,7 @@ CREATE TABLE `audit_report` (
 CREATE TABLE `report_template` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `template_no` varchar(40) NOT NULL,
-  `upload_idempotency_key` varchar(120) DEFAULT NULL,
+  `upload_idempotency_key` varchar(120) DEFAULT NULL, -- 上传请求幂等标识
   `name` varchar(255) NOT NULL,
   `source_filename` varchar(255) NOT NULL,
   `source_path` varchar(500) NOT NULL,
@@ -329,7 +329,7 @@ CREATE TABLE `report_template` (
   `source_sha256` varchar(64) NOT NULL,
   `page_count` bigint NOT NULL DEFAULT '0',
   `status` varchar(24) NOT NULL DEFAULT 'PROCESSING',
-  `style_profile_json` json DEFAULT NULL,
+  `style_profile_json` json DEFAULT NULL, -- 提取出的报告结构与风格
   `analysis_error` text,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -350,7 +350,7 @@ CREATE TABLE `task_document` (
   `audit_task_id` bigint NOT NULL,
   `material_key` varchar(40) NOT NULL,
   `material_name` varchar(255) NOT NULL,
-  `required` tinyint(1) NOT NULL,
+  `required` tinyint(1) NOT NULL, -- 是否为必传材料
   `status` varchar(30) NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -369,14 +369,14 @@ CREATE TABLE `document_upload` (
   `task_document_id` bigint NOT NULL,
   `audit_task_id` bigint NOT NULL,
   `original_filename` varchar(255) NOT NULL,
-  `relative_path` varchar(500) NOT NULL,
+  `relative_path` varchar(500) NOT NULL, -- 文件相对存储路径
   `content_type` varchar(120) NOT NULL,
-  `declared_material_type` varchar(80) NOT NULL,
-  `size_bytes` bigint NOT NULL,
-  `sha256` char(64) NOT NULL,
-  `status` varchar(30) NOT NULL,
-  `is_current` tinyint(1) NOT NULL,
-  `current_task_document_id` bigint GENERATED ALWAYS AS (if((`is_current` = 1),`task_document_id`,NULL)) STORED,
+  `declared_material_type` varchar(80) NOT NULL, -- 上传时声明的材料类型
+  `size_bytes` bigint NOT NULL, -- 文件大小（字节）
+  `sha256` char(64) NOT NULL, -- 文件 SHA-256
+  `status` varchar(30) NOT NULL, -- 上传版本状态
+  `is_current` tinyint(1) NOT NULL, -- 是否为材料位当前版本
+  `current_task_document_id` bigint GENERATED ALWAYS AS (if((`is_current` = 1),`task_document_id`,NULL)) STORED, -- 用于唯一约束当前版本
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -399,14 +399,14 @@ CREATE TABLE `stored_artifact` (
   `document_upload_id` bigint NOT NULL,
   `audit_task_id` bigint NOT NULL,
   `artifact_type` varchar(40) NOT NULL,
-  `relative_path` varchar(500) NOT NULL,
-  `content_sha256` char(64) DEFAULT NULL,
-  `status` varchar(30) NOT NULL,
-  `external_job_id` varchar(120) DEFAULT NULL,
-  `deadline_at` datetime(6) DEFAULT NULL,
+  `relative_path` varchar(500) NOT NULL, -- 产物正文相对路径
+  `content_sha256` char(64) DEFAULT NULL, -- 产物内容摘要
+  `status` varchar(30) NOT NULL, -- 外部处理状态
+  `external_job_id` varchar(120) DEFAULT NULL, -- 外部服务作业编号
+  `deadline_at` datetime(6) DEFAULT NULL, -- 外部作业查询截止时间
   `failure_code` varchar(80) DEFAULT NULL,
   `failure_message` text,
-  `metadata_json` json DEFAULT NULL,
+  `metadata_json` json DEFAULT NULL, -- 产物元数据
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -431,12 +431,12 @@ CREATE TABLE `task_field_value` (
   `field_key` varchar(40) NOT NULL,
   `material_key` varchar(40) NOT NULL,
   `document_upload_id` bigint NOT NULL,
-  `revision_no` int NOT NULL DEFAULT '1',
-  `is_current` tinyint(1) NOT NULL DEFAULT '1',
-  `status` varchar(40) NOT NULL,
-  `extraction_execution_id` bigint DEFAULT NULL,
-  `origin` varchar(30) NOT NULL DEFAULT 'DOCUMENT_EXTRACTION',
-  `current_fact_scope` varchar(120) GENERATED ALWAYS AS (if((`is_current` = 1),concat(char_length(`field_key`),_utf8mb4':',`field_key`,char_length(`material_key`),_utf8mb4':',`material_key`),NULL)) VIRTUAL,
+  `revision_no` int NOT NULL DEFAULT '1', -- 字段候选修订号
+  `is_current` tinyint(1) NOT NULL DEFAULT '1', -- 是否为当前候选
+  `status` varchar(40) NOT NULL, -- 候选值状态
+  `extraction_execution_id` bigint DEFAULT NULL, -- 产生候选的执行批次
+  `origin` varchar(30) NOT NULL DEFAULT 'DOCUMENT_EXTRACTION', -- 候选来源
+  `current_fact_scope` varchar(120) GENERATED ALWAYS AS (if((`is_current` = 1),concat(char_length(`field_key`),_utf8mb4':',`field_key`,char_length(`material_key`),_utf8mb4':',`material_key`),NULL)) VIRTUAL, -- 当前候选唯一键
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -463,19 +463,19 @@ CREATE TABLE `task_fact` (
   `audit_task_id` bigint NOT NULL,
   `scenario_version_id` bigint NOT NULL,
   `fact_code` varchar(80) NOT NULL,
-  `fact_kind` varchar(20) NOT NULL,
-  `material_key` varchar(40) DEFAULT NULL,
-  `entity_scope` varchar(20) NOT NULL DEFAULT 'SELF',
-  `period_scope` varchar(30) NOT NULL,
-  `statement_scope` varchar(20) NOT NULL,
-  `value_type` varchar(20) NOT NULL,
-  `source_execution_id` bigint DEFAULT NULL,
-  `calculation_rule_code` varchar(80) DEFAULT NULL,
-  `revision_no` int NOT NULL DEFAULT '1',
-  `is_current` tinyint(1) NOT NULL DEFAULT '1',
-  `status` varchar(40) NOT NULL,
-  `material_scope` varchar(40) GENERATED ALWAYS AS (ifnull(`material_key`,_utf8mb4'')) VIRTUAL,
-  `current_fact_scope` varchar(255) GENERATED ALWAYS AS (if((`is_current` = 1),concat(char_length(`fact_code`),_utf8mb4':',`fact_code`,if((`material_key` is null),_utf8mb4'-1:',concat(char_length(`material_key`),_utf8mb4':',`material_key`)),char_length(`period_scope`),_utf8mb4':',`period_scope`,char_length(`statement_scope`),_utf8mb4':',`statement_scope`,char_length(`entity_scope`),_utf8mb4':',`entity_scope`),NULL)) VIRTUAL,
+  `fact_kind` varchar(20) NOT NULL, -- 抽取事实或计算事实
+  `material_key` varchar(40) DEFAULT NULL, -- 来源材料类型
+  `entity_scope` varchar(20) NOT NULL DEFAULT 'SELF', -- 事实所属主体范围
+  `period_scope` varchar(30) NOT NULL, -- 事实所属期间
+  `statement_scope` varchar(20) NOT NULL, -- 事实所属报表范围
+  `value_type` varchar(20) NOT NULL, -- 事实值类型
+  `source_execution_id` bigint DEFAULT NULL, -- 产生事实的执行批次
+  `calculation_rule_code` varchar(80) DEFAULT NULL, -- 派生事实所用规则编号
+  `revision_no` int NOT NULL DEFAULT '1', -- 事实修订号
+  `is_current` tinyint(1) NOT NULL DEFAULT '1', -- 是否为当前事实
+  `status` varchar(40) NOT NULL, -- 事实状态
+  `material_scope` varchar(40) GENERATED ALWAYS AS (ifnull(`material_key`,_utf8mb4'')) VIRTUAL, -- 空材料统一用于唯一键
+  `current_fact_scope` varchar(255) GENERATED ALWAYS AS (if((`is_current` = 1),concat(char_length(`fact_code`),_utf8mb4':',`fact_code`,if((`material_key` is null),_utf8mb4'-1:',concat(char_length(`material_key`),_utf8mb4':',`material_key`)),char_length(`period_scope`),_utf8mb4':',`period_scope`,char_length(`statement_scope`),_utf8mb4':',`statement_scope`,char_length(`entity_scope`),_utf8mb4':',`entity_scope`),NULL)) VIRTUAL, -- 当前事实唯一键
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -502,16 +502,16 @@ CREATE TABLE `rule_result` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `audit_task_id` bigint NOT NULL,
   `node_execution_id` bigint NOT NULL,
-  `rule_key` varchar(80) NOT NULL,
+  `rule_key` varchar(80) NOT NULL, -- 规则稳定标识
   `rule_code` varchar(80) DEFAULT NULL,
   `rule_name` varchar(255) NOT NULL,
   `status` varchar(40) NOT NULL,
   `message` text NOT NULL,
   `risk_level` varchar(40) DEFAULT NULL,
-  `rule_role` varchar(20) NOT NULL,
-  `loop_status` varchar(30) DEFAULT NULL,
-  `turn_count` int NOT NULL DEFAULT '0',
-  `result_json` json DEFAULT NULL,
+  `rule_role` varchar(20) NOT NULL, -- 规则用途类别
+  `loop_status` varchar(30) DEFAULT NULL, -- 规则循环处理状态
+  `turn_count` int NOT NULL DEFAULT '0', -- 模型处理轮数
+  `result_json` json DEFAULT NULL, -- 结论的结构化补充信息
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -535,13 +535,13 @@ CREATE TABLE `manual_review` (
   `audit_task_id` bigint NOT NULL,
   `field_value_id` bigint NOT NULL,
   `status` varchar(30) NOT NULL,
-  `system_judgment_json` json NOT NULL,
-  `decision` varchar(40) DEFAULT NULL,
+  `system_judgment_json` json NOT NULL, -- 人工提交时的系统判断快照
+  `decision` varchar(40) DEFAULT NULL, -- 人工裁决类型
   `business_note` text,
-  `before_value` text,
-  `after_value` text,
-  `basis_type` varchar(30) DEFAULT NULL,
-  `decision_command_no` varchar(40) DEFAULT NULL,
+  `before_value` text, -- 裁决前取值
+  `after_value` text, -- 裁决后取值
+  `basis_type` varchar(30) DEFAULT NULL, -- 裁决依据类型
+  `decision_command_no` varchar(40) DEFAULT NULL, -- 提交裁决的操作编号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -559,12 +559,12 @@ CREATE TABLE `field_review_confirmation` (
   `confirmation_no` varchar(40) NOT NULL,
   `audit_task_id` bigint NOT NULL,
   `node_execution_id` bigint NOT NULL,
-  `input_revision` int NOT NULL,
-  `field_digest` char(64) NOT NULL,
-  `missing_field_count` int NOT NULL DEFAULT 0,
-  `missing_field_keys` json DEFAULT NULL,
+  `input_revision` int NOT NULL, -- 确认时的任务输入修订号
+  `field_digest` char(64) NOT NULL, -- 字段结果集合摘要
+  `missing_field_count` int NOT NULL DEFAULT 0, -- 缺失字段数量
+  `missing_field_keys` json DEFAULT NULL, -- 缺失字段编号列表
   `note` text,
-  `operation_no` varchar(40) DEFAULT NULL,
+  `operation_no` varchar(40) DEFAULT NULL, -- 对应操作编号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -581,18 +581,18 @@ CREATE TABLE `field_review_confirmation` (
 CREATE TABLE `rulebook_generation_job` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `job_no` varchar(40) NOT NULL,
-  `idempotency_key` varchar(120) NOT NULL,
-  `request_hash` char(64) NOT NULL,
+  `idempotency_key` varchar(120) NOT NULL, -- 创建请求幂等标识
+  `request_hash` char(64) NOT NULL, -- 创建请求内容摘要
   `source_filename` varchar(255) NOT NULL,
-  `source_path` varchar(500) NOT NULL,
-  `source_sha256` char(64) NOT NULL,
-  `source_size` bigint NOT NULL,
+  `source_path` varchar(500) NOT NULL, -- 原始文件存储路径
+  `source_sha256` char(64) NOT NULL, -- 原始文件 SHA-256
+  `source_size` bigint NOT NULL, -- 原始文件大小（字节）
   `business_background` text NOT NULL,
   `generation_requirements` text NOT NULL,
-  `document_schema_version` varchar(40) NOT NULL,
-  `prompt_version` varchar(40) NOT NULL,
-  `document_json` json DEFAULT NULL,
-  `revision` int NOT NULL DEFAULT 0,
+  `document_schema_version` varchar(40) NOT NULL, -- 生成文档结构版本
+  `prompt_version` varchar(40) NOT NULL, -- 使用的提示词版本
+  `document_json` json DEFAULT NULL, -- 当前可编辑的规则库文档
+  `revision` int NOT NULL DEFAULT 0, -- 当前文档修订号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
@@ -607,13 +607,13 @@ CREATE TABLE `rulebook_generation_export` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `export_no` varchar(40) NOT NULL,
   `generation_job_id` bigint NOT NULL,
-  `revision` int NOT NULL,
-  `document_snapshot_json` json NOT NULL,
-  `export_format_version` varchar(40) NOT NULL,
+  `revision` int NOT NULL, -- 导出对应的文档修订号
+  `document_snapshot_json` json NOT NULL, -- 导出时的文档快照
+  `export_format_version` varchar(40) NOT NULL, -- 导出文件格式版本
   `filename` varchar(255) NOT NULL,
   `relative_path` varchar(500) NOT NULL,
-  `sha256` char(64) NOT NULL,
-  `size` bigint NOT NULL,
+  `sha256` char(64) NOT NULL, -- 导出文件 SHA-256
+  `size` bigint NOT NULL, -- 导出文件大小（字节）
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_rulebook_generation_export_no` (`export_no`),
@@ -628,8 +628,8 @@ CREATE TABLE `rulebook_generation_import` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `generation_export_id` bigint NOT NULL,
   `import_job_id` bigint DEFAULT NULL,
-  `idempotency_key` varchar(120) NOT NULL,
-  `request_hash` char(64) NOT NULL,
+  `idempotency_key` varchar(120) NOT NULL, -- 导入请求幂等标识
+  `request_hash` char(64) NOT NULL, -- 导入请求内容摘要
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_rulebook_generation_import_request` (`generation_export_id`,`idempotency_key`),
@@ -644,11 +644,11 @@ CREATE TABLE `rulebook_generation_import` (
 CREATE TABLE `rulebook_generation_revision` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `generation_job_id` bigint NOT NULL,
-  `revision` int NOT NULL,
-  `document_json` json NOT NULL,
-  `summary` text NOT NULL,
-  `origin` varchar(16) NOT NULL,
-  `operation_id` bigint DEFAULT NULL,
+  `revision` int NOT NULL, -- 历史修订号
+  `document_json` json NOT NULL, -- 本次修订的完整文档
+  `summary` text NOT NULL, -- 本次修订说明
+  `origin` varchar(16) NOT NULL, -- 修订来源
+  `operation_id` bigint DEFAULT NULL, -- 触发本次修订的后台操作
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_generation_revision_job` (`generation_job_id`,`revision`),
@@ -662,10 +662,10 @@ CREATE TABLE `rulebook_generation_revision` (
 CREATE TABLE `rulebook_generation_message` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `generation_job_id` bigint NOT NULL,
-  `revision` int NOT NULL,
-  `operation_id` bigint NOT NULL,
-  `role` varchar(16) NOT NULL,
-  `content` text NOT NULL,
+  `revision` int NOT NULL, -- 对话对应的文档修订号
+  `operation_id` bigint NOT NULL, -- 对应的后台操作
+  `role` varchar(16) NOT NULL, -- 对话角色
+  `content` text NOT NULL, -- 对话内容
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_generation_message_operation_role` (`operation_id`,`role`),

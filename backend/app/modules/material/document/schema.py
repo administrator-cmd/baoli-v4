@@ -5,6 +5,21 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class DocumentRowResponse(BaseModel):
+    document_no: str
+    task_no: str
+    task_name: str
+    material_key: str
+    material_name: str
+    required: bool
+    status: str
+    filename: str | None
+    size_bytes: int | None
+    uploaded_at: datetime | None
+    version_no: int | None
+    version_count: int | None
+
+
 class DocumentUploadItem(BaseModel):
     """一次上传的版本记录；version_no 按上传顺序从 1 递增。"""
 

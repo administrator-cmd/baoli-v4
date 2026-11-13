@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED, LOOP_RUNNING
+from app.domain.audit_state import RuleExecutionState
 from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
 from app.domain.llm_failure import channel_failure_detail, is_channel_failure
 from app.integrations.llm.gateway import RequestLogContext
@@ -35,7 +36,7 @@ def _loop_limit_reached(loop_count: int) -> int | None:
     return None
 
 
-def _loop_limit_state(max_rounds: int, loop_count: int, executed_tool_calls: list[str]) -> dict[str, Any]:
+def _loop_limit_state(max_rounds: int, loop_count: int, executed_tool_calls: list[str]) -> RuleExecutionState:
     """到达上限时的显式阻断状态：原因、已用轮次与已经执行过的工具调用。"""
     return {
         "loop_status": LOOP_BLOCKED,
@@ -89,7 +90,7 @@ def graph_call_model(
     state_evaluation_id: str | None,
     executed_tool_results: list[dict[str, Any]] | None = None,
     log_context: RequestLogContext | None = None,
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """调用模型一次，返回本条规则这一轮的状态变化。
 
     这里不执行工具：模型请求了工具就由 `graph_execute_tool_calls` 执行、由
@@ -166,20 +167,20 @@ def graph_call_model(
                 "规则模型请求失败 task_no=%s rule_key=%s code=%s channel_failure=%s message=%s",
                 task_no, rule["rule_key"], exc.code, channel, exc.message,
             )
-            turn = {
+            failure_state: RuleExecutionState = {
                 "loop_status": LOOP_BLOCKED, "loop_count": next_loop_count,
                 "candidate_verdict": None, "pending_tool_calls": [], "last_error": None,
                 "unresolved_items": [{"kind": exc.code, "message": exc.message, "details": exc.details}],
             }
             if channel:
-                turn["channel_failure"] = channel_failure_detail(
+                failure_state["channel_failure"] = channel_failure_detail(
                     exc.code, exc.message, rule_key=rule["rule_key"],
                     # 是否可能已经产生费用由网关按请求阶段给出，不按错误码猜。
                     result_unknown=bool((exc.details or {}).get("result_unknown")),
                     # 上游错误码、说明与请求 ID 随暂停原因保存，便于定位具体批次。
                     details=exc.details,
                 )
-            return turn
+            return failure_state
         summary = {
             "kind": turn.kind,
             "finish_reason": turn.finish_reason,
@@ -192,7 +193,7 @@ def graph_call_model(
             "refusal": turn.refusal,
             "raw_message": turn.raw_message,
         }
-        base = {
+        base: RuleExecutionState = {
             "loop_count": next_loop_count,
             "last_model_response": summary,
             "candidate_verdict": None,

@@ -5,11 +5,9 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
-from app.core.transactions import commit_transaction, rollback_transaction
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.field_review import reviewed_extraction_keys
 from app.constants.status import (
     AUDIT_LLM_CHANNEL_UNAVAILABLE,
     EXECUTION_STATUS_WAITING_FIELD_REVIEW,
@@ -20,6 +18,10 @@ from app.constants.status import (
     TASK_STATUS_RUNNING,
     TASK_STATUS_WAITING_FIELD_REVIEW,
 )
+from app.core.transactions import commit_transaction, rollback_transaction
+from app.domain.audit_state import AgentSummary, AuditGraphState
+from app.domain.field_review import reviewed_extraction_keys
+from app.domain.llm_failure import ChannelFailure
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import agent_step, graph_error_state
@@ -43,7 +45,7 @@ MODE_AGENT = "AGENT"
 # 服务重启导致的中断失败允许被后续真实执行结果覆盖，原失败信息保留。
 
 
-def graph_load_task(db: Session, task_no: str) -> dict[str, Any]:
+def graph_load_task(db: Session, task_no: str) -> AuditGraphState:
     """加载任务并校验它确实停在可执行的节点上。"""
     task = AuditTaskLookupService(db).task_or_404( task_no)
     if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
@@ -76,7 +78,7 @@ def graph_execute_current_node(
     db: Session,
     task_no: str,
     current_node: str,
-) -> dict[str, Any]:
+) -> AuditGraphState:
     """建立本次规则执行记录；实际规则统一由模型与工具循环完成。"""
     task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
     if task.status == TASK_STATUS_WAITING_FIELD_REVIEW:
@@ -170,7 +172,7 @@ def _begin_node_execution(
     return execution
 
 
-def _channel_failure_message(failure: dict[str, Any]) -> str:
+def _channel_failure_message(failure: ChannelFailure) -> str:
     """渠道故障的对外说明：真实原因 + 本次请求是否可能已经产生费用。"""
     reason = str(failure.get("message") or failure.get("code") or "远程大模型渠道不可用")
     if failure.get("result_unknown"):
@@ -186,8 +188,8 @@ def graph_pause_scheduling(
     task_no: str,
     execution_id: int | None,
     *,
-    failure: dict[str, Any],
-) -> dict[str, Any]:
+    failure: ChannelFailure,
+) -> AuditGraphState:
     """模型渠道故障时停止后续调度：先把真实原因落到批次上，再结束本次执行。
 
     已提交的规则结果不动，也不写成任何成功状态。未完成的规则没有结果，继续执行时按
@@ -247,8 +249,8 @@ def graph_finalize_node_execution(
     execution_id: int | None,
     execution_mode: str,
     node_result: dict[str, Any] | None,
-    agent_summary: dict[str, Any] | None,
-) -> dict[str, Any]:
+    agent_summary: AgentSummary | None,
+) -> AuditGraphState:
     """收尾规则执行批次，保存真实逐条结果的汇总。"""
     task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
     execution = execution_in_progress(db, task, execution_id)
@@ -341,7 +343,7 @@ def graph_advance_workflow(
     db: Session,
     task_no: str,
     execution_id: int | None,
-) -> dict[str, Any]:
+) -> AuditGraphState:
     """规则批次收尾；失败保持阻断，成功结束任务。"""
     task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
     phase = _task_phase(task)
@@ -464,7 +466,7 @@ def _next_node_after(db: Session, task: AuditTask, manifest: dict[str, Any], nod
     return None
 
 
-def graph_save_node_result(db: Session, task_no: str) -> dict[str, Any]:
+def graph_save_node_result(db: Session, task_no: str) -> AuditGraphState:
     """落库并提交本次节点结果与流程进度。"""
     task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
     phase = _task_phase(task)

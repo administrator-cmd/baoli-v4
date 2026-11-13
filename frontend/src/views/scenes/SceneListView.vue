@@ -14,6 +14,7 @@ import {
 import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 
 /**
  * 场景列表：管理场景身份（名称/业务类型/启停/实际删除）与配置入口。
@@ -215,12 +216,12 @@ onMounted(() => {
       empty-text="暂无数据"
     >
       <el-table-column type="index" label="序号" width="64" />
-      <el-table-column label="场景名称" min-width="160" show-overflow-tooltip>
+      <el-table-column label="场景名称" :width="TABLE_COLUMN_WIDTHS.scenarioName" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="goDetail(row)">{{ row.scenario_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="业务类型" width="110" show-overflow-tooltip>
+      <el-table-column label="业务类型" :width="TABLE_COLUMN_WIDTHS.businessType" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category || "—" }}</template>
       </el-table-column>
       <el-table-column label="配置状态" width="140">

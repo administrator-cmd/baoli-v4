@@ -23,7 +23,7 @@ from app.modules.imports.job.dto import (
     ImportProposalGroup,
     UpdateImportProposalRequest,
 )
-from app.modules.imports.job.schema import ImportJobResponse, ImportJobSummaryResponse
+from app.modules.imports.job.schema import ImportJobResponse, ImportJobRowResponse, ImportJobSummaryResponse
 from app.modules.imports.job.service import (
     lifecycle as imports_lifecycle,
 )
@@ -58,13 +58,13 @@ def list_jobs(request: Request, db: Session = Depends(get_db)) -> ResponseSchema
     )
 
 
-@router.get("/page", response_model=ResponseSchema[PagedResponse])
+@router.get("/page", response_model=ResponseSchema[PagedResponse[ImportJobRowResponse]])
 def list_jobs_page(
     request: Request,
     page: Annotated[PaginationQueryParam, Depends()],
     search: Annotated[ImportJobListQueryParam, Query()],
     db: Session = Depends(get_db),
-) -> ResponseSchema[PagedResponse]:
+) -> ResponseSchema[PagedResponse[ImportJobRowResponse]]:
     """导入作业分页列表：可限定所属场景，total 与列表使用同一筛选范围。"""
     result = imports_query.ImportsJobQueryService(db).list_import_jobs_page(
 
@@ -76,7 +76,7 @@ def list_jobs_page(
         page=page.page,
         page_size=page.page_size,
     )
-    return ok(PagedResponse.model_validate(result), request)
+    return ok(PagedResponse[ImportJobRowResponse].model_validate(result), request)
 
 
 @router.delete("/{job_no}", status_code=204)

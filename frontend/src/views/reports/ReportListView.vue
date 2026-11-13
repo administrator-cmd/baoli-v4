@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
 
 import type { ReportDetail, ReportRow } from "@/api/contracts";
 import { listPlanOptions, type PlanOption } from "@/api/plans";
@@ -9,19 +8,16 @@ import {
   getReport,
   listReports,
   reportDownloadUrl,
-  setReportArchived,
-  updateReportRemark,
 } from "@/api/reports";
 import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
-import StatusBadge from "@/components/StatusBadge.vue";
 import ReportGenerationNotice from "@/components/audit/ReportGenerationNotice.vue";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
  * 审核报告：真实报告生成项产生的快照。
- * 三个信号（报告已生成 / 范围执行完整 / 风险可判定）分别展示；备注可编辑、正文不可手改；
- * 重新生成是新快照，历史快照保留；归档只改归档状态。
+ * 三个信号（报告已生成 / 范围执行完整 / 风险可判定）分别展示；正文不可手改；
+ * 重新生成是新快照，历史快照保留。
  */
 const router = useRouter();
 
@@ -30,20 +26,18 @@ const list = usePagedList<ReportRow, {
   task_name: string;
   scenario_code: string;
   plan_code: string;
-  archived: string;
   generated_from: string;
   generated_to: string;
 }>(
   {
     key: "reports",
-    initialFilters: { name: "", task_name: "", scenario_code: "", plan_code: "", archived: "", generated_from: "", generated_to: "" },
+    initialFilters: { name: "", task_name: "", scenario_code: "", plan_code: "", generated_from: "", generated_to: "" },
     fetch: (params) =>
       listReports({
         name: params.name || undefined,
         task_name: params.task_name || undefined,
         scenario_code: params.scenario_code || undefined,
         plan_code: params.plan_code || undefined,
-        archived: params.archived === "" ? undefined : params.archived === "true",
         generated_from: params.generated_from || undefined,
         generated_to: params.generated_to || undefined,
         page: params.page,
@@ -67,9 +61,6 @@ async function loadPlanOptions(): Promise<void> {
     planOptionsError.value = failure instanceof Error ? failure.message : "方案选项读取失败";
   }
 }
-
-const selectedRows = ref<ReportRow[]>([]);
-const archiveDisabled = computed(() => selectedRows.value.length !== 1);
 
 function openTask(row: ReportRow): void {
   void router.push({ name: "audit-task-detail", params: { taskNo: row.task_no }, query: { tab: "report" } });
@@ -98,44 +89,6 @@ async function openDetail(row: ReportRow): Promise<void> {
     detailError.value = failure instanceof Error ? failure.message : "报告详情读取失败";
   } finally {
     if (request === detailRequest) detailLoading.value = false;
-  }
-}
-
-/* 备注 / 归档 */
-const remarkVisible = ref(false);
-const remarkRow = ref<ReportRow | null>(null);
-const remarkText = ref("");
-const remarkSaving = ref(false);
-
-function openRemark(row: ReportRow): void {
-  remarkRow.value = row;
-  remarkText.value = row.remark ?? "";
-  remarkVisible.value = true;
-}
-
-async function submitRemark(): Promise<void> {
-  if (!remarkRow.value) return;
-  remarkSaving.value = true;
-  try {
-    await updateReportRemark(remarkRow.value.report_no, remarkText.value.trim() || null);
-    ElMessage.success("报告备注已保存（正文与信号不受影响）");
-    remarkVisible.value = false;
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "保存失败");
-  } finally {
-    remarkSaving.value = false;
-  }
-}
-
-async function toggleArchive(row: ReportRow): Promise<void> {
-  const archiving = row.archived_at === null;
-  try {
-    await setReportArchived(row.report_no, archiving);
-    ElMessage.success(archiving ? "报告已归档" : "已取消归档");
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "操作失败");
   }
 }
 
@@ -192,12 +145,6 @@ onMounted(async () => {
           <el-option v-for="item in planOptions" :key="item.plan_code" :value="item.plan_code" :label="item.plan_name" />
         </el-select>
       </el-form-item>
-      <el-form-item label="归档状态">
-        <el-select v-model="filters.archived" clearable placeholder="全部" style="width: 130px">
-          <el-option value="false" label="未归档" />
-          <el-option value="true" label="已归档" />
-        </el-select>
-      </el-form-item>
       <el-form-item label="生成时间">
         <el-date-picker v-model="filters.generated_from" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" style="width: 150px" />
         <span style="margin: 0 6px">至</span>
@@ -207,14 +154,6 @@ onMounted(async () => {
         <el-button type="primary" @click="list.search()">查询</el-button>
         <el-button @click="list.reset()">重置</el-button>
         <el-button :loading="loading" @click="list.load()">刷新</el-button>
-        <el-button
-          type="danger"
-          plain
-          :disabled="archiveDisabled"
-          @click="selectedRows[0] && toggleArchive(selectedRows[0])"
-        >
-          {{ selectedRows[0]?.archived_at ? "取消归档" : "归档" }}
-        </el-button>
       </el-form-item>
     </el-form>
 
@@ -226,8 +165,7 @@ onMounted(async () => {
       <el-button size="small" @click="list.load()">重试</el-button>
     </el-alert>
 
-    <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据" @selection-change="selectedRows = $event">
-      <el-table-column type="selection" width="42" />
+    <el-table v-else :data="items" border stripe class="management-table" v-loading="loading" empty-text="暂无数据">
       <el-table-column label="报告名称" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
           <el-button link type="primary" class="table-link" @click="openDetail(row)">{{ row.report_name }}</el-button>
@@ -238,13 +176,7 @@ onMounted(async () => {
           <el-button link type="primary" class="table-link" @click="openTask(row)">{{ row.task_name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="场景版本" width="120" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span>{{ row.scenario_name }}</span>
-          <div v-if="row.scenario_version_no" class="table-note">第 {{ row.scenario_version_no }} 版</div>
-        </template>
-      </el-table-column>
-      <el-table-column label="方案版本" width="140" show-overflow-tooltip>
+      <el-table-column label="所属方案" width="140" show-overflow-tooltip>
         <template #default="{ row }">
           <span>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
@@ -275,10 +207,7 @@ onMounted(async () => {
           <span v-else class="text-hint">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="归档状态" width="140">
-        <template #default="{ row }"><StatusBadge :status="row.status" /></template>
-      </el-table-column>
-      <el-table-column label="操作" width="256" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="124" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openDetail(row)">查看</el-button>
           <el-button
@@ -292,9 +221,6 @@ onMounted(async () => {
           >
             下载
           </el-button>
-          <el-button link type="primary" size="small" @click="openRemark(row)">备注</el-button>
-          <el-button link type="primary" size="small" @click="toggleArchive(row)">{{ row.archived_at ? "取消归档" : "归档" }}</el-button>
-          <el-button link type="primary" size="small" @click="openTask(row)">任务</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -351,7 +277,7 @@ onMounted(async () => {
           </el-alert>
           <el-descriptions :column="2" border size="small" class="block-gap-sm">
             <el-descriptions-item label="任务">{{ detail.task_name }}</el-descriptions-item>
-            <el-descriptions-item label="方案版本">
+            <el-descriptions-item label="所属方案">
               {{ detail.plan_name || "方案名称未记录" }}
             </el-descriptions-item>
             <el-descriptions-item label="生成时间">{{ formatDate(String(detail.generated_at)) }}</el-descriptions-item>
@@ -368,18 +294,6 @@ onMounted(async () => {
         </template>
       </div>
     </el-drawer>
-
-    <el-dialog v-model="remarkVisible" title="编辑报告备注" width="600px" :close-on-click-modal="false">
-      <el-form label-width="80px">
-        <el-form-item label="备注">
-          <el-input v-model="remarkText" type="textarea" :rows="4" maxlength="4000" placeholder="备注只用于说明，不修改报告正文与三个信号" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="remarkVisible = false">取消</el-button>
-        <el-button type="primary" :loading="remarkSaving" @click="submitRemark">保存备注</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 

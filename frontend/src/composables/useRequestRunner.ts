@@ -16,7 +16,7 @@ export interface RequestRunner {
  * 页面统一的请求执行状态。
  *
  * 只做三件事：进入时清空上一次的错误、失败时保留服务端返回的真实原因、结束时复位忙碌状态。
- * 不吞异常、不重试、不降级：错误原样交给页面和 FailureNotice 显示。
+ * 捕获异常后保存到 failure，交给页面和 FailureNotice 显示；不自动重试。
  */
 export function useRequestRunner(): RequestRunner {
   const pending = ref(false);

@@ -2,10 +2,14 @@
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 
-import type { AuditFieldView } from "@/api/audits";
-import type { FieldReviewCorrection, FieldReviewMissing, FieldReviewState } from "@/api/contracts";
+import type {
+  AuditField,
+  FieldReviewCorrection,
+  FieldReviewMissing,
+  FieldReviewState,
+} from "@/api/contracts";
+
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
-import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { formatBusinessValue } from "@/constants/labels";
 import { fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
@@ -21,7 +25,7 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
  * 原抽取值与本次采用值分开显示，人工修改不覆盖原抽取记录。
  */
 const props = defineProps<{
-  fields: AuditFieldView[];
+  fields: AuditField[];
   state: FieldReviewState;
   /** 正在保存修改。 */
   saving?: boolean;
@@ -48,20 +52,20 @@ interface Draft {
 }
 
 const drafts = ref<Map<string, Draft>>(new Map());
-const detailField = shallowRef<AuditFieldView | null>(null);
+const detailField = shallowRef<AuditField | null>(null);
 const note = ref("");
 const search = ref("");
 const statusFilter = ref("ALL");
 
-function keyOf(field: AuditFieldView): string {
+function keyOf(field: AuditField): string {
   return `${field.field_key ?? field.name}::${field.material_key ?? field.material_name}`;
 }
 
-function draftOf(field: AuditFieldView): Draft | null {
+function draftOf(field: AuditField): Draft | null {
   return drafts.value.get(keyOf(field)) ?? null;
 }
 
-function currentText(field: AuditFieldView): string {
+function currentText(field: AuditField): string {
   const value = field.normalized_value;
   if (value === null || value === undefined || value === "") return "";
   // 结构化字段的值是对象：编辑框必须给出可还原的 JSON，展示用的拼接文本存回去会被
@@ -73,20 +77,20 @@ function currentText(field: AuditFieldView): string {
 }
 
 /** 对象和数组均按 JSON 编辑，避免把结构化值转换成不可还原的展示文本。 */
-function isStructured(field: AuditFieldView): boolean {
+function isStructured(field: AuditField): boolean {
   const value = field.normalized_value;
   return typeof value === "object" && value !== null;
 }
 
 /** 列表展示的采用值：数值按字段类型加千分位，人工标记为不存在的单独说明。 */
-function adoptedText(field: AuditFieldView): string {
+function adoptedText(field: AuditField): string {
   if (field.status === "NOT_PRESENT" && field.corrected) return "人工已确认材料中不存在";
   const value = field.normalized_value;
   if (value === null || value === undefined || value === "") return "";
   return formatFieldValue(field);
 }
 
-function extractedText(field: AuditFieldView): string {
+function extractedText(field: AuditField): string {
   const value = field.extracted_raw_value;
   if (value !== null && value !== undefined && value !== "") return String(value);
   if (field.corrected) return "原抽取未取得取值，本次由人工补填";
@@ -96,7 +100,7 @@ function extractedText(field: AuditFieldView): string {
   return "未取到取值";
 }
 
-function sourceFilesText(field: AuditFieldView): string {
+function sourceFilesText(field: AuditField): string {
   return fieldSourceFiles(field).join("、") || "未记录来源文件";
 }
 
@@ -108,12 +112,12 @@ const missingByKey = computed(() => {
   return map;
 });
 
-function missingOf(field: AuditFieldView): FieldReviewMissing | null {
+function missingOf(field: AuditField): FieldReviewMissing | null {
   return missingByKey.value.get(keyOf(field)) ?? null;
 }
 
 /** 该行提交后是否仍会被服务端判为缺项：改值会补上，标记「不存在」本身就是缺项。 */
-function stillMissing(field: AuditFieldView): boolean {
+function stillMissing(field: AuditField): boolean {
   const draft = draftOf(field);
   if (draft) {
     if (draft.decision === "MARK_NOT_PRESENT") return true;
@@ -122,7 +126,7 @@ function stillMissing(field: AuditFieldView): boolean {
   return missingOf(field) !== null;
 }
 
-function startEdit(field: AuditFieldView): void {
+function startEdit(field: AuditField): void {
   const next = new Map(drafts.value);
   next.set(keyOf(field), {
     fieldKey: field.field_key ?? field.name,
@@ -134,7 +138,7 @@ function startEdit(field: AuditFieldView): void {
   drafts.value = next;
 }
 
-function markMissing(field: AuditFieldView): void {
+function markMissing(field: AuditField): void {
   const next = new Map(drafts.value);
   next.set(keyOf(field), {
     fieldKey: field.field_key ?? field.name,
@@ -146,7 +150,7 @@ function markMissing(field: AuditFieldView): void {
   drafts.value = next;
 }
 
-function revert(field: AuditFieldView): void {
+function revert(field: AuditField): void {
   const next = new Map(drafts.value);
   next.delete(keyOf(field));
   drafts.value = next;
@@ -159,11 +163,11 @@ function discardDrafts(): void {
 }
 
 /** 材料未上传时字段没有可核对的原文，服务端也会拒绝整批提交。 */
-function materialMissing(field: AuditFieldView): boolean {
+function materialMissing(field: AuditField): boolean {
   return field.material_uploaded === false;
 }
 
-function updateDraft(field: AuditFieldView, value: string): void {
+function updateDraft(field: AuditField, value: string): void {
   const draft = draftOf(field);
   if (!draft) return;
   const next = new Map(drafts.value);
@@ -266,7 +270,7 @@ const MISSING_STATUSES = new Set([
   "NOT_EXECUTED", "PENDING", "EXTRACTION_FAILED", "NORMALIZATION_FAILED",
 ]);
 
-function matchesFilterValue(field: AuditFieldView, value: string): boolean {
+function matchesFilterValue(field: AuditField, value: string): boolean {
   switch (value) {
     case "EXTRACTED":
       return hasEffectiveFieldValue(field);
@@ -283,7 +287,7 @@ function matchesFilterValue(field: AuditFieldView, value: string): boolean {
   }
 }
 
-function searchText(field: AuditFieldView): string {
+function searchText(field: AuditField): string {
   return [field.source_ref, field.name, field.material_name, ...fieldSourceFiles(field), field.actual_period_scope, field.actual_unit, field.actual_statement_scope, field.actual_entity_scope, extractedText(field), currentText(field)]
     .join(" ").toLocaleLowerCase();
 }

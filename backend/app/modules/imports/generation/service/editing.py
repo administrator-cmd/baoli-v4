@@ -17,8 +17,8 @@ from app.domain.rulebook_generation import (
 )
 from app.modules.imports.generation import crud
 from app.modules.imports.generation.model import RulebookGenerationJob
-from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.generation.service.history import GenerationHistoryService
+from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.job.service.workbook import ImportsJobWorkbookService
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_types import OBJECT_RULEBOOK_GENERATION

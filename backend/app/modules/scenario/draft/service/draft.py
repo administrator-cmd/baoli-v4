@@ -32,11 +32,11 @@ class ScenarioDraftService:
 
     def draft_rows(self, draft_id: int
     ) -> tuple[
-        list[ScenarioDraftNode],
-        list[ScenarioDraftMaterial],
-        list[ScenarioDraftField],
-        list[ScenarioDraftRule],
-        list[ScenarioDraftSection],
+        list[config_store.ConfigItem],
+        list[config_store.ConfigItem],
+        list[config_store.ConfigItem],
+        list[config_store.ConfigItem],
+        list[config_store.ConfigItem],
     ]:
         """草稿的全部业务行：节点实例、材料、字段、规则、报告章节。
 

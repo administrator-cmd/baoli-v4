@@ -324,7 +324,7 @@ class AuditExecutionCommandsService:
                 status_code=404,
                 details={"material_key": request.material_key},
             )
-        current_pair = AuditFieldFactsService(self.db)._current_field_fact_pairs( task).get((request.field_key, request.material_key))
+        current_pair = AuditFieldFactsService(self.db).current_field_fact_pairs( task).get((request.field_key, request.material_key))
         if current_pair is None:
             raise BusinessError(
                 "FIELD_FACT_MISSING",

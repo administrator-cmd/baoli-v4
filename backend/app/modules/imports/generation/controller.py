@@ -16,14 +16,15 @@ from app.common.exceptions import BusinessError
 from app.common.response import ResponseSchema, ok
 from app.core.database import get_db, request_session
 from app.domain.rulebook_generation import GENERATION_INPUT_MAX_LENGTH
+from app.modules.imports.generation.crud import GenerationMessageCRUD, GenerationRevisionCRUD
 from app.modules.imports.generation.dto import (
+    AssistantMessageRequest,
     CreateGenerationExportRequest,
     ImportGenerationRequest,
+    RestoreGenerationRequest,
     RetryGenerationRequest,
     SaveGenerationDocumentRequest,
     StartGenerationRequest,
-    AssistantMessageRequest,
-    RestoreGenerationRequest,
 )
 from app.modules.imports.generation.schema import (
     GenerationCreatedResponse,
@@ -31,20 +32,19 @@ from app.modules.imports.generation.schema import (
     GenerationImportResponse,
     GenerationJobPageResponse,
     GenerationJobResponse,
-    GenerationRetryResponse,
     GenerationMessageResponse,
     GenerationMessagesResponse,
+    GenerationRetryResponse,
     GenerationRevisionResponse,
 )
+from app.modules.imports.generation.service.assistant import GenerationAssistantService
 from app.modules.imports.generation.service.editing import GenerationEditingService
 from app.modules.imports.generation.service.export import GenerationExportService
+from app.modules.imports.generation.service.history import GenerationHistoryService
 from app.modules.imports.generation.service.import_bridge import GenerationImportService
 from app.modules.imports.generation.service.operations import GenerationOperationsService
 from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.generation.service.upload import GenerationUploadService
-from app.modules.imports.generation.service.assistant import GenerationAssistantService
-from app.modules.imports.generation.service.history import GenerationHistoryService
-from app.modules.imports.generation.crud import GenerationMessageCRUD, GenerationRevisionCRUD
 from app.modules.system.operation.schema import OperationAcceptedResponse
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.schema.query.lists import RulebookGenerationListQueryParam

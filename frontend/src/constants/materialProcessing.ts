@@ -1,5 +1,5 @@
 /** 材料产物状态与任务执行状态具有不同语义，按材料处理上下文统一展示。 */
-import type { DocumentArtifactStatus, DocumentOcrStatus } from "@/api/audits";
+import type { DocumentArtifactStatus, DocumentOcrStatus } from "@/api/contracts";
 import type { StatusTone } from "./labels";
 
 export interface ProcessingArtifact {

@@ -47,7 +47,7 @@ class AuditFieldFactsService:
         )
 
 
-    def _current_field_fact_pairs(self, task: AuditTask,
+    def current_field_fact_pairs(self, task: AuditTask,
     ) -> dict[tuple[str, str], tuple[TaskFieldValue, TaskFact]]:
         """读取当前字段候选与统一事实，并核对两者是否仍表示同一份业务事实。
 

@@ -9,20 +9,20 @@ from app.common.response import ResponseSchema, ok
 from app.core.base_schema import PagedResponse
 from app.core.database import get_db
 from app.modules.material.document import service as material_documents
-from app.modules.material.document.schema import DocumentDetailResponse
+from app.modules.material.document.schema import DocumentDetailResponse, DocumentRowResponse
 from app.schema.query.lists import DocumentListQueryParam
 from app.schema.query.pagination import PaginationQueryParam
 
 router = APIRouter(prefix="/documents", tags=["审核材料"])
 
 
-@router.get("", response_model=ResponseSchema[PagedResponse])
+@router.get("", response_model=ResponseSchema[PagedResponse[DocumentRowResponse]])
 def list_documents(
     request: Request,
     page: Annotated[PaginationQueryParam, Depends()],
     search: Annotated[DocumentListQueryParam, Query()],
     db: Session = Depends(get_db),
-) -> ResponseSchema[PagedResponse]:
+) -> ResponseSchema[PagedResponse[DocumentRowResponse]]:
     """审核材料分页列表：以任务材料位为行，显示当前文件与处理状态。"""
     result = material_documents.MaterialDocumentService(db).list_documents_page(
         
@@ -34,7 +34,7 @@ def list_documents(
         page=page.page,
         page_size=page.page_size,
     )
-    return ok(PagedResponse.model_validate(result), request)
+    return ok(PagedResponse[DocumentRowResponse].model_validate(result), request)
 
 
 @router.get("/{document_no}", response_model=ResponseSchema[DocumentDetailResponse])

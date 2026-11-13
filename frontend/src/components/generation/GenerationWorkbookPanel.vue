@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 import { useMediaQuery } from "@/composables/useMediaQuery";
 import type { GenerationDocument, GenerationEntry, GenerationSheet } from "@/api/contracts";
-import { businessCodeColumn, cloneValue, entryBusinessCode, entryCellValue, entryLabel, generationSourceText, newGenerationRef, newUserSource, updateEntry } from "@/utils/generationDocument";
+import { businessCodeColumn, cloneValue, entryBusinessCode, entryCellValue, entryLabel, entryReferenceLabel, generationSourceText, newGenerationRef, newUserSource, updateEntry } from "@/utils/generationDocument";
 import GenerationEntryEditor from "./GenerationEntryEditor.vue";
 import GenerationSheetEditor from "./GenerationSheetEditor.vue";
 
@@ -19,12 +19,15 @@ const showCodeColumn = computed(() => {
   const sheet = current.value;
   return Boolean(sheet && !businessCodeColumn(sheet) && sheet.rows.some(row => entryBusinessCode(sheet, row)));
 });
-const allEntries = computed(() => props.document.sheets.flatMap(sheet => sheet.rows.map(row => ({ ...row, business_code: entryBusinessCode(sheet, row), label: entryLabel(sheet, row) }))));
-const codeById = computed(() => new Map(allEntries.value.map(row => [row.row_id, row.business_code || row.label])));
+const allEntries = computed(() => props.document.sheets.flatMap(sheet => sheet.rows.map(row => ({
+  ...row, business_code: entryBusinessCode(sheet, row), referenceLabel: entryReferenceLabel(sheet, row),
+  label: `${sheet.name} · ${entryLabel(sheet, row)}`,
+}))));
+const codeById = computed(() => new Map(allEntries.value.map(row => [row.row_id, row.referenceLabel])));
 const materials = computed(() => allEntries.value.filter(row => row.entry_kind === 'MATERIAL').map(material => {
   const ids = new Set(material.related_row_ids ?? []);
   allEntries.value.filter(row => row.related_row_ids?.includes(material.row_id)).forEach(row => ids.add(row.row_id));
-  return { ...material, rules: allEntries.value.filter(row => ids.has(row.row_id) && row.entry_kind === 'RULE').map(row => row.business_code || row.label).join('；'), references: allEntries.value.filter(row => ids.has(row.row_id) && row.entry_kind !== 'RULE').map(row => row.business_code || row.label).join('；') };
+  return { ...material, rules: allEntries.value.filter(row => ids.has(row.row_id) && row.entry_kind === 'RULE').map(row => row.referenceLabel).join('；'), references: allEntries.value.filter(row => ids.has(row.row_id) && row.entry_kind !== 'RULE').map(row => row.referenceLabel).join('；') };
 }));
 watch(() => props.document.sheets.map((sheet) => sheet.sheet_id), (identifiers) => {
   if (!identifiers.includes(selectedSheet.value)) selectedSheet.value = identifiers[0] ?? "";

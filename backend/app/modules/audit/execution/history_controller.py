@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.common.response import ResponseSchema, ok
 from app.core.base_schema import PagedResponse
 from app.core.database import get_db
+from app.modules.audit.execution.schema import ExecutionRowResponse
 from app.modules.audit.execution.service import executions as audit_executions
 from app.schema.query.lists import ExecutionListQueryParam
 from app.schema.query.pagination import PaginationQueryParam
@@ -16,13 +17,13 @@ from app.schema.query.pagination import PaginationQueryParam
 executions_router = APIRouter(prefix="/executions", tags=["执行记录"])
 
 
-@executions_router.get("", response_model=ResponseSchema[PagedResponse])
+@executions_router.get("", response_model=ResponseSchema[PagedResponse[ExecutionRowResponse]])
 def list_executions(
     request: Request,
     page: Annotated[PaginationQueryParam, Depends()],
     search: Annotated[ExecutionListQueryParam, Query()],
     db: Session = Depends(get_db),
-) -> ResponseSchema[PagedResponse]:
+) -> ResponseSchema[PagedResponse[ExecutionRowResponse]]:
     """节点执行记录分页列表（跨任务）。"""
     result = audit_executions.AuditExecutionExecutionsService(db).list_executions_page(
 
@@ -34,4 +35,4 @@ def list_executions(
         page=page.page,
         page_size=page.page_size,
     )
-    return ok(PagedResponse.model_validate(result), request)
+    return ok(PagedResponse[ExecutionRowResponse].model_validate(result), request)

@@ -77,8 +77,43 @@ function setup(t, relative = "src/views/documents/RulebookGenerationDetailView.v
   const reactiveProps = vue.reactive(props);
   const state = scope.run(() => component.setup(reactiveProps, { expose() {}, emit() {} }));
   return { state, props: reactiveProps, api, imports, calls, route, failure,
+    documentUtils: load(path.join(root, "src/utils/generationDocument.ts")),
     finish: async value => { tracked.value = value; await handlers.onFinished(value); } };
 }
+
+test("批次与目标规则只显示原值，不被当作历史记录的自身编号", t => {
+  const { documentUtils: utils } = setup(t);
+  const sheet = { columns: [
+    { column_id: "batch", name: "批次ID", code_role: "GROUP" },
+    { column_id: "target", name: "规则ID", is_business_code: true, code_role: "REFERENCE" },
+  ] };
+  const row = { cells: { batch: "BATCH-001", target: "RULE-001" }, business_code: "" };
+  assert.equal(utils.businessCodeColumn(sheet), undefined);
+  assert.equal(utils.entryBusinessCode(sheet, row), "");
+  assert.equal(utils.entryCellValue(sheet, row, "batch"), "BATCH-001");
+  assert.equal(utils.entryCellValue(sheet, row, "target"), "RULE-001");
+  assert.equal(utils.cloneValue(sheet).columns[1].code_role, "REFERENCE");
+});
+
+test("未标注编号语义的旧文档仍优先使用原编号", t => {
+  const { documentUtils: utils } = setup(t);
+  const sheet = { columns: [
+    { column_id: "extra", name: "编制编号" }, { column_id: "own", name: "材料规则ID" },
+  ] };
+  const row = { cells: { extra: "OLD-001", own: "SOURCE-001" }, business_code: "OLD-001" };
+  assert.equal(utils.entryBusinessCode(sheet, row), "SOURCE-001");
+});
+
+test("跨表关联能区分相同的表内编号", t => {
+  const { documentUtils: utils } = setup(t);
+  const sheet = { name: "当前要求", business_code_scope: "SHEET", columns: [
+    { column_id: "own", name: "规则ID", code_role: "IDENTITY" },
+  ] };
+  const row = { cells: { own: "001" }, business_code: "001" };
+  assert.equal(utils.entryReferenceLabel(sheet, row), "当前要求 · 001");
+  assert.equal(utils.entryReferenceLabel({ ...sheet, name: "另一组要求" }, row), "另一组要求 · 001");
+  assert.equal(utils.entryBusinessCode(sheet, row), "001");
+});
 
 for (const output of ["download", "import"]) {
   test(`后台完成与${output}重叠后自动补查新版本`, async t => {

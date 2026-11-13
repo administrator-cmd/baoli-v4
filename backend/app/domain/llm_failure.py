@@ -7,7 +7,15 @@
 且只针对能确认请求未送达的情形。
 """
 
-from typing import Any
+from typing import Any, NotRequired, TypedDict
+
+
+class ChannelFailure(TypedDict):
+    code: str
+    message: str
+    result_unknown: bool
+    rule_key: str | None
+    details: NotRequired[dict[str, Any]]
 
 # 渠道级故障：请求没有可靠完成，或渠道本身不可用。继续请求只会重复失败。
 CHANNEL_FAILURE_CODES = frozenset({
@@ -32,14 +40,14 @@ def is_channel_failure(code: str | None) -> bool:
 def channel_failure_detail(
     code: str, message: str, *, rule_key: str | None = None, result_unknown: bool = False,
     details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> ChannelFailure:
     """暂停调度的原因。
 
     `result_unknown` 由调用方按请求所处阶段给出：已经收到生成内容后中断、读取超时、
     或响应未可靠返回时为真；连接前就失败的请求不据此声称可能已计费。
     `details` 保留上游返回的错误码、说明与请求 ID，便于定位具体批次。
     """
-    record = {
+    record: ChannelFailure = {
         "code": code,
         "message": message,
         "result_unknown": bool(result_unknown),

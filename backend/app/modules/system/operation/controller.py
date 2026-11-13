@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.common.response import ResponseSchema, ok
-from app.core.base_schema import OperationLogPageResponse
 from app.core.database import get_db
+from app.modules.system.operation.schema import OperationLogPageResponse
 from app.modules.system.operation.service import operation_log as operation_log_service
 from app.schema.query.lists import OperationLogListQueryParam
 from app.schema.query.pagination import PaginationQueryParam

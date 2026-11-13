@@ -10,7 +10,7 @@ from app.common.response import ResponseSchema, ok
 from app.core.base_schema import ItemsResponse, PagedResponse
 from app.core.database import get_db
 from app.modules.audit.task.dto import TaskCopyRequest, TaskUpdateRequest
-from app.modules.audit.task.schema import AuditTaskResponse, TaskOptionItem
+from app.modules.audit.task.schema import AuditTaskResponse, TaskOptionItem, TaskRowResponse
 from app.modules.audit.task.service import copying as task_command_service
 from app.modules.audit.task.service import lifecycle as tasks_lifecycle
 from app.modules.audit.task.service import query as tasks_query
@@ -22,13 +22,13 @@ from app.schema.query.pagination import PaginationQueryParam
 router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
 
 
-@router.get("", response_model=ResponseSchema[PagedResponse])
+@router.get("", response_model=ResponseSchema[PagedResponse[TaskRowResponse]])
 def list_tasks(
     request: Request,
     page: Annotated[PaginationQueryParam, Depends()],
     search: Annotated[TaskListQueryParam, Query()],
     db: Session = Depends(get_db),
-) -> ResponseSchema[PagedResponse]:
+) -> ResponseSchema[PagedResponse[TaskRowResponse]]:
     """审核任务分页列表。"""
     result = tasks_query.AuditTaskQueryService(db).list_tasks_page(
 
@@ -42,7 +42,7 @@ def list_tasks(
         page=page.page,
         page_size=page.page_size,
     )
-    return ok(PagedResponse.model_validate(result), request)
+    return ok(PagedResponse[TaskRowResponse].model_validate(result), request)
 
 
 @router.get("/options", response_model=ResponseSchema[ItemsResponse[TaskOptionItem]])

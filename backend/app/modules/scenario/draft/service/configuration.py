@@ -215,7 +215,7 @@ class ScenarioDraftConfigurationService:
         }
 
 
-    def _draft_rule_view(self, item: ScenarioDraftRule,
+    def _draft_rule_view(self, item: config_store.ConfigItem,
         material_names: dict[str, str],
         field_map: dict[str, ScenarioDraftField],
         rule_names: dict[str, str],

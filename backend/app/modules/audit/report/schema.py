@@ -5,6 +5,56 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.core.base_schema import PagedResponse
+
+
+class ReportRowResponse(BaseModel):
+    report_no: str
+    report_name: str
+    task_no: str
+    task_name: str
+    scenario_name: str
+    scenario_version_no: int
+    plan_name: str | None
+    generated_at: datetime | None
+    report_generated: bool
+    scope_execution_complete: bool
+    risk_conclusion_available: bool
+    status: str
+    archived_at: datetime | None
+    current: bool
+    stale: bool
+    stale_reason: str | None
+    input_revision: int
+    task_input_revision: int
+    remark: str | None
+
+
+class RiskRowResponse(BaseModel):
+    task_no: str
+    task_name: str
+    scenario_name: str
+    scenario_version_no: int
+    plan_name: str | None
+    rule_key: str
+    rule_code: str | None
+    name: str
+    risk_level: str | None
+    status: str
+    message: str | None
+    suggestion: Any
+    source_rule_key: str | None
+    source_rule_name: str | None
+    result_id: int
+    created_at: datetime
+
+
+class RiskResultPageResponse(PagedResponse[RiskRowResponse]):
+    """风险结果分页：命中数仅统计 ABNORMAL。"""
+
+    hit_count: int = 0
+    risk_levels: list[str] = Field(default_factory=list)
+
 
 class RiskListResponse(BaseModel):
     task_no: str

@@ -7,12 +7,19 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.constants.execution import ORIGIN_HUMAN_CORRECTION
 from app.constants.status import LOOP_RUNNING
+from app.domain.audit_state import AuditGraphState, EvaluationContext, RuleExecutionState
 from app.domain.execution_mode import EXECUTION_MODES, MODE_EXTRACT, MODE_UNKNOWN
 from app.domain.material_precheck import PRECHECK_KEY, PRECHECK_TOOLS, precheck_rule_keys
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
-from app.modules.audit.execution.service.flow.plan import ReviewBoundary, enabled_rules, evaluation_plan, field_review_boundary, reviewed_extraction_rule_keys
+from app.modules.audit.execution.service.flow.plan import (
+    ReviewBoundary,
+    enabled_rules,
+    evaluation_plan,
+    field_review_boundary,
+    reviewed_extraction_rule_keys,
+)
 from app.modules.audit.execution.service.flow.preload import (
     extraction_artifact_requests,
     preload_extraction_artifacts,
@@ -70,7 +77,7 @@ def _rule_instance_id(node_code: str, rule_identity: str, execution_id: int) -> 
     return f"{node_code}:{rule_identity}:NE{execution_id}"
 
 
-def graph_prepare_materials(db: Session, task_no: str, execution_id: int | None) -> dict[str, Any]:
+def graph_prepare_materials(db: Session, task_no: str, execution_id: int | None) -> AuditGraphState:
     """先由 LLM/工具检查原文件质量，再处理可继续的材料。"""
     with agent_step(db, task_no):
         from app.modules.audit.artifact.preprocessing import ArtifactPreprocessingExecution
@@ -88,7 +95,7 @@ def graph_load_evaluation(
     task_no: str,
     node_code: str,
     execution_id: int | None,
-) -> dict[str, Any]:
+) -> EvaluationContext:
     """从任务冻结配置生成一次依赖计划；单条执行不重新排序。
 
     同时给出字段核对边界：本次计划是否有抽取段、当前字段版本是否已被确认、
@@ -139,7 +146,7 @@ def graph_load_rule_instance(
     rule_cursor: int,
     execution_id: int | None,
     planned_rule: dict[str, Any],
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """按本次计划读取单条规则的真实输入，创建独立执行状态。"""
     with agent_step(db, task_no):
         task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
@@ -211,7 +218,7 @@ def graph_prepare_agent_context(
     planned_rule: dict[str, Any],
     rule_instance: dict[str, Any] | None,
     messages: list[dict[str, Any]] | None,
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """首次组装本规则上下文；后续轮次沿用已有消息与真实来源。"""
     with agent_step(db, task_no):
         task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)

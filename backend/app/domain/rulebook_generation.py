@@ -7,8 +7,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 GENERATION_DOCUMENT_SCHEMA_VERSION = "rulebook_generation_v2"
-GENERATION_PROMPT_VERSION = "rulebook_generation_prompt_v9"
-GENERATION_EXPORT_FORMAT_VERSION = "rulebook_generation_xlsx_v10"
+GENERATION_PROMPT_VERSION = "rulebook_generation_prompt_v10"
+GENERATION_EXPORT_FORMAT_VERSION = "rulebook_generation_xlsx_v11"
 GENERATION_WORKBOOK_PROFILE = "rulebook_generation_v2"
 # UTF-8 每字符最多 4 字节，保证两个编制输入各自小于 MySQL TEXT 的字节上限。
 GENERATION_INPUT_MAX_LENGTH = 16000
@@ -81,13 +81,17 @@ class GenerationColumn(GenerationModel):
     name: str = Field(min_length=1, description="给业务人员阅读的栏目名称。")
     description: str = ""
     is_business_code: bool = Field(default=False, description="本条内容自身的业务编号栏，由模型结合表头和内容识别；不标记关联编号栏。每表最多一栏。")
+    code_role: Literal["IDENTITY", "REFERENCE", "GROUP"] | None = Field(
+        default=None,
+        description="编号语义：IDENTITY 是本行自身编号，REFERENCE 是其他对象的引用，GROUP 是可重复的批次或分组号；非编号栏留空。优先于旧标记和表头推断。",
+    )
 
 
 class GenerationEntry(GenerationModel):
     row_id: str = Field(min_length=1, max_length=80, description="仅供编辑器定位，不展示或导出。")
     cells: dict[str, str] = Field(description="栏目 column_id 到业务正文的映射；正文使用人能直接阅读的文字。")
     source: GenerationSource
-    business_code: str = Field(default="", max_length=80, description="唯一一套可读业务编号：已有编号照录原值；仅缺失时由模型按原编号规律或业务内容补充，并与正文编号栏保持一致。")
+    business_code: str = Field(default="", max_length=80, description="本条内容自身的业务编号，与自身编号栏一致；规则、材料确实缺号时补充。无独立编号的说明或历史记录留空，不填批次号或被引用对象编号。")
     entry_kind: Literal["RULE", "MATERIAL", "REFERENCE", "OTHER"] = "OTHER"
     related_row_ids: list[str] = Field(default_factory=list, description="原文有明确关系的其他条目；不能猜测关联。")
 
@@ -99,6 +103,9 @@ class GenerationSheet(GenerationModel):
     columns: list[GenerationColumn] = Field(min_length=1)
     rows: list[GenerationEntry]
     source: GenerationSource
+    business_code_scope: Literal["DOCUMENT", "SHEET"] = Field(
+        default="DOCUMENT", description="自身编号的唯一范围，默认整份文档；仅原文明示各表独立编号时选 SHEET，不为绕过真实重复而缩小范围。",
+    )
 
 
 class GenerationIssue(GenerationModel):
@@ -136,10 +143,17 @@ def is_business_code_column(name: str) -> bool:
     }
 
 
+def is_identity_column(column: GenerationColumn) -> bool:
+    """显式编号语义优先，未标注的旧文档仍沿用原识别规则。"""
+    if column.code_role is not None:
+        return column.code_role == "IDENTITY"
+    return column.is_business_code or is_business_code_column(column.name)
+
+
 def business_code_column(sheet: GenerationSheet) -> str | None:
     """优先使用原业务编号栏，避免历史额外编制编号覆盖原编号。"""
-    columns = [column for column in sheet.columns if column.is_business_code or is_business_code_column(column.name)]
-    columns.sort(key=lambda column: (not column.is_business_code, re.sub(r"\s+", "", column.name) == "编制编号"))
+    columns = [column for column in sheet.columns if is_identity_column(column)]
+    columns.sort(key=lambda column: (not (column.code_role == "IDENTITY" or column.is_business_code), re.sub(r"\s+", "", column.name) == "编制编号"))
     return columns[0].column_id if columns else None
 
 
@@ -156,7 +170,12 @@ def normalize_business_codes(document: GenerationDocument, previous: GenerationD
     for sheet in result.sheets:
         column = business_code_column(sheet)
         for row in sheet.rows:
-            row.business_code = entry_business_code(sheet, row) or old.get(row.row_id, "")
+            # 明确标为引用/分组后，不能从旧元数据重新带回被排除的编号。
+            excluded = {row.cells.get(item.column_id, "").strip().casefold() for item in sheet.columns
+                        if item.code_role in {"REFERENCE", "GROUP"}}
+            code = entry_business_code(sheet, row)
+            old_code = old.get(row.row_id, "")
+            row.business_code = code or (old_code if column or old_code.casefold() not in excluded else "")
             if column and column in row.cells and not row.cells[column].strip():
                 row.cells[column] = row.business_code
             sequence = re.fullmatch(r"(.+?)(\d+)", row.business_code)
@@ -204,7 +223,7 @@ def _check_unique(values: Sequence[str], owner: str, kind: str, problems: list[d
 
 def _check_source(
     source: GenerationSource, owner: str, source_rows: set[tuple[str, int]],
-    requirement_ids: set[str], problems: list[dict[str, Any]],
+    requirement_ids: set[str], problems: list[dict[str, Any]], *, allow_unlinked_review: bool = False,
 ) -> None:
     if source.kind == "ORIGINAL_EXCEL" and source.origin is None:
         _add(problems, owner, "source.origin_required")
@@ -218,7 +237,7 @@ def _check_source(
     for reference in source.requirement_ids:
         if reference not in requirement_ids:
             _add(problems, owner, "source.requirement_missing", reference)
-    if source.kind == "DERIVED" and not source.requirement_ids:
+    if source.kind == "DERIVED" and not source.requirement_ids and not allow_unlinked_review:
         _add(problems, owner, "source.derived_without_requirement")
 
 
@@ -294,9 +313,7 @@ def collect_document_problems(
     _check_unique([row.row_id for sheet in document.sheets for row in sheet.rows], "业务条目", "row.duplicate_id", problems)
     _check_unique([issue.issue_id for issue in document.issues], "待明确事项", "issue.duplicate_id", problems)
     rows = {row.row_id for sheet in document.sheets for row in sheet.rows}
-    codes = [entry_business_code(sheet, row).casefold() for sheet in document.sheets for row in sheet.rows
-             if entry_business_code(sheet, row)]
-    _check_unique(codes, "业务编号", "row.duplicate_business_code", problems)
+    seen_codes: dict[tuple[str, str], str] = {}
     covered: set[str] = set()
     for item in document.requirements:
         _check_source(item.source, item.requirement_id, source_rows, requirements, problems)
@@ -306,12 +323,27 @@ def collect_document_problems(
         _check_source(sheet.source, sheet.name, source_rows, requirements, problems)
         _check_unique([column.column_id for column in sheet.columns], sheet.name, "column.duplicate_id", problems)
         _check_unique([column.name for column in sheet.columns], sheet.name, "column.duplicate_name", problems)
-        if sum(column.is_business_code for column in sheet.columns) > 1:
+        if sum(column.code_role == "IDENTITY" or (column.code_role is None and column.is_business_code)
+               for column in sheet.columns) > 1:
             _add(problems, sheet.name, "column.multiple_business_code_columns")
         column_ids = {column.column_id for column in sheet.columns}
+        identity_column = business_code_column(sheet)
         for row in sheet.rows:
-            if require_codes and not entry_business_code(sheet, row):
+            code = entry_business_code(sheet, row)
+            owner = f"{sheet.name} / {row.row_id}"
+            if require_codes and (row.entry_kind in {"RULE", "MATERIAL"} or identity_column) and not code:
                 _add(problems, row.row_id, "row.business_code_missing")
+            if code:
+                excluded = {row.cells.get(column.column_id, "").strip().casefold() for column in sheet.columns
+                            if column.code_role in {"REFERENCE", "GROUP"}}
+                if identity_column is None and code.casefold() in excluded:
+                    _add(problems, owner, "row.non_identity_business_code", code)
+                scope = sheet.sheet_id if sheet.business_code_scope == "SHEET" else ""
+                key = (scope, code.casefold())
+                if key in seen_codes:
+                    _add(problems, owner, "row.duplicate_business_code", f"{code}（已用于 {seen_codes[key]}）")
+                else:
+                    seen_codes[key] = owner
             for reference in row.related_row_ids:
                 if reference not in rows or reference == row.row_id:
                     _add(problems, row.business_code or row.row_id, "row.related_missing_or_self", reference)
@@ -321,7 +353,8 @@ def collect_document_problems(
                 _add(problems, sheet.name, "row.columns_mismatch", row.row_id)
             covered.update(row.source.requirement_ids)
     for issue in document.issues:
-        _check_source(issue.source, issue.title, source_rows, requirements, problems)
+        _check_source(issue.source, issue.title, source_rows, requirements, problems,
+                      allow_unlinked_review=issue.source.note == "自动复核疑点，原文位置未确定")
         for reference in issue.affected_row_ids:
             if reference not in rows:
                 _add(problems, issue.title, "issue.row_missing", reference)

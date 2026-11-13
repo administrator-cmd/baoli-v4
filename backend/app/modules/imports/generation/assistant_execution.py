@@ -9,9 +9,19 @@ from app.common.exceptions import BusinessError
 from app.core.config import get_settings
 from app.core.transactions import commit_transaction, rollback_transaction
 from app.domain.generation_assistant import (
-    ASSISTANT_PROMPT_VERSION, AssistantReply, AssistantReview, apply_edits, apply_review_text_repairs, document_changes,
+    ASSISTANT_PROMPT_VERSION,
+    AssistantReply,
+    AssistantReview,
+    apply_edits,
+    apply_review_text_repairs,
+    document_changes,
 )
-from app.domain.rulebook_generation import GenerationDocument, collect_document_problems, normalize_business_codes, summarize_generation_problems
+from app.domain.rulebook_generation import (
+    GenerationDocument,
+    collect_document_problems,
+    normalize_business_codes,
+    summarize_generation_problems,
+)
 from app.integrations.llm.gateway import call_json
 from app.modules.imports.generation.crud import GenerationMessageCRUD
 from app.modules.imports.generation.model import RulebookGenerationMessage
@@ -21,7 +31,7 @@ from app.modules.imports.generation.service.history import GenerationHistoryServ
 from app.modules.imports.generation.service.llm import GenerationLlmService
 from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.system.operation.crud import SystemOperationCRUD
-from app.modules.system.operation.service.background import CommandHandle, PHASE_LLM_REQUEST, PHASE_RESULT_READY
+from app.modules.system.operation.service.background import PHASE_LLM_REQUEST, PHASE_RESULT_READY, CommandHandle
 from app.modules.system.operation.service.operation_types import OBJECT_RULEBOOK_GENERATION
 
 logger = logging.getLogger(__name__)

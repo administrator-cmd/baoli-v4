@@ -21,8 +21,8 @@ from app.modules.imports.generation.model import (
     RulebookGenerationExport,
     RulebookGenerationImport,
     RulebookGenerationJob,
-    RulebookGenerationRevision,
     RulebookGenerationMessage,
+    RulebookGenerationRevision,
 )
 from app.modules.imports.job.model import ImportJob
 from app.modules.system.operation.model import BackgroundOperation

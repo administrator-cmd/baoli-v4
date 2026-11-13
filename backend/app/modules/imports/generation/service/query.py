@@ -7,8 +7,8 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.common.pagination import PageResult, page_result
+from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.domain.rulebook_generation import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_PROMPT_VERSION,

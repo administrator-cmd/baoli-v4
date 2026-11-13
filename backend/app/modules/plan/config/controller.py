@@ -1,7 +1,5 @@
 """方案配置接口；任务反向生成方案的入口明确拒绝。"""
 
-from typing import Any
-
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
@@ -18,10 +16,6 @@ from app.modules.plan.plan.service.lookup import PlanLookupService
 from app.modules.plan.plan.service.query import PlanQueryService
 
 router = APIRouter(prefix="/plans", tags=["审核方案"])
-
-
-def selection_response(request: Request, payload: dict[str, Any]) -> ResponseSchema[PlanSelectionResponse]:
-    return ok(PlanSelectionResponse.model_validate(payload), request)
 
 
 @router.get("/{plan_code}/config", response_model=ResponseSchema[PlanConfigResponse])
@@ -52,4 +46,4 @@ def put_plan_config(
 def plan_from_task(payload: PlanFromTaskRequest, request: Request, db: Session = Depends(get_db)) -> ResponseSchema[PlanSelectionResponse]:
     """拒绝用任务反向生成方案。"""
     plan = PlanLifecycleService().save_task_range_as_plan(payload.model_dump())
-    return selection_response(request, PlanQueryService(db).plan_selection_view( plan))
+    return ok(PlanSelectionResponse.model_validate(PlanQueryService(db).plan_selection_view(plan)), request)

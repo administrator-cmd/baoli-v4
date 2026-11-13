@@ -10,12 +10,13 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.domain.external_artifacts import ExternalArtifact, OcrContent, ExternalServiceResult
+from app.domain.external_artifacts import ExternalArtifact, ExternalServiceResult, OcrContent
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.artifact.model import StoredArtifact
 from app.modules.audit.task.model import AuditTask
 from app.modules.material.document.model import DocumentUpload
 from app.services.shared.storage import resolve_storage_path
+
 
 class AuditArtifactArtifactsService:
     """读写真实产物及其内容，不管理数据库提交。"""
@@ -151,17 +152,19 @@ class AuditArtifactArtifactsService:
         return path, filename
 
 
-    def _material_classify_content(self, upload: DocumentUpload) -> dict[str, Any] | None:
-        """该上传的 8018 材料识别结果内容；没有产物时返回 None。
+    def material_classifications(self, upload_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """批量读取已就绪的 8018 识别结果，缺失或未就绪的上传不进入映射。
 
         8018 已改为只记录不判定：识别结论与置信度只是展示用的事实，不改变材料状态、
         不挂人工复核、不影响任何分支。因此这里既不按 `matches_declared_material` 写材料状态，
         也不据它生成待办——材料类型不符要由人按识别结论另行裁决，不由自动识别代替。
         """
-        artifact = self._artifact_for_upload( upload, "MATERIAL_CLASSIFY")
-        if artifact is None or artifact.status != "READY":
-            return None
-        payload = self._artifact_payload(artifact)
-        if not isinstance(payload.content.get("matches_declared_material"), bool):
-            raise BusinessError("MATERIAL_CLASSIFY_CONTRACT_INVALID", "材料识别服务未返回类型匹配结论")
-        return payload.content
+        results = {}
+        for artifact in AuditArtifactCRUD(self.db).by_uploads_and_type(upload_ids, "MATERIAL_CLASSIFY"):
+            if artifact.status != "READY":
+                continue
+            payload = self._artifact_payload(artifact)
+            if not isinstance(payload.content.get("matches_declared_material"), bool):
+                raise BusinessError("MATERIAL_CLASSIFY_CONTRACT_INVALID", "材料识别服务未返回类型匹配结论")
+            results[artifact.document_upload_id] = payload.content
+        return results

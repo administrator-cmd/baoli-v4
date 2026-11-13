@@ -9,6 +9,7 @@ from app.common.response import ResponseSchema, ok
 from app.core.base_schema import PagedResponse
 from app.core.database import get_db
 from app.modules.audit.execution.dto import ExecuteNodeRequest, ResumeExecutionRequest
+from app.modules.audit.execution.schema import ExecutionRowResponse
 from app.modules.audit.execution.service import executions as audit_executions
 from app.modules.audit.execution.service.operations import AuditExecutionOperationsService
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
@@ -19,13 +20,13 @@ from app.schema.query.pagination import PaginationQueryParam
 router = APIRouter(prefix="/audit-tasks", tags=["审核任务"])
 
 
-@router.get("/{task_no}/executions", response_model=ResponseSchema[PagedResponse])
+@router.get("/{task_no}/executions", response_model=ResponseSchema[PagedResponse[ExecutionRowResponse]])
 def get_task_executions(
     task_no: str,
     request: Request,
     page: Annotated[PaginationQueryParam, Depends()],
     db: Session = Depends(get_db),
-) -> ResponseSchema[PagedResponse]:
+) -> ResponseSchema[PagedResponse[ExecutionRowResponse]]:
     """该任务的节点执行记录分页。"""
     result = audit_executions.AuditExecutionExecutionsService(db).list_executions_page(
         
@@ -37,7 +38,7 @@ def get_task_executions(
         page=page.page,
         page_size=page.page_size,
     )
-    return ok(PagedResponse.model_validate(result), request)
+    return ok(PagedResponse[ExecutionRowResponse].model_validate(result), request)
 
 
 @router.post("/{task_no}/execute", response_model=ResponseSchema[OperationAcceptedResponse], status_code=202)

@@ -15,14 +15,15 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from app.core.transactions import commit_transaction
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.modules.audit.rule.service.result_contract import validate_result_shape
 from app.constants.execution import ORIGIN_HUMAN_CORRECTION
 from app.constants.status import LOOP_BLOCKED, LOOP_DONE
+from app.core.transactions import commit_transaction
+from app.domain.audit_state import EvaluationPlanEntry, RuleOutcome
 from app.domain.execution_mode import MODE_EXTRACT, execution_mode_label
+from app.domain.llm_failure import ChannelFailure
 from app.integrations.llm.gateway import RequestLogContext
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.context import execution_attempt_no
@@ -37,6 +38,7 @@ from app.modules.audit.execution.service.flow.results import _RULE_SAVE_ERRORS
 from app.modules.audit.execution.service.flow.shared import agent_module
 from app.modules.audit.execution.service.flow.tools import graph_append_tool_results, graph_execute_tool_calls
 from app.modules.audit.field.crud import AuditFieldCRUD
+from app.modules.audit.rule.service.result_contract import validate_result_shape
 from app.modules.audit.rule.service.rule_execution import AuditRuleExecutionService
 from app.modules.audit.rule.service.rule_results import AuditRuleResultsService
 from app.modules.audit.shared import _task_manifest, pending_rerun_keys
@@ -51,7 +53,7 @@ _FIELD_SAVE_ERRORS = _RULE_SAVE_ERRORS | {"AGENT_VERDICT_INVALID"}
 
 
 def _outcome(rule: dict[str, Any], saved, *, loop_status: str, turn_count: int,
-             unresolved: list[dict[str, Any]], counted_turns: int) -> dict[str, Any]:
+             unresolved: list[dict[str, Any]], counted_turns: int) -> RuleOutcome:
     """`turn_count` 是这条字段实际产自的批次轮次；`counted_turns` 是本批次计入汇总的轮次。
 
     同批字段共享一次模型调用，逐个都计入汇总会把批次轮次重复计算 N 次；
@@ -71,7 +73,7 @@ def _outcome(rule: dict[str, Any], saved, *, loop_status: str, turn_count: int,
 def _finish(
     saved, rule: dict[str, Any], *, loop_status: str, turn_count: int,
     unresolved: list[dict[str, Any]], batch_size: int, counted_turns: int,
-) -> dict[str, Any]:
+) -> RuleOutcome:
     """批量来源写进诊断，标明这次结果不是单独调用得到的。"""
     saved.result_json = {
         **(saved.result_json or {}),
@@ -84,8 +86,8 @@ def _finish(
 def _record_blocked(
     db: Session, task: AuditTask, execution: NodeExecution, rule: dict[str, Any], *,
     unresolved: list[dict[str, Any]], evaluation_id: str, turn_count: int, batch_size: int,
-    counted_turns: int, channel_failure: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    counted_turns: int, channel_failure: ChannelFailure | None = None,
+) -> RuleOutcome:
     with db.begin_nested():
         AuditRuleExecutionService(db).revoke_outputs( task, execution, rule)
         saved = AuditRuleResultsService(db).save_rule_result(
@@ -252,7 +254,7 @@ def _save_field(
     verdict: dict[str, Any], unresolved: list[dict[str, Any]],
     execution_issues: list[dict[str, Any]],
     evaluation_id: str, turn_count: int, batch_size: int, counted_turns: int,
-) -> dict[str, Any]:
+) -> RuleOutcome:
     """保存一个已校验通过的字段；保存期的字段问题只让它记为 BLOCKED。"""
     try:
         verdict["execution_issues"] = list(execution_issues)
@@ -293,8 +295,8 @@ def graph_execute_extraction_batch(
     task_no: str,
     node_code: str,
     execution_id: int | None,
-    entries: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+    entries: list[EvaluationPlanEntry],
+) -> list[RuleOutcome]:
     """一次读取材料、一次抽取多个字段，再按字段拆回各自的规则结果。
 
     `entries` 是执行计划里连续的、同一材料同一产物来源的单字段抽取项；调用方保证长度大于 1。
@@ -374,7 +376,7 @@ def graph_execute_extraction_batch(
         # 本次请求的状态，只决定「还没有结论的字段」怎么记录，不影响已通过校验的字段。
         request_blocked = False
         # 渠道级故障：已校验的字段照常保存，未形成结论的字段带着真实原因停止调度。
-        channel_failure: dict[str, Any] | None = None
+        channel_failure: ChannelFailure | None = None
         repaired = False
         by_field: dict[str, dict[str, Any]] = {}
         # 已通过本轮接口校验的字段：修正轮未再返回的字段仍按它们上一轮的结论保存。
@@ -469,7 +471,7 @@ def graph_execute_extraction_batch(
                 [(item.get("details") or {}).get("code") or item.get("details") for item in response_issues],
             )
 
-        outcomes = []
+        outcomes: list[RuleOutcome] = []
         batch_size = len(rules)
         for position, rule in enumerate(rules):
             # 同批字段共享一次模型调用，汇总只在第一条计入轮次。

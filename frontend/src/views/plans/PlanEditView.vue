@@ -14,6 +14,7 @@ import PlanExtractionEditor from "@/components/plans/PlanExtractionEditor.vue";
 import PlanConfigList from "@/components/plans/PlanConfigList.vue";
 import { sourceSheetLabel } from "@/composables/useRuleSourceFilter";
 import { executionModeLabel } from "@/constants/executionModes";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 import {
   extractionStrategyLabel,
   reportContentTypeOptions,
@@ -649,7 +650,7 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                   <el-table-column prop="name" label="字段名称" width="180" show-overflow-tooltip />
                   <el-table-column label="所属材料" width="168" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
                   <el-table-column label="数据类型" width="88"><template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template></el-table-column>
-                  <el-table-column label="抽取策略" width="108"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
+                  <el-table-column label="抽取策略" :width="TABLE_COLUMN_WIDTHS.extractionStrategy"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
                   <el-table-column label="必抽" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
                   <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
                   <el-table-column prop="instruction" label="提取要求" min-width="300" show-overflow-tooltip />

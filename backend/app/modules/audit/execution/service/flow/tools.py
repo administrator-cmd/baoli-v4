@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.transactions import commit_transaction
+from app.domain.audit_state import RuleExecutionState
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.shared import agent_module, rule_of_instance
 from app.modules.audit.shared import _scenario, _task_manifest
@@ -19,7 +20,7 @@ def graph_execute_tool_calls(
     allowed_tools: list[dict[str, Any]] | None,
     rule_instance: dict[str, Any] | None,
     existing_unresolved: list[dict[str, Any]] | None,
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """执行模型明确请求的工具并返回真实结果与错误。"""
     with agent_step(db, task_no):
         task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)
@@ -95,7 +96,7 @@ def graph_execute_tool_calls(
 def graph_append_tool_results(
     messages: list[dict[str, Any]] | None,
     tool_results: list[dict[str, Any]] | None,
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """把本批工具结果生成 `tool` 角色消息并追加到消息历史。
 
     单独成一个节点而不是塞进 `execute_tool_calls`：消息历史与工具执行是两件事，合在一起会让

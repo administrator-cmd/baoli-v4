@@ -61,14 +61,14 @@ class ScenarioDraftRulesService:
         return draft
 
 
-    def _draft_rule_or_404(self, draft_id: int, rule_key: str) -> ScenarioDraftRule:
+    def _draft_rule_or_404(self, draft_id: int, rule_key: str) -> config_store.ConfigItem:
         item = next(iter([item for item in config_store.rows(self.db, ScenarioDraftRule, draft_id) if (item.rule_key == rule_key)]), None)
         if not item:
             raise BusinessError("DRAFT_RULE_NOT_FOUND", "规则配置不存在", status_code=404, details={"rule_key": rule_key})
         return item
 
 
-    def _downstream_rule_names(self, rules: list[ScenarioDraftRule], rule_key: str) -> list[str]:
+    def _downstream_rule_names(self, rules: list[config_store.ConfigItem], rule_key: str) -> list[str]:
         return [
             rule.name
             for rule in rules
@@ -92,12 +92,12 @@ class ScenarioDraftRulesService:
         )
         dependents = config_store.rows(self.db, ScenarioDraftRule, draft.id)
         downstream = self._downstream_rule_names(dependents, rule_key)
-        item.name = definition["name"]
-        item.node_code = definition["node"]
-        item.operator_code = definition["operator"]
-        item.enabled = definition["enabled"]
-        item.rule_json = definition
-        item.source_ref = definition.get("source_ref")
+        config_store.update_rule(item, name=definition["name"])
+        config_store.update_rule(item, node_code=definition["node"])
+        config_store.update_rule(item, operator_code=definition["operator"])
+        config_store.update_rule(item, enabled=definition["enabled"])
+        config_store.update_rule(item, rule_json=definition)
+        config_store.update_rule(item, source_ref=definition.get("source_ref"))
         detail: dict[str, Any] = {"scenario_code": scenario_code, "rule_key": rule_key}
         if downstream:
             detail["downstream_rules"] = downstream
@@ -116,11 +116,11 @@ class ScenarioDraftRulesService:
         """启用 / 停用草稿中的规则。"""
         template, draft = ScenarioDraftService(self.db)._locked_draft( scenario_code)
         item = self._draft_rule_or_404( draft.id, rule_key)
-        item.enabled = enabled
+        config_store.update_rule(item, enabled=enabled)
         definition = dict(item.rule_json or {})
         definition["enabled"] = enabled
         definition["config_status"] = "CLEAR" if enabled else "DISABLED"
-        item.rule_json = definition
+        config_store.update_rule(item, rule_json=definition)
         ScenarioDraftService(self.db)._save_draft(
             
             template,

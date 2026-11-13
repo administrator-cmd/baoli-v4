@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 
-import type { FieldCorrectionRequest, FieldCorrectionResponse } from "@/api/contracts";
-import type { AuditFieldView } from "@/api/audits";
+import type {
+  FieldCorrectionRequest,
+  FieldCorrectionResponse,
+  AuditField,
+} from "@/api/contracts";
+
 import StatusBadge from "@/components/StatusBadge.vue";
 import { formatBusinessValue } from "@/constants/labels";
 import { statusTextOf } from "@/constants/statusVocabulary";
@@ -15,7 +19,7 @@ import { statusTextOf } from "@/constants/statusVocabulary";
  */
 const props = defineProps<{
   open: boolean;
-  field: AuditFieldView | null;
+  field: AuditField | null;
   /** 服务端返回的纠错结果，用于展示失效与重算范围。 */
   result: FieldCorrectionResponse | null;
   pending?: boolean;

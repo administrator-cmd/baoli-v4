@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.constants.status import LOOP_DONE, RULE_STATUS_LABELS, UNRESOLVED_RESULT_STATUSES
+from app.domain.audit_state import RuleExecutionState
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
 
@@ -108,7 +109,7 @@ def graph_build_aggregate_verdict(
     execution_id: int | None,
     rule_instance: dict[str, Any] | None,
     planned_rule: dict[str, Any],
-) -> dict[str, Any]:
+) -> RuleExecutionState:
     """读取来源规则结果并形成确定性汇总结论。"""
     with agent_step(db, task_no):
         task = AuditTaskLookupService(db).task_or_404( task_no, lock=True)

@@ -30,6 +30,7 @@ export interface GenerationColumn {
   name: string;
   description: string;
   is_business_code?: boolean;
+  code_role?: "IDENTITY" | "REFERENCE" | "GROUP" | null;
 }
 export interface GenerationEntry {
   row_id: string;
@@ -46,6 +47,7 @@ export interface GenerationSheet {
   columns: GenerationColumn[];
   rows: GenerationEntry[];
   source: GenerationSource;
+  business_code_scope?: "DOCUMENT" | "SHEET";
 }
 export interface GenerationIssue {
   issue_id: string;

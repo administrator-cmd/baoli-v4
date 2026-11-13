@@ -1,18 +1,16 @@
 <script setup lang="ts">
+import type {
+  AuditTask,
+  AuditField,
+  ExecuteNodeResponse,
+  FieldCorrectionRequest,
+  FieldCorrectionResponse,
+} from "@/api/contracts";
 import { computed, nextTick, onMounted, onUnmounted, proxyRefs, ref, shallowRef, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import type {
-  AuditField,
-  ExecuteNodeResponse,
-  ExecutionRow,
-  FieldCorrectionRequest,
-  FieldCorrectionResponse,
-  FieldReviewCorrection,
-  Report,
-  RiskList,
-} from "@/api/contracts";
+
 import {
   ApiError,
   apiFileUrl,
@@ -22,19 +20,7 @@ import {
   OPERATION_POLL_INTERVAL_MS,
   type OperationView,
 } from "@/api/http";
-import {
-  confirmFieldReview,
-  deleteAuditTask,
-  executeAuditNode,
-  getAuditTask,
-  getTaskReport,
-  getTaskRisks,
-  listTaskExecutions,
-  resumeAuditTask,
-  saveFieldReview,
-  submitFieldCorrections,
-  type AuditTaskView,
-} from "@/api/audits";
+import { deleteAuditTask, executeAuditNode, getAuditTask, resumeAuditTask, submitFieldCorrections } from "@/api/audits";
 
 import MaterialProcessingDialog from "@/components/audit/MaterialProcessingDialog.vue";
 import AuditFieldResults from "@/components/audit/AuditFieldResults.vue";
@@ -53,6 +39,8 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import { useMaterialProcessing } from "@/composables/useMaterialProcessing";
 import { useMaterialActions } from "@/composables/useMaterialActions";
 import { useMaterialTypeCatalog } from "@/composables/useMaterialTypeCatalog";
+import { useAuditFieldReview } from "@/composables/useAuditFieldReview";
+import { useAuditTaskResults } from "@/composables/useAuditTaskResults";
 import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { isDetailTab, type DetailTab } from "@/constants/auditWorkspaces";
@@ -80,7 +68,7 @@ const { pending, failure, formMessage, run, setFailure } = useRequestRunner();
 const taskNo = computed(() => String(route.params.taskNo ?? ""));
 
 // 任务详情整体替换（applyTask），用 shallowRef 避免对含递归 JsonValue 的类型做深解包（TS2589）。
-const task = shallowRef<AuditTaskView | null>(null);
+const task = shallowRef<AuditTask | null>(null);
 const materialTypeCatalog = useMaterialTypeCatalog();
 /* 材料位操作与原文证据抽屉：各自独立的状态与操作流程，见对应 composable。 */
 const {
@@ -92,15 +80,6 @@ const {
   reset: resetMaterialActions,
 } = useMaterialActions({ taskNo, run, refresh: refreshTask });
 
-const risks = ref<RiskList | null>(null);
-const risksError = ref<string | null>(null);
-const risksLoading = ref(false);
-
-const report = ref<Report | null>(null);
-const reportError = ref<string | null>(null);
-const reportLoading = ref(false);
-let selectedReportNo: string | undefined;
-let reportRequestGeneration = 0;
 const lastExecution = ref<ExecuteNodeResponse | null>(null);
 const executingNode = ref<{ code: string; name: string } | null>(null);
 const tab = ref<DetailTab>("materials");
@@ -132,6 +111,14 @@ function isStale(token: number, currentTaskNo: string): boolean {
   return token !== stateGeneration || activeTaskNo.value !== currentTaskNo;
 }
 
+const {
+  risks, risksError, risksLoading,
+  report, reportError, reportLoading,
+  executions, executionsError, executionsLoading,
+  loadReport, retryLoadExecutions, ensureTabLoaded, refreshLoaded,
+  reset: resetTaskResults,
+} = useAuditTaskResults({ taskNo, generation: () => stateGeneration, isStale });
+
 const materialProcessing = useMaterialProcessing({
   task,
   watching,
@@ -149,63 +136,6 @@ const {
   openProcessingDialog,
   reset: resetMaterialProcessing,
 } = materialProcessing;
-
-/* 执行记录（页签） */
-const executions = ref<ExecutionRow[]>([]);
-const executionsError = ref<string | null>(null);
-const executionsLoading = ref(false);
-
-async function loadExecutions(token: number): Promise<void> {
-  const currentTaskNo = taskNo.value;
-  executionsLoading.value = true;
-  executionsError.value = null;
-  try {
-    const payload = await listTaskExecutions(currentTaskNo);
-    if (isStale(token, currentTaskNo)) return;
-    executions.value = payload.items;
-  } catch (error) {
-    if (isStale(token, currentTaskNo)) return;
-    executions.value = [];
-    executionsError.value = error instanceof Error ? error.message : "执行记录读取失败";
-  } finally {
-    if (!isStale(token, currentTaskNo)) executionsLoading.value = false;
-  }
-}
-
-/** 模板里的重试按钮：用当前页代次重新读取对应列表。 */
-function retryLoadExecutions(): void {
-  void loadExecutions(stateGeneration);
-}
-
-/**
- * 已为当前任务加载过的页签。
- * 材料在任务详情里；风险、报告、执行记录只在用户真正切到对应页签时加载。
- * 加载失败时从集合中移除，用户再次进入该页签会重新请求，而不是停在错误态无法自救。
- */
-const loadedTabs = new Set<DetailTab>();
-
-async function ensureTabLoaded(target: DetailTab, token = stateGeneration): Promise<void> {
-  const currentTaskNo = taskNo.value;
-  if (!currentTaskNo || loadedTabs.has(target)) return;
-  loadedTabs.add(target);
-  if (target === "risks") {
-    await loadRisks(currentTaskNo, token);
-    if (risksError.value) loadedTabs.delete(target);
-  } else if (target === "report") {
-    const loads = [loadReport(currentTaskNo, token)];
-    // 报告页的风险结论说明依赖风险结果；首次打开报告页时一并加载。
-    if (!loadedTabs.has("risks")) {
-      loadedTabs.add("risks");
-      loads.push(loadRisks(currentTaskNo, token));
-    }
-    await Promise.allSettled(loads);
-    if (reportError.value) loadedTabs.delete(target);
-    if (risksError.value) loadedTabs.delete("risks");
-  } else if (target === "executions") {
-    await loadExecutions(token);
-    if (executionsError.value) loadedTabs.delete(target);
-  }
-}
 
 /* 节点流程 */
 const currentNodeCode = computed(() => task.value?.current_node.node_code ?? null);
@@ -251,75 +181,13 @@ const atFieldReview = computed(
 const reviewDirty = ref(false);
 /** 核对面板实例：用户明确放弃修改时由它清空暂存，避免离开后再次提示同一批修改。 */
 const reviewPanel = ref<InstanceType<typeof AuditFieldReviewPanel> | null>(null);
-const reviewSaving = ref(false);
-const reviewConfirming = ref(false);
-/** 确认请求身份：受理结果未知时保留，重发同一请求由服务端返回原受理记录。 */
-let reviewAttemptKey: string | null = null;
-
-async function submitFieldReviewSave(corrections: FieldReviewCorrection[]): Promise<void> {
-  if (!task.value || !corrections.length) return;
-  const currentTaskNo = task.value.task_no;
-  const inputRevision = task.value.input_revision;
-  const token = stateGeneration;
-  reviewSaving.value = true;
-  try {
-    const result = await saveFieldReview(currentTaskNo, { input_revision: inputRevision, corrections });
-    if (isStale(token, currentTaskNo)) return;
-    await fetchTaskState(currentTaskNo, token);
-    ElMessage.success(`已保存 ${result.applied.length} 项字段修改，任务仍等待核对`);
-  } catch (error) {
-    if (isStale(token, currentTaskNo)) return;
-    setFailure(error);
-  } finally {
-    reviewSaving.value = false;
-  }
-}
-
-async function submitFieldReviewConfirm(payload: {
-  corrections: FieldReviewCorrection[];
-  acknowledgeMissing: boolean;
-  note: string | null;
-}): Promise<void> {
-  if (!task.value) return;
-  const currentTaskNo = task.value.task_no;
-  const inputRevision = task.value.input_revision;
-  const token = stateGeneration;
-  const attemptKey = reviewAttemptKey ?? operationIdempotencyKey("FIELD_REVIEW_CONFIRM", currentTaskNo);
-  reviewAttemptKey = attemptKey;
-  reviewConfirming.value = true;
-  try {
-    const accepted = await confirmFieldReview(currentTaskNo, {
-      idempotency_key: attemptKey,
-      input_revision: inputRevision,
-      corrections: payload.corrections,
-      acknowledge_missing: payload.acknowledgeMissing,
-      note: payload.note,
-    });
-    if (isStale(token, currentTaskNo)) return;
-    trackOperation(accepted, token);
-    await router.replace({
-      name: "audit-task-detail",
-      params: { taskNo: currentTaskNo },
-      query: { ...route.query, operation: accepted.operation_no },
-    });
-  } catch (error) {
-    if (isStale(token, currentTaskNo)) return;
-    // 只有「结果未知」才保留请求身份：明确被服务端拒绝时原命令没有受理，
-    // 保留旧键会让用户改完再提交时被当成「同一标识的不同请求」。
-    if (!(error instanceof ApiError) || (error.code !== "REQUEST_TIMEOUT" && error.code !== "NETWORK_ERROR")) {
-      reviewAttemptKey = null;
-    }
-    setFailure(error);
-    // 受理结果未知时只查询真实状态：详情里的 latest_operation 指向已受理的操作。
-    // 查询返回后要重新校验任务身份：期间切到别的任务时，这次响应不能覆盖当前页面。
-    const latest = await getAuditTask(currentTaskNo);
-    if (isStale(token, currentTaskNo)) return;
-    applyTask(latest);
-    resumeLatestOperation(token);
-  } finally {
-    reviewConfirming.value = false;
-  }
-}
+const {
+  reviewSaving, reviewConfirming, submitFieldReviewSave, submitFieldReviewConfirm,
+  clearAttempt: clearFieldReviewAttempt, reset: resetFieldReview,
+} = useAuditFieldReview({
+  task, generation: () => stateGeneration, isStale, refresh: fetchTaskState,
+  applyTask, trackOperation, resumeLatestOperation, setFailure,
+});
 
 /** 有未保存的核对修改时离开，必须由用户明确选择。 */
 async function confirmLeaveReview(): Promise<boolean> {
@@ -365,7 +233,7 @@ const uploadBlockedReason = computed(() => {
 
 /** 材料处理中需要用户介入的一项：确定失败，或操作已结束但结果未知。 */
 interface MaterialArtifactIssue {
-  document: AuditTaskView["documents"][number];
+  document: AuditTask["documents"][number];
   artifactType: string;
   message: string;
 }
@@ -831,7 +699,7 @@ function reportDownloadUrl(reportNo: string): string {
   return apiFileUrl(`/audit-tasks/${task.value.task_no}/reports/download?report_no=${encodeURIComponent(reportNo)}`);
 }
 
-function applyTask(auditTask: AuditTaskView): void {
+function applyTask(auditTask: AuditTask): void {
   task.value = auditTask;
 }
 
@@ -844,17 +712,9 @@ function applyTask(auditTask: AuditTaskView): void {
 function resetWorkspace(): void {
   resetTracking();
   stateGeneration += 1;
-  loadedTabs.clear();
+  resetTaskResults();
   activeTaskNo.value = null;
   task.value = null;
-  risks.value = null;
-  risksError.value = null;
-  risksLoading.value = false;
-  report.value = null;
-  selectedReportNo = undefined;
-  reportRequestGeneration += 1;
-  reportError.value = null;
-  reportLoading.value = false;
   lastExecution.value = null;
   executingNode.value = null;
   /* 独立业务区块各自重置：材料操作。 */
@@ -863,55 +723,14 @@ function resetWorkspace(): void {
   correctionResult.value = null;
   correctionPending.value = false;
   reviewDirty.value = false;
-  reviewSaving.value = false;
-  reviewConfirming.value = false;
-  reviewAttemptKey = null;
+  resetFieldReview();
   lastOperationType.value = null;
   executionAttemptKey = null;
   resumeAttemptKey = null;
-  executions.value = [];
-  executionsError.value = null;
-  executionsLoading.value = false;
   /* 抽屉与弹窗 */
   resetMaterialProcessing();
   formMessage.value = "";
   loadingTask.value = false;
-}
-
-async function loadRisks(currentTaskNo: string, token: number): Promise<void> {
-  risksLoading.value = true;
-  risksError.value = null;
-  try {
-    const value = await getTaskRisks(currentTaskNo);
-    if (isStale(token, currentTaskNo)) return;
-    risks.value = value;
-  } catch (error) {
-    if (isStale(token, currentTaskNo)) return;
-    risks.value = null;
-    risksError.value = error instanceof Error ? error.message : "未知原因";
-  } finally {
-    if (!isStale(token, currentTaskNo)) risksLoading.value = false;
-  }
-}
-
-async function loadReport(currentTaskNo: string, token: number, reportNo?: string): Promise<void> {
-  if (reportNo !== undefined) selectedReportNo = reportNo;
-  const generation = ++reportRequestGeneration;
-  const stale = () => isStale(token, currentTaskNo) || generation !== reportRequestGeneration;
-  reportLoading.value = true;
-  reportError.value = null;
-  try {
-    const value = await getTaskReport(currentTaskNo, selectedReportNo);
-    if (stale()) return;
-    report.value = value;
-  } catch (error) {
-    if (stale()) return;
-    // 切换列表中的某份报告失败时保留已加载的报告清单，让弹窗显示读取失败原因并可关闭重试。
-    if (reportNo === undefined) report.value = null;
-    reportError.value = error instanceof Error ? error.message : "未知原因";
-  } finally {
-    if (!stale()) reportLoading.value = false;
-  }
 }
 
 async function fetchTaskState(currentTaskNo: string, token = stateGeneration): Promise<void> {
@@ -920,11 +739,7 @@ async function fetchTaskState(currentTaskNo: string, token = stateGeneration): P
   if (isStale(token, currentTaskNo)) return;
   applyTask(auditTask);
   // 只刷新用户已经打开过的页签：默认停在材料页时，风险、报告与执行记录不必一起加载。
-  const loads: Array<Promise<void>> = [];
-  if (loadedTabs.has("risks")) loads.push(loadRisks(currentTaskNo, token));
-  if (loadedTabs.has("report")) loads.push(loadReport(currentTaskNo, token));
-  if (loadedTabs.has("executions")) loads.push(loadExecutions(token));
-  await Promise.allSettled(loads);
+  await refreshLoaded(currentTaskNo, token);
 }
 
 async function loadTask(currentTaskNo: string): Promise<void> {
@@ -964,7 +779,7 @@ function trackOperation(value: OperationView, token = stateGeneration): void {
   }
   executionAttemptKey = null;
   resumeAttemptKey = null;
-  reviewAttemptKey = null;
+  clearFieldReviewAttempt();
   lastOperationType.value = value.operation_type;
   setExecutionResult(value);
   let lastDetailRefreshAt = 0;

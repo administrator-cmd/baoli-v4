@@ -19,7 +19,6 @@ from app.domain.proposals import (
 )
 from app.domain.workbook import WorkbookIR, WorkbookSheet
 
-
 ProposalGroup = Literal["materials", "fields", "rules", "calculations", "report_sections"]
 
 

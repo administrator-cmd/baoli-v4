@@ -6,6 +6,22 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class PlanRowResponse(BaseModel):
+    plan_code: str
+    plan_name: str
+    scenario_code: str
+    scenario_name: str
+    description: str | None
+    enabled: bool
+    deleted: bool
+    base_scenario_version_no: int | None
+    effective: bool
+    sync_error: dict[str, Any] | None
+    enabled_rule_count: int
+    explicit_rule_count: int
+    updated_at: datetime
+
+
 class PlanSelectionResponse(BaseModel):
     plan_code: str
     plan_name: str

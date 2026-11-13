@@ -162,7 +162,7 @@ def _validate_field_fact_identity(fields: list[dict[str, Any]]) -> None:
     """所有字段的完整事实身份必须唯一。
 
     人工核对允许给没有自动抽取的字段补值，任何字段都可能形成事实；运行期
-    `_current_field_fact_pairs` 也按全部字段配对。因此唯一性必须覆盖全部字段，
+    `current_field_fact_pairs` 也按全部字段配对。因此唯一性必须覆盖全部字段，
     只校验启用规则的产出会让重复身份等到写入事实才暴露。
     """
     identities: dict[tuple[Any, ...], str] = {}

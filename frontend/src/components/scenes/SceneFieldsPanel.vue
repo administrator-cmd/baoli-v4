@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftFieldItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 import {
   createDraftField,
@@ -299,7 +300,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="数据类型" width="88" align="center">
           <template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template>
         </el-table-column>
-        <el-table-column label="抽取策略" width="108" align="center">
+        <el-table-column label="抽取策略" :width="TABLE_COLUMN_WIDTHS.extractionStrategy" align="center">
           <template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template>
         </el-table-column>
         <el-table-column label="单位" width="64" align="center">
@@ -314,7 +315,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="报表口径" width="96" align="center">
           <template #default="{ row }">{{ statementScopeLabel(row.statement_scope) }}</template>
         </el-table-column>
-        <el-table-column label="产物来源" width="100" align="center">
+        <el-table-column label="产物来源" :width="TABLE_COLUMN_WIDTHS.artifactSource" align="center">
           <template #default="{ row }">{{ artifactSourceLabel(row.artifact_source) }}</template>
         </el-table-column>
         <el-table-column label="是否必填" width="88" align="center">

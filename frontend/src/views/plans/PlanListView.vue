@@ -14,6 +14,7 @@ import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 
 /**
  * 方案列表：基于已发布场景版本生成、随后独立编辑的审核方案。
@@ -186,7 +187,7 @@ async function loadSceneOptions(): Promise<void> {
           <span>{{ row.plan_name }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="scenario_name" label="所属场景" min-width="180" show-overflow-tooltip />
+      <el-table-column prop="scenario_name" label="所属场景" :width="TABLE_COLUMN_WIDTHS.scenarioName" show-overflow-tooltip />
       <el-table-column label="场景版本" width="120">
         <template #default="{ row }">
           <span v-if="row.base_scenario_version_no">第 {{ row.base_scenario_version_no }} 版</span>

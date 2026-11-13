@@ -118,7 +118,7 @@ class AuditFieldReviewService:
         extracted = self._extraction_versions( task)
         reviews = self._latest_reviews( task)
         if pairs is None:
-            pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+            pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         supplement: dict[tuple[str, str], dict[str, Any]] = {}
         for field in task.task_schema_json["fields"]:
             key = (self._field_field_key(field), str(field["material_key"]))
@@ -162,7 +162,7 @@ class AuditFieldReviewService:
     ) -> list[dict[str, Any]]:
         """当前仍不能作为下游有效输入的字段：按业务名称与原因列出真实缺项。"""
         if pairs is None:
-            pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+            pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         uploads = _current_upload_map(self.db, task)
         documents = {item.material_key: item for item in _task_documents(self.db, task)}
         extracted_keys = {
@@ -200,7 +200,7 @@ class AuditFieldReviewService:
         值本身不可变，版本变化一定伴随新的 revision_no，因此不需要把业务取值读进摘要。
         """
         if pairs is None:
-            pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+            pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         parts = [
             "|".join((
                 field_key, material_key,
@@ -309,7 +309,7 @@ class AuditFieldReviewService:
         fields = _task_field_definitions(task)
         documents = {item.material_key: item for item in _task_documents(self.db, task)}
         uploads = _current_upload_map(self.db, task)
-        pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+        pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         seen: set[tuple[str, str]] = set()
         applied: list[dict[str, Any]] = []
         for correction in corrections:
@@ -429,7 +429,7 @@ class AuditFieldReviewService:
     ) -> dict[str, Any]:
         """任务详情展示的核对状态；页面只据此显示入口与缺项，不自行推导范围。"""
         if pairs is None:
-            pairs = AuditFieldFactsService(self.db)._current_field_fact_pairs( task)
+            pairs = AuditFieldFactsService(self.db).current_field_fact_pairs( task)
         confirmation = self.latest_confirmation( task, execution.id if execution is not None else None)
         current = (
             confirmation is not None

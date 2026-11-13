@@ -13,7 +13,9 @@ from app.core.transactions import commit_transaction, rollback_transaction
 from app.modules.system.operation.crud import SystemOperationCRUD
 from app.modules.system.operation.model import BackgroundOperation
 from app.modules.system.operation.service.background import (
-    ACTIVE_STATUSES, PHASE_BUSINESS_COMMITTED, CommandHandle,
+    ACTIVE_STATUSES,
+    PHASE_BUSINESS_COMMITTED,
+    CommandHandle,
 )
 
 logger = logging.getLogger(__name__)

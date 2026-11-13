@@ -2,6 +2,12 @@ import { onUnmounted, ref, type Ref } from "vue";
 
 import { isOperationFinished, watchOperation, type OperationView, type OperationWatch } from "@/api/http";
 
+interface OperationHandlers {
+  onFinished: (operation: OperationView) => void | Promise<void>;
+  onUpdate?: (operation: OperationView) => void | Promise<void>;
+  onError: (error: unknown) => void;
+}
+
 /**
  * 后台操作的页面侧查询状态。
  *
@@ -14,11 +20,7 @@ export interface OperationTracker {
   /** 追踪一次已受理（或已结束）的操作。 */
   track: (
     operation: OperationView,
-    handlers: {
-      onFinished: (operation: OperationView) => void | Promise<void>;
-      onUpdate?: (operation: OperationView) => void | Promise<void>;
-      onError: (error: unknown) => void;
-    },
+    handlers: OperationHandlers,
   ) => void;
   /** 只再次查询当前操作，不重新提交执行请求。 */
   requery: () => void;
@@ -96,11 +98,7 @@ export function useOperationTracker(): OperationTracker {
 
   function track(
     value: OperationView,
-    handlers: {
-      onFinished: (operation: OperationView) => void | Promise<void>;
-      onUpdate?: (operation: OperationView) => void | Promise<void>;
-      onError: (error: unknown) => void;
-    },
+    handlers: OperationHandlers,
   ): void {
     onFinished = handlers.onFinished;
     onUpdate = handlers.onUpdate ?? null;

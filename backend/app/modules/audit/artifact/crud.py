@@ -58,6 +58,16 @@ class AuditArtifactCRUD(CRUDBase):
             )
         )
 
+    def by_uploads_and_type(self, upload_ids: list[int], artifact_type: str) -> list[StoredArtifact]:
+        if not upload_ids:
+            return []
+        return list(self.db.scalars(
+            select(StoredArtifact).where(
+                StoredArtifact.document_upload_id.in_(upload_ids),
+                StoredArtifact.artifact_type == artifact_type,
+            )
+        ).all())
+
     def latest_id_by_upload_type(self, upload_id: int, artifact_type: str) -> int | None:
         return self.db.scalar(
             select(func.max(StoredArtifact.id))

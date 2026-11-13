@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import type {
   ConfigOrigin, ImportJob, ImportProposalChanges, ImportProposalGroup, ImportProposalStatus,
-  ProposalCalculation, ProposalInterpretationView, ProposalRule, ProposalSupportingContent,
+  ProposalCalculation, ProposalInterpretationView, ProposalRule,
 } from "@/api/contracts";
 import { updateImportProposal } from "@/api/imports";
 import DrawerPanel from "@/components/DrawerPanel.vue";
@@ -18,7 +18,7 @@ import { formatBusinessValue, periodScopeLabel, statementScopeLabel, valueTypeLa
 const props = defineProps<{ job: ImportJob; readonly: boolean }>();
 const emit = defineEmits<{ saved: [job: ImportJob]; busy: [value: boolean] }>();
 const { pending, failure, run, clear } = useRequestRunner();
-const activeGroup = ref<ImportProposalGroup | "supporting_content">("rules");
+const activeGroup = ref<ImportProposalGroup>("rules");
 const savingRef = ref<string | null>(null);
 const editing = ref<ProposalRow | null>(null);
 const editRevision = ref(0);
@@ -159,20 +159,14 @@ const calculationRows = computed(() => rowsOf("calculations"));
 const sectionRows = computed(() => rowsOf("report_sections"));
 /** 第二轮逐项核对后仍未建立绑定的输入；不改变启用状态，只暴露配置不完整。 */
 const bindingGaps = computed(() => props.job.proposals?.binding_gaps ?? []);
-const supportingContent = computed(() => props.job.proposals?.supporting_content);
+const relatedSupportingContent = computed(() => {
+  const row = editing.value;
+  if (!row) return [];
+  return (props.job.proposals?.supporting_content ?? []).filter((item) =>
+    item.targets.some((target) => target.group === row.group && target.candidate_ref === row.ref));
+});
 const incompleteRows = computed(() => [...materialRows.value, ...fieldRows.value, ...ruleRows.value,
   ...calculationRows.value, ...sectionRows.value].filter((row) => row.interpretation?.missing_details.length));
-
-function supportingTargetLabel(target: ProposalSupportingContent["targets"][number]): string {
-  const row = rowsOf(target.group).find((item) => item.ref === target.candidate_ref);
-  return row ? `${groupLabels[target.group]} · ${row.name}${row.context ? `（${row.context}）` : ''}` : "关联对象已不存在";
-}
-function openSupportingTarget(target: ProposalSupportingContent["targets"][number]): void {
-  const row = rowsOf(target.group).find((item) => item.ref === target.candidate_ref);
-  if (!row) { ElMessage.error("关联对象已不存在，请重新读取解析记录"); return; }
-  if (pending.value) return;
-  openEditor(row);
-}
 
 /** 材料筛选按名称匹配：表格里的「适用材料 / 所属材料」显示的就是名称。 */
 const materialOptions = computed(() => (props.job.proposals?.materials ?? [])
@@ -446,10 +440,6 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           </el-table-column>
         </PlanConfigList>
       </el-tab-pane>
-      <el-tab-pane :label="supportingContent == null ? '辅助资料（未记录）' : `辅助资料（${supportingContent.length}）`" name="supporting_content" lazy>
-        <el-alert v-if="supportingContent == null" type="info" :closable="false" show-icon title="此历史记录未保存辅助资料的识别与归属，无法据此判断是否存在材料说明、字典或映射。" />
-        <ImportSupportingContentPanel v-else :items="supportingContent" :target-label="supportingTargetLabel" @select="openSupportingTarget" />
-      </el-tab-pane>
     </el-tabs>
 
     <DrawerPanel :open="Boolean(editing)" :title="`${readonly ? '查看' : '编辑'}${editing ? groupLabels[editing.group] : ''}`" size="min(640px, 100vw)" @close="editing = null">
@@ -483,6 +473,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
         <el-descriptions v-if="editing.details.length" :column="2" direction="vertical" size="small" border class="proposal-context">
           <el-descriptions-item v-for="detail in editing.details" :key="detail.label" :label="detail.label">{{ detail.value }}</el-descriptions-item>
         </el-descriptions>
+        <ImportSupportingContentPanel :key="`${editing.group}:${editing.ref}`" :origin="editing.origin" :items="relatedSupportingContent" />
       </template>
       <template #footer><el-button @click="editing = null">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="pending" @click="saveEditor">保存修改</el-button></template>
     </DrawerPanel>

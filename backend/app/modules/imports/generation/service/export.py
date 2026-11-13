@@ -15,14 +15,21 @@ from app.common.exceptions import BusinessError
 from app.core.transactions import after_rollback
 from app.domain.identity import public_no
 from app.domain.rulebook_generation import (
-    GENERATION_DOCUMENT_SCHEMA_VERSION, GENERATION_EXPORT_FORMAT_VERSION, GenerationDocument, GenerationSource,
-    GenerationEntry, GenerationSheet,
-    business_code_column, document_has_business_content, is_business_code_column, normalize_business_codes,
+    GENERATION_DOCUMENT_SCHEMA_VERSION,
+    GENERATION_EXPORT_FORMAT_VERSION,
+    GenerationDocument,
+    GenerationEntry,
+    GenerationSheet,
+    GenerationSource,
+    business_code_column,
+    document_has_business_content,
+    is_identity_column,
+    normalize_business_codes,
 )
 from app.modules.imports.generation import crud
 from app.modules.imports.generation.model import RulebookGenerationExport
-from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.generation.service.history import GenerationHistoryService
+from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.generation.service.workbook_layout import GenerationWorkbookLayout
 from app.modules.imports.job.service.workbook import ImportsJobWorkbookService
 from app.services.shared.storage import resolve_storage_path
@@ -75,8 +82,8 @@ def _relation_text(sheet: GenerationSheet, row: GenerationEntry) -> str:
     columns = []
     for column in sheet.columns:
         name = re.sub(r"\s+", "", column.name).casefold()
-        if not column.is_business_code and not is_business_code_column(name) and (
-            any(word in name for word in ("关联", "适用材料", "所属材料", "依赖"))
+        if not is_identity_column(column) and column.code_role != "GROUP" and (
+            column.code_role == "REFERENCE" or any(word in name for word in ("关联", "适用材料", "所属材料", "依赖"))
             or (any(word in name for word in ("规则", "材料")) and any(word in name for word in ("id", "编号")))
         ):
             columns.append(row.cells[column.column_id])
@@ -279,8 +286,22 @@ class GenerationExportService:
             return candidate
 
         all_rows = {row.row_id: row for sheet in document.sheets for row in sheet.rows}
-        aliases = {row.row_id: {row.business_code, *(row.cells[column.column_id].strip() for column in sheet.columns
-                   if column.is_business_code or is_business_code_column(column.name))} for sheet in document.sheets for row in sheet.rows}
+        row_names = {
+            row.row_id: f"{sheet.name} · " + (" · ".join(
+                row.cells[column.column_id] for column in sheet.columns if row.cells[column.column_id].strip()
+            )[:160] or f"第{index}条")
+            for sheet in document.sheets for index, row in enumerate(sheet.rows, 1)
+        }
+        relation_labels = {row.row_id: (f"{sheet.name} · {row.business_code}" if sheet.business_code_scope == "SHEET" and row.business_code
+                                      else row.business_code or row_names[row.row_id])
+                           for sheet in document.sheets for row in sheet.rows}
+        # 表内编号须连同表名匹配，不能让另一张表的同号引用遮掉真实关联。
+        aliases = {
+            row.row_id: ({relation_labels[row.row_id]} if sheet.business_code_scope == "SHEET" else {
+                row.business_code, *(row.cells[column.column_id].strip() for column in sheet.columns
+                                     if is_identity_column(column)),
+            }) for sheet in document.sheets for row in sheet.rows
+        }
         relations = {row.row_id: list(row.related_row_ids) for row in all_rows.values()}
         for row in all_rows.values():
             if row.entry_kind == "MATERIAL":
@@ -290,7 +311,6 @@ class GenerationExportService:
         missing_relations = {row.row_id: [ref for ref in relations[row.row_id]
                              if not any(_mentions_code(_relation_text(sheet, row), code) for code in aliases[ref])]
                              for sheet in document.sheets for row in sheet.rows}
-        row_names = {}
         for sheet in document.sheets:
             headings = {column.name for column in sheet.columns}
 
@@ -310,11 +330,9 @@ class GenerationExportService:
             has_codes = business_code_column(sheet) is None and any(row.business_code for row in sheet.rows)
             has_relations = any(missing_relations[row.row_id] for row in sheet.rows)
             has_notes = any(_export_note(row) for row in sheet.rows)
-            for index, row in enumerate(sheet.rows, 1):
+            for row in sheet.rows:
                 values = [row.cells[column.column_id] for column in sheet.columns]
-                label = " · ".join([value for value in values if value.strip()][:2]) or f"第{index}条"
-                row_names[row.row_id] = f"{sheet.name} · {label}"
-                related = "；".join(all_rows[ref].business_code for ref in missing_relations[row.row_id])
+                related = "；".join(relation_labels[ref] for ref in missing_relations[row.row_id])
                 rows.append([*([row.business_code] if has_codes else []), *values,
                              *([related] if has_relations else []),
                              *([_source_text(row.source.model_copy(update={"note": _export_note(row)})) if _export_note(row) else ""] if has_notes else [])])
@@ -337,9 +355,9 @@ class GenerationExportService:
                 label = " · ".join([material.cells[column.column_id] for column in sheet.columns
                                     if material.cells[column.column_id].strip()][:2])
                 catalog.append([
-                    material.business_code, label,
-                    "；".join(row.business_code for row in related if row.entry_kind == "RULE"),
-                    "；".join(row.business_code for row in related if row.entry_kind != "RULE"),
+                    relation_labels[material.row_id], label,
+                    "；".join(relation_labels[row.row_id] for row in related if row.entry_kind == "RULE"),
+                    "；".join(relation_labels[row.row_id] for row in related if row.entry_kind != "RULE"),
                     _source_text(material.source),
                 ])
             layout.add_sheet(wb, auxiliary_name("材料目录"), ["材料编号", "材料说明", "关联业务规则", "关联其他内容", "依据"], catalog,
