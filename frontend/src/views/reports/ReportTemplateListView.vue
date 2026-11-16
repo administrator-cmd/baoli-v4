@@ -315,7 +315,7 @@ onUnmounted(() => {
           <el-tag v-else :type="statusType(row)" effect="light">{{ statusLabel(row) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="更新时间" width="190">
+      <el-table-column label="更新时间" width="200">
         <template #default="{ row }">{{ formatDate(row.updated_at) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="300" class-name="table-actions" fixed="right">

@@ -43,8 +43,7 @@ class RiskRowResponse(BaseModel):
     status: str
     message: str | None
     suggestion: Any
-    source_rule_key: str | None
-    source_rule_name: str | None
+    source_rules: list[dict[str, Any]] = Field(default_factory=list)
     result_id: int
     created_at: datetime
 

@@ -27,7 +27,7 @@ description: baoli-v4 全栈开发指南，覆盖 FastAPI 后端分层、Vue 前
 | `script/`、`tmp/`、`output/` | 长期维护脚本、临时脚本、本地验收产物；后两者不入库 |
 | `data/`、`logs/backend.log` | 本地业务文件与后端滚动日志，不入库 |
 
-准确版本以 [后端依赖](backend/requirements.txt)、[开发依赖](backend/requirements-dev.txt)、[前端依赖与脚本](frontend/package.json) 为准。
+准确版本以 [后端依赖](backend/requirements.txt)、[前端依赖与脚本](frontend/package.json) 为准；后端运行依赖与开发工具统一维护。
 
 ### 后端业务入口
 
@@ -69,7 +69,7 @@ description: baoli-v4 全栈开发指南，覆盖 FastAPI 后端分层、Vue 前
 
 ```powershell
 conda activate dd
-python -m pip install -r backend/requirements-dev.txt
+python -m pip install -r backend/requirements.txt
 cd backend
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
@@ -124,7 +124,7 @@ Vite 默认开发端口为 5173，实际以终端输出为准；`/api` 代理到
 
 ## 4. 前端页面与交互约定
 
-- API 放 `api/<业务>.ts`，类型放 `api/contracts/<业务>.ts`；复用 `request<T>`，其返回值已经是信封中的 `data`。下载用 `requestBlob` 等已有封装，不能把错误 JSON 保存成文件。
+- API 放 `api/<业务>.ts`，类型放 `api/contracts/<业务>.ts`；请求统一使用 `api/http.ts` 的 Axios 实例及 `request<T>`，返回值已经是信封中的 `data`。参数使用 Axios 配置，`data` 直接传对象或 `FormData`，不手动 `JSON.stringify` 或为表单指定 Content-Type；上传进度复用 `uploadWithProgress`。下载用 `requestBlob` 等已有封装，不能把错误 JSON 保存成文件。
 - 服务端返回的任务、节点、字段统一使用 `AuditTask/AuditNode/AuditField`，不在 API 文件中追加平行 View 类型。请求参数也在契约目录声明；纯页面派生状态留在组件或 composable。
 - Vue API 显式 import，沿用 `<script setup lang="ts">` 与 `@/` 别名；组件与类型从现有实现复用，不假定有自动导入、动态菜单或其他项目的 CRUD 套件。
 - 新页面核对 `router/index.ts` 的 `meta.title/group/menu`；需要菜单入口时同步 `AppShell.vue`，详情页归属现有菜单。

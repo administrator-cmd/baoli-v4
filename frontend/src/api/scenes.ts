@@ -74,8 +74,7 @@ export function getScene(scenarioCode: string): Promise<ScenarioDetail> {
 export function updateScene(scenarioCode: string, payload: ScenarioPayload): Promise<ScenarioDetail> {
   return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -83,8 +82,7 @@ export function updateScene(scenarioCode: string, payload: ScenarioPayload): Pro
 export function setSceneEnabled(scenarioCode: string, enabled: boolean): Promise<ScenarioDetail> {
   return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}/enabled`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    data: { enabled },
   });
 }
 
@@ -102,8 +100,7 @@ export function createScene(payload: {
 }): Promise<ScenarioDetail> {
   return request<ScenarioDetail>("/scenarios", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -127,8 +124,7 @@ export interface DraftMaterialPayload {
 export function createDraftMaterial(scenarioCode: string, payload: DraftMaterialPayload): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/materials`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -136,7 +132,7 @@ export function createDraftMaterial(scenarioCode: string, payload: DraftMaterial
 export function updateDraftMaterial(scenarioCode: string, materialKey: string, payload: Partial<DraftMaterialPayload>): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(
     `/scenarios/${encodeURIComponent(scenarioCode)}/draft/materials/${encodeURIComponent(materialKey)}`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    { method: "PUT", data: payload },
   );
 }
 
@@ -175,8 +171,7 @@ export interface DraftFieldPayload {
 export function createDraftField(scenarioCode: string, payload: DraftFieldPayload): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/fields`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -184,7 +179,7 @@ export function createDraftField(scenarioCode: string, payload: DraftFieldPayloa
 export function updateDraftField(scenarioCode: string, fieldKey: string, payload: Partial<DraftFieldPayload>): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(
     `/scenarios/${encodeURIComponent(scenarioCode)}/draft/fields/${encodeURIComponent(fieldKey)}`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    { method: "PUT", data: payload },
   );
 }
 
@@ -222,8 +217,7 @@ export interface DraftRulePayload {
 export function createDraftRule(scenarioCode: string, payload: DraftRulePayload): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/rules`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -231,7 +225,7 @@ export function createDraftRule(scenarioCode: string, payload: DraftRulePayload)
 export function updateDraftRule(scenarioCode: string, ruleKey: string, payload: DraftRulePayload): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(
     `/scenarios/${encodeURIComponent(scenarioCode)}/draft/rules/${encodeURIComponent(ruleKey)}`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    { method: "PUT", data: payload },
   );
 }
 
@@ -276,13 +270,13 @@ export interface DraftCalculationMutation {
 
 export function createDraftCalculation(scenarioCode: string, payload: DraftCalculationPayload): Promise<DraftCalculationMutation> {
   return request<DraftCalculationMutation>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/calculations`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    method: "POST", data: payload,
   });
 }
 
 export function updateDraftCalculation(scenarioCode: string, ruleCode: string, payload: DraftCalculationPayload): Promise<DraftCalculationMutation> {
   return request<DraftCalculationMutation>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/calculations/${encodeURIComponent(ruleCode)}`, {
-    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    method: "PUT", data: payload,
   });
 }
 
@@ -315,8 +309,7 @@ export interface DraftSectionPayload {
 export function createDraftSection(scenarioCode: string, payload: DraftSectionPayload): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/sections`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -324,7 +317,7 @@ export function createDraftSection(scenarioCode: string, payload: DraftSectionPa
 export function updateDraftSection(scenarioCode: string, sectionKey: string, payload: Partial<DraftSectionPayload>): Promise<ScenarioDraftView> {
   return request<ScenarioDraftView>(
     `/scenarios/${encodeURIComponent(scenarioCode)}/draft/sections/${encodeURIComponent(sectionKey)}`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    { method: "PUT", data: payload },
   );
 }
 
@@ -346,8 +339,7 @@ export function publishSceneDraft(
 ): Promise<ScenarioPublishResult> {
   return request<ScenarioPublishResult>(`/scenarios/${encodeURIComponent(scenarioCode)}/draft/publish`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 

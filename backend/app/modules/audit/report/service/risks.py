@@ -76,8 +76,7 @@ class AuditReportRisksService:
                     "status": result.status,
                     "message": result.message,
                     "suggestion": data.get("action"),
-                    "source_rule_key": data.get("source_rule_key"),
-                    "source_rule_name": data.get("source_rule_name"),
+                    "source_rules": data.get("source_rules", []),
                     "result_id": row.id,
                     "created_at": row.created_at,
                 }

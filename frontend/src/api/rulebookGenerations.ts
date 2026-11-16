@@ -48,8 +48,7 @@ export function generationSourceFileUrl(jobNo: string): string {
 export function startGeneration(jobNo: string, idempotencyKey: string): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/rulebook-generations/${encodeURIComponent(jobNo)}/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    data: { idempotency_key: idempotencyKey },
   });
 }
 
@@ -57,8 +56,7 @@ export function startGeneration(jobNo: string, idempotencyKey: string): Promise<
 export function retryGeneration(jobNo: string, idempotencyKey: string): Promise<GenerationRetryResult> {
   return request<GenerationRetryResult>(`/rulebook-generations/${encodeURIComponent(jobNo)}/retry`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    data: { idempotency_key: idempotencyKey },
   });
 }
 
@@ -66,8 +64,8 @@ export function sendGenerationMessage(jobNo: string, input: {
   message: string; expectedRevision: number; idempotencyKey: string; issueId?: string;
 }): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/rulebook-generations/${encodeURIComponent(jobNo)}/messages`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: input.message, expected_revision: input.expectedRevision, idempotency_key: input.idempotencyKey, issue_id: input.issueId }),
+    method: "POST",
+    data: { message: input.message, expected_revision: input.expectedRevision, idempotency_key: input.idempotencyKey, issue_id: input.issueId },
   });
 }
 
@@ -81,8 +79,8 @@ export function listGenerationRevisions(jobNo: string): Promise<GenerationRevisi
 
 export function restoreGenerationRevision(jobNo: string, expectedRevision: number, targetRevision: number): Promise<GenerationJob> {
   return request<GenerationJob>(`/rulebook-generations/${encodeURIComponent(jobNo)}/restore`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_revision: expectedRevision, target_revision: targetRevision }),
+    method: "POST",
+    data: { expected_revision: expectedRevision, target_revision: targetRevision },
   });
 }
 
@@ -92,8 +90,7 @@ export function saveGenerationDocument(
 ): Promise<GenerationJob> {
   return request<GenerationJob>(`/rulebook-generations/${encodeURIComponent(jobNo)}/document`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_revision: expectedRevision, document }),
+    data: { expected_revision: expectedRevision, document },
   });
 }
 
@@ -101,8 +98,7 @@ export function saveGenerationDocument(
 export function createGenerationExport(jobNo: string, expectedRevision: number): Promise<GenerationExport> {
   return request<GenerationExport>(`/rulebook-generations/${encodeURIComponent(jobNo)}/exports`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_revision: expectedRevision }),
+    data: { expected_revision: expectedRevision },
   });
 }
 
@@ -148,11 +144,10 @@ export function importGenerationExport(
 ): Promise<GenerationImportResult> {
   return request<GenerationImportResult>(`/rulebook-generations/${encodeURIComponent(jobNo)}/imports`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    data: {
       export_no: input.exportNo,
       scenario_code: input.scenarioCode,
       idempotency_key: input.idempotencyKey,
-    }),
+    },
   });
 }

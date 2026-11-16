@@ -182,8 +182,8 @@ onMounted(async () => {
           <el-button link type="primary" class="table-link" @click="detail = row">{{ row.name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="来源规则" min-width="112" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.source_rule_name || "—" }}</template>
+      <el-table-column label="来源规则" min-width="220" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.source_rules.map((source) => source.rule_name).join("、") || "—" }}</template>
       </el-table-column>
       <el-table-column label="风险等级" width="140">
         <template #default="{ row }">
@@ -228,7 +228,7 @@ onMounted(async () => {
         <el-descriptions-item label="风险编号"><span class="mono">{{ detail.rule_code || "—" }}</span></el-descriptions-item>
         <el-descriptions-item label="任务">{{ detail.task_name }}</el-descriptions-item>
         <el-descriptions-item label="风险名称">{{ detail.name }}</el-descriptions-item>
-        <el-descriptions-item label="来源规则">{{ detail.source_rule_name || "未记录来源规则" }}</el-descriptions-item>
+        <el-descriptions-item label="来源规则">{{ detail.source_rules.map((source) => source.rule_name).join("、") || "未记录来源规则" }}</el-descriptions-item>
         <el-descriptions-item label="风险等级">{{ detail.risk_level || "—" }}</el-descriptions-item>
         <el-descriptions-item label="当前状态">
           <StatusBadge domain="risk" :status="detail.status" />

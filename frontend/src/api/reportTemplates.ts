@@ -26,15 +26,13 @@ export function uploadReportTemplate(
 export function reanalyzeReportTemplate(templateNo: string, idempotencyKey: string): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/report-templates/${encodeURIComponent(templateNo)}/reanalyze`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    data: { idempotency_key: idempotencyKey },
   });
 }
 
 export function updateReportTemplate(templateNo: string, payload: { name: string; style_profile?: ReportStyleProfile | null }): Promise<ReportTemplate> {
   return request<ReportTemplate>(`/report-templates/${encodeURIComponent(templateNo)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }

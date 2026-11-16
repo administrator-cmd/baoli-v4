@@ -146,8 +146,13 @@ export interface RiskResultRow {
   status: string;
   message: string;
   suggestion: string | null;
-  source_rule_key: string | null;
-  source_rule_name: string | null;
+  source_rules: Array<{
+    rule_key: string;
+    rule_code: string | null;
+    rule_name: string;
+    status: string;
+    message: string;
+  }>;
   result_id: number;
   created_at: string;
 }

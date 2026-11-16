@@ -18,6 +18,7 @@ from app.constants.status import (
 )
 from app.domain.audit import fact_projection
 from app.domain.tools import tool_catalog
+from app.domain.configuration.rule_library import is_risk_rule
 from app.domain.configuration.execution_mode import (
     MODE_AGGREGATE,
     MODE_CALCULATE,
@@ -384,12 +385,18 @@ class AuditRuleAgentService:
         """一条规则实例的初始消息历史。只在 `prepare_agent_context` 里生成一次。"""
         schema = VERDICT_SCHEMA
         guidance = ""
+        if is_risk_rule(rule):
+            guidance = (
+                "\n本条是风险判断：风险触发条件不成立时 status 必须为 PASSED（未命中风险）；"
+                "只有规则明确限定的业务范围不适用于本次任务时才用 NOT_APPLICABLE；"
+                "来源数据不足或触发条件无法判断时用 EVIDENCE_INSUFFICIENT。"
+            )
         if rule.get("material_precheck"):
             from app.domain.materials.material_precheck import MaterialQualityResults
             quality_schema = MaterialQualityResults.model_json_schema()
             schema = {**schema, "properties": {**schema["properties"], **quality_schema["properties"]},
                       "$defs": quality_schema["$defs"], "required": [*schema["required"], "material_quality"]}
-            guidance = (
+            guidance += (
                 "\n这是原文件质量前置检查，只能调用所提供的原文件质量工具。阈值、格式及合格要求均取自本条已发布规则，不能补默认标准。"
                 "必须根据真实工具结果逐份判断，并在 material_quality 中完整返回下方允许材料的结论：material_key、status、message、tool_call_ids。"
                 "tool_call_ids 必须同时在顶层 evidence 引用，且工具逐份结果含有对应材料。多项检查的条件关系由你按规则理解，不把一个文件的异常扩散到其他文件。"

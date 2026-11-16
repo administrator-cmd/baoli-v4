@@ -102,7 +102,7 @@ export function createImportJob(file: File, scenarioCode: string): Promise<Impor
   const formData = new FormData();
   formData.append("file", file);
   formData.append("scenario_code", scenarioCode);
-  return request<ImportJob>("/import-jobs", { method: "POST", body: formData });
+  return request<ImportJob>("/import-jobs", { method: "POST", data: formData });
 }
 
 /** 导入作业详情：解析配置与修订号。 */
@@ -117,8 +117,7 @@ export function updateImportProposal(
 ): Promise<ImportJob> {
   return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/proposals/${group}/${encodeURIComponent(candidateRef)}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_job_revision: expectedJobRevision, changes }),
+    data: { expected_job_revision: expectedJobRevision, changes },
   });
 }
 
@@ -133,8 +132,7 @@ export function startImportConversion(
 ): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/import-jobs/${encodeURIComponent(jobNo)}/retry`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idempotency_key: idempotencyKey, mode }),
+    data: { idempotency_key: idempotencyKey, mode },
   });
 }
 
@@ -147,10 +145,9 @@ export function applyImportToDraft(
 ): Promise<ImportJob> {
   return request<ImportJob>(`/import-jobs/${encodeURIComponent(jobNo)}/apply-draft`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    data: {
       expected_job_revision: expectedJobRevision,
       expected_scene_revision: expectedSceneRevision,
-    }),
+    },
   });
 }

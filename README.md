@@ -53,9 +53,11 @@ npm run dev
 
 后端按实体组织在 `app/modules/<业务>/<实体>/`，每个实体包含 controller、dto、schema、model、crud 和 service；数据库操作只写在 crud，service 负责业务编排。共用能力在 `app/services/shared/`，路由汇总在 `app/api/routes.py`。代码导航与职责说明见[后端分层约定](docs/后端分层约定.md)。
 
-编辑器基础格式由 `.editorconfig` 统一。Python 使用根目录 `pyproject.toml` 中的 Ruff 配置，开发依赖位于 `backend/requirements-dev.txt`；前端使用 ESLint、Prettier 和现有 TypeScript 配置。前端新增 `npm run lint`、`npm run typecheck`、`npm run format:check` 和 `npm run format` 命令。Python 对应 `ruff check backend/app`、`ruff format --check backend/app` 和 `ruff format backend/app`。
+编辑器基础格式由 `.editorconfig` 统一。Python 使用根目录 `pyproject.toml` 中的 Ruff 配置，Ruff 与其他后端依赖统一列在 `backend/requirements.txt`；前端使用 ESLint、Prettier 和现有 TypeScript 配置。前端新增 `npm run lint`、`npm run typecheck`、`npm run format:check` 和 `npm run format` 命令。Python 对应 `ruff check backend/app`、`ruff format --check backend/app` 和 `ruff format backend/app`。
 
 这些命令按需手动执行，未加入启动流程或自动修改提交的钩子；配置接入不表示历史代码已经全部符合规则，已有检查范围见[当前状态与问题](docs/当前状态与问题.md)。
+
+前端请求统一通过 `frontend/src/api/http.ts` 的 Axios 实例发送，业务接口用 `data` 传入对象或 `FormData`，由 Axios 序列化并设置请求内容类型。普通请求与文件下载超时为 60 秒，带进度上传为 300 秒；统一解析响应信封和 `ApiError`，下载错误 JSON 不作为文件保存。超时或取消后仍按原有后台操作机制查询真实状态，不自动重发写请求。
 
 任务详情页的结果读取与字段核对分别由 `useAuditTaskResults`、`useAuditFieldReview` 维护。前者负责风险、报告与执行记录的按需加载及重置，后者负责保存、确认和受理结果未知时的查询；页面负责展示与路由协调。切换任务或组件卸载后，旧请求不得回写新对象；同一结果的重复读取只采纳最新响应。
 

@@ -56,8 +56,7 @@ export function createPlan(payload: {
 }): Promise<PlanSelection> {
   return request<PlanSelection>("/plans", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -68,8 +67,7 @@ export function updatePlan(
 ): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -77,8 +75,7 @@ export function updatePlan(
 export function setPlanEnabled(planCode: string, enabled: boolean): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/enabled`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    data: { enabled },
   });
 }
 
@@ -101,8 +98,7 @@ export function getPlanConfig(planCode: string): Promise<PlanConfig> {
 export function updatePlanConfig(planCode: string, payload: PlanConfigPayload): Promise<PlanConfig> {
   return request<PlanConfig>(`/plans/${encodeURIComponent(planCode)}/config`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 
@@ -121,8 +117,7 @@ export function createTaskFromPlan(
 ): Promise<TaskCreatedResult> {
   return request<TaskCreatedResult>(`/plans/${encodeURIComponent(planCode)}/tasks`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 

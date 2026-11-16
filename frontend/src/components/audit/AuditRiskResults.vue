@@ -101,7 +101,7 @@ function quoteTitle(item: RiskItem): string {
 
 function quoteNote(item: RiskItem): string {
   if (item.status === "PASSED") return "以下为判断风险未触发时检查到的原文，不构成风险结论。";
-  if (item.status === "NOT_APPLICABLE") return "风险条件不成立，以下片段仅说明检查范围，不作为风险依据。";
+  if (item.status === "NOT_APPLICABLE") return "本条风险规则不适用于当前业务范围，以下片段不作为风险结论依据。";
   if (item.status === "EVIDENCE_INSUFFICIENT" || item.status === "PENDING_REVIEW") {
     return "以下为系统读取到的原文，但不足以判定风险。";
   }
@@ -109,7 +109,7 @@ function quoteNote(item: RiskItem): string {
 }
 
 function noQuoteText(item: RiskItem): string {
-  return item.status === "NOT_APPLICABLE" ? "条件不成立，无风险原文" : "未记录引用原文";
+  return item.status === "NOT_APPLICABLE" ? "本次不适用，无风险依据" : "未记录引用原文";
 }
 const sourceRules = computed(() => (detailRisk.value?.details?.source_rules ?? []) as Array<{ rule_name: string; status: string }>);
 

@@ -30,8 +30,7 @@ export function listAuditTasksPage(query: TaskQuery): Promise<Paged<AuditTaskRow
 export function updateAuditTask(taskNo: string, payload: AuditTaskUpdateRequest): Promise<AuditTask> {
   return request<AuditTask>(`/audit-tasks/${encodeURIComponent(taskNo)}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 /** 永久删除任务及关联记录、文件。 */
@@ -94,8 +93,7 @@ export function executeAuditNode(
 ): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/audit-tasks/${encodeURIComponent(taskNo)}/execute`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ node_code: nodeCode, idempotency_key: idempotencyKey, input_revision: inputRevision }),
+    data: { node_code: nodeCode, idempotency_key: idempotencyKey, input_revision: inputRevision },
   });
 }
 /** 从中断的执行批次继续：已完成的规则保留，只执行没有结果的规则。 */
@@ -106,8 +104,7 @@ export function resumeAuditTask(
 ): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/audit-tasks/${encodeURIComponent(taskNo)}/resume`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idempotency_key: idempotencyKey, input_revision: inputRevision }),
+    data: { idempotency_key: idempotencyKey, input_revision: inputRevision },
   });
 }
 /**
@@ -117,8 +114,7 @@ export function resumeAuditTask(
 export function submitFieldCorrections(taskNo: string, payload: FieldCorrectionRequest): Promise<FieldCorrectionResponse> {
   return request<FieldCorrectionResponse>(`/audit-tasks/${encodeURIComponent(taskNo)}/field-corrections`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 /**
@@ -131,8 +127,7 @@ export function saveFieldReview(
 ): Promise<FieldReviewSaveResult> {
   return request<FieldReviewSaveResult>(`/audit-tasks/${encodeURIComponent(taskNo)}/field-review/save`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 /**
@@ -145,8 +140,7 @@ export function confirmFieldReview(
 ): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/audit-tasks/${encodeURIComponent(taskNo)}/field-review/confirm`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    data: payload,
   });
 }
 /** 只读查询某份材料的 OCR 处理状态；用于「作业过期 / 状态未知」时核对真实情况。 */
@@ -175,8 +169,7 @@ export function retryDocumentOcr(
     `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/ocr/retry`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      data: payload,
     },
   );
 }
@@ -189,7 +182,7 @@ export function retryDocumentArtifact(
 ): Promise<OperationAccepted> {
   return request<OperationAccepted>(
     `/audit-tasks/${encodeURIComponent(taskNo)}/documents/${encodeURIComponent(documentNo)}/artifacts/${encodeURIComponent(artifactType)}/retry`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    { method: "POST", data: payload },
   );
 }
 

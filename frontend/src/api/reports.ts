@@ -29,8 +29,7 @@ export function getReport(reportNo: string): Promise<ReportDetail> {
 export function updateReportRemark(reportNo: string, remark: string | null): Promise<ReportDetail> {
   return request<ReportDetail>(`/reports/${encodeURIComponent(reportNo)}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ remark }),
+    data: { remark },
   });
 }
 
