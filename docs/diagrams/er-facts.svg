@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>统一事实与计算结果</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">统一事实与计算结果</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">事实归属任务，可关联材料和执行批次；业务值保存在任务 CSV 中。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(395.2184 172.0) scale(1.36)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 482)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>node_execution-&gt;task_fact</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_task_fact_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M101.8,-283.38C117.22,-251.36 130.88,-223 130.88,-223 130.88,-223 148.02,-200.45 168.11,-174.03" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="175.88" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>task_document-&gt;task_fact</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_task_fact_material">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M230.88,-283.2C230.88,-250.42 230.88,-213.33 230.88,-180.56" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="275.88" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>audit_task-&gt;task_fact</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_task_fact_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M355.91,-283.38C342.64,-251.36 330.88,-223 330.88,-223 330.88,-223 313.73,-200.45 293.64,-174.03" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="375.57" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>node_execution</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-283 0,-464 117.75,-464 117.75,-283 0,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-422.25 1,-463 116.75,-463 116.75,-422.25 1,-422.25" />
+<ns0:text text-anchor="start" x="9" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行批次</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">node_execution</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">sequence_no</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-283 0,-464 117.75,-464 117.75,-283 0,-283" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>task_document</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="161.12,-283 161.12,-464 300.62,-464 300.62,-283 161.12,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="162.12,-422.25 162.12,-463 299.62,-463 299.62,-422.25 162.12,-422.25" />
+<ns0:text text-anchor="start" x="170.12" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">任务材料位</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_document</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">UK  document_no</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">material_key</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="161.12,-283 161.12,-464 300.62,-464 300.62,-283 161.12,-283" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="344.12,-283 344.12,-464 441.62,-464 441.62,-283 344.12,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="345.12,-422.25 345.12,-463 440.62,-463 440.62,-422.25 345.12,-422.25" />
+<ns0:text text-anchor="start" x="353.12" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="344.12,-283 344.12,-464 441.62,-464 441.62,-283 344.12,-283" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>task_fact</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="167.88,0 167.88,-181 293.88,-181 293.88,0 167.88,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="168.88,-139.25 168.88,-180 292.88,-180 292.88,-139.25 168.88,-139.25" />
+<ns0:text text-anchor="start" x="176.88" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">统一事实索引</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_fact</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">fact_code</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">fact_kind</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="167.88,0 167.88,-181 293.88,-181 293.88,0 167.88,0" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg>

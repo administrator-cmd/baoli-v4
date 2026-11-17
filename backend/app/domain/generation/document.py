@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 GENERATION_DOCUMENT_SCHEMA_VERSION = "rulebook_generation_v2"
-GENERATION_PROMPT_VERSION = "rulebook_generation_prompt_v10"
+GENERATION_PROMPT_VERSION = "rulebook_generation_prompt_v11"
 GENERATION_EXPORT_FORMAT_VERSION = "rulebook_generation_xlsx_v11"
 GENERATION_WORKBOOK_PROFILE = "rulebook_generation_v2"
 # UTF-8 每字符最多 4 字节，保证两个编制输入各自小于 MySQL TEXT 的字节上限。
@@ -287,10 +287,13 @@ def collect_requirement_inventory_problems(
 
 def requirement_identity_problems(
     inventory: GenerationRequirementInventory, document: GenerationDocument,
+    *, allow_content_repairs: bool = False,
 ) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
-    first = {item.requirement_id: item.model_dump(mode="json") for item in inventory.requirements}
-    second = {item.requirement_id: item.model_dump(mode="json") for item in document.requirements}
+    # 首轮补修可订正目录措辞与补充依据，身份、分类及主来源仍须与第一阶段一致。
+    exclude = {"text": True, "source": {"note": True, "origin": {"related_rows": True}}} if allow_content_repairs else None
+    first = {item.requirement_id: item.model_dump(mode="json", exclude=exclude) for item in inventory.requirements}
+    second = {item.requirement_id: item.model_dump(mode="json", exclude=exclude) for item in document.requirements}
     for reference in first.keys() | second.keys():
         if first.get(reference) != second.get(reference):
             _add(problems, reference, "requirement.changed_or_missing")

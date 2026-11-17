@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>场景、发布与方案</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">场景、发布与方案</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">场景身份与历史快照分离；方案来源和任务来源允许为空。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(48.0 188.70103092783506) scale(0.972327726532827)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 647)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>scenario_template-&gt;import_job</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_import_job_template">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M141.37,-165.65C193.16,-197.07 263.66,-239.83 315.8,-271.46" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="228.75" y="-247.37" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>scenario_template-&gt;scenario_draft</ns0:title>
+<ns0:g id="a_edge5"><ns0:a ns1:title="fk_scenario_draft_template">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M141.37,-116.22C199.5,-110.12 281.19,-101.56 334.05,-96.02" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="228.75" y="-116.58" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R05   1 : 0..1</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>scenario_version-&gt;scenario_version</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_scenario_version_base">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M673.44,-404.97C674.98,-429.41 684.75,-448 702.75,-448 720.75,-448 730.52,-429.41 732.06,-404.97" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="702.75" y="-453.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>scenario_version-&gt;scenario_node</ns0:title>
+<ns0:g id="a_edge4"><ns0:a ns1:title="fk_scenario_node_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M774.57,-366.17C827.25,-404.61 898.45,-456.56 948.86,-493.34" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="861.75" y="-465.3" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R04   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>scenario_version-&gt;audit_plan</ns0:title>
+<ns0:g id="a_edge6"><ns0:a ns1:title="fk_audit_plan_scenario_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M774.57,-314.5C829.28,-314.5 903.98,-314.5 954.61,-314.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="861.75" y="-320.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R06   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge9" class="edge">
+<ns0:title>scenario_version-&gt;audit_task</ns0:title>
+<ns0:g id="a_edge9"><ns0:a ns1:title="fk_audit_task_scenario_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M774.61,-276.9C846.97,-238.5 948.75,-184.5 948.75,-184.5 948.75,-184.5 1074.75,-184.5 1074.75,-184.5 1074.75,-184.5 1183.77,-248.41 1248.93,-286.61" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="1011.75" y="-190.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R09   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>import_job-&gt;scenario_version</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_scenario_version_import_job">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M459.38,-314.5C510.59,-314.5 579.56,-314.5 630.83,-314.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="545.25" y="-320.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   0..1 : 0..1</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>scenario_node-&gt;audit_task</ns0:title>
+<ns0:g id="a_edge7"><ns0:a ns1:title="fk_audit_task_current_node">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M1074.67,-489.62C1127.01,-448.3 1200.92,-389.95 1248.77,-352.18" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="1161.75" y="-458.8" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R07   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>audit_plan-&gt;audit_task</ns0:title>
+<ns0:g id="a_edge8"><ns0:a ns1:title="fk_audit_task_plan">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M1068.81,-314.5C1121.46,-314.5 1199.37,-314.5 1249.03,-314.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="1161.75" y="-320.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R08   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>scenario_template</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-33 0,-214 141.75,-214 141.75,-33 0,-33" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-172.25 1,-213 140.75,-213 140.75,-172.25 1,-172.25" />
+<ns0:text text-anchor="start" x="9" y="-188.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">场景</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-151.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_template</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-116.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-82.2" font-family="Microsoft YaHei" font-size="14.00">UK  scenario_code</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-47.45" font-family="Microsoft YaHei" font-size="14.00">scenario_name</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-33 0,-214 141.75,-214 141.75,-33 0,-33" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>scenario_version</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="630.75,-224 630.75,-405 774.75,-405 774.75,-224 630.75,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="631.75,-363.25 631.75,-404 773.75,-404 773.75,-363.25 631.75,-363.25" />
+<ns0:text text-anchor="start" x="639.75" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">已发布场景版本</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_version</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">scenario_code</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">version_no</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="630.75,-224 630.75,-405 774.75,-405 774.75,-224 630.75,-224" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>import_job</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="315.75,-224 315.75,-405 459.75,-405 459.75,-224 315.75,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="316.75,-363.25 316.75,-404 458.75,-404 458.75,-363.25 316.75,-363.25" />
+<ns0:text text-anchor="start" x="324.75" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">规则库导入作业</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">import_job</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  job_no</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="315.75,-224 315.75,-405 459.75,-405 459.75,-224 315.75,-224" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>scenario_node</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="948.75,-448 948.75,-629 1074.75,-629 1074.75,-448 948.75,-448" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="949.75,-587.25 949.75,-628 1073.75,-628 1073.75,-587.25 949.75,-587.25" />
+<ns0:text text-anchor="start" x="957.75" y="-603.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行容器节点</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-566.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_node</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-531.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-497.2" font-family="Microsoft YaHei" font-size="14.00">node_code</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-462.45" font-family="Microsoft YaHei" font-size="14.00">node_type</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="948.75,-448 948.75,-629 1074.75,-629 1074.75,-448 948.75,-448" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>audit_plan</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="954.38,-224 954.38,-405 1069.12,-405 1069.12,-224 954.38,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="955.38,-363.25 955.38,-404 1068.12,-404 1068.12,-363.25 955.38,-363.25" />
+<ns0:text text-anchor="start" x="963.38" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核方案</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_plan</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  plan_code</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">plan_name</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="954.38,-224 954.38,-405 1069.12,-405 1069.12,-224 954.38,-224" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>scenario_draft</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="333.75,0 333.75,-181 441.75,-181 441.75,0 333.75,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="334.75,-139.25 334.75,-180 440.75,-180 440.75,-139.25 334.75,-139.25" />
+<ns0:text text-anchor="start" x="342.75" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">场景草稿</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_draft</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">revision_no</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">config_json</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="333.75,0 333.75,-181 441.75,-181 441.75,0 333.75,0" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="1248.75,-224 1248.75,-405 1346.25,-405 1346.25,-224 1248.75,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1249.75,-363.25 1249.75,-404 1345.25,-404 1345.25,-363.25 1249.75,-363.25" />
+<ns0:text text-anchor="start" x="1257.75" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="1248.75,-224 1248.75,-405 1346.25,-405 1346.25,-224 1248.75,-224" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg>

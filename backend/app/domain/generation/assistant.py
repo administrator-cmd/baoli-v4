@@ -11,6 +11,7 @@ from app.domain.generation.document import (
     GenerationEntry,
     GenerationIssue,
     GenerationModel,
+    GenerationRowReference,
     GenerationSheet,
     business_code_column,
     normalize_business_codes,
@@ -103,6 +104,26 @@ class AssistantReply(GenerationModel):
     kind: Literal["EDIT", "EXPLAIN", "CLARIFY"]
     message: str = Field(min_length=1, max_length=1600)
     edits: list[Edit] = Field(default_factory=list)
+
+
+class GenerationRequirementRepair(GenerationModel):
+    requirement_id: str
+    text: str = Field(min_length=1, description="依据原文补正后的完整目录文字，不更改编号、分类或主来源。")
+    related_rows: list[GenerationRowReference] = Field(default_factory=list, description="需追加的真实跨表依据，保留已有来源。")
+    source_note: str | None = None
+
+
+class GenerationRowSourceRepair(GenerationModel):
+    row_id: str
+    related_rows: list[GenerationRowReference] = Field(default_factory=list, description="需追加的真实跨表依据，保留已有来源。")
+    requirement_ids: list[str] = Field(default_factory=list, description="需追加的已有目录项编号，保留已有引用。")
+
+
+class GenerationRepairReply(AssistantReply):
+    """仅用于首轮交付前的补修；后续对话仍使用不可改目录的 AssistantReply。"""
+
+    requirement_repairs: list[GenerationRequirementRepair] = Field(default_factory=list)
+    row_source_repairs: list[GenerationRowSourceRepair] = Field(default_factory=list)
 
 
 class ReviewTextRepair(GenerationModel):

@@ -9,14 +9,12 @@ from pydantic import ValidationError
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
-from app.domain.generation.assistant import AssistantReply, apply_edits
+from app.domain.generation.assistant import GenerationRepairReply, apply_edits
 from app.domain.generation.document import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_PROMPT_VERSION,
     GenerationContentReview,
     GenerationDocument,
-    GenerationIssue,
-    GenerationSource,
     GenerationRequirementInventory,
     collect_document_problems,
     collect_requirement_inventory_problems,
@@ -227,14 +225,14 @@ class GenerationLlmService:
         )
 
         def check_document(value):
-            return (requirement_identity_problems(inventory, value)
+            return (requirement_identity_problems(inventory, value, allow_content_repairs=True)
                 + collect_document_problems(value, source_rows, require_coverage=True, require_codes=True)
                 + source_record_coverage_problems([row for sheet in value.sheets for row in sheet.rows], source_records, require_code=True))
 
         document = self._repair_document(document_payload, document, check_document,
                                          operation_no=operation_no, reasoning_effort=reasoning_effort)
 
-        identity_problems = requirement_identity_problems(inventory, document)
+        identity_problems = requirement_identity_problems(inventory, document, allow_content_repairs=True)
         if identity_problems:
             self._raise_contract_error("document", identity_problems)
         document.code_counters = {}
@@ -259,33 +257,52 @@ class GenerationLlmService:
         return document.model_dump(mode="json")
 
     def _repair_document(self, payload, document, check, *, operation_no: str, reasoning_effort):
-        """局部补修合法候选稿，并保留仍未解决的复核意见。"""
+        """局部补修合法候选稿；只有内容复核通过才交付文档。"""
         problems = self._review_document(payload, document, operation_no=operation_no, attempt=0, reasoning_effort=reasoning_effort)
-        history, diagnostics, seen = [], [], set()
+        history, diagnostics = [], []
         for attempt in range(3):
             if not problems:
                 return document
-            signature = tuple(sorted(str(p.get("reference", "")) for p in problems))
-            if signature in seen:
-                break
-            seen.add(signature)
             history.append(problems)
             request = {**payload, "document": document.model_dump(mode="json"), "review_problems": problems,
                        "review_history": history, "previous_diagnostics": diagnostics,
-                       "response_schema": AssistantReply.model_json_schema()}
+                       "response_schema": GenerationRepairReply.model_json_schema()}
             response = call_json(request, GENERATION_REPAIR_PROMPT,
                                  idempotency_key=f"{operation_no}:document-repair:{attempt}", reasoning_effort=reasoning_effort)
             try:
-                reply = AssistantReply.model_validate(response)
+                reply = GenerationRepairReply.model_validate(response)
+                if reply.kind != "EDIT" and (reply.requirement_repairs or reply.row_source_repairs):
+                    raise BusinessError("ASSISTANT_INVALID_EDIT", "解释或提问不能同时补修目录或来源", status_code=502)
                 candidate = apply_edits(document, reply)
+                requirements = {item.requirement_id: item for item in candidate.requirements}
+                rows = {row.row_id: row for sheet in candidate.sheets for row in sheet.rows}
+                for repair in reply.requirement_repairs:
+                    if repair.requirement_id not in requirements:
+                        raise BusinessError("ASSISTANT_INVALID_EDIT", "目录补修引用了不存在的需求", status_code=502)
+                    target = requirements[repair.requirement_id]
+                    target.text = repair.text
+                    if repair.source_note is not None:
+                        target.source.note = repair.source_note
+                sources = [(requirements[repair.requirement_id].source, repair.related_rows)
+                           for repair in reply.requirement_repairs]
+                for repair in reply.row_source_repairs:
+                    if repair.row_id not in rows:
+                        raise BusinessError("ASSISTANT_INVALID_EDIT", "来源补修引用了不存在的条目", status_code=502)
+                    source = rows[repair.row_id].source
+                    source.requirement_ids.extend(ref for ref in repair.requirement_ids if ref not in source.requirement_ids)
+                    sources.append((source, repair.related_rows))
+                for source, related_rows in sources:
+                    if not related_rows:
+                        continue
+                    if source.origin is None:
+                        raise BusinessError("ASSISTANT_INVALID_EDIT", "追加跨表依据的条目缺少原始主来源", status_code=502)
+                    source.origin.related_rows.extend(ref for ref in related_rows if ref not in source.origin.related_rows)
                 invalid = check(candidate)
                 if invalid:
                     diagnostics = invalid[:50]
-                    seen.discard(signature)
                     continue
             except (ValidationError, BusinessError) as exc:
                 diagnostics = [{"kind": "repair.invalid", "reference": str(exc)}]
-                seen.discard(signature)
                 continue
             if candidate == document:
                 break
@@ -294,19 +311,8 @@ class GenerationLlmService:
             problems = self._review_document(payload, document, operation_no=operation_no,
                                              attempt=attempt + 1, reasoning_effort=reasoning_effort)
         if problems:
-            existing = {item.issue_id for item in document.issues}
-            for index, problem in enumerate(problems, 1):
-                issue_id = f"REVIEW-{index}"
-                while issue_id in existing:
-                    issue_id += "-1"
-                existing.add(issue_id)
-                document.issues.append(GenerationIssue(issue_id=issue_id, title="编制内容待核对",
-                    detail="自动复核仍有疑点，请结合原始资料核对：" + str(problem.get("reference", "")),
-                    source=GenerationSource(kind="DERIVED", note="自动复核疑点，原文位置未确定")))
-            invalid = check(document)
-            if invalid:
-                self._raise_contract_error("document", invalid)
-            logger.warning("编制保留复核疑点 operation_no=%s problems=%s", operation_no, problems)
+            logger.error("编制内容复核未通过 operation_no=%s problems=%s diagnostics=%s", operation_no, problems, diagnostics)
+            self._raise_contract_error("document", problems)
         return document
 
     def _review_document(self, payload, document, *, operation_no: str, attempt: int, reasoning_effort):

@@ -183,7 +183,9 @@ onMounted(async () => {
         </template>
       </el-table-column>
       <el-table-column label="来源规则" min-width="220" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.source_rules.map((source) => source.rule_name).join("、") || "—" }}</template>
+        <template #default="{ row }">
+          {{ row.source_rules.map((source: RiskResultRow["source_rules"][number]) => source.rule_name).join("、") || "—" }}
+        </template>
       </el-table-column>
       <el-table-column label="风险等级" width="140">
         <template #default="{ row }">
@@ -236,7 +238,7 @@ onMounted(async () => {
         </el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
       </el-descriptions>
-      <div class="app-toolbar">
+      <div class="app-toolbar block-gap">
         <div class="app-toolbar__left">
           <el-button v-if="detail" type="primary" @click="openTask(detail)">进入任务风险页签</el-button>
         </div>

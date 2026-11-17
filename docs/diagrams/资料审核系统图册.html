@@ -1,0 +1,754 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>资料审核系统 · ER 与工作流</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f5f7fb;color:#15253c;font-family:"Microsoft YaHei",system-ui,sans-serif}header{padding:26px 34px;border-bottom:1px solid #dce3ed;background:white;display:flex;align-items:center;justify-content:space-between}header b{font-size:23px}header small{color:#627086;font-size:13px}.layout{display:grid;grid-template-columns:252px minmax(0,1fr);min-height:calc(100vh - 84px)}nav{padding:24px 16px;border-right:1px solid #dce3ed;background:#fff}nav p{font-size:12px;letter-spacing:2px;color:#627086;margin:0 12px 18px}nav button{display:flex;gap:12px;align-items:center;width:100%;text-align:left;background:none;border:0;border-radius:7px;color:#43526a;padding:14px 12px;margin:3px 0;cursor:pointer;font-size:14px;line-height:1.5}nav button span{font-size:11px;color:#8593a7}nav button[aria-selected=true]{background:#eaf1ff;color:#1d4ed8;font-weight:600}main{padding:22px 28px;min-width:0}.panel-head{display:flex;gap:20px;justify-content:space-between;align-items:center;font-size:13px;color:#627086;margin-bottom:18px}.panel-head p{margin:0}.panel-head a{white-space:nowrap;color:#2563eb;text-decoration:none}.canvas{background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:auto}.canvas>svg{display:block;width:100%;height:auto;min-width:800px}details{margin-top:18px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px;font-size:13px}summary{cursor:pointer;color:#334765;font-weight:600}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;margin-top:16px}th,td{padding:12px;text-align:left;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:1.7}th{color:#64748b}td:last-child{white-space:nowrap}.legend{font-size:12px;line-height:1.9;color:#6b7b90;padding:22px 12px}[hidden]{display:none!important}@media(max-width:850px){.layout{grid-template-columns:1fr}nav{display:flex;overflow:auto;padding:10px;gap:5px}nav p,.legend{display:none}nav button{min-width:180px;width:auto}main{padding:14px}header{padding:18px}header small{display:none}.panel-head{align-items:flex-start}.canvas>svg{min-width:1000px}}@media print{header,nav,.panel-head,details{display:none}.layout{display:block}main{padding:0}.canvas{border:0}section:not([hidden]){display:block}.canvas>svg{min-width:0}}
+</style></head><body><header><b>资料审核系统 · ER 与工作流</b><small>25 张物理表 / 36 组外键 / 当前源码 2026.11.16</small></header><div class="layout"><nav role="tablist" aria-label="选择图表"><p>数据结构与执行流程</p><button type="button" role="tab" id="tab-0" aria-controls="panel-0" aria-selected="true" data-page="0"><span>01</span>ER 总览</button><button type="button" role="tab" id="tab-1" aria-controls="panel-1" aria-selected="false" data-page="1"><span>02</span>场景、发布与方案</button><button type="button" role="tab" id="tab-2" aria-controls="panel-2" aria-selected="false" data-page="2"><span>03</span>任务材料与文件版本</button><button type="button" role="tab" id="tab-3" aria-controls="panel-3" aria-selected="false" data-page="3"><span>04</span>字段取值与人工记录</button><button type="button" role="tab" id="tab-4" aria-controls="panel-4" aria-selected="false" data-page="4"><span>05</span>统一事实与计算结果</button><button type="button" role="tab" id="tab-5" aria-controls="panel-5" aria-selected="false" data-page="5"><span>06</span>执行批次、规则结果与报告</button><button type="button" role="tab" id="tab-6" aria-controls="panel-6" aria-selected="false" data-page="6"><span>07</span>AI 规则库编制</button><button type="button" role="tab" id="tab-7" aria-controls="panel-7" aria-selected="false" data-page="7"><span>08</span>后台操作与报告模板</button><button type="button" role="tab" id="tab-8" aria-controls="panel-8" aria-selected="false" data-page="8"><span>09</span>业务全流程</button><button type="button" role="tab" id="tab-9" aria-controls="panel-9" aria-selected="false" data-page="9"><span>10</span>审核执行流程</button><button type="button" role="tab" id="tab-10" aria-controls="panel-10" aria-selected="false" data-page="10"><span>11</span>程序执行结构</button><div class="legend">ER 明细：只绘制真实外键。<br>总览与逻辑页：虚线为快照引用。<br>业务定义存 JSON，取值存 CSV。<br>SVG 可放大，文字保持清晰。</div></nav><main><section id="panel-0" role="tabpanel" aria-labelledby="tab-0" ><div class="panel-head"><p>先看三条主干，再按模块查看完整约束。</p><a href="资料审核系统ER图.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="920" viewBox="0 0 1440 920" role="img"><title>ER 总览：配置、执行与材料</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / 00</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">ER 总览：配置、执行与材料</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">主干关系只保留核心实体；完整 25 张表与 36 组外键在各模块明细中。</text><line x1="48" y1="871" x2="1392" y2="871" stroke="#e2e8f0"/><text x="48" y="897" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><rect x="48" y="165" width="404" height="650" rx="12" fill="#f7f9fc"/><text x="68" y="195" font-size="16" fill="#2563eb" font-weight="600" text-anchor="start">01  配置快照</text><rect x="518" y="165" width="404" height="650" rx="12" fill="#f7f9fc"/><text x="538" y="195" font-size="16" fill="#2563eb" font-weight="600" text-anchor="start">02  审核执行</text><rect x="988" y="165" width="404" height="650" rx="12" fill="#f7f9fc"/><text x="1008" y="195" font-size="16" fill="#2563eb" font-weight="600" text-anchor="start">03  材料版本</text><rect x="85" y="235" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="235" width="5" height="88" rx="2" fill="#2563eb"/><text x="105" y="267" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">场景</text><text x="105" y="294" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">scenario_template</text><rect x="85" y="420" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="420" width="5" height="88" rx="2" fill="#2563eb"/><text x="105" y="452" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">已发布场景版本</text><text x="105" y="479" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">scenario_version</text><rect x="85" y="605" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="605" width="5" height="88" rx="2" fill="#2563eb"/><text x="105" y="637" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">审核方案</text><text x="105" y="664" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">audit_plan</text><rect x="555" y="235" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="555" y="235" width="5" height="88" rx="2" fill="#0f766e"/><text x="575" y="267" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">审核任务</text><text x="575" y="294" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">audit_task</text><rect x="555" y="420" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="555" y="420" width="5" height="88" rx="2" fill="#0f766e"/><text x="575" y="452" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">执行批次</text><text x="575" y="479" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">node_execution</text><rect x="555" y="605" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="555" y="605" width="5" height="88" rx="2" fill="#0f766e"/><text x="575" y="637" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">规则执行结果</text><text x="575" y="664" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">rule_result</text><rect x="1025" y="235" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1025" y="235" width="5" height="88" rx="2" fill="#b45309"/><text x="1045" y="267" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">任务材料位</text><text x="1045" y="294" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">task_document</text><rect x="1025" y="420" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1025" y="420" width="5" height="88" rx="2" fill="#b45309"/><text x="1045" y="452" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">上传文件版本</text><text x="1045" y="479" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">document_upload</text><rect x="1025" y="605" width="330" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1025" y="605" width="5" height="88" rx="2" fill="#b45309"/><text x="1045" y="637" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">处理产物</text><text x="1045" y="664" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">stored_artifact</text><path d="M250,323 L250,420" fill="none" stroke="#5d6c80" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#arr)"/><rect x="180.0" y="358" width="140" height="23" rx="5" fill="white"/><text x="250" y="374" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">编号快照 · 无 FK</text><path d="M250,508 L250,605" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="195.0" y="541" width="110" height="23" rx="5" fill="white"/><text x="250" y="557" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">0..1 → 0..N</text><path d="M415,649 L477,649 L477,279 L555,279" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="441.0" y="445" width="72" height="23" rx="5" fill="white"/><text x="477" y="461" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">方案来源</text><path d="M720,323 L720,420" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="677.0" y="358" width="86" height="23" rx="5" fill="white"/><text x="720" y="374" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">1 → 0..N</text><path d="M720,508 L720,605" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="677.0" y="541" width="86" height="23" rx="5" fill="white"/><text x="720" y="557" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">1 → 0..N</text><path d="M885,279 L1025,279" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="912.0" y="252" width="86" height="23" rx="5" fill="white"/><text x="955" y="268" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">1 → 0..N</text><path d="M1190,323 L1190,420" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="1147.0" y="358" width="86" height="23" rx="5" fill="white"/><text x="1190" y="374" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">1 → 0..N</text><path d="M1190,508 L1190,605" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="1147.0" y="541" width="86" height="23" rx="5" fill="white"/><text x="1190" y="557" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">1 → 0..N</text><text x="85" y="750" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">草稿、导入与版本派生 → 场景明细</text><text x="555" y="750" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">字段、事实、核对、报告 → 执行明细</text><text x="1025" y="750" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">原件与处理产物均有版本归属</text><text x="48" y="848" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">实线：物理外键主干（父表 → 子表）    虚线：业务快照关联    0..1：可空单个    0..N：零到多个</text></g></svg></div></section><section id="panel-1" role="tabpanel" aria-labelledby="tab-1" hidden><div class="panel-head"><p>场景身份与历史快照分离；方案来源和任务来源允许为空。</p><a href="er-scenarios.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>场景、发布与方案</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">场景、发布与方案</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">场景身份与历史快照分离；方案来源和任务来源允许为空。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(48.0 188.70103092783506) scale(0.972327726532827)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 647)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>scenario_template-&gt;import_job</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_import_job_template">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M141.37,-165.65C193.16,-197.07 263.66,-239.83 315.8,-271.46" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="228.75" y="-247.37" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>scenario_template-&gt;scenario_draft</ns0:title>
+<ns0:g id="a_edge5"><ns0:a ns1:title="fk_scenario_draft_template">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M141.37,-116.22C199.5,-110.12 281.19,-101.56 334.05,-96.02" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="228.75" y="-116.58" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R05   1 : 0..1</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>scenario_version-&gt;scenario_version</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_scenario_version_base">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M673.44,-404.97C674.98,-429.41 684.75,-448 702.75,-448 720.75,-448 730.52,-429.41 732.06,-404.97" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="702.75" y="-453.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>scenario_version-&gt;scenario_node</ns0:title>
+<ns0:g id="a_edge4"><ns0:a ns1:title="fk_scenario_node_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M774.57,-366.17C827.25,-404.61 898.45,-456.56 948.86,-493.34" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="861.75" y="-465.3" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R04   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>scenario_version-&gt;audit_plan</ns0:title>
+<ns0:g id="a_edge6"><ns0:a ns1:title="fk_audit_plan_scenario_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M774.57,-314.5C829.28,-314.5 903.98,-314.5 954.61,-314.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="861.75" y="-320.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R06   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge9" class="edge">
+<ns0:title>scenario_version-&gt;audit_task</ns0:title>
+<ns0:g id="a_edge9"><ns0:a ns1:title="fk_audit_task_scenario_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M774.61,-276.9C846.97,-238.5 948.75,-184.5 948.75,-184.5 948.75,-184.5 1074.75,-184.5 1074.75,-184.5 1074.75,-184.5 1183.77,-248.41 1248.93,-286.61" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="1011.75" y="-190.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R09   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>import_job-&gt;scenario_version</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_scenario_version_import_job">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M459.38,-314.5C510.59,-314.5 579.56,-314.5 630.83,-314.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="545.25" y="-320.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   0..1 : 0..1</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>scenario_node-&gt;audit_task</ns0:title>
+<ns0:g id="a_edge7"><ns0:a ns1:title="fk_audit_task_current_node">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M1074.67,-489.62C1127.01,-448.3 1200.92,-389.95 1248.77,-352.18" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="1161.75" y="-458.8" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R07   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>audit_plan-&gt;audit_task</ns0:title>
+<ns0:g id="a_edge8"><ns0:a ns1:title="fk_audit_task_plan">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M1068.81,-314.5C1121.46,-314.5 1199.37,-314.5 1249.03,-314.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="1161.75" y="-320.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R08   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>scenario_template</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-33 0,-214 141.75,-214 141.75,-33 0,-33" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-172.25 1,-213 140.75,-213 140.75,-172.25 1,-172.25" />
+<ns0:text text-anchor="start" x="9" y="-188.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">场景</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-151.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_template</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-116.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-82.2" font-family="Microsoft YaHei" font-size="14.00">UK  scenario_code</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-47.45" font-family="Microsoft YaHei" font-size="14.00">scenario_name</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-33 0,-214 141.75,-214 141.75,-33 0,-33" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>scenario_version</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="630.75,-224 630.75,-405 774.75,-405 774.75,-224 630.75,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="631.75,-363.25 631.75,-404 773.75,-404 773.75,-363.25 631.75,-363.25" />
+<ns0:text text-anchor="start" x="639.75" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">已发布场景版本</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_version</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">scenario_code</ns0:text>
+<ns0:text text-anchor="start" x="639.75" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">version_no</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="630.75,-224 630.75,-405 774.75,-405 774.75,-224 630.75,-224" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>import_job</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="315.75,-224 315.75,-405 459.75,-405 459.75,-224 315.75,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="316.75,-363.25 316.75,-404 458.75,-404 458.75,-363.25 316.75,-363.25" />
+<ns0:text text-anchor="start" x="324.75" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">规则库导入作业</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">import_job</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  job_no</ns0:text>
+<ns0:text text-anchor="start" x="324.75" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="315.75,-224 315.75,-405 459.75,-405 459.75,-224 315.75,-224" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>scenario_node</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="948.75,-448 948.75,-629 1074.75,-629 1074.75,-448 948.75,-448" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="949.75,-587.25 949.75,-628 1073.75,-628 1073.75,-587.25 949.75,-587.25" />
+<ns0:text text-anchor="start" x="957.75" y="-603.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行容器节点</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-566.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_node</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-531.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-497.2" font-family="Microsoft YaHei" font-size="14.00">node_code</ns0:text>
+<ns0:text text-anchor="start" x="957.75" y="-462.45" font-family="Microsoft YaHei" font-size="14.00">node_type</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="948.75,-448 948.75,-629 1074.75,-629 1074.75,-448 948.75,-448" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>audit_plan</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="954.38,-224 954.38,-405 1069.12,-405 1069.12,-224 954.38,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="955.38,-363.25 955.38,-404 1068.12,-404 1068.12,-363.25 955.38,-363.25" />
+<ns0:text text-anchor="start" x="963.38" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核方案</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_plan</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  plan_code</ns0:text>
+<ns0:text text-anchor="start" x="963.38" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">plan_name</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="954.38,-224 954.38,-405 1069.12,-405 1069.12,-224 954.38,-224" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>scenario_draft</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="333.75,0 333.75,-181 441.75,-181 441.75,0 333.75,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="334.75,-139.25 334.75,-180 440.75,-180 440.75,-139.25 334.75,-139.25" />
+<ns0:text text-anchor="start" x="342.75" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">场景草稿</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_draft</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">revision_no</ns0:text>
+<ns0:text text-anchor="start" x="342.75" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">config_json</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="333.75,0 333.75,-181 441.75,-181 441.75,0 333.75,0" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="1248.75,-224 1248.75,-405 1346.25,-405 1346.25,-224 1248.75,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1249.75,-363.25 1249.75,-404 1345.25,-404 1345.25,-363.25 1249.75,-363.25" />
+<ns0:text text-anchor="start" x="1257.75" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="1257.75" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="1248.75,-224 1248.75,-405 1346.25,-405 1346.25,-224 1248.75,-224" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg></div><details><summary>关系明细 · 9 组真实外键</summary><div class="table-wrap"><table><thead><tr><th>编号</th><th>父表及被引用列</th><th>子表及外键列</th><th>父 : 子</th></tr></thead><tbody><tr><td>R01</td><td>scenario_template (scenario_code)</td><td>import_job (scenario_code)</td><td>0..1 : 0..N</td></tr><tr><td>R02</td><td>scenario_version (id)</td><td>scenario_version (base_version_id)</td><td>0..1 : 0..N</td></tr><tr><td>R03</td><td>import_job (id)</td><td>scenario_version (import_job_id)</td><td>0..1 : 0..1</td></tr><tr><td>R04</td><td>scenario_version (id)</td><td>scenario_node (scenario_version_id)</td><td>1 : 0..N</td></tr><tr><td>R05</td><td>scenario_template (scenario_code)</td><td>scenario_draft (scenario_code)</td><td>1 : 0..1</td></tr><tr><td>R06</td><td>scenario_version (id)</td><td>audit_plan (scenario_version_id)</td><td>0..1 : 0..N</td></tr><tr><td>R07</td><td>scenario_node (scenario_version_id, node_code)</td><td>audit_task (scenario_version_id, current_node)</td><td>1 : 0..N</td></tr><tr><td>R08</td><td>audit_plan (id)</td><td>audit_task (plan_id)</td><td>0..1 : 0..N</td></tr><tr><td>R09</td><td>scenario_version (id)</td><td>audit_task (scenario_version_id)</td><td>1 : 0..N</td></tr></tbody></table></div></details></section><section id="panel-2" role="tabpanel" aria-labelledby="tab-2" hidden><div class="panel-head"><p>一个材料位可以保留多个上传版本；每份上传按产物类型保存处理结果。</p><a href="er-materials.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>任务材料与文件版本</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">任务材料与文件版本</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">一个材料位可以保留多个上传版本；每份上传按产物类型保存处理结果。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(48.0 367.8695329873981) scale(1.3283914010378057)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 199)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>audit_task-&gt;task_document</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_task_document_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M97.37,-90.5C141.69,-90.5 208.23,-90.5 258.25,-90.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="177.75" y="-96.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>task_document-&gt;document_upload</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_document_upload_task_document_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M397.28,-90.5C445.79,-90.5 510.42,-90.5 558.02,-90.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="477.75" y="-96.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>document_upload-&gt;stored_artifact</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_stored_artifact_upload_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M689.06,-90.5C737.18,-90.5 802.53,-90.5 849.99,-90.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="769.5" y="-96.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,0 0,-181 97.5,-181 97.5,0 0,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-139.25 1,-180 96.5,-180 96.5,-139.25 1,-139.25" />
+<ns0:text text-anchor="start" x="9" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,0 0,-181 97.5,-181 97.5,0 0,0" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>task_document</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="258,0 258,-181 397.5,-181 397.5,0 258,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="259,-139.25 259,-180 396.5,-180 396.5,-139.25 259,-139.25" />
+<ns0:text text-anchor="start" x="267" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">任务材料位</ns0:text>
+<ns0:text text-anchor="start" x="267" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_document</ns0:text>
+<ns0:text text-anchor="start" x="267" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="267" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">UK  document_no</ns0:text>
+<ns0:text text-anchor="start" x="267" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">material_key</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="258,0 258,-181 397.5,-181 397.5,0 258,0" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>document_upload</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="558,0 558,-181 689.25,-181 689.25,0 558,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="559,-139.25 559,-180 688.25,-180 688.25,-139.25 559,-139.25" />
+<ns0:text text-anchor="start" x="567" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">上传文件版本</ns0:text>
+<ns0:text text-anchor="start" x="567" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">document_upload</ns0:text>
+<ns0:text text-anchor="start" x="567" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="567" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">upload_no</ns0:text>
+<ns0:text text-anchor="start" x="567" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">is_current</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="558,0 558,-181 689.25,-181 689.25,0 558,0" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>stored_artifact</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="849.75,0 849.75,-181 975.75,-181 975.75,0 849.75,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="850.75,-139.25 850.75,-180 974.75,-180 974.75,-139.25 850.75,-139.25" />
+<ns0:text text-anchor="start" x="858.75" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">处理产物索引</ns0:text>
+<ns0:text text-anchor="start" x="858.75" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">stored_artifact</ns0:text>
+<ns0:text text-anchor="start" x="858.75" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="858.75" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">UK  artifact_no</ns0:text>
+<ns0:text text-anchor="start" x="858.75" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">artifact_type</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="849.75,0 849.75,-181 975.75,-181 975.75,0 849.75,0" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg></div><details><summary>关系明细 · 3 组真实外键</summary><div class="table-wrap"><table><thead><tr><th>编号</th><th>父表及被引用列</th><th>子表及外键列</th><th>父 : 子</th></tr></thead><tbody><tr><td>R01</td><td>audit_task (id)</td><td>task_document (audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R02</td><td>task_document (id, audit_task_id)</td><td>document_upload (task_document_id, audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R03</td><td>document_upload (id, audit_task_id)</td><td>stored_artifact (document_upload_id, audit_task_id)</td><td>1 : 0..N</td></tr></tbody></table></div></details></section><section id="panel-3" role="tabpanel" aria-labelledby="tab-3" hidden><div class="panel-head"><p>抽取候选绑定任务、材料位、上传版本与执行批次；人工复核指向具体字段版本。</p><a href="er-values.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>字段取值与人工记录</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">字段取值与人工记录</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">抽取候选绑定任务、材料位、上传版本与执行批次；人工复核指向具体字段版本。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(433.57496807151983 172.0) scale(0.8684546615581098)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 765)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>node_execution-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_task_field_value_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M505.88,-590.46C493.32,-576.58 483.75,-566 483.75,-566 483.75,-566 405.75,-506 405.75,-506 405.75,-506 341.75,-458.72 290.51,-420.86" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="473.8" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>task_document-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_task_field_value_task_material">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M221.61,-566.2C222.66,-533.42 223.85,-496.33 224.9,-463.56" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="261.77" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>audit_task-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_task_field_value_task_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M97.36,-572.44C117.5,-538.03 136.25,-506 136.25,-506 136.25,-506 149.39,-487.12 165.7,-463.67" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="174.5" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>audit_task-&gt;manual_review</ns0:title>
+<ns0:g id="a_edge6"><ns0:a ns1:title="fk_manual_review_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M51.76,-566.13C55.31,-460.68 61.18,-286.39 64.74,-180.91" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="99.31" y="-370.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R06   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>document_upload-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge4"><ns0:a ns1:title="fk_task_field_value_upload_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M344.89,-566.38C326.25,-534.36 309.75,-506 309.75,-506 309.75,-506 297.98,-487.12 283.35,-463.67" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="357.05" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R04   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>task_field_value-&gt;manual_review</ns0:title>
+<ns0:g id="a_edge5"><ns0:a ns1:title="fk_manual_review_field_value_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M176.91,-283.2C158.24,-250.42 137.12,-213.33 118.46,-180.56" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="190.8" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R05   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>node_execution</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="505.88,-566 505.88,-747 623.62,-747 623.62,-566 505.88,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="506.88,-705.25 506.88,-746 622.62,-746 622.62,-705.25 506.88,-705.25" />
+<ns0:text text-anchor="start" x="514.88" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行批次</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">node_execution</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">sequence_no</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="505.88,-566 505.88,-747 623.62,-747 623.62,-566 505.88,-566" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>task_document</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="149,-566 149,-747 288.5,-747 288.5,-566 149,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="150,-705.25 150,-746 287.5,-746 287.5,-705.25 150,-705.25" />
+<ns0:text text-anchor="start" x="158" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">任务材料位</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_document</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">UK  document_no</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">material_key</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="149,-566 149,-747 288.5,-747 288.5,-566 149,-566" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-566 0,-747 97.5,-747 97.5,-566 0,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-705.25 1,-746 96.5,-746 96.5,-705.25 1,-705.25" />
+<ns0:text text-anchor="start" x="9" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-566 0,-747 97.5,-747 97.5,-566 0,-566" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>document_upload</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="331.12,-566 331.12,-747 462.38,-747 462.38,-566 331.12,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="332.12,-705.25 332.12,-746 461.38,-746 461.38,-705.25 332.12,-705.25" />
+<ns0:text text-anchor="start" x="340.12" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">上传文件版本</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">document_upload</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">upload_no</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">is_current</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="331.12,-566 331.12,-747 462.38,-747 462.38,-566 331.12,-566" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>task_field_value</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="164.75,-283 164.75,-464 290.75,-464 290.75,-283 164.75,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="165.75,-422.25 165.75,-463 289.75,-463 289.75,-422.25 165.75,-422.25" />
+<ns0:text text-anchor="start" x="173.75" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">字段取值索引</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_field_value</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">field_key</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">revision_no</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="164.75,-283 164.75,-464 290.75,-464 290.75,-283 164.75,-283" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>manual_review</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="4.75,0 4.75,-181 130.75,-181 130.75,0 4.75,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="5.75,-139.25 5.75,-180 129.75,-180 129.75,-139.25 5.75,-139.25" />
+<ns0:text text-anchor="start" x="13.75" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">人工复核记录</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">manual_review</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">UK  review_no</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">decision ?</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="4.75,0 4.75,-181 130.75,-181 130.75,0 4.75,0" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg></div><details><summary>关系明细 · 6 组真实外键</summary><div class="table-wrap"><table><thead><tr><th>编号</th><th>父表及被引用列</th><th>子表及外键列</th><th>父 : 子</th></tr></thead><tbody><tr><td>R01</td><td>node_execution (id, audit_task_id)</td><td>task_field_value (extraction_execution_id, audit_task_id)</td><td>0..1 : 0..N</td></tr><tr><td>R02</td><td>task_document (audit_task_id, material_key)</td><td>task_field_value (audit_task_id, material_key)</td><td>1 : 0..N</td></tr><tr><td>R03</td><td>audit_task (id, scenario_version_id)</td><td>task_field_value (audit_task_id, scenario_version_id)</td><td>1 : 0..N</td></tr><tr><td>R04</td><td>document_upload (id, audit_task_id)</td><td>task_field_value (document_upload_id, audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R05</td><td>task_field_value (id, audit_task_id)</td><td>manual_review (field_value_id, audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R06</td><td>audit_task (id)</td><td>manual_review (audit_task_id)</td><td>1 : 0..N</td></tr></tbody></table></div></details></section><section id="panel-4" role="tabpanel" aria-labelledby="tab-4" hidden><div class="panel-head"><p>事实归属任务，可关联材料和执行批次；业务值保存在任务 CSV 中。</p><a href="er-facts.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>统一事实与计算结果</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">统一事实与计算结果</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">事实归属任务，可关联材料和执行批次；业务值保存在任务 CSV 中。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(395.2184 172.0) scale(1.36)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 482)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>node_execution-&gt;task_fact</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_task_fact_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M101.8,-283.38C117.22,-251.36 130.88,-223 130.88,-223 130.88,-223 148.02,-200.45 168.11,-174.03" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="175.88" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>task_document-&gt;task_fact</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_task_fact_material">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M230.88,-283.2C230.88,-250.42 230.88,-213.33 230.88,-180.56" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="275.88" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>audit_task-&gt;task_fact</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_task_fact_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M355.91,-283.38C342.64,-251.36 330.88,-223 330.88,-223 330.88,-223 313.73,-200.45 293.64,-174.03" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="375.57" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>node_execution</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-283 0,-464 117.75,-464 117.75,-283 0,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-422.25 1,-463 116.75,-463 116.75,-422.25 1,-422.25" />
+<ns0:text text-anchor="start" x="9" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行批次</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">node_execution</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">sequence_no</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-283 0,-464 117.75,-464 117.75,-283 0,-283" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>task_document</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="161.12,-283 161.12,-464 300.62,-464 300.62,-283 161.12,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="162.12,-422.25 162.12,-463 299.62,-463 299.62,-422.25 162.12,-422.25" />
+<ns0:text text-anchor="start" x="170.12" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">任务材料位</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_document</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">UK  document_no</ns0:text>
+<ns0:text text-anchor="start" x="170.12" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">material_key</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="161.12,-283 161.12,-464 300.62,-464 300.62,-283 161.12,-283" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="344.12,-283 344.12,-464 441.62,-464 441.62,-283 344.12,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="345.12,-422.25 345.12,-463 440.62,-463 440.62,-422.25 345.12,-422.25" />
+<ns0:text text-anchor="start" x="353.12" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="353.12" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="344.12,-283 344.12,-464 441.62,-464 441.62,-283 344.12,-283" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>task_fact</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="167.88,0 167.88,-181 293.88,-181 293.88,0 167.88,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="168.88,-139.25 168.88,-180 292.88,-180 292.88,-139.25 168.88,-139.25" />
+<ns0:text text-anchor="start" x="176.88" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">统一事实索引</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_fact</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">fact_code</ns0:text>
+<ns0:text text-anchor="start" x="176.88" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">fact_kind</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="167.88,0 167.88,-181 293.88,-181 293.88,0 167.88,0" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg></div><details><summary>关系明细 · 3 组真实外键</summary><div class="table-wrap"><table><thead><tr><th>编号</th><th>父表及被引用列</th><th>子表及外键列</th><th>父 : 子</th></tr></thead><tbody><tr><td>R01</td><td>node_execution (id, audit_task_id)</td><td>task_fact (source_execution_id, audit_task_id)</td><td>0..1 : 0..N</td></tr><tr><td>R02</td><td>task_document (audit_task_id, material_key)</td><td>task_fact (audit_task_id, material_key)</td><td>0..1 : 0..N</td></tr><tr><td>R03</td><td>audit_task (id, scenario_version_id)</td><td>task_fact (audit_task_id, scenario_version_id)</td><td>1 : 0..N</td></tr></tbody></table></div></details></section><section id="panel-5" role="tabpanel" aria-labelledby="tab-5" hidden><div class="panel-head"><p>确认、结果及报告归属明确任务；复合外键同时约束批次与任务一致。</p><a href="er-execution.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>执行批次、规则结果与报告</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">执行批次、规则结果与报告</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">确认、结果及报告归属明确任务；复合外键同时约束批次与任务一致。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(350.93023255813955 172.0) scale(0.9302325581395349)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 713)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>audit_task-&gt;node_execution</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_node_execution_task_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M111.56,-277.79C159.92,-294.34 234.88,-320.01 286.62,-337.72" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="206.25" y="-326.57" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>audit_task-&gt;audit_report</ns0:title>
+<ns0:g id="a_edge4"><ns0:a ns1:title="fk_audit_report_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M111.73,-254.21C177.11,-244.22 286.5,-227.5 286.5,-227.5 286.5,-227.5 404.25,-227.5 404.25,-227.5 404.25,-227.5 536.25,-231.5 536.25,-231.5 536.25,-231.5 571.24,-253.73 605.01,-275.19" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="345.38" y="-233.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R04   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>audit_task-&gt;rule_result</ns0:title>
+<ns0:g id="a_edge6"><ns0:a ns1:title="fk_rule_result_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M111.74,-244.52C139.08,-234.79 168,-224.5 168,-224.5 168,-224.5 471.35,-143.02 604.95,-107.13" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="345.38" y="-197.38" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R06   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>audit_task-&gt;field_review_confirmation</ns0:title>
+<ns0:g id="a_edge8"><ns0:a ns1:title="fk_field_review_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M111.73,-306.12C177.11,-367.24 286.5,-469.5 286.5,-469.5 286.5,-469.5 466.29,-502.11 578.65,-522.5" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="345.38" y="-496.18" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R08   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>scenario_node-&gt;node_execution</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_node_execution_version_node">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M125.88,-549.99C173.93,-507.65 240.07,-449.39 286.96,-408.08" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="206.25" y="-516.04" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>node_execution-&gt;audit_report</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_audit_report_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M404.04,-349.76C460.72,-342.16 546.94,-330.59 605.02,-322.8" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="491.25" y="-349.24" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>node_execution-&gt;rule_result</ns0:title>
+<ns0:g id="a_edge5"><ns0:a ns1:title="fk_rule_result_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M404.04,-309.46C460.72,-262.24 546.94,-190.41 605.02,-142.03" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="491.25" y="-276.79" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R05   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>node_execution-&gt;field_review_confirmation</ns0:title>
+<ns0:g id="a_edge7"><ns0:a ns1:title="fk_field_review_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M404.04,-390.07C452.61,-417.5 522.87,-457.18 578.53,-488.61" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="491.25" y="-469.86" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R07   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="14.25,-171 14.25,-352 111.75,-352 111.75,-171 14.25,-171" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="15.25,-310.25 15.25,-351 110.75,-351 110.75,-310.25 15.25,-310.25" />
+<ns0:text text-anchor="start" x="23.25" y="-326.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="23.25" y="-289.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="23.25" y="-254.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="23.25" y="-220.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="23.25" y="-185.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="14.25,-171 14.25,-352 111.75,-352 111.75,-171 14.25,-171" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>scenario_node</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-514 0,-695 126,-695 126,-514 0,-514" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-653.25 1,-694 125,-694 125,-653.25 1,-653.25" />
+<ns0:text text-anchor="start" x="9" y="-669.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行容器节点</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-632.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">scenario_node</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-597.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-563.2" font-family="Microsoft YaHei" font-size="14.00">node_code</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-528.45" font-family="Microsoft YaHei" font-size="14.00">node_type</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-514 0,-695 126,-695 126,-514 0,-514" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>node_execution</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="286.5,-267 286.5,-448 404.25,-448 404.25,-267 286.5,-267" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="287.5,-406.25 287.5,-447 403.25,-447 403.25,-406.25 287.5,-406.25" />
+<ns0:text text-anchor="start" x="295.5" y="-422.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行批次</ns0:text>
+<ns0:text text-anchor="start" x="295.5" y="-385.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">node_execution</ns0:text>
+<ns0:text text-anchor="start" x="295.5" y="-350.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="295.5" y="-316.2" font-family="Microsoft YaHei" font-size="14.00">sequence_no</ns0:text>
+<ns0:text text-anchor="start" x="295.5" y="-281.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="286.5,-267 286.5,-448 404.25,-448 404.25,-267 286.5,-267" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>audit_report</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="604.88,-224 604.88,-405 730.88,-405 730.88,-224 604.88,-224" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="605.88,-363.25 605.88,-404 729.88,-404 729.88,-363.25 605.88,-363.25" />
+<ns0:text text-anchor="start" x="613.88" y="-379.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核报告快照</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-342.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_report</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-307.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-273.2" font-family="Microsoft YaHei" font-size="14.00">UK  report_no</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-238.45" font-family="Microsoft YaHei" font-size="14.00">report_name</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="604.88,-224 604.88,-405 730.88,-405 730.88,-224 604.88,-224" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>rule_result</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="604.88,0 604.88,-181 730.88,-181 730.88,0 604.88,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="605.88,-139.25 605.88,-180 729.88,-180 729.88,-139.25 605.88,-139.25" />
+<ns0:text text-anchor="start" x="613.88" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">规则执行结果</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">rule_result</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">rule_key</ns0:text>
+<ns0:text text-anchor="start" x="613.88" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">rule_code ?</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="604.88,0 604.88,-181 730.88,-181 730.88,0 604.88,0" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>field_review_confirmation</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="578.25,-448 578.25,-629 757.5,-629 757.5,-448 578.25,-448" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="579.25,-587.25 579.25,-628 756.5,-628 756.5,-587.25 579.25,-587.25" />
+<ns0:text text-anchor="start" x="587.25" y="-603.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">字段核对确认</ns0:text>
+<ns0:text text-anchor="start" x="587.25" y="-566.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">field_review_confirmation</ns0:text>
+<ns0:text text-anchor="start" x="587.25" y="-531.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="587.25" y="-497.2" font-family="Microsoft YaHei" font-size="14.00">UK  confirmation_no</ns0:text>
+<ns0:text text-anchor="start" x="587.25" y="-462.45" font-family="Microsoft YaHei" font-size="14.00">input_revision</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="578.25,-448 578.25,-629 757.5,-629 757.5,-448 578.25,-448" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg></div><details><summary>关系明细 · 8 组真实外键</summary><div class="table-wrap"><table><thead><tr><th>编号</th><th>父表及被引用列</th><th>子表及外键列</th><th>父 : 子</th></tr></thead><tbody><tr><td>R01</td><td>audit_task (id, scenario_version_id)</td><td>node_execution (audit_task_id, scenario_version_id)</td><td>1 : 0..N</td></tr><tr><td>R02</td><td>scenario_node (scenario_version_id, node_code)</td><td>node_execution (scenario_version_id, node_code)</td><td>1 : 0..N</td></tr><tr><td>R03</td><td>node_execution (id, audit_task_id)</td><td>audit_report (node_execution_id, audit_task_id)</td><td>0..1 : 0..N</td></tr><tr><td>R04</td><td>audit_task (id)</td><td>audit_report (audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R05</td><td>node_execution (id, audit_task_id)</td><td>rule_result (node_execution_id, audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R06</td><td>audit_task (id)</td><td>rule_result (audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R07</td><td>node_execution (id, audit_task_id)</td><td>field_review_confirmation (node_execution_id, audit_task_id)</td><td>1 : 0..N</td></tr><tr><td>R08</td><td>audit_task (id)</td><td>field_review_confirmation (audit_task_id)</td><td>1 : 0..N</td></tr></tbody></table></div></details></section><section id="panel-6" role="tabpanel" aria-labelledby="tab-6" hidden><div class="panel-head"><p>当前文档、修订历史、对话与冻结导出分别保存；导出通过关联记录进入真实导入作业。</p><a href="er-generation.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>AI 规则库编制</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">AI 规则库编制</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">当前文档、修订历史、对话与冻结导出分别保存；导出通过关联记录进入真实导入作业。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(295.0 172.0) scale(0.8785529715762274)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 756)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>rulebook_generation_job-&gt;rulebook_generation_export</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_rulebook_generation_export_job">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M175.14,-520.71C228.01,-545.32 295.77,-576.87 350.48,-602.34" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="261" y="-584.61" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>rulebook_generation_job-&gt;rulebook_generation_revision</ns0:title>
+<ns0:g id="a_edge4"><ns0:a ns1:title="fk_generation_revision_job">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M175.14,-412.84C226.76,-372.4 292.59,-320.84 346.6,-278.53" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="261" y="-379.08" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R04   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>rulebook_generation_export-&gt;rulebook_generation_import</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_rulebook_generation_import_export">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M546.33,-608.61C602.03,-586.24 671.83,-558.22 727.69,-535.78" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="636" y="-595.62" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>import_job-&gt;rulebook_generation_import</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_rulebook_generation_import_job">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M520.22,-437.23C578.83,-448.61 662.75,-464.9 727.78,-477.53" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="636" y="-472.19" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   0..1 : 0..1</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>background_operation-&gt;rulebook_generation_revision</ns0:title>
+<ns0:g id="a_edge5"><ns0:a ns1:title="fk_generation_revision_operation">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M167.48,-114.42C220.18,-130.43 290.01,-151.65 346.76,-168.89" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="261" y="-160.41" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R05   0..1 : 0..1</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>background_operation-&gt;rulebook_generation_message</ns0:title>
+<ns0:g id="a_edge6"><ns0:a ns1:title="fk_generation_message_operation">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M167.48,-84.09C243.28,-77.91 346.5,-69.5 346.5,-69.5 346.5,-69.5 550.5,-69.5 550.5,-69.5 550.5,-69.5 643.66,-81.02 721.53,-90.65" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="448.5" y="-75.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R06   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>rulebook_generation_revision-&gt;rulebook_generation_message</ns0:title>
+<ns0:g id="a_edge7"><ns0:a ns1:title="fk_generation_message_revision">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M550.26,-173.77C603.23,-160.25 668.07,-143.69 721.51,-130.05" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="636" y="-168.57" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R07   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>rulebook_generation_job</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-390 0,-571 175.5,-571 175.5,-390 0,-390" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-529.25 1,-570 174.5,-570 174.5,-529.25 1,-529.25" />
+<ns0:text text-anchor="start" x="9" y="-545.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">AI规则库编制作业</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-508.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">rulebook_generation_job</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-473.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-439.2" font-family="Microsoft YaHei" font-size="14.00">UK  job_no</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-404.45" font-family="Microsoft YaHei" font-size="14.00">revision</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-390 0,-571 175.5,-571 175.5,-390 0,-390" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>rulebook_generation_export</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="350.25,-557 350.25,-738 546.75,-738 546.75,-557 350.25,-557" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="351.25,-696.25 351.25,-737 545.75,-737 545.75,-696.25 351.25,-696.25" />
+<ns0:text text-anchor="start" x="359.25" y="-712.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">编制冻结导出</ns0:text>
+<ns0:text text-anchor="start" x="359.25" y="-675.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">rulebook_generation_export</ns0:text>
+<ns0:text text-anchor="start" x="359.25" y="-640.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="359.25" y="-606.2" font-family="Microsoft YaHei" font-size="14.00">UK  export_no</ns0:text>
+<ns0:text text-anchor="start" x="359.25" y="-571.45" font-family="Microsoft YaHei" font-size="14.00">revision</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="350.25,-557 350.25,-738 546.75,-738 546.75,-557 350.25,-557" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>import_job</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="376.5,-333 376.5,-514 520.5,-514 520.5,-333 376.5,-333" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="377.5,-472.25 377.5,-513 519.5,-513 519.5,-472.25 377.5,-472.25" />
+<ns0:text text-anchor="start" x="385.5" y="-488.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">规则库导入作业</ns0:text>
+<ns0:text text-anchor="start" x="385.5" y="-451.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">import_job</ns0:text>
+<ns0:text text-anchor="start" x="385.5" y="-416.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="385.5" y="-382.2" font-family="Microsoft YaHei" font-size="14.00">UK  job_no</ns0:text>
+<ns0:text text-anchor="start" x="385.5" y="-347.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="376.5,-333 376.5,-514 520.5,-514 520.5,-333 376.5,-333" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>background_operation</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="7.88,0 7.88,-181 167.62,-181 167.62,0 7.88,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="8.88,-139.25 8.88,-180 166.62,-180 166.62,-139.25 8.88,-139.25" />
+<ns0:text text-anchor="start" x="16.88" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">后台操作</ns0:text>
+<ns0:text text-anchor="start" x="16.88" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">background_operation</ns0:text>
+<ns0:text text-anchor="start" x="16.88" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="16.88" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">UK  operation_no</ns0:text>
+<ns0:text text-anchor="start" x="16.88" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">object_type</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="7.88,0 7.88,-181 167.62,-181 167.62,0 7.88,0" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>rulebook_generation_revision</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="346.5,-109 346.5,-290 550.5,-290 550.5,-109 346.5,-109" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="347.5,-248.25 347.5,-289 549.5,-289 549.5,-248.25 347.5,-248.25" />
+<ns0:text text-anchor="start" x="355.5" y="-264.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">编制修订快照</ns0:text>
+<ns0:text text-anchor="start" x="355.5" y="-227.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">rulebook_generation_revision</ns0:text>
+<ns0:text text-anchor="start" x="355.5" y="-192.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="355.5" y="-158.2" font-family="Microsoft YaHei" font-size="14.00">revision</ns0:text>
+<ns0:text text-anchor="start" x="355.5" y="-123.45" font-family="Microsoft YaHei" font-size="14.00">origin</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="346.5,-109 346.5,-290 550.5,-290 550.5,-109 346.5,-109" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>rulebook_generation_import</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="727.5,-423.38 727.5,-569.62 925.5,-569.62 925.5,-423.38 727.5,-423.38" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="728.5,-527.88 728.5,-568.62 924.5,-568.62 924.5,-527.88 728.5,-527.88" />
+<ns0:text text-anchor="start" x="736.5" y="-544.52" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">编制导入关联</ns0:text>
+<ns0:text text-anchor="start" x="736.5" y="-507.52" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">rulebook_generation_import</ns0:text>
+<ns0:text text-anchor="start" x="736.5" y="-472.57" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="736.5" y="-437.82" font-family="Microsoft YaHei" font-size="14.00">idempotency_key</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="727.5,-423.38 727.5,-569.62 925.5,-569.62 925.5,-423.38 727.5,-423.38" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>rulebook_generation_message</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="721.5,-13 721.5,-194 931.5,-194 931.5,-13 721.5,-13" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="722.5,-152.25 722.5,-193 930.5,-193 930.5,-152.25 722.5,-152.25" />
+<ns0:text text-anchor="start" x="730.5" y="-168.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">编制对话消息</ns0:text>
+<ns0:text text-anchor="start" x="730.5" y="-131.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">rulebook_generation_message</ns0:text>
+<ns0:text text-anchor="start" x="730.5" y="-96.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="730.5" y="-62.2" font-family="Microsoft YaHei" font-size="14.00">role</ns0:text>
+<ns0:text text-anchor="start" x="730.5" y="-27.45" font-family="Microsoft YaHei" font-size="14.00">content</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="721.5,-13 721.5,-194 931.5,-194 931.5,-13 721.5,-13" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg></div><details><summary>关系明细 · 7 组真实外键</summary><div class="table-wrap"><table><thead><tr><th>编号</th><th>父表及被引用列</th><th>子表及外键列</th><th>父 : 子</th></tr></thead><tbody><tr><td>R01</td><td>rulebook_generation_job (id)</td><td>rulebook_generation_export (generation_job_id)</td><td>1 : 0..N</td></tr><tr><td>R02</td><td>rulebook_generation_export (id)</td><td>rulebook_generation_import (generation_export_id)</td><td>1 : 0..N</td></tr><tr><td>R03</td><td>import_job (id)</td><td>rulebook_generation_import (import_job_id)</td><td>0..1 : 0..1</td></tr><tr><td>R04</td><td>rulebook_generation_job (id)</td><td>rulebook_generation_revision (generation_job_id)</td><td>1 : 0..N</td></tr><tr><td>R05</td><td>background_operation (id)</td><td>rulebook_generation_revision (operation_id)</td><td>0..1 : 0..1</td></tr><tr><td>R06</td><td>background_operation (id)</td><td>rulebook_generation_message (operation_id)</td><td>1 : 0..N</td></tr><tr><td>R07</td><td>rulebook_generation_revision (generation_job_id, revision)</td><td>rulebook_generation_message (generation_job_id, revision)</td><td>1 : 0..N</td></tr></tbody></table></div></details></section><section id="panel-7" role="tabpanel" aria-labelledby="tab-7" hidden><div class="panel-head"><p>单独说明没有物理 FK 的业务关联，避免与数据库约束混淆。</p><a href="er-support.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img"><title>后台操作与报告模板</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / LOGICAL REFERENCES</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">后台操作与报告模板</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">这两类关联通过业务编号或配置快照实现，不属于物理外键。</text><line x1="48" y1="851" x2="1392" y2="851" stroke="#e2e8f0"/><text x="48" y="877" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><rect x="48" y="170" width="650" height="580" rx="12" fill="#f7f9fc"/><text x="68" y="200" font-size="16" fill="#7c3aed" font-weight="600" text-anchor="start">后台操作及业务记录</text><rect x="730" y="170" width="662" height="580" rx="12" fill="#f7f9fc"/><text x="750" y="200" font-size="16" fill="#0f766e" font-weight="600" text-anchor="start">报告风格的冻结使用</text><rect x="90" y="250" width="270" height="108" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="90" y="250" width="5" height="108" rx="2" fill="#7c3aed"/><text x="110" y="282" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">后台操作</text><text x="110" y="309" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">background_operation</text><text x="110" y="331" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">operation_no / status</text><rect x="390" y="480" width="270" height="108" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="390" y="480" width="5" height="108" rx="2" fill="#7c3aed"/><text x="410" y="512" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">操作日志</text><text x="410" y="539" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">operation_log</text><text x="410" y="561" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">command_no / result</text><path d="M225,358 L225,534 L390,534" fill="none" stroke="#5d6c80" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#arr)"/><rect x="145.0" y="415" width="160" height="23" rx="5" fill="white"/><text x="225" y="431" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">command_no 逻辑引用</text><text x="90" y="660" font-size="18" fill="#7c3aed" font-weight="600" text-anchor="start">对象定位</text><text x="90" y="688" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">两表以 object_type + object_no 关联业务对象。</text><rect x="780" y="250" width="550" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="780" y="250" width="5" height="88" rx="2" fill="#0f766e"/><text x="800" y="282" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">报告模板</text><text x="800" y="309" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">report_template · template_no / style_profile_json</text><rect x="780" y="480" width="550" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="780" y="480" width="5" height="88" rx="2" fill="#0f766e"/><text x="800" y="512" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">任务配置快照</text><text x="800" y="539" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">audit_task.manifest_json.report_generation</text><path d="M1055,338 L1055,480" fill="none" stroke="#5d6c80" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#arr)"/><rect x="928.0" y="391" width="254" height="23" rx="5" fill="white"/><text x="1055" y="407" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">创建任务时冻结模板编号、名称和风格</text><text x="780" y="660" font-size="18" fill="#0f766e" font-weight="600" text-anchor="start">模板后续修改</text><text x="780" y="688" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">已经创建的任务继续使用自身冻结的风格档案。</text><text x="48" y="806" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">本页虚线均为逻辑引用或复制，不表示数据库 FK。后台操作与 AI 编制的真实外键见「AI 规则库编制」。</text></g></svg></div></section><section id="panel-8" role="tabpanel" aria-labelledby="tab-8" hidden><div class="panel-head"><p>Excel 编制与导入、场景发布、方案创建、任务执行的责任边界。</p><a href="workflow-business.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="990" viewBox="0 0 1440 990" role="img"><title>业务工作流：从规则库到审核报告</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">WORKFLOW / BUSINESS</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">业务工作流：从规则库到审核报告</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">上半部分负责配置发布，下半部分负责每一次资料审核。</text><line x1="48" y1="941" x2="1392" y2="941" stroke="#e2e8f0"/><text x="48" y="967" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><rect x="48" y="170" width="1344" height="200" rx="12" fill="#f7f9fc"/><text x="68" y="200" font-size="16" fill="#7c3aed" font-weight="600" text-anchor="start">01 规则库准备 · 管理员</text><rect x="85" y="240" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="240" width="5" height="88" rx="2" fill="#7c3aed"/><text x="105" y="272" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">业务 Excel</text><text x="105" y="299" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">直接导入，或先 AI 编制</text><rect x="415" y="240" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="415" y="240" width="5" height="88" rx="2" fill="#7c3aed"/><text x="435" y="272" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">AI 辅助编制（可选）</text><text x="435" y="299" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">整理 → 复核 → 修改 → 冻结导出</text><rect x="1005" y="240" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1005" y="240" width="5" height="88" rx="2" fill="#7c3aed"/><text x="1025" y="272" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">导入解析</text><text x="1025" y="299" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">LLM 转换系统执行配置</text><path d="M385,284 L415,284" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M715,284 L1005,284" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="775.0" y="255" width="170" height="23" rx="5" fill="white"/><text x="860" y="271" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">选择场景后创建导入作业</text><path d="M235,240 L235,218 L1155,218 L1155,240" fill="none" stroke="#5d6c80" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#arr)"/><rect x="722.0" y="198" width="156" height="23" rx="5" fill="white"/><text x="800" y="214" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">原 Excel 可直接导入</text><rect x="48" y="400" width="1344" height="200" rx="12" fill="#f7f9fc"/><text x="68" y="430" font-size="16" fill="#2563eb" font-weight="600" text-anchor="start">02 配置发布 · 管理员 → 使用者</text><rect x="85" y="470" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="470" width="5" height="88" rx="2" fill="#2563eb"/><text x="105" y="502" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">检查解析结果</text><text x="105" y="529" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">修改并保存场景草稿</text><rect x="525" y="470" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="525" y="470" width="5" height="88" rx="2" fill="#2563eb"/><text x="545" y="502" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">发布场景版本</text><text x="545" y="529" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">形成不可变配置快照</text><rect x="1005" y="470" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1005" y="470" width="5" height="88" rx="2" fill="#2563eb"/><text x="1025" y="502" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">创建审核方案</text><text x="1025" y="529" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">按需调整生效规则与配置</text><path d="M1155,328 L1155,385 L460,385 L460,450 L235,450 L235,470" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M385,514 L525,514" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="433.0" y="486" width="44" height="23" rx="5" fill="white"/><text x="455" y="502" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">发布</text><path d="M825,514 L1005,514" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="879.0" y="486" width="72" height="23" rx="5" fill="white"/><text x="915" y="502" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">基于版本</text><rect x="48" y="630" width="1344" height="200" rx="12" fill="#f7f9fc"/><text x="68" y="660" font-size="16" fill="#0f766e" font-weight="600" text-anchor="start">03 资料审核 · 使用者</text><rect x="85" y="700" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="700" width="5" height="88" rx="2" fill="#0f766e"/><text x="105" y="732" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">创建任务并上传资料</text><text x="105" y="759" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">冻结方案；上传保存原件</text><rect x="525" y="700" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="525" y="700" width="5" height="88" rx="2" fill="#0f766e"/><text x="545" y="732" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">执行审核与字段核对</text><text x="545" y="759" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">材料处理 → 抽取 → 确认 → 规则</text><rect x="1005" y="700" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1005" y="700" width="5" height="88" rx="2" fill="#0f766e"/><text x="1025" y="732" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">查看风险与审核报告</text><text x="1025" y="759" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">执行状态与业务结论分别展示</text><path d="M1155,558 L1155,615 L460,615 L460,680 L235,680 L235,700" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M385,744 L525,744" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="419.0" y="716" width="72" height="23" rx="5" fill="white"/><text x="455" y="732" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">开始审核</text><path d="M825,744 L1005,744" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="879.0" y="716" width="72" height="23" rx="5" fill="white"/><text x="915" y="732" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">结果保存</text><text x="48" y="877" font-size="18" fill="#2563eb" font-weight="600" text-anchor="start">配置冻结</text><text x="48" y="905" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">场景、方案后续修改，不影响已经创建的任务；AI 编制导出不会自动发布场景或创建任务。</text></g></svg></div></section><section id="panel-9" role="tabpanel" aria-labelledby="tab-9" hidden><div class="panel-head"><p>单文件质量限制、材料并行处理、字段核对等待和同批次继续。</p><a href="workflow-audit.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1160" viewBox="0 0 1440 1160" role="img"><title>审核工作流：材料准备 → 字段核对 → 规则执行</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">WORKFLOW / AUDIT</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">审核工作流：材料准备 → 字段核对 → 规则执行</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">实线为业务执行路径；蓝色分支表示条件选择，橙色表示人工等待。</text><line x1="48" y1="1111" x2="1392" y2="1111" stroke="#e2e8f0"/><text x="48" y="1137" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><rect x="48" y="168" width="1344" height="277" rx="12" fill="#f7f9fc"/><text x="68" y="198" font-size="16" fill="#0f766e" font-weight="600" text-anchor="start">01 材料准备</text><rect x="75" y="245" width="225" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="75" y="245" width="5" height="88" rx="2" fill="#0f766e"/><text x="95" y="277" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">开始审核</text><text x="95" y="304" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">读取冻结配置</text><rect x="350" y="245" width="270" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="350" y="245" width="5" height="88" rx="2" fill="#0f766e"/><text x="370" y="277" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">原文件质量检查</text><text x="370" y="304" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">依据生效规则逐文件判断</text><rect x="690" y="245" width="250" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="690" y="245" width="5" height="88" rx="2" fill="#0f766e"/><text x="710" y="277" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">材料类型校验</text><text x="710" y="304" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">8018 · 获准文件进入处理</text><rect x="1020" y="212" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1020" y="212" width="5" height="88" rx="2" fill="#0f766e"/><text x="1040" y="244" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">去章 → OCR</text><text x="1040" y="271" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">8010 → PaddleOCR</text><rect x="1020" y="340" width="300" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1020" y="340" width="5" height="88" rx="2" fill="#0f766e"/><text x="1040" y="372" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">原件印章识别</text><text x="1040" y="399" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">8003 · 与去章分支并行</text><path d="M300,289 L350,289" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M620,289 L690,289" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M940,289 L980,289 L980,256 L1020,256" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M980,289 L980,384 L1020,384" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><text x="350" y="380" font-size="15" fill="#b45309" font-weight="400" text-anchor="start">质量不通过 / 无法判定：停止该文件后续处理，</text><text x="350" y="407" font-size="15" fill="#b45309" font-weight="400" text-anchor="start">关联规则记录原因，无关材料继续。</text><rect x="48" y="478" width="1344" height="276" rx="12" fill="#f7f9fc"/><text x="68" y="508" font-size="16" fill="#b45309" font-weight="600" text-anchor="start">02 抽取与人工核对</text><rect x="75" y="557" width="240" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="75" y="557" width="5" height="88" rx="2" fill="#2563eb"/><text x="95" y="589" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">按依赖生成执行计划</text><text x="95" y="616" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">只有存在抽取项才需要核对</text><rect x="380" y="557" width="240" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="380" y="557" width="5" height="88" rx="2" fill="#0f766e"/><text x="400" y="589" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">执行抽取规则</text><text x="400" y="616" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">相邻同来源字段可合并抽取</text><rect x="690" y="557" width="260" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="690" y="557" width="5" height="88" rx="2" fill="#b45309"/><text x="710" y="589" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">等待字段核对</text><text x="710" y="616" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">WAITING_FIELD_REVIEW</text><rect x="1030" y="557" width="290" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1030" y="557" width="5" height="88" rx="2" fill="#b45309"/><text x="1050" y="589" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">确认并继续</text><text x="1050" y="616" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">保存修正并绑定输入版本</text><path d="M1320,256 L1365,256 L1365,460 L330,460 L330,535 L195,535 L195,557" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M1320,384 L1365,384" fill="none" stroke="#5d6c80" stroke-width="1.8"/><path d="M315,601 L380,601" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="318.0" y="570" width="58" height="23" rx="5" fill="white"/><text x="347" y="586" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">有抽取</text><path d="M620,601 L690,601" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M950,601 L1030,601" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><text x="690" y="700" font-size="15" fill="#b45309" font-weight="400" text-anchor="start">仅保存修改：仍留在等待点。</text><text x="1030" y="700" font-size="15" fill="#b45309" font-weight="400" text-anchor="start">确认后沿用同一执行批次。</text><rect x="48" y="789" width="1344" height="244" rx="12" fill="#f7f9fc"/><text x="68" y="819" font-size="16" fill="#0f766e" font-weight="600" text-anchor="start">03 核对后审核与收尾</text><rect x="380" y="860" width="310" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="380" y="860" width="5" height="88" rx="2" fill="#0f766e"/><text x="400" y="892" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">计算 / 检查 / 风险 / 报告</text><text x="400" y="919" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">按依赖执行，报告按生效规则生成</text><rect x="810" y="860" width="250" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="810" y="860" width="5" height="88" rx="2" fill="#0f766e"/><text x="830" y="892" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">保存与汇总结果</text><text x="830" y="919" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">每条规则独立保存结局</text><rect x="1120" y="860" width="235" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1120" y="860" width="5" height="88" rx="2" fill="#2563eb"/><text x="1140" y="892" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">形成任务状态</text><text x="1140" y="919" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">完成 / 阻断 / 失败</text><path d="M195,645 L195,735 L270,735 L270,904 L380,904" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"/><rect x="234.0" y="759" width="72" height="23" rx="5" fill="white"/><text x="270" y="775" font-size="14" fill="#2563eb" font-weight="400" text-anchor="middle">无抽取项</text><path d="M1175,645 L1175,665 L1365,665 L1365,771 L535,771 L535,860" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="807.0" y="755" width="86" height="23" rx="5" fill="white"/><text x="850" y="771" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">人工确认后</text><path d="M690,904 L810,904" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M1060,904 L1120,904" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><text x="48" y="1072" font-size="18" fill="#b45309" font-weight="600" text-anchor="start">失败与恢复</text><text x="48" y="1100" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">处理技术失败会阻断审核；模型渠道故障停止后续请求。可恢复批次从已提交结果继续，执行结束不等于业务通过。</text></g></svg></div></section><section id="panel-10" role="tabpanel" aria-labelledby="tab-10" hidden><div class="panel-head"><p>八步任务图、逐规则模型与工具循环，以及持久化恢复边界。</p><a href="workflow-runtime.svg" download>下载本图 SVG ↗</a></div><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1070" viewBox="0 0 1440 1070" role="img"><title>程序工作流：固定任务图与规则循环</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">WORKFLOW / IMPLEMENTATION</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">程序工作流：固定任务图与规则循环</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">对应 audit_graph.py 与 audit_rule_runner.py；业务规则循环位于 execute_rules 内部。</text><line x1="48" y1="1021" x2="1392" y2="1021" stroke="#e2e8f0"/><text x="48" y="1047" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><rect x="48" y="170" width="1344" height="270" rx="12" fill="#f7f9fc"/><text x="68" y="200" font-size="16" fill="#2563eb" font-weight="600" text-anchor="start">固定 LangGraph · AuditGraphState</text><rect x="76" y="230" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="76" y="230" width="5" height="76" rx="2" fill="#2563eb"/><text x="96" y="262" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">读取任务</text><text x="96" y="289" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">load_task</text><rect x="404" y="230" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="404" y="230" width="5" height="76" rx="2" fill="#2563eb"/><text x="424" y="262" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">建立执行批次</text><text x="424" y="289" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">execute_current_node</text><path d="M361,268 L404,268" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="732" y="230" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="732" y="230" width="5" height="76" rx="2" fill="#2563eb"/><text x="752" y="262" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">准备材料</text><text x="752" y="289" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">prepare_materials</text><path d="M689,268 L732,268" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="1060" y="230" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1060" y="230" width="5" height="76" rx="2" fill="#2563eb"/><text x="1080" y="262" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">加载执行计划</text><text x="1080" y="289" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">load_evaluation</text><path d="M1017,268 L1060,268" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="76" y="344" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="76" y="344" width="5" height="76" rx="2" fill="#2563eb"/><text x="96" y="376" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">执行规则</text><text x="96" y="403" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">execute_rules</text><rect x="404" y="344" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="404" y="344" width="5" height="76" rx="2" fill="#2563eb"/><text x="424" y="376" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">汇总批次</text><text x="424" y="403" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">finalize_node_execution</text><path d="M361,382 L404,382" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="732" y="344" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="732" y="344" width="5" height="76" rx="2" fill="#2563eb"/><text x="752" y="376" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">推进任务状态</text><text x="752" y="403" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">advance_workflow</text><path d="M689,382 L732,382" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="1060" y="344" width="285" height="76" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1060" y="344" width="5" height="76" rx="2" fill="#2563eb"/><text x="1080" y="376" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">保存任务结果</text><text x="1080" y="403" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">save_node_result</text><path d="M1017,382 L1060,382" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M1345,268 L1372,268 L1372,322 L61,322 L61,382 L76,382" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="48" y="475" width="1344" height="355" rx="12" fill="#f7f9fc"/><text x="68" y="505" font-size="16" fill="#0f766e" font-weight="600" text-anchor="start">execute_rules 内部 · 按依赖串行调度</text><rect x="85" y="550" width="270" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="85" y="550" width="5" height="88" rx="2" fill="#0f766e"/><text x="105" y="582" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">读取一条规则</text><text x="105" y="609" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">RuleExecutionState · 独立上下文</text><rect x="440" y="550" width="270" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="440" y="550" width="5" height="88" rx="2" fill="#0f766e"/><text x="460" y="582" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">调用模型</text><text x="460" y="609" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">读取配置和当前数据</text><rect x="795" y="550" width="270" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="795" y="550" width="5" height="88" rx="2" fill="#0f766e"/><text x="815" y="582" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">校验候选结论</text><text x="815" y="609" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">不合格时按现有协议继续循环</text><rect x="1110" y="550" width="245" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="1110" y="550" width="5" height="88" rx="2" fill="#0f766e"/><text x="1130" y="582" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">提交本条结果</text><text x="1130" y="609" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">再调度下一条规则</text><rect x="440" y="710" width="270" height="88" rx="10" fill="#fff" stroke="#cbd5e1"/><rect x="440" y="710" width="5" height="88" rx="2" fill="#7c3aed"/><text x="460" y="742" font-size="20" fill="#15253c" font-weight="600" text-anchor="start">执行工具调用</text><text x="460" y="769" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">真实工具结果回传模型</text><path d="M355,594 L440,594" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M710,594 L795,594" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="716.0" y="564" width="72" height="23" rx="5" fill="white"/><text x="752" y="580" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">返回结论</text><path d="M1065,594 L1110,594" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><path d="M575,638 L575,710" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="539.0" y="661" width="72" height="23" rx="5" fill="white"/><text x="575" y="677" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">需要工具</text><path d="M440,754 L399,754 L399,618 L440,618" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="376.0" y="673" width="44" height="23" rx="5" fill="white"/><text x="398" y="689" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">回传</text><path d="M930,550 L930,526 L575,526 L575,550" fill="none" stroke="#5d6c80" stroke-width="1.8" marker-end="url(#arr)"/><rect x="714.0" y="505" width="72" height="23" rx="5" fill="white"/><text x="750" y="521" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="middle">需要纠正</text><text x="85" y="716" font-size="15" fill="#0f766e" font-weight="400" text-anchor="start">组合汇总：程序直接计算并保存。</text><text x="85" y="748" font-size="15" fill="#b45309" font-weight="400" text-anchor="start">材料受阻：记录原因并保存。</text><text x="48" y="889" font-size="18" fill="#2563eb" font-weight="600" text-anchor="start">状态与恢复</text><text x="48" y="917" font-size="15" fill="#5d6c80" font-weight="400" text-anchor="start">图状态仅在本次运行内保存，没有持久化 checkpoint；继续执行依据数据库中的执行批次、已提交结果与字段确认。</text><text x="48" y="958" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">任务图建立执行失败时转 save_node_result；其他异常由调用边界显式处理。单条模型循环不增加任务图节点数。</text></g></svg></div></section></main></div><script>
+const tabs=[...document.querySelectorAll('[role="tab"]')];function activate(index){tabs.forEach((tab,i)=>{tab.setAttribute('aria-selected',String(i===index));document.getElementById(tab.getAttribute('aria-controls')).hidden=i!==index});location.hash='page-'+index}tabs.forEach((tab,i)=>{tab.addEventListener('click',()=>activate(i));tab.addEventListener('keydown',event=>{if(event.key==='ArrowDown'||event.key==='ArrowRight'){event.preventDefault();const next=(i+1)%tabs.length;activate(next);tabs[next].focus()}if(event.key==='ArrowUp'||event.key==='ArrowLeft'){event.preventDefault();const next=(i+tabs.length-1)%tabs.length;activate(next);tabs[next].focus()}})});const match=location.hash.match(/^#page-([0-9]+)$/);if(match&&Number(match[1])<tabs.length)activate(Number(match[1]));
+</script></body></html>

@@ -12,13 +12,17 @@ from typing import Any
 from app.common.exceptions import BusinessError
 from app.domain.materials import file_quality
 
-# 工具的名称、输出与描述元数据；输入参数以本文件的 JSON Schema 为准。
-KIND_OPERATOR = "OPERATOR"
-KIND_QUALITY_ITEM = "QUALITY_ITEM"
-INPUT_NONE = "NONE"
-INPUT_MATERIAL_SCOPE = "MATERIAL_SCOPE"
-JUDGE_PROGRAM = "PROGRAM"
-JUDGE_LLM = "LLM"
+# 工具类别：决定采用算子工具还是文件质量检查工具的构建逻辑。
+KIND_OPERATOR = "OPERATOR"  # 算子类工具，使用对应算子的参数 Schema 和执行入口。
+KIND_QUALITY_ITEM = "QUALITY_ITEM"  # 文件质量检查子项，每个检查项目生成一个独立工具。
+
+# 输入口径：描述字段输入与材料范围；实际参数要求以各工具的 JSON Schema 为准。
+INPUT_NONE = "NONE"  # 无字段输入，不表示无业务参数；例如风险工具仍需来源规则编号。
+INPUT_MATERIAL_SCOPE = "MATERIAL_SCOPE"  # 按材料位确定检查范围，真实文件由运行时读取。
+
+# 判定归属：用于描述能力，不负责选择执行入口或发起模型调用。
+JUDGE_PROGRAM = "PROGRAM"  # 程序判定，工具描述明确要求模型不得改写判定结果。
+JUDGE_LLM = "LLM"  # 大模型判定的能力标记。
 
 
 @dataclass(frozen=True)

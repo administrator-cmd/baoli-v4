@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img"><title>字段取值与人工记录</title><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5d6c80"/></marker></defs><rect width="100%" height="100%" fill="#fff"/><g font-family="Microsoft YaHei, sans-serif"><text x="48" y="42" font-size="13" fill="#2563eb" font-weight="600" text-anchor="start">DATA MODEL / DETAIL</text><text x="48" y="91" font-size="32" fill="#15253c" font-weight="600" text-anchor="start">字段取值与人工记录</text><text x="48" y="125" font-size="16" fill="#5d6c80" font-weight="400" text-anchor="start">抽取候选绑定任务、材料位、上传版本与执行批次；人工复核指向具体字段版本。</text><line x1="48" y1="951" x2="1392" y2="951" stroke="#e2e8f0"/><text x="48" y="977" font-size="12" fill="#5d6c80" font-weight="400" text-anchor="start">BAOLI · 资料审核系统   /   基于当前源码 · 2026-11-16</text><g transform="translate(433.57496807151983 172.0) scale(0.8684546615581098)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 765)">
+<ns0:title>G</ns0:title>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>node_execution-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge1"><ns0:a ns1:title="fk_task_field_value_execution_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M505.88,-590.46C493.32,-576.58 483.75,-566 483.75,-566 483.75,-566 405.75,-506 405.75,-506 405.75,-506 341.75,-458.72 290.51,-420.86" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="473.8" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R01   0..1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>task_document-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge2"><ns0:a ns1:title="fk_task_field_value_task_material">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M221.61,-566.2C222.66,-533.42 223.85,-496.33 224.9,-463.56" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="261.77" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R02   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>audit_task-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge3"><ns0:a ns1:title="fk_task_field_value_task_version">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M97.36,-572.44C117.5,-538.03 136.25,-506 136.25,-506 136.25,-506 149.39,-487.12 165.7,-463.67" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="174.5" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R03   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>audit_task-&gt;manual_review</ns0:title>
+<ns0:g id="a_edge6"><ns0:a ns1:title="fk_manual_review_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M51.76,-566.13C55.31,-460.68 61.18,-286.39 64.74,-180.91" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="99.31" y="-370.15" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R06   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>document_upload-&gt;task_field_value</ns0:title>
+<ns0:g id="a_edge4"><ns0:a ns1:title="fk_task_field_value_upload_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M344.89,-566.38C326.25,-534.36 309.75,-506 309.75,-506 309.75,-506 297.98,-487.12 283.35,-463.67" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="357.05" y="-511.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R04   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>task_field_value-&gt;manual_review</ns0:title>
+<ns0:g id="a_edge5"><ns0:a ns1:title="fk_manual_review_field_value_task">
+<ns0:path fill="none" stroke="#8c9bad" stroke-width="1.3" d="M176.91,-283.2C158.24,-250.42 137.12,-213.33 118.46,-180.56" />
+</ns0:a>
+</ns0:g>
+<ns0:text text-anchor="middle" x="190.8" y="-228.65" font-family="Microsoft YaHei" font-size="13.00" fill="#4b5b71">R05   1 : 0..N</ns0:text>
+</ns0:g>
+
+<ns0:g id="node1" class="node">
+<ns0:title>node_execution</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="505.88,-566 505.88,-747 623.62,-747 623.62,-566 505.88,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="506.88,-705.25 506.88,-746 622.62,-746 622.62,-705.25 506.88,-705.25" />
+<ns0:text text-anchor="start" x="514.88" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">执行批次</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">node_execution</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">sequence_no</ns0:text>
+<ns0:text text-anchor="start" x="514.88" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="505.88,-566 505.88,-747 623.62,-747 623.62,-566 505.88,-566" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>task_document</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="149,-566 149,-747 288.5,-747 288.5,-566 149,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="150,-705.25 150,-746 287.5,-746 287.5,-705.25 150,-705.25" />
+<ns0:text text-anchor="start" x="158" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">任务材料位</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_document</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">UK  document_no</ns0:text>
+<ns0:text text-anchor="start" x="158" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">material_key</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="149,-566 149,-747 288.5,-747 288.5,-566 149,-566" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>audit_task</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="0,-566 0,-747 97.5,-747 97.5,-566 0,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="1,-705.25 1,-746 96.5,-746 96.5,-705.25 1,-705.25" />
+<ns0:text text-anchor="start" x="9" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">审核任务</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">audit_task</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">UK  task_no</ns0:text>
+<ns0:text text-anchor="start" x="9" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">status</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="0,-566 0,-747 97.5,-747 97.5,-566 0,-566" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>document_upload</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="331.12,-566 331.12,-747 462.38,-747 462.38,-566 331.12,-566" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="332.12,-705.25 332.12,-746 461.38,-746 461.38,-705.25 332.12,-705.25" />
+<ns0:text text-anchor="start" x="340.12" y="-721.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">上传文件版本</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-684.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">document_upload</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-649.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-615.2" font-family="Microsoft YaHei" font-size="14.00">upload_no</ns0:text>
+<ns0:text text-anchor="start" x="340.12" y="-580.45" font-family="Microsoft YaHei" font-size="14.00">is_current</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="331.12,-566 331.12,-747 462.38,-747 462.38,-566 331.12,-566" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>task_field_value</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="164.75,-283 164.75,-464 290.75,-464 290.75,-283 164.75,-283" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="165.75,-422.25 165.75,-463 289.75,-463 289.75,-422.25 165.75,-422.25" />
+<ns0:text text-anchor="start" x="173.75" y="-438.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">字段取值索引</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-401.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">task_field_value</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-366.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-332.2" font-family="Microsoft YaHei" font-size="14.00">field_key</ns0:text>
+<ns0:text text-anchor="start" x="173.75" y="-297.45" font-family="Microsoft YaHei" font-size="14.00">revision_no</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="164.75,-283 164.75,-464 290.75,-464 290.75,-283 164.75,-283" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>manual_review</ns0:title>
+<ns0:polygon fill="white" stroke="none" points="4.75,0 4.75,-181 130.75,-181 130.75,0 4.75,0" />
+<ns0:polygon fill="#eff4fb" stroke="none" points="5.75,-139.25 5.75,-180 129.75,-180 129.75,-139.25 5.75,-139.25" />
+<ns0:text text-anchor="start" x="13.75" y="-155.9" font-family="Microsoft YaHei" font-weight="bold" font-size="18.00" fill="#15253c">人工复核记录</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-118.9" font-family="Microsoft YaHei" font-size="13.00" fill="#2563eb">manual_review</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-83.95" font-family="Microsoft YaHei" font-size="14.00">PK  id</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-49.2" font-family="Microsoft YaHei" font-size="14.00">UK  review_no</ns0:text>
+<ns0:text text-anchor="start" x="13.75" y="-14.45" font-family="Microsoft YaHei" font-size="14.00">decision ?</ns0:text>
+<ns0:polygon fill="none" stroke="#cbd5e1" points="4.75,0 4.75,-181 130.75,-181 130.75,0 4.75,0" />
+</ns0:g>
+</ns0:g>
+</g><text x="48" y="889" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">连线标注：关系编号 · 父记录数 : 子记录数。只绘制当前模块负责的外键；共享表可重复出现在不同页。</text><text x="48" y="918" font-size="14" fill="#5d6c80" font-weight="400" text-anchor="start">卡片只列定位字段；每条连线对应的完整外键列见图册下方「关系明细」。PK 主键 · UK 单列唯一 · ? 可空</text></g></svg>

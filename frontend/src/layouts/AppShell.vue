@@ -133,7 +133,7 @@ onUnmounted(() => {
       <div class="app-brand">
         <span class="app-brand__mark"><Scale :size="18" aria-hidden="true" /></span>
         <span v-if="!collapsed" class="app-brand__text">
-          <strong>保理合同审核系统</strong>
+          <strong>资料审核系统</strong>
         </span>
       </div>
 

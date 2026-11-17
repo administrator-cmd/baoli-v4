@@ -318,7 +318,7 @@ onUnmounted(() => {
       <el-table-column label="更新时间" width="200">
         <template #default="{ row }">{{ formatDate(row.updated_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="300" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="260" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="previewPdf(row)">查看 PDF</el-button>
           <el-button link type="primary" size="small" @click="openEdit(row)">{{ row.style_profile ? "查看 / 编辑" : "修改名称" }}</el-button>
