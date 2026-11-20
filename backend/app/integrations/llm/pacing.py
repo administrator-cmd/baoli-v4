@@ -50,7 +50,8 @@ class LlmRequestPacer:
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self._busy = False
+        self._active = 0
+        self._cooling_until: list[float] = []
         self._next_allowed_at = 0.0
 
     def defer(self, seconds: float) -> None:
@@ -67,8 +68,18 @@ class LlmRequestPacer:
             )
         return remaining
 
+    def wait_for_retry_window(self, deadline: float) -> None:
+        # 已占槽的请求重试前也要尊重其他并发请求延长的共享冷却。
+        with self._condition:
+            while True:
+                remaining = self._remaining(deadline)
+                delay = self._next_allowed_at - time.monotonic()
+                if delay <= 0:
+                    return
+                self._condition.wait(timeout=min(delay, remaining))
+
     @contextmanager
-    def slot(self, *, interval_seconds: float, deadline: float,
+    def slot(self, *, interval_seconds: float, deadline: float, max_concurrent: int = 1,
              on_wait: Callable[[], None] | None = None) -> Iterator[None]:
         notified = False
 
@@ -79,28 +90,23 @@ class LlmRequestPacer:
             notified = True
 
         with self._condition:
-            while self._busy:
+            while True:
                 remaining = self._remaining(deadline)
+                now = time.monotonic()
+                self._cooling_until = [end for end in self._cooling_until if end > now]
+                delay = max(0.0, self._next_allowed_at - now)
+                if self._active + len(self._cooling_until) < max_concurrent and not delay:
+                    self._active += 1
+                    break
                 notice()
-                self._condition.wait(timeout=remaining)
-            self._remaining(deadline)
-            self._busy = True
-        entered = False
+                if self._active + len(self._cooling_until) >= max_concurrent and self._cooling_until:
+                    delay = max(delay, min(self._cooling_until) - now)
+                self._condition.wait(timeout=min(delay or remaining, remaining))
         try:
-            with self._condition:
-                while True:
-                    remaining = self._remaining(deadline)
-                    delay = self._next_allowed_at - time.monotonic()
-                    if delay <= 0:
-                        break
-                    notice()
-                    self._condition.wait(timeout=min(delay, remaining))
-            entered = True
             yield
         finally:
             with self._condition:
-                if entered:
-                    # 按上一轮结束计间隔，长响应结束后也不能立刻紧接下一条规则。
-                    self._next_allowed_at = max(self._next_allowed_at, time.monotonic() + interval_seconds)
-                self._busy = False
+                self._active -= 1
+                if interval_seconds > 0:
+                    self._cooling_until.append(time.monotonic() + interval_seconds)
                 self._condition.notify_all()

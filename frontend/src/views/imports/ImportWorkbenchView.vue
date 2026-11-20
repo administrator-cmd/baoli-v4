@@ -2,7 +2,7 @@
 import { computed, h, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { getOperation, isOperationActive, isOperationFinished, operationIdempotencyKey, type ApiError, type OperationView } from "@/api/http";
+import { ApiError, getOperation, isOperationActive, isOperationFinished, operationIdempotencyKey, type OperationView } from "@/api/http";
 import {
   applyImportToDraft,
   createImportJob,
@@ -18,6 +18,7 @@ import type {
   ProposalCalculation,
   UploadPolicy,
 } from "@/api/contracts";
+import ImportDependencyReview from "@/components/import/ImportDependencyReview.vue";
 import ImportProposalEditor from "@/components/import/ImportProposalEditor.vue";
 import FileUploadCard from "@/components/import/FileUploadCard.vue";
 import ImportJobPicker from "@/components/import/ImportJobPicker.vue";
@@ -53,13 +54,15 @@ const uploadScenarioCode = ref("");
 const uploadPolicy = ref<UploadPolicy | null>(null);
 const activeStep = ref(0);
 const proposalSaving = ref(false);
+const dependencySaving = ref(false);
 /** 首次进入时的加载状态：与「还没有数据」分开，避免把请求失败显示成空。 */
 const loadingJob = ref(false);
 const loadingJobs = ref(false);
 /** 本次浏览器选择的文件大小；刷新后浏览器不再保留该信息。 */
 const selectedFileSize = ref<number | null>(null);
-/** 尚未确认受理的幂等标识：同一次业务动作再次提交时复用它，不会产生第二次执行。 */
-let conversionAttemptKey: string | null = null;
+type ConversionMode = "FULL" | "RESUME_REFINEMENT";
+/** 受理结果未知时，幂等键和原解析方式必须一起复用。 */
+const conversionAttempt = ref<{ key: string; mode: ConversionMode } | null>(null);
 
 let jobReception = 0;
 let jobLoadRequest = 0;
@@ -69,6 +72,11 @@ const proposalFields = computed(() => job.value?.proposals?.fields ?? []);
 const proposalRules = computed(() => job.value?.proposals?.rules ?? []);
 const proposalReports = computed(() => job.value?.proposals?.report_sections ?? []);
 const proposalCalculations = computed<ProposalCalculation[]>(() => job.value?.proposals?.calculations ?? []);
+const dependencyReviews = computed(() => {
+  const questions = job.value?.proposals?.dependency_questions ?? [];
+  return proposalRules.value.map(rule => ({ rule, questions: questions.filter(q => q.owner_ref === rule.candidate_ref) }))
+    .filter(item => item.questions.length);
+});
 const hasProposals = computed(() => Boolean(job.value?.proposals));
 
 const proposalTotals = computed(() => ({
@@ -102,7 +110,7 @@ const importMutable = computed(() => Boolean(job.value?.proposals) === false && 
 const canSubmitConversion = computed(() => importMutable.value && !pending.value && !operationRunning.value);
 
 /**
- * 第一轮目录已保存且尚未形成最终结果：可以只重跑第二轮。
+ * 尚未形成最终结果且有可复用的解析进度。
  * 场景已发布、已写入草稿或已有解析结果时不提供该选项。
  */
 const canResumeRefinement = computed(
@@ -111,7 +119,8 @@ const canResumeRefinement = computed(
 
 const conversionActionLabel = computed(() => {
   if (parsing.value) return "正在解析";
-  return canResumeRefinement.value ? "重试第二轮" : jobFailure.value ? "重新解析" : "开始解析";
+  if (conversionAttempt.value) return "确认上次解析";
+  return canResumeRefinement.value ? "继续解析" : jobFailure.value ? "重新解析" : "开始解析";
 });
 
 const conversionDisabledReason = computed(() => {
@@ -238,7 +247,7 @@ function resetImportWorkspace(): void {
   importJobs.value = [];
   activeStep.value = 0;
   selectedFileSize.value = null;
-  conversionAttemptKey = null;
+  conversionAttempt.value = null;
 }
 
 /**
@@ -247,7 +256,7 @@ function resetImportWorkspace(): void {
  */
 function trackOperation(value: OperationView): void {
   const jobNo = job.value?.job_no;
-  conversionAttemptKey = null;
+  conversionAttempt.value = null;
   track(value, {
     onFinished: async (finished) => {
       if (jobNo && job.value?.job_no === jobNo) await refreshAfterOperation(finished, jobNo);
@@ -352,9 +361,9 @@ async function uploadRulebook(file: File): Promise<void> {
 
 /**
  * 提交后台解析。长处理只受理，随后查询真实状态。
- * 默认复用已保存的第一轮目录，只重跑第二轮；显式选择 FULL 时从头解析。
+ * 默认复用当前解析契约的检查点；显式选择 FULL 时从头解析。
  */
-async function submitConversion(mode?: "FULL" | "RESUME_REFINEMENT"): Promise<void> {
+async function submitConversion(mode?: ConversionMode): Promise<void> {
   if (!job.value) {
     return;
   }
@@ -362,38 +371,39 @@ async function submitConversion(mode?: "FULL" | "RESUME_REFINEMENT"): Promise<vo
     formMessage.value = conversionDisabledReason.value;
     return;
   }
-  const selected = mode ?? (canResumeRefinement.value ? "RESUME_REFINEMENT" : "FULL");
   const jobNo = job.value.job_no;
   await run(async () => {
-    const attemptKey = conversionAttemptKey ?? operationIdempotencyKey("IMPORT_CONVERT", jobNo);
-    conversionAttemptKey = attemptKey;
+    conversionAttempt.value ??= {
+      key: operationIdempotencyKey("IMPORT_CONVERT", jobNo),
+      mode: mode ?? (canResumeRefinement.value ? "RESUME_REFINEMENT" : "FULL"),
+    };
+    const attempt = conversionAttempt.value;
+    let accepted: OperationView;
     try {
-      const accepted = await startImportConversion(jobNo, attemptKey, selected);
-      trackOperation(accepted);
-      activeStep.value = 1;
-      // 把操作编号写进 URL：刷新后仍能凭它继续查询同一个操作。
-      await router.replace({ name: "scene-import-detail", params: { jobNo }, query: { operation: accepted.operation_no } });
+      accepted = await startImportConversion(jobNo, attempt.key, attempt.mode);
     } catch (error) {
+      if (conversionAttempt.value !== attempt) return;
       setFailure(error);
-      const code = error instanceof Error && "code" in error ? (error as ApiError).code : null;
-      // 服务端明确返回错误码说明本次请求未被受理，幂等键只在结果未知（网络中断）时才保留；
-      // 否则用户换一个模式提交时会用同一键发出不同内容，持续命中幂等冲突。
-      if (code) conversionAttemptKey = null;
-      if (code === "OPERATION_ALREADY_ACTIVE") {
-        // 同一作业已有活跃操作时，明确切换到查询该操作的真实状态，不重复提交。
+      if (!(error instanceof ApiError) || error.statusCode === null || error.statusCode === 408
+        || error.statusCode < 400 || error.statusCode >= 500 || error.code === "INVALID_RESPONSE" || error.code === "HTTP_ERROR") return;
+      conversionAttempt.value = null;
+      if (error.code === "OPERATION_ALREADY_ACTIVE" || error.code === "IMPORT_INITIAL_STAGE_UNAVAILABLE") {
         const reloaded = await getImportJob(jobNo);
+        if (job.value?.job_no !== jobNo) return;
         await receiveJob(reloaded, true);
-        resumeLatestOperation();
-      } else if (code === "IMPORT_INITIAL_STAGE_UNAVAILABLE") {
-        // 第一轮检查点已失效：刷新作业详情，页面按钮随之回到「开始解析」。
-        const reloaded = await getImportJob(jobNo);
-        await receiveJob(reloaded, true);
+        if (error.code === "OPERATION_ALREADY_ACTIVE") resumeLatestOperation();
       }
+      return;
     }
+    if (conversionAttempt.value !== attempt) return;
+    trackOperation(accepted);
+    activeStep.value = 1;
+    // 把操作编号写进 URL：刷新后仍能凭它继续查询同一个操作。
+    await router.replace({ name: "scene-import-detail", params: { jobNo }, query: { operation: accepted.operation_no } });
   });
 }
 
-/** 从头重新解析：两轮都重跑，已保存的第一轮目录会被新的结果覆盖。 */
+/** 从头重新解析：不复用本模式的检查点。 */
 async function reparseFromStart(): Promise<void> {
   try {
     await ElMessageBox.confirm(
@@ -404,6 +414,7 @@ async function reparseFromStart(): Promise<void> {
   } catch {
     return;
   }
+  if (conversionAttempt.value) return;
   await submitConversion("FULL");
 }
 
@@ -565,7 +576,7 @@ watch(
         :closable="false"
         :title="jobFailure.message"
       >
-        <div v-if="canResumeRefinement">第一轮解析结果已保存，可只重试第二轮；如需重新理解整份 Excel，选择「从头重新解析」。</div>
+        <div v-if="canResumeRefinement">可从已保存的进度继续；选择「从头重新解析」会重新读取整份 Excel。</div>
       </el-alert>
 
       <!-- 第一步：上传文件 -->
@@ -585,7 +596,7 @@ watch(
           <div class="sticky-actions__bar">
             <div class="card-actions">
               <el-button @click="startNewImport">重新上传规则库</el-button>
-              <el-button v-if="canResumeRefinement" :disabled="!canSubmitConversion" @click="reparseFromStart">从头重新解析</el-button>
+              <el-button v-if="canResumeRefinement && !conversionAttempt" :disabled="!canSubmitConversion" @click="reparseFromStart">从头重新解析</el-button>
               <el-button
                 type="primary"
                 :loading="pending || parsing"
@@ -610,7 +621,7 @@ watch(
         </template>
 
         <div v-if="importMutable" class="card-actions block-gap-sm">
-          <el-button v-if="canResumeRefinement" :disabled="!canSubmitConversion" @click="reparseFromStart">从头重新解析</el-button>
+          <el-button v-if="canResumeRefinement && !conversionAttempt" :disabled="!canSubmitConversion" @click="reparseFromStart">从头重新解析</el-button>
           <el-button
             type="primary"
             :loading="pending || parsing"
@@ -622,12 +633,18 @@ watch(
           </el-button>
         </div>
 
+        <template v-if="!loadingJob && dependencyReviews.length">
+          <h3>待确认的规则引用</h3>
+          <ImportDependencyReview v-for="item in dependencyReviews" :key="JSON.stringify([job.job_no, item.rule.candidate_ref, item.questions])"
+            :job="job" :rule="item.rule" :questions="item.questions" :disabled="sealed || operationRunning || proposalSaving || dependencySaving"
+            @busy="dependencySaving = $event" @saved="receiveProposalUpdate" @failed="setFailure" />
+        </template>
         <StateBlock v-if="loadingJob" kind="loading" />
         <StateBlock v-else-if="operationRunning && !hasProposals" kind="loading" title="正在解析规则库" description="完成后将显示材料、字段、规则和报告配置。" />
         <ImportProposalEditor
           v-else-if="hasProposals"
           :job="job"
-          :readonly="sealed || operationRunning"
+          :readonly="sealed || operationRunning || dependencySaving"
           @saved="receiveProposalUpdate"
           @busy="proposalSaving = $event"
         />
@@ -642,7 +659,7 @@ watch(
           <div class="sticky-actions__bar">
             <div class="card-actions">
               <el-button :disabled="proposalSaving" @click="activeStep = 0">上一步</el-button>
-              <el-button type="primary" :disabled="!hasProposals || proposalSaving" @click="activeStep = 2">下一步：写入草稿</el-button>
+              <el-button type="primary" :disabled="!hasProposals || proposalSaving || dependencyReviews.length > 0" @click="activeStep = 2">下一步：写入草稿</el-button>
             </div>
           </div>
         </div>
@@ -653,7 +670,7 @@ watch(
         <template #header>
           <div class="card-header">
             <span>第三步 · 写入场景草稿</span>
-            <StatusBadge :status="job.status === 'APPLIED' ? 'APPLIED' : 'READY'" />
+            <StatusBadge :status="job.status === 'APPLIED' ? 'APPLIED' : 'READY'" :label="job.status === 'APPLIED' ? '已写入场景草稿' : '待写入场景草稿'" />
           </div>
         </template>
 
@@ -684,6 +701,7 @@ watch(
             </section>
           </div>
 
+          <el-alert v-if="dependencyReviews.length" class="block-gap" type="warning" :closable="false" title="请返回上一步，确认规则引用后再写入。" />
           <el-alert class="block-gap" type="info" show-icon :closable="false" title="本次操作只生成草稿，不会自动发布">
             写入后将在场景配置页继续核对和调整；只有管理员手动发布后，新配置才会生效。
           </el-alert>
@@ -697,7 +715,7 @@ watch(
                 v-if="job.status !== 'APPLIED'"
                 type="primary"
                 :loading="pending"
-                :disabled="!hasProposals"
+                :disabled="!hasProposals || dependencyReviews.length > 0"
                 @click="applyToSceneDraft"
               >
                 写入场景草稿

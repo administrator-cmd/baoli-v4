@@ -159,7 +159,7 @@ class GenerationExportService:
                 details={"job_no": job_no, "revision": job.revision},
             )
         export_no = public_no("GENX")
-        directory = f"rulebook_generations/{job.job_no}/exports/{expected_revision}"
+        directory = f"{Path(job.source_path).parent.as_posix()}/exports/v{expected_revision:04d}"
         relative_path = f"{directory}/规则库.xlsx"
         target = resolve_storage_path(relative_path)
         self._discard_unreferenced_export(int(job.id), expected_revision, target)

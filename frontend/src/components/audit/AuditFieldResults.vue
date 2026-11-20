@@ -5,8 +5,7 @@ import type { AuditField } from "@/api/contracts";
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { statusTextOf } from "@/constants/statusVocabulary";
-import { evidenceIsValue, fieldMode, fieldReason, fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
+import { evidenceIsValue, extractionOutcome, extractionOutcomeCode, fieldMode, fieldReason, fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
 import { quoteInlineText } from "@/utils/quoteText";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
@@ -29,8 +28,10 @@ const emit = defineEmits<{
 const detailField = shallowRef<AuditField | null>(null);
 
 function extractedText(field: AuditField): string {
+  if (extractionOutcomeCode(field) === "UNKNOWN_STATUS") return `未识别状态（${field.status}）`;
   if (hasEffectiveFieldValue(field)) return formatFieldValue(field);
   if (field.status === "NOT_PRESENT") return "材料未载明";
+  if (field.status === "EXTRACTION_FAILED") return "未取得可采信的值";
   if (field.status === "NOT_APPLICABLE") return "本次不适用";
   if (field.extraction_enabled === false) return "未启用抽取";
   if (field.material_uploaded === false) return "材料未上传";
@@ -70,30 +71,14 @@ function sourceFilesText(field: AuditField): string {
   return fieldSourceFiles(field).join("、") || "未记录来源文件";
 }
 
-/**
- * 筛选分档。分档必须覆盖服务端可能给出的全部字段状态码：
- * 落在分档之外的码会让数量对不上，也会让人以为所有结果都被看过了。
- */
 const filters = [
-  { value: "ALL", label: "全部", statuses: [] as string[] },
-  { value: "EXTRACTED", label: "有有效值", statuses: ["PRESENT", "REVIEWED"] },
-  { value: "NO_VALUE", label: "无有效值", statuses: [] as string[] },
-  {
-    value: "UNRESOLVED",
-    label: "未取到值",
-    statuses: ["NOT_PRESENT", "EVIDENCE_UNCLEAR", "NORMALIZATION_FAILED", "EXTRACTION_FAILED", "EVIDENCE_INSUFFICIENT"],
-  },
-  { value: "NOT_APPLICABLE", label: "不适用", statuses: ["NOT_APPLICABLE"] },
-  { value: "NOT_EXECUTED", label: "未执行", statuses: ["NOT_EXECUTED", "PENDING"] },
+  { value: "ALL", label: "全部" },
+  { value: "EXTRACTED", label: "已抽取" },
+  { value: "NO_VALUE", label: "未抽取到" },
 ];
 
 function matchesFilter(field: AuditField, filter: (typeof filters)[number]): boolean {
-  if (filter.value === "ALL") return true;
-  if (filter.value === "EXTRACTED") return hasEffectiveFieldValue(field);
-  if (filter.value === "NO_VALUE") {
-    return field.status !== "NOT_APPLICABLE" && !hasEffectiveFieldValue(field);
-  }
-  return filter.statuses.includes(field.status);
+  return filter.value === "ALL" || extractionOutcomeCode(field) === filter.value;
 }
 
 watch(() => props.filter, (value) => {
@@ -115,20 +100,6 @@ watch(() => props.fields, (fields) => {
   if (detailField.value) detailField.value = fields.find((field) =>
     field.field_key === detailField.value?.field_key && field.material_key === detailField.value?.material_key) ?? null;
 });
-
-/** 不被任何分档覆盖的状态码：新增状态出现时必须看得见，不能静默消失。 */
-const uncoveredStatusCounts = computed(() => {
-  const covered = new Set(filters.flatMap((filter) => filter.statuses));
-  const counts: Record<string, number> = {};
-  for (const field of props.fields) {
-    if (!covered.has(field.status)) {
-      counts[field.status] = (counts[field.status] ?? 0) + 1;
-    }
-  }
-  return counts;
-});
-
-const uncoveredTotal = computed(() => Object.values(uncoveredStatusCounts.value).reduce((sum, item) => sum + item, 0));
 
 const rows = computed(() => {
   const selected = filters.find((item) => item.value === statusFilter.value)!;
@@ -152,20 +123,12 @@ const emptyDescription = computed(() => {
   <div v-else class="stack">
     <div class="field-toolbar">
       <el-input v-model="search" clearable placeholder="搜索字段、来源文件或原文" aria-label="搜索字段结果" class="field-search" />
-      <el-select v-model="statusFilter" aria-label="按字段状态筛选" class="field-status-filter">
+      <el-select v-model="statusFilter" aria-label="按字段状态筛选" class="field-status-filter" style="min-width: 260px">
         <el-option v-for="filter in filters" :key="filter.value" :value="filter.value"
           :label="`${filter.label}（${fields.filter((field) => matchesFilter(field, filter)).length}）`" />
       </el-select>
       <span class="text-hint field-count">显示 {{ rows.length }} / {{ fields.length }} 项</span>
     </div>
-
-    <el-alert
-      v-if="uncoveredTotal"
-      type="warning"
-      show-icon
-      :closable="false"
-      :title="`有 ${uncoveredTotal} 条字段结果的状态不在上面的分档内（${Object.entries(uncoveredStatusCounts).map(([status, count]) => `${statusTextOf('field', status)} ${count} 条`).join('、')}），它们只在「全部」里出现。`"
-    />
 
     <el-empty v-if="!rows.length" description="没有符合筛选条件的字段结果">
       <el-button @click="search = ''; statusFilter = 'ALL'">清除筛选</el-button>
@@ -185,14 +148,15 @@ const emptyDescription = computed(() => {
           <div class="field-value" :title="sourceFilesText(row)">{{ sourceFilesText(row) }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="抽取结果" min-width="240">
+      <el-table-column label="当前取值" min-width="240">
         <template #default="{ row }">
           <div class="field-value" :class="{ 'field-value--empty': row.normalized_value === null || row.normalized_value === undefined || row.normalized_value === '' }">{{ extractedText(row) }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="140">
+      <el-table-column label="抽取结果" width="140">
         <template #default="{ row }">
-          <StatusBadge domain="field" :status="row.status" />
+          <StatusBadge v-if="extractionOutcome(row)" :status="row.status" :label="extractionOutcome(row)" :tone="extractionOutcomeCode(row) === 'EXTRACTED' ? 'success' : 'warning'" />
+          <span v-else class="text-hint">—</span>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="88" fixed="right" align="center">

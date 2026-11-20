@@ -2,9 +2,14 @@
 
 from sqlalchemy import and_, func, or_, select, update
 
+from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.core.base_crud import CRUDBase
+from app.domain.materials.material_precheck import PRECHECK_KEY
+from app.modules.audit.artifact.model import StoredArtifact
+from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.task.model import AuditTask
 from app.modules.material.document.model import DocumentUpload, TaskDocument
+from app.modules.system.operation.model import BackgroundOperation
 
 
 class MaterialDocumentCRUD(CRUDBase):
@@ -96,6 +101,37 @@ class MaterialDocumentCRUD(CRUDBase):
 
     def document_by_no(self, document_no: str) -> TaskDocument | None:
         return self.db.scalar(select(TaskDocument).where(TaskDocument.document_no == document_no))
+
+    def processing_attention_rows(self, document_ids: list[int]):
+        active_task_ids = (
+            select(AuditTask.id)
+            .join(BackgroundOperation, BackgroundOperation.object_no == AuditTask.task_no)
+            .where(BackgroundOperation.object_type == "AUDIT_TASK", BackgroundOperation.status.in_(ACTIVE_OPERATION_STATUSES))
+        )
+        return self.db.execute(
+            select(TaskDocument.id, StoredArtifact.artifact_type, StoredArtifact.status, StoredArtifact.failure_message)
+            .join(DocumentUpload, DocumentUpload.task_document_id == TaskDocument.id)
+            .join(StoredArtifact, StoredArtifact.document_upload_id == DocumentUpload.id)
+            .where(TaskDocument.id.in_(document_ids), DocumentUpload.is_current.is_(True),
+                   or_(StoredArtifact.status == "FAILED",
+                       and_(StoredArtifact.status.in_(["PROCESSING", "SUBMITTING"]),
+                            TaskDocument.audit_task_id.not_in(active_task_ids))))
+        ).all()
+
+    def quality_attention_rows(self, document_ids: list[int]):
+        precheck = (
+            select(NodeExecution.result_json[PRECHECK_KEY])
+            .where(NodeExecution.audit_task_id == AuditTask.id,
+                   NodeExecution.status != "INVALIDATED")
+            .order_by(NodeExecution.id.desc()).limit(1).correlate(AuditTask).scalar_subquery()
+        )
+        return self.db.execute(
+            select(TaskDocument.id, TaskDocument.material_key, AuditTask.input_revision,
+                   DocumentUpload.id.label("upload_id"), precheck.label("precheck"))
+            .join(AuditTask, AuditTask.id == TaskDocument.audit_task_id)
+            .join(DocumentUpload, DocumentUpload.task_document_id == TaskDocument.id)
+            .where(TaskDocument.id.in_(document_ids), DocumentUpload.is_current.is_(True))
+        ).all()
 
 
     def task_by_id(self, task_id: int) -> AuditTask | None:

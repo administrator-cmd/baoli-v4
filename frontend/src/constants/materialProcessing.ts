@@ -25,7 +25,9 @@ const artifactStatuses: Record<string, { label: string; tone: StatusTone }> = {
   SKIPPED: { label: "已停止处理", tone: "warning" },
 };
 
-export function processingStatusLabel(artifact: ProcessingArtifact): string {
+export function processingStatusLabel(artifact: ProcessingArtifact, operationActive: boolean): string {
+  if (operationActive && artifact.status === "SUBMITTING") return "提交中";
+  if (operationActive && artifact.status === "PROCESSING") return "处理中";
   if (artifact.artifact_type === "OCR" && artifact.status === "PENDING") {
     if (artifact.provider_state === "running") return "识别中";
     if (artifact.provider_state === "pending") return "排队中";
@@ -35,7 +37,8 @@ export function processingStatusLabel(artifact: ProcessingArtifact): string {
   return artifactStatuses[artifact.status]?.label ?? artifact.status;
 }
 
-export function processingStatusTone(artifact: ProcessingArtifact): StatusTone {
+export function processingStatusTone(artifact: ProcessingArtifact, operationActive: boolean): StatusTone {
+  if (operationActive && ["SUBMITTING", "PROCESSING"].includes(artifact.status)) return "info";
   return artifactStatuses[artifact.status]?.tone ?? "neutral";
 }
 

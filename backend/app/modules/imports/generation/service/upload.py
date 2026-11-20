@@ -23,7 +23,7 @@ from app.modules.imports.generation import crud
 from app.modules.imports.generation.model import RulebookGenerationJob
 from app.modules.imports.job.service.workbook import ImportsJobWorkbookService
 from app.services.shared.commands import _idempotency_key
-from app.services.shared.storage import RULEBOOK_EXTENSIONS, resolve_storage_path, save_upload_sync
+from app.services.shared.storage import storage_entry, RULEBOOK_EXTENSIONS, resolve_storage_path, save_upload_sync
 
 
 class GenerationUploadService:
@@ -166,7 +166,7 @@ class GenerationUploadService:
             return existing, True
 
         job_no = public_no("GEN")
-        relative_path = f"rulebook_generations/{job_no}/source{suffix}"
+        relative_path = f"rulebook_generations/{storage_entry('generation', job_no)}/source{suffix}"
         target = resolve_storage_path(relative_path)
         try:
             self._validate_workbook(staging_path, source_filename, size, sha256)

@@ -2,7 +2,7 @@
 import { computed } from "vue";
 
 import { isOperationFinished, operationToneClass, type OperationView } from "@/api/http";
-import { operationPhaseLabel, operationTypeLabel, parseServerTime, statusLabel } from "@/constants/labels";
+import { operationPhaseLabel, operationStatusLabel, operationTypeLabel, parseServerTime } from "@/constants/labels";
 import StatusBadge from "./StatusBadge.vue";
 
 /**
@@ -96,7 +96,7 @@ const elapsedText = computed(() => {
           <div class="operation-panel__title">{{ title }}</div>
         </div>
         <div class="card-actions">
-          <StatusBadge :status="operation.status" />
+          <StatusBadge :status="operation.status" :label="operationStatusLabel(operation.status)" />
           <!-- 终态记录不会变化，重读只会得到同一份状态；只在轮询仍在进行或已中断时提供查询。 -->
           <el-button v-if="watching || queryStopped" size="small" :loading="watching" @click="$emit('requery')">再次查询</el-button>
           <el-button
@@ -134,8 +134,8 @@ const elapsedText = computed(() => {
       <summary v-if="compact">技术信息</summary>
       <el-descriptions :column="2" size="small" border>
         <el-descriptions-item label="当前步骤">{{ operationTypeLabel(operation.operation_type) }}</el-descriptions-item>
-        <el-descriptions-item label="状态">
-          {{ statusLabel(operation.status) }} · {{ operation.message }}
+        <el-descriptions-item label="操作状态">
+          {{ operationStatusLabel(operation.status) }} · {{ operation.message }}
         </el-descriptions-item>
         <el-descriptions-item v-if="phaseText" label="命令阶段">{{ phaseText }}</el-descriptions-item>
         <el-descriptions-item v-if="operation.external_job_ref" label="外部作业引用">

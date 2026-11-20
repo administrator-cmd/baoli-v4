@@ -63,7 +63,13 @@ class ModelField(FieldProposal):
     config_status: Literal["CLEAR", "PENDING", "DISABLED"] = Field(description="CLEAR 启用；PENDING 待确认、不抽取；DISABLED 暂停、不抽取。按原文状态填写。")
 
 
+class RuleDependencyChoice(BaseModel):
+    term: str = Field(min_length=1, description="原文中无法唯一确定的输入或来源名称。")
+    candidate_refs: list[str] = Field(min_length=2, description="可能的字段、普通规则或计算项的 candidate_ref。")
+
+
 class ModelRule(RuleProposal):
+    dependency_choices: list[RuleDependencyChoice] = Field(default_factory=list)
     interpretation: DefinitionInterpretation
     origin: SourceOrigin
     config_status: Literal["CLEAR", "PENDING", "DISABLED"] = Field(description="CLEAR 启用；PENDING 待确认、暂不执行；DISABLED 暂停、不执行。按原文状态填写。")

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CHAR, JSON, BigInteger, Boolean, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import CHAR, JSON, BigInteger, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.base_model import TimestampMixin, UTCDateTime
@@ -43,11 +43,24 @@ class BackgroundOperation(Base, TimestampMixin):
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 相对于 data 根目录；原始模型返回独立保存，业务校验失败仍保留索引。
-    raw_response_path: Mapped[str | None] = mapped_column(String(500))
     failure_code: Mapped[str | None] = mapped_column(String(80))
     failure_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class OperationLlmResponse(Base):
+    __tablename__ = "operation_llm_response"
+    __table_args__ = (
+        UniqueConstraint("relative_path", name="uq_llm_response_path"),
+        Index("idx_llm_response_operation", "operation_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("background_operation.id", name="fk_llm_response_operation", ondelete="CASCADE"), nullable=False)
+    stage: Mapped[str] = mapped_column(String(40), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=text("CURRENT_TIMESTAMP(6)"), nullable=False)
 
 
 class OperationLog(Base, TimestampMixin):

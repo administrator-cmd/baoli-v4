@@ -8,6 +8,12 @@ data/
 logs/
 *.log
 
+# IDE 与编辑器个人配置。
+.idea/
+
+# Claude Code 个人权限配置；launch.json 属于共享开发配置，仍然提交。
+.claude/settings.local.json
+
 # Python 本地缓存和虚拟环境。
 __pycache__/
 *.py[cod]

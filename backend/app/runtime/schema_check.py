@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 REQUIRED_TABLES: tuple[str, ...] = (
     "scenario_template",
     "background_operation",
+    "operation_llm_response",
     "import_job",
     # AI 辅助生成规则库：作业、冻结导出与导入关联。
     "rulebook_generation_job",

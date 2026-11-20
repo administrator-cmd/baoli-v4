@@ -70,19 +70,11 @@ export function getScene(scenarioCode: string): Promise<ScenarioDetail> {
   return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}`);
 }
 
-/** 编辑场景基本资料（名称、业务类型、说明）。 */
+/** 编辑场景基本资料和启用状态。 */
 export function updateScene(scenarioCode: string, payload: ScenarioPayload): Promise<ScenarioDetail> {
   return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}`, {
     method: "PUT",
     data: payload,
-  });
-}
-
-/** 启用 / 停用场景；已停用的场景不能用于创建任务。 */
-export function setSceneEnabled(scenarioCode: string, enabled: boolean): Promise<ScenarioDetail> {
-  return request<ScenarioDetail>(`/scenarios/${encodeURIComponent(scenarioCode)}/enabled`, {
-    method: "PUT",
-    data: { enabled },
   });
 }
 
@@ -200,6 +192,7 @@ export interface DraftRulePayload {
   execution_mode: string;
   rule_role: "CHECK" | "RISK";
   enabled: boolean;
+  config_status: "CLEAR" | "PENDING" | "DISABLED";
   inputs: Array<{ field_key: string; material_key: string }>;
   outputs: string[];
   materials: string[];

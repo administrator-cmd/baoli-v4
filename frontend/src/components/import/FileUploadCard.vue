@@ -83,7 +83,7 @@ function onFileChange(file: { raw?: File; name: string }): void {
             {{ jobFilename }}
           </span>
         </el-descriptions-item>
-        <el-descriptions-item label="处理状态">
+        <el-descriptions-item label="导入状态">
           <StatusBadge :status="jobStatus" />
         </el-descriptions-item>
         <el-descriptions-item label="文件大小">{{ sizeText ?? "刷新后不再显示" }}</el-descriptions-item>

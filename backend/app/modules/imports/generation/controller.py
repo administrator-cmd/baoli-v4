@@ -42,6 +42,7 @@ from app.modules.imports.generation.service.editing import GenerationEditingServ
 from app.modules.imports.generation.service.export import GenerationExportService
 from app.modules.imports.generation.service.history import GenerationHistoryService
 from app.modules.imports.generation.service.import_bridge import GenerationImportService
+from app.modules.imports.generation.service.lifecycle import GenerationLifecycleService
 from app.modules.imports.generation.service.operations import GenerationOperationsService
 from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.generation.service.upload import GenerationUploadService
@@ -100,6 +101,14 @@ def get_generation(job_no: str, request: Request, db: Session = Depends(get_db))
     """生成作业详情：当前文档、修订号和最近后台操作。"""
     job = GenerationQueryService(db).get_job(job_no)
     return ok(GenerationJobResponse.model_validate(GenerationQueryService(db).job_view(job)), request)
+
+
+@router.delete("/{job_no}", status_code=204)
+def delete_generation(job_no: str) -> Response:
+    """删除已停止处理的编制记录及文件；不删除已创建的场景导入。"""
+    with request_session() as db:
+        GenerationLifecycleService(db).delete_job(job_no)
+    return Response(status_code=204)
 
 
 @router.get("/{job_no}/source-file")
@@ -163,7 +172,7 @@ def send_assistant_message(
 ) -> ResponseSchema[OperationAcceptedResponse]:
     operation, reused = GenerationAssistantService(db).submit(
         job_no, message=payload.message, expected_revision=payload.expected_revision,
-        idempotency_key=payload.idempotency_key, issue_id=payload.issue_id,
+        idempotency_key=payload.idempotency_key, issue_id=payload.issue_id, issue_answers=payload.issue_answers,
     )
     return ok(OperationAcceptedResponse.model_validate(
         OperationBackgroundService().operation_view(operation, reused=reused),
@@ -181,8 +190,9 @@ def list_assistant_messages(
     return ok(GenerationMessagesResponse(
         items=[GenerationMessageResponse(
             id=item.id, role=item.role, content=item.content, revision=item.revision, created_at=item.created_at,
-            issue_id=operation.request_json.get("issue_id") if item.role == "USER" else None,
+            issue_id=operation.request_json.get("issue_id"),
             answer=operation.request_json.get("message") if item.role == "USER" and operation.request_json.get("issue_id") else None,
+            issue_answers=operation.request_json.get("issue_answers") if item.role == "USER" else None,
             operation=OperationAcceptedResponse.model_validate(OperationBackgroundService().operation_view(operation)),
         ) for item, operation in reversed(selected)],
         next_before_id=selected[-1][0].id if len(rows) > 40 else None,

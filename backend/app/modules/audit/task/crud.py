@@ -111,6 +111,12 @@ class AuditTaskCRUD(CRUDBase):
                 AuditTask.remark,
                 AuditTask.current_node,
                 AuditTask.status,
+                select(NodeExecution.failure_message)
+                .where(NodeExecution.audit_task_id == AuditTask.id,
+                       NodeExecution.node_code == AuditTask.current_node,
+                       NodeExecution.status != "INVALIDATED")
+                .order_by(NodeExecution.id.desc()).limit(1).correlate(AuditTask)
+                .scalar_subquery().label("block_reason"),
                 AuditTask.created_at,
                 AuditTask.updated_at,
                 AuditTask.task_schema_json["plan_name"].label("frozen_plan_name"),

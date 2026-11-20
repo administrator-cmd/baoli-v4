@@ -53,11 +53,6 @@ watch(() => filteredItems.value.length, (total) => {
   page.value = Math.min(page.value, Math.max(1, Math.ceil(total / pageSize.value)));
 });
 
-function resetFilters(): void {
-  Object.assign(query, { keyword: "", material: "", group: "", status: "" });
-  page.value = 1;
-}
-
 </script>
 
 <template>
@@ -76,12 +71,11 @@ function resetFilters(): void {
           <el-option v-for="option in groupOptions" :key="option.value" :value="option.value" :label="option.label" />
         </el-select>
       </el-form-item>
-      <el-form-item label="状态">
+      <el-form-item label="配置状态">
         <el-select v-model="query.status" clearable placeholder="全部" class="config-status">
           <el-option v-for="option in statusOptions" :key="option.value" :value="option.value" :label="option.label" />
         </el-select>
       </el-form-item>
-      <el-form-item><el-button @click="resetFilters">重置</el-button></el-form-item>
     </el-form>
 
     <div class="app-toolbar">
@@ -113,7 +107,7 @@ function resetFilters(): void {
 .config-search { width: 240px; }
 .config-material { width: 180px; }
 .config-group { width: 220px; }
-.config-status { width: 160px; }
+.config-status { width: 184px; }
 .app-toolbar__right { flex-wrap: wrap; gap: 8px 16px; }
 
 @media (max-width: 640px) {

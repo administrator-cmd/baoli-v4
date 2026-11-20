@@ -6,7 +6,7 @@
 
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from functools import partial
 from queue import Queue
@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.common.exceptions import BusinessError, exception_summary
 from app.core.transactions import commit_transaction
+from app.integrations.documents.ocr_concurrency import OCR_CONCURRENCY_LIMITER, OCR_MAX_CONCURRENT_JOBS
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.audit.artifact.model import StoredArtifact
@@ -54,7 +55,8 @@ class ArtifactPreprocessingExecution:
         parsed_id: int | None,
     ) -> tuple[int, str]:
         """线程只接收标量身份；会话和 ORM 对象均在当前线程创建、关闭。"""
-        with sessions() as db:
+        slot = OCR_CONCURRENCY_LIMITER.slot() if stage == "OCR" else nullcontext()
+        with slot, sessions() as db:
             task = AuditTaskCRUD(db).get_of(AuditTask, task_id)
             upload = MaterialDocumentCRUD(db).get_of(DocumentUpload, upload_id)
             if task is None or upload is None or upload.audit_task_id != task.id:
@@ -166,9 +168,11 @@ class ArtifactPreprocessingExecution:
                     stage: stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"material-{stage.lower()}"))
                     for stage in STAGES if stage != "OCR"
                 }
-                # 本次任务的 OCR 步骤逐份执行；8010 仍可准备后续材料。
-                # 这不是账号级全局锁；本地超时也不代表远端作业已终止。
-                lanes["OCR"] = stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="material-ocr"))
+                # 单个任务可并行处理多份 OCR；跨任务总量由进程级闸门限制。
+                lanes["OCR"] = stack.enter_context(ThreadPoolExecutor(
+                    max_workers=min(OCR_MAX_CONCURRENT_JOBS, len(runnable)),
+                    thread_name_prefix="material-ocr",
+                ))
 
                 def schedule(item: dict[str, Any], stage: str, parsed_id: int | None = None) -> None:
                     item["stages"][stage] = {"status": "QUEUED"}
@@ -177,7 +181,7 @@ class ArtifactPreprocessingExecution:
 
                     def run() -> tuple[int, str]:
                         events.put(("STARTED", upload_id, stage))
-                        logger.info("材料前置处理 task_no=%s material=%s service=%s", task_no, material_name, stage)
+                        logger.debug("材料前置处理开始 task_no=%s material=%s service=%s", task_no, material_name, stage)
                         return self._prepare_stage(sessions, task_id, upload_id, stage, parsed_id)
 
                     future = lanes[stage].submit(run)
@@ -215,6 +219,7 @@ class ArtifactPreprocessingExecution:
                         if all(item["stages"][step]["status"] == "READY" for step in STAGES):
                             item.update(status="READY", stage="READY")
                             documents[item["upload_id"]].status = "PREPARED"
+                            logger.info("材料处理完成 task_no=%s material=%s", task_no, item["material_name"])
                     save_progress()
 
         progress["status"] = "FAILED" if failures else "READY"

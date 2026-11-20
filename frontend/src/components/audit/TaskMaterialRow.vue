@@ -65,7 +65,7 @@ const confidenceLabel = computed(() => {
 function materialStatusTone(status: string | null | undefined): StatusTone {
   if (qualityBlocked.value) return "warning";
   if (waitingQuality.value) return "neutral";
-  if (artifactAttention.value) return "danger";
+  if (artifactAttention.value) return artifactAttention.value.artifact.status === "FAILED" ? "danger" : "warning";
   if (processingActive.value) return "info";
   if (status === "PREPARED" || status === "PROCESSED") return "success";
   if (status === "TYPE_REJECTED") return "danger";
@@ -77,7 +77,7 @@ function materialStatusTone(status: string | null | undefined): StatusTone {
 const statusLabelOverride = computed<string | null>(() => {
   if (qualityBlocked.value) return "已停止处理";
   if (waitingQuality.value) return "等待前置检查完成";
-  if (artifactAttention.value) return "处理未完成";
+  if (artifactAttention.value) return artifactAttention.value.artifact.status === "FAILED" ? "处理失败" : "处理结果待确认";
   if (processingActive.value) return "处理中";
   if (props.document.status === "TYPE_REVIEW") return "材料类型待复核";
   if (props.document.status === "TYPE_REJECTED") return "材料类型不符";
@@ -122,11 +122,11 @@ const ocrProgressText = computed(() => {
   const extracted = ocr.extract_progress?.extractedPages;
   const total = ocr.extract_progress?.totalPages;
   if (typeof extracted !== "number") {
-    return processingStatusLabel(ocr);
+    return processingStatusLabel(ocr, Boolean(props.operationActive));
   }
   return typeof total === "number"
-    ? `${processingStatusLabel(ocr)} ${extracted} / ${total} 页`
-    : `${processingStatusLabel(ocr)} ${extracted} 页`;
+    ? `${processingStatusLabel(ocr, Boolean(props.operationActive))} ${extracted} / ${total} 页`
+    : `${processingStatusLabel(ocr, Boolean(props.operationActive))} ${extracted} 页`;
 });
 
 /** 当前需要用户处理的处理项：确定失败，或操作结束后仍结果未知的第一项。 */

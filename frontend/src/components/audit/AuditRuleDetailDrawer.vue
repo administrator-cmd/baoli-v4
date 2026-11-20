@@ -8,13 +8,15 @@ import QuoteBlock from "@/components/audit/QuoteBlock.vue";
 import RuleInputSnapshotTable from "@/components/audit/RuleInputSnapshotTable.vue";
 import DrawerPanel from "@/components/DrawerPanel.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
-import { auditResultSummary } from "@/constants/auditStatus";
+import AuditRuleOutcomeBadge from "@/components/audit/AuditRuleOutcomeBadge.vue";
 import { executionModeLabel } from "@/constants/executionModes";
+import { isReportRule, isReportRuleGenerated } from "@/utils/reportPresentation";
 import {
   hasBusinessResult,
   materialRowsOf,
   payloadOf,
   ruleCodeOf,
+  ruleResultSummary,
   sourceFilesOf,
   standardDetail,
   standardText,
@@ -70,7 +72,9 @@ const detailRuleCode = computed(() => detailRule.value ? ruleCodeOf(detailRule.v
 const detailValues = computed(() => (detailRule.value ? valueSourcesOf(detailRule.value) : []));
 const detailMaterialRows = computed(() => (detailRule.value ? materialRowsOf(detailRule.value) : []));
 
-const detailStandardText = computed(() => (detailRule.value ? standardText(detailRule.value) : ""));
+const detailStandardText = computed(() => detailRule.value
+  ? standardText(detailRule.value).replace(/([；;])[^\S\r\n]*(?=[^\s；;])/g, "$1\n")
+  : "");
 const detailStandardDetail = computed(() => (detailRule.value ? standardDetail(detailRule.value) : ""));
 
 const detailFindings = computed(() => (detailPayload.value.tool_findings ?? []) as Array<{
@@ -145,16 +149,16 @@ const hasTechnicalDetail = computed(() => {
   >
     <template v-if="detailRule">
       <div class="detail-head">
-        <StatusBadge domain="rule" :status="detailRule.status" size="default" />
+        <AuditRuleOutcomeBadge :rule="detailRule" size="default" />
         <span v-if="detailRuleCode" class="mono detail-head__code">{{ detailRuleCode }}</span>
         <span class="detail-head__meta">执行方式：{{ executionModeLabel(detailRule.execution_mode) }}</span>
         <span v-if="detailRule.source_sheet" class="detail-head__sheet">{{ detailRule.source_sheet }}</span>
       </div>
 
       <section class="detail-section detail-section--lead">
-        <h4 class="app-section-title">检查结论</h4>
-        <div class="detail-conclusion">{{ auditResultSummary(detailRule.status, detailRule.message, detailPayload) }}</div>
-        <div v-if="detailRule.kind === 'REPORT' && !detailBasisCount" class="text-muted detail-note">
+        <h4 class="app-section-title">{{ isReportRule(detailRule) ? '生成结果' : '检查结论' }}</h4>
+        <div class="detail-conclusion">{{ ruleResultSummary(detailRule) }}</div>
+        <div v-if="isReportRuleGenerated(detailRule) && !detailBasisCount" class="text-muted detail-note">
           报告正文在「报告」页签查看。
         </div>
         <div v-if="detailRule.status === 'PENDING_REVIEW'" class="text-muted detail-note">

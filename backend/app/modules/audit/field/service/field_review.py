@@ -25,6 +25,7 @@ from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.model import FieldReviewConfirmation, ManualReview, TaskFieldValue
 from app.modules.audit.field.service import value_store as task_value_service
+from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
 from app.modules.audit.field.service.facts import AuditFieldFactsService
 from app.modules.audit.shared import (
     _current_upload_map,
@@ -407,7 +408,53 @@ class AuditFieldReviewService:
         note: str | None, operation_no: str | None,
     ) -> FieldReviewConfirmation:
         """在当前字段版本上记录一次核对确认；缺项数量与字段一起写入。"""
+        pairs = AuditFieldFactsService(self.db).current_field_fact_pairs(task)
         missing = self.missing_fields( task)
+        evidence_service = AuditFieldEvidenceService(self.db)
+        evidence_memo = evidence_service.evidence_memo()
+        value_store = task_value_service.AuditFieldValueStoreService(self.db)
+        documents = {item.material_key: item for item in _task_documents(self.db, task)}
+        uploads = _current_upload_map(self.db, task)
+        field_snapshots = []
+        for definition in task.task_schema_json["fields"]:
+            key = (str(definition["field_key"]), str(definition["material_key"]))
+            pair = pairs.get(key)
+            candidate, fact = pair if pair is not None else (None, None)
+            candidate_value = (
+                value_store.value_of(task, task_value_service.RECORD_TASK_FIELD_VALUE, candidate.id)
+                if candidate is not None else {}
+            )
+            fact_value = (
+                value_store.value_of(task, task_value_service.RECORD_TASK_FACT, fact.id)
+                if fact is not None else {}
+            )
+            evidence = (
+                evidence_service.evidence_source_views(
+                    task,
+                    evidence_service.field_evidence(task, candidate.id, evidence_memo),
+                )
+                if candidate is not None else []
+            )
+            document = documents.get(key[1])
+            upload = uploads.get(document.id) if document is not None else None
+            field_snapshots.append({
+                "field_key": key[0],
+                "field_name": str(definition.get("name") or key[0]),
+                "material_key": key[1],
+                "material_name": document.material_name if document is not None else key[1],
+                "status": fact.status if fact is not None else (candidate.status if candidate is not None else None),
+                "raw_value": candidate_value.get("raw_value"),
+                "value": fact_value.get("value") if fact is not None else None,
+                "unit": definition.get("unit"),
+                "period_scope": definition.get("period_scope"),
+                "statement_scope": definition.get("statement_scope"),
+                "fact_revision_no": fact.revision_no if fact is not None else None,
+                "candidate_revision_no": candidate.revision_no if candidate is not None else None,
+                "upload_id": upload.id if upload is not None else None,
+                "upload_filename": upload.original_filename if upload is not None else None,
+                "upload_no": upload.upload_no if upload is not None else None,
+                "evidence": evidence,
+            })
         confirmation = FieldReviewConfirmation(
             confirmation_no=public_no("FRV"),
             audit_task_id=task.id,
@@ -416,6 +463,7 @@ class AuditFieldReviewService:
             field_digest=self.field_review_digest( task),
             missing_field_count=len(missing),
             missing_field_keys=[item["field_key"] for item in missing],
+            snapshot_json={"fields": field_snapshots, "missing_fields": missing},
             note=note,
             operation_no=operation_no,
         )

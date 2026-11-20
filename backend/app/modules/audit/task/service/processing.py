@@ -143,8 +143,8 @@ class AuditTaskProcessingService:
         return {
             "READY": "已就绪",
             "PENDING": "作业已提交，等待供应商完成",
-            "SUBMITTING": "提交结果未知，可确认后重新提交",
-            "PROCESSING": "处理结果未知，可确认后重试此项",
+            "SUBMITTING": "尚未取得提交结果",
+            "PROCESSING": "尚未取得处理结果",
             "FAILED": "处理失败，可在处理状态中重试此项",
             "INVALIDATED": "已随材料替换失效",
         }.get(status, f"处理产物状态：{status}")
@@ -177,12 +177,7 @@ class AuditTaskProcessingService:
             **base,
             "artifact_no": artifact.artifact_no,
             "status": artifact.status,
-            "message": (
-                str(artifact.failure_message or "处理结果未知，可确认可能重复调用后重试此项")
-                if artifact.status == "PROCESSING"
-                else "处理产物已就绪" if artifact.status == "READY"
-                else str(artifact.failure_message or f"处理产物状态：{artifact.status}")
-            ),
+            "message": artifact.failure_message or self._artifact_status_message(artifact.status),
         }
 
 
@@ -219,7 +214,7 @@ class AuditTaskProcessingService:
         deadline_at = artifact.deadline_at
         attempts = metadata.get("submit_attempts")
         message = {
-            "SUBMITTING": "OCR 提交结果未知，可点击「重新提交 OCR」；需确认可能重复创建云端作业",
+            "SUBMITTING": artifact.failure_message or "尚未取得 OCR 提交结果",
             "PENDING": "OCR 作业已提交，等待供应商完成",
             "READY": "OCR 产物已就绪",
             "FAILED": str(artifact.failure_message or "OCR 作业失败"),

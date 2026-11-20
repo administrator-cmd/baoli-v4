@@ -1,7 +1,6 @@
 """审核任务名称维护与删除。"""
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,7 +15,8 @@ from app.modules.audit.task.model import AuditTask
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_log import OperationLogService
 from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TASK
-from app.services.shared.storage import resolve_storage_path
+from app.services.shared.directory_cleanup import remove_directory_tree
+from app.services.shared.storage import audit_directory, resolve_storage_path
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,8 @@ class AuditTaskLifecycleService:
             raise BusinessError("AUDIT_TASK_RUNNING", "任务正在执行，不能删除", status_code=409, details={"task_no": task_no})
         # 与业务写入保持相同次序：先数据库任务行锁，再文件锁。
         AuditFieldValueFilesService(self.db).lock_task_files( task_no)
-        task_directory = resolve_storage_path(f"tasks/{task.task_no}")
-        task_root = resolve_storage_path("tasks")
+        task_directory = resolve_storage_path(audit_directory(task.task_no, task.created_at))
+        task_root = resolve_storage_path("audit_tasks")
         if task_directory.parent != task_root:
             raise BusinessError("STORAGE_PATH_INVALID", "任务文件目录不安全", status_code=500)
         staged_directories: list[tuple[Path, Path]] = []
@@ -84,7 +84,7 @@ class AuditTaskLifecycleService:
         def discard_files() -> None:
             for _original, staged in staged_directories:
                 try:
-                    shutil.rmtree(staged)
+                    remove_directory_tree(staged)
                 except OSError as exc:
                     raise BusinessError(
                         "TASK_FILE_CLEANUP_FAILED", "任务数据已永久删除，但文件清理失败",
@@ -95,7 +95,7 @@ class AuditTaskLifecycleService:
         before_rollback(self.db, restore_files)
         after_commit(self.db, discard_files)
         if task_directory.exists():
-            staged = resolve_storage_path(f"tasks/.deleting-{task.task_no}-{uuid4().hex}")
+            staged = resolve_storage_path(f"audit_tasks/.deleting-{task.task_no}-{uuid4().hex}")
             task_directory.rename(staged)
             staged_directories.append((task_directory, staged))
         crud.AuditTaskCRUD(self.db).delete_task_data(task.id, task.task_no)

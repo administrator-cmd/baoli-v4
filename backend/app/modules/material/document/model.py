@@ -1,6 +1,8 @@
 """模型定义，由 entity/tasks.py 按实体拆分。"""
 
 
+from pathlib import PurePosixPath
+
 from sqlalchemy import (
     CHAR,
     BigInteger,
@@ -37,6 +39,11 @@ class TaskDocument(Base, TimestampMixin):
 
 class DocumentUpload(Base, TimestampMixin):
     __tablename__ = "document_upload"
+
+    @property
+    def artifact_directory(self) -> str:
+        return (PurePosixPath(self.relative_path).parent / "artifacts").as_posix()
+
     __table_args__ = (
         UniqueConstraint("task_document_id", "upload_no"),
         UniqueConstraint("id", "audit_task_id"),

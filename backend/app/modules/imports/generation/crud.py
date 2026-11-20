@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 
 from app.constants.status import ACTIVE_OPERATION_STATUSES
 from app.core.base_crud import CRUDBase
@@ -118,6 +118,15 @@ class GenerationMessageCRUD(CRUDBase):
 
 class RulebookGenerationCRUD(CRUDBase):
     model = RulebookGenerationJob
+
+    def delete_dependents(self, job_id: int) -> None:
+        """按外键顺序清理编制数据；真实导入作业有独立文件，只移除关联。"""
+        export_ids = select(RulebookGenerationExport.id).where(RulebookGenerationExport.generation_job_id == job_id)
+        self.db.execute(delete(RulebookGenerationImport).where(
+            RulebookGenerationImport.generation_export_id.in_(export_ids),
+        ).execution_options(synchronize_session=False))
+        for model in (RulebookGenerationExport, RulebookGenerationMessage, RulebookGenerationRevision):
+            self.db.execute(delete(model).where(model.generation_job_id == job_id))
 
     def by_no(self, job_no: str, *, lock: bool = False) -> RulebookGenerationJob | None:
         statement = select(RulebookGenerationJob).where(RulebookGenerationJob.job_no == job_no)

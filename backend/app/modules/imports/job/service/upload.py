@@ -16,7 +16,7 @@ from app.modules.imports.job import crud
 from app.modules.imports.job.model import ImportJob
 from app.modules.imports.job.service.workbook import ImportsJobWorkbookService
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD
-from app.services.shared.storage import RULEBOOK_EXTENSIONS, resolve_storage_path, save_upload_sync
+from app.services.shared.storage import storage_entry, RULEBOOK_EXTENSIONS, resolve_storage_path, save_upload_sync
 
 
 class ImportsJobUploadService:
@@ -114,7 +114,7 @@ class ImportsJobUploadService:
         schema = self._scenario_schema(scenario_code)
         job_no = public_no("IMP")
         suffix = Path(upload.filename or "").suffix.lower()
-        relative_path = f"imports/{job_no}/source{suffix}"
+        relative_path = f"rulebook_imports/{storage_entry('import', job_no)}/source{suffix}"
         size, sha256 = save_upload_sync(
             upload,
             relative_path=relative_path,
@@ -151,7 +151,7 @@ class ImportsJobUploadService:
                 details={"path": str(source_path)},
             )
         job_no = public_no("IMP")
-        relative_path = f"imports/{job_no}/source{suffix}"
+        relative_path = f"rulebook_imports/{storage_entry('import', job_no)}/source{suffix}"
         target = resolve_storage_path(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         try:

@@ -59,7 +59,7 @@ def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmis
         file_sha256 = hashlib.file_digest(input_file, "sha256").hexdigest()
         file_size = input_file.tell()
         input_file.seek(0)
-        logger.info(
+        logger.debug(
             "PaddleOCR 提交 filename=%s uploaded_filename=%s bytes=%s sha256=%s model=%s options=%s",
             filename, file_path.name, file_size, file_sha256, model, data["optionalPayload"],
         )
@@ -81,7 +81,7 @@ def submit_processed_document(*, file_path: Path, filename: str) -> OcrJobSubmis
         job_id = non_empty_string(submit_data["jobId"])
     except (KeyError, TypeError, ValueError) as exc:
         raise contract_error(SERVICE_CODE, "SUBMIT") from exc
-    logger.info(
+    logger.debug(
         "PaddleOCR 已受理 job_id=%s filename=%s sha256=%s trace_id=%s",
         job_id, filename, file_sha256, submit_payload.get("traceId"),
     )
@@ -128,8 +128,12 @@ def poll_ocr_job(
             raise contract_error(SERVICE_CODE, "POLL")
         progress = {"provider_state": state, "extract_progress": extract_progress}
         if progress != previous_progress:
-            logger.info("PaddleOCR 处理进度 job_id=%s state=%s progress=%s",
-                        normalized_job_id, state, extract_progress)
+            if state == "done":
+                pages = (extract_progress or {}).get("extractedPages")
+                logger.info("PaddleOCR 完成 job_id=%s 页数=%s", normalized_job_id, pages)
+            else:
+                logger.debug("PaddleOCR 处理进度 job_id=%s state=%s progress=%s",
+                             normalized_job_id, state, extract_progress)
             if on_progress is not None:
                 on_progress(progress)
             previous_progress = progress

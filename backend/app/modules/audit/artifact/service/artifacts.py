@@ -89,7 +89,7 @@ class AuditArtifactArtifactsService:
         artifact = result.artifact
         if service_code == "OCR":
             OcrContent.model_validate(artifact.content)
-        directory = resolve_storage_path(f"tasks/{task.task_no}/artifacts/{upload.upload_no}")
+        directory = resolve_storage_path(upload.artifact_directory)
         directory.mkdir(parents=True, exist_ok=True)
         envelope = directory / f"{service_code.lower()}.json"
         with envelope.open("w", encoding="utf-8") as output:

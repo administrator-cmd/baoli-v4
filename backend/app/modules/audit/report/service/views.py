@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
-from app.constants.status import CONCLUSIVE_RESULT_STATUSES
+from app.constants.status import COMPLETED_RESULT_STATUSES, CONCLUSIVE_RESULT_STATUSES
 from app.domain.audit.execution_scope import RESULT_STALE_PENDING_RERUN, result_state
 from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.execution.service.execution_scope import current_execution_ids, pending_rerun_by_execution
@@ -87,6 +87,8 @@ class AuditReportViewsService:
             "task_no": task.task_no,
             "risk_configured": risk_configured,
             "risk_executed": bool(current_results),
+            "risk_results_stale": risk_configured and not current_results
+            and AuditRuleCRUD(self.db).has_produced_result(task.id, risk_keys),
             "risk_conclusion_available": risk_conclusion_available,
             "hit_count": hit_count,
             "status_counts": status_counts,
@@ -116,6 +118,9 @@ class AuditReportViewsService:
     def report_view(self, task_no: str, report_no: str | None = None) -> dict[str, Any]:
         """读取真实保存的报告，不要求固定报告阶段或节点结果格式。"""
         task = AuditTaskLookupService(self.db).task_or_404( task_no, values=True)
+        scope_signals = AuditReportValidityService().scope_signals(
+            _task_manifest(task), set(task.task_schema_json["enabled_rule_keys"]), None,
+        )
         reports = AuditReportCRUD(self.db).reports_for_task(task.id)
         # 判定数据一次取回：逐份报告查执行与结果会让报告页随份数线性退化。
         current_ids = current_execution_ids(self.db, [task.id])
@@ -196,6 +201,9 @@ class AuditReportViewsService:
                         "report_no": f"CSV-{item['rule_result'].id}",
                         "report_name": item["rule"].get("name") or item["rule_result"].rule_name,
                         "current": recovered_current(item),
+                        "report_generated": True,
+                        "scope_execution_complete": complete,
+                        "unresolved_count": sum(result.status not in COMPLETED_RESULT_STATUSES for result in dependency_results),
                     }
                     for item in recovered
                 ]
@@ -212,10 +220,15 @@ class AuditReportViewsService:
                 risk_rules = [item for item in _task_manifest(task)["rules"] if item.get("kind") != "REPORT" and is_risk_rule(item) and item.get("rule_key") in task.task_schema_json["enabled_rule_keys"]]
                 result_by_key = {item.rule_key: item for item in all_current_results}
                 risk_available = bool(risk_rules) and all(result_by_key.get(item["rule_key"]) is not None and result_by_key[item["rule_key"]].status in CONCLUSIVE_RESULT_STATUSES for item in risk_rules)
+                scope_signals = AuditReportValidityService().scope_signals(
+                    _task_manifest(task), set(task.task_schema_json["enabled_rule_keys"]),
+                    {"unresolved": [{"rule_key": item.rule_key, "status": item.status, "message": item.message}
+                                    for item in dependency_results if item.status not in COMPLETED_RESULT_STATUSES]},
+                )
                 return {"task_no": task.task_no, "status": "COMPLETE" if complete and stale_reason is None else "INCOMPLETE",
                         "content_type": report_data.get("content_type", "text/markdown"), "content": report_data["content"],
-                        "reasons": [], "report_generated": True, "scope_execution_complete": complete,
-                        "risk_conclusion_available": risk_available, "results_scope": "CURRENT_RUN",
+                        "reasons": scope_signals["execution_notes"], "report_generated": True, "scope_execution_complete": complete,
+                        "risk_conclusion_available": risk_available, **scope_signals, "results_scope": "CURRENT_RUN",
                         "current": stale_reason is None, "stale_reason": stale_reason,
                         "input_revision": task.input_revision, "snapshot": {"task_input_revision": task.input_revision, "rule_result_ids": [item["rule_result"].id for item in recovered]},
                         "reports": choices, "report_no": f"CSV-{selected['rule_result'].id}", "report_name": selected["rule"].get("name") or selected["rule_result"].rule_name,
@@ -226,20 +239,26 @@ class AuditReportViewsService:
             reasons = [f"{r.rule_name}：已执行，但没有保存可读取的报告正文，请查看执行详情" for r in results]
             return {"task_no": task.task_no, "status": "NOT_GENERATED", "content_type": "text/markdown", "content": None,
                     "reasons": reasons or ["生效报告执行项尚未产生正文" if report_keys else "本任务没有生效的报告执行项"],
-                    "report_generated": False, "scope_execution_complete": False, "risk_conclusion_available": False,
+                    "report_generated": False, "scope_execution_complete": False, "risk_conclusion_available": False, **scope_signals,
                     "results_scope": "CURRENT_RUN", "current": False, "input_revision": task.input_revision, "snapshot": None,
                     "reports": choices, "report_no": None, "report_name": None,
                     "conclusion": None, "format_support": [], "business_section_count": 0}
         reason = reasons_by_id[report.id]
         current = reason is None
         unresolved = (report.reasons_json or {}).get("unresolved") or []
+        scope_signals = AuditReportValidityService().scope_signals(
+            _task_manifest(task), set(task.task_schema_json["enabled_rule_keys"]), report.reasons_json,
+        )
         rule = next((item for item in _task_manifest(task)["rules"] if item["rule_key"] == (report.snapshot_json or {}).get("rule_key")), None)
         return {"task_no": task.task_no, "status": "COMPLETE" if current and report.scope_execution_complete and not unresolved else "INCOMPLETE",
-                "content_type": report.content_type, "content": report.content_md, "reasons": [i["message"] for i in unresolved] + ([reason] if reason else []),
+                "content_type": report.content_type, "content": report.content_md,
+                "reasons": scope_signals["execution_notes"] + [item["message"] for item in unresolved if item["status"] == "NOT_GENERATED"],
                 # 三个信号分开表达：正文是否存在、生成时范围是否完整、生成时风险是否可判定；
                 # 快照是否仍对应当前执行只由 current / stale_reason 表达。
                 "report_generated": bool(report.content_md), "scope_execution_complete": report.scope_execution_complete,
-                "risk_conclusion_available": report.risk_conclusion_available, "results_scope": "CURRENT_RUN", "current": current,
+                "risk_conclusion_available": report.risk_conclusion_available,
+                **scope_signals,
+                "results_scope": "CURRENT_RUN", "current": current,
                 "stale_reason": reason,
                 "input_revision": task.input_revision, "snapshot": report.snapshot_json, "conclusion": None,
                 "report_generation": (report.snapshot_json or {}).get("report_generation"),

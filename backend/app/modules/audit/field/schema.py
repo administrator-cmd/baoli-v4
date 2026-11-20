@@ -1,5 +1,6 @@
 """审核响应模型。"""
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -29,3 +30,25 @@ class FieldReviewSaveResponse(BaseModel):
     applied: list[dict[str, Any]] = Field(default_factory=list)
     missing_field_count: int = 0
     missing_fields: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FieldReviewHistoryItem(BaseModel):
+    confirmation_no: str
+    task_no: str
+    task_name: str
+    input_revision: int
+    missing_field_count: int
+    missing_field_keys: list[Any] = Field(default_factory=list)
+    note: str | None = None
+    operation_no: str | None = None
+    created_at: datetime
+    snapshot: dict[str, Any] | None = None
+
+
+class FieldReviewHistoryTaskItem(BaseModel):
+    task_no: str
+    task_name: str
+    confirmation_count: int
+    latest_confirmation_no: str
+    latest_confirmed_at: datetime
+    latest_missing_field_count: int

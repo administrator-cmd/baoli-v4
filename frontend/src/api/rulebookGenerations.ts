@@ -7,6 +7,7 @@ import type {
   GenerationJobRow,
   GenerationQuery,
   GenerationRetryResult,
+  GenerationMessageSubmission,
   GenerationMessages,
   GenerationRevision,
   Paged,
@@ -39,9 +40,14 @@ export function getGenerationJob(jobNo: string): Promise<GenerationJob> {
   return request<GenerationJob>(`/rulebook-generations/${encodeURIComponent(jobNo)}`);
 }
 
-/** 原始 Excel 下载地址。 */
-export function generationSourceFileUrl(jobNo: string): string {
-  return apiFileUrl(`/rulebook-generations/${encodeURIComponent(jobNo)}/source-file`);
+/** 删除已停止处理的编制记录，不影响已创建的场景导入。 */
+export function deleteGenerationJob(jobNo: string): Promise<void> {
+  return request<void>(`/rulebook-generations/${encodeURIComponent(jobNo)}`, { method: "DELETE" });
+}
+
+export async function downloadGenerationSourceFile(jobNo: string, filename: string): Promise<void> {
+  const blob = await requestBlob(`/rulebook-generations/${encodeURIComponent(jobNo)}/source-file`);
+  saveDownload(blob, filename);
 }
 
 /** 开始生成或失败后显式重试；返回 202 只代表已受理。 */
@@ -60,12 +66,15 @@ export function retryGeneration(jobNo: string, idempotencyKey: string): Promise<
   });
 }
 
-export function sendGenerationMessage(jobNo: string, input: {
-  message: string; expectedRevision: number; idempotencyKey: string; issueId?: string;
+export function sendGenerationMessage(jobNo: string, input: GenerationMessageSubmission & {
+  expectedRevision: number; idempotencyKey: string;
 }): Promise<OperationAccepted> {
   return request<OperationAccepted>(`/rulebook-generations/${encodeURIComponent(jobNo)}/messages`, {
     method: "POST",
-    data: { message: input.message, expected_revision: input.expectedRevision, idempotency_key: input.idempotencyKey, issue_id: input.issueId },
+    data: {
+      message: input.message, issue_id: input.issueId, issue_answers: input.issueAnswers,
+      expected_revision: input.expectedRevision, idempotency_key: input.idempotencyKey,
+    },
   });
 }
 
@@ -124,10 +133,14 @@ export async function downloadGenerationExportFile(
   if (blob.type.split(";", 1)[0] !== "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
     throw new Error(`下载响应不是规则库 Excel（${blob.type || "未提供文件类型"}）`);
   }
+  saveDownload(blob, item.filename);
+}
+
+function saveDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = item.filename;
+  link.download = filename;
   document.body.appendChild(link);
   try {
     link.click();

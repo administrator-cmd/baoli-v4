@@ -260,22 +260,6 @@ class AuditRuleExecutionService:
                 raise BusinessError("RULE_REPORT_FORMAT_UNSUPPORTED", "当前报告保存接口不支持模型返回的正文格式")
 
 
-    def _recognized_values(self, item: dict[str, Any]) -> dict[str, str]:
-        """模型从正文实际识别到的期间、报表口径、主体和单位；原样保存，不补默认值。"""
-        mapping = {
-            "actual_period_scope": "recognized_period",
-            "actual_statement_scope": "recognized_statement_scope",
-            "actual_entity_scope": "recognized_entity_scope",
-            "actual_unit": "recognized_unit",
-        }
-        values = {}
-        for target, source in mapping.items():
-            value = item.get(source)
-            if isinstance(value, str) and value.strip():
-                values[target] = value.strip()
-        return values
-
-
     def save_outputs(self, task, execution, rule, verdict, *, evaluation_id: str | None):
         if verdict is None:
             return []
@@ -341,7 +325,7 @@ class AuditRuleExecutionService:
                 written.append((task_value_service.RECORD_TASK_FIELD_VALUE, field_value.id,
                                 {"raw_value": item.get("raw_value"), "normalized_value_json": value,
                                  "unit": field.get("unit"), "currency": field.get("currency"),
-                                 **self._recognized_values(item)}))
+                                 **fact_projection.recognized_scopes(item)}))
             task_fact = TaskFact(audit_task_id=task.id, scenario_version_id=task.scenario_version_id,
                                  fact_code=fact_code, fact_kind=FACT_KIND_EXTRACTED if field is not None else FACT_KIND_DERIVED,
                                  material_key=material, entity_scope=entity, period_scope=period, statement_scope=statement,
@@ -353,8 +337,8 @@ class AuditRuleExecutionService:
             written.append((task_value_service.RECORD_TASK_FACT, task_fact.id,
                             {"value": fact_projection.canonical_fact_value(value, definition),
                              "unit": definition.get("unit"), "currency": definition.get("currency"),
-                             **self._recognized_values(item)}))
-        # 先建立数据库索引；证据核对完成后，与规则结论一起写入四表。
+                             **fact_projection.recognized_scopes(item)}))
+        # 先建立数据库索引；证据核对完成后，再一起保存取值与结论。
         report = verdict.get("report")
         if rule.get("kind") == "REPORT" and report:
             scope = set(task.task_schema_json["enabled_rule_keys"])

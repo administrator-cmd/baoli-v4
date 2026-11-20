@@ -129,6 +129,13 @@ class AuditRuleCRUD(CRUDBase):
             query = query.where(RuleResult.rule_key.in_(rule_keys))
         return list(self.db.scalars(query.order_by(RuleResult.id)).all())
 
+    def has_produced_result(self, task_id: int, rule_keys: set[str]) -> bool:
+        return self.db.scalar(select(RuleResult.id).where(
+            RuleResult.audit_task_id == task_id,
+            RuleResult.rule_key.in_(rule_keys),
+            RuleResult.status != "NOT_EXECUTED",
+        ).limit(1)) is not None
+
     def ids_for_executions(self, execution_ids: list[int]) -> list[int]:
         return list(self.db.scalars(
             select(RuleResult.id).where(RuleResult.node_execution_id.in_(execution_ids))

@@ -57,7 +57,7 @@ class ImportsJobOperationsService:
         def validate() -> None:
             imports_lookup.ImportsJobLookupService(self.db)._ensure_import_mutable(job)
             if mode == CONVERSION_MODE_RESUME and not ImportsJobLlmService().can_resume_initial(
-                job.job_no, job.profile_version, job.schema_key, job.schema_version, job.source_sha256,
+                job.source_path, job.profile_version, job.schema_key, job.schema_version, job.source_sha256,
                 job.scenario_code,
             ):
                 raise BusinessError(

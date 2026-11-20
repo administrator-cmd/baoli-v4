@@ -1,6 +1,7 @@
 """上传文件及业务产物的存储路径、保存与读取。"""
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -23,6 +24,15 @@ def rulebook_media_type(path: Path) -> str:
 
 
 DOCUMENT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+def storage_entry(kind: str, number: str, created_at: datetime | None = None) -> str:
+    stamp = (created_at or datetime.now(UTC)).astimezone(UTC)
+    return f"{kind}_{stamp:%Y%m%dT%H%M%SZ}_{number}"
+
+
+def audit_directory(task_no: str, created_at: datetime) -> str:
+    return f"audit_tasks/{storage_entry('audit', task_no, created_at)}"
 
 
 def resolve_storage_path(relative_path: str) -> Path:

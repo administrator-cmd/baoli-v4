@@ -74,6 +74,8 @@ class ImportsJobDraftService:
         if not job.proposals_json:
             raise BusinessError("PROPOSALS_MISSING", "规则尚未转换", status_code=409)
         proposals = ImportsJobLookupService()._saved_proposals(job)
+        if proposals.get("dependency_questions"):
+            raise BusinessError("IMPORT_DEPENDENCIES_PENDING", "请先在解析结果中确认规则引用，再写入草稿", status_code=409)
         draft = ScenarioDraftCRUD(self.db).by_code(template.scenario_code)
         actual_revision = draft.revision_no if draft is not None else None
         if actual_revision != expected_scene_revision:

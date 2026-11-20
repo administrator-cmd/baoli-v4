@@ -14,7 +14,8 @@ import {
 } from "@/api/imports";
 import { usePagedList } from "@/composables/usePagedList";
 import BackButton from "@/components/BackButton.vue";
-import { formatDate, statusLabel } from "@/constants/labels";
+import StatusBadge from "@/components/StatusBadge.vue";
+import { formatDate, operationStatusLabel } from "@/constants/labels";
 import { importJobStatusOptions } from "@/constants/imports";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
@@ -230,7 +231,7 @@ watch(scopedScenarioCode, () => {
         <el-input v-model="filters.filename" clearable placeholder="请输入文件名称" style="width: 200px" @keyup.enter="list.search()" />
       </el-form-item>
       <el-form-item label="导入状态">
-        <el-select v-model="filters.status" clearable placeholder="全部" style="width: 140px">
+        <el-select v-model="filters.status" clearable placeholder="全部" style="width: 190px">
           <el-option v-for="item in importJobStatusOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
@@ -266,16 +267,19 @@ watch(scopedScenarioCode, () => {
       <el-table-column label="所属场景" :width="TABLE_COLUMN_WIDTHS.scenarioName" show-overflow-tooltip>
         <template #default="{ row }">{{ sceneText(row) }}</template>
       </el-table-column>
-      <el-table-column label="导入状态" width="140">
+      <el-table-column label="导入状态" width="190">
         <template #default="{ row }">
-          <el-tag
-            :type="row.status === 'APPLIED' ? 'success' : 'primary'"
-            size="small"
-            effect="light"
-            disable-transitions
-          >
-            {{ statusLabel(row.status) }}
-          </el-tag>
+          <StatusBadge :status="row.status" />
+          <div v-if="row.failure_message" class="status-note" :title="row.failure_message">{{ row.failure_message }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="最近解析操作" min-width="200">
+        <template #default="{ row }">
+          <template v-if="row.latest_operation">
+            <StatusBadge :status="row.latest_operation.status" :label="operationStatusLabel(row.latest_operation.status)" />
+            <div v-if="row.latest_operation.failure_message && row.latest_operation.failure_message !== row.failure_message" class="status-note" :title="row.latest_operation.failure_message">{{ row.latest_operation.failure_message }}</div>
+          </template>
+          <span v-else>尚无解析操作</span>
         </template>
       </el-table-column>
       <el-table-column label="创建时间" width="200">
@@ -362,3 +366,7 @@ watch(scopedScenarioCode, () => {
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.status-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+</style>

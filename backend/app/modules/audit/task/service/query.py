@@ -57,6 +57,7 @@ class AuditTaskQueryService:
                     "current_node": row.current_node,
                     "current_node_name": row.current_node_name if row.current_node_name is not None else row.current_node,
                     "status": row.status,
+                    "block_reason": row.block_reason if row.status in {"BLOCKED", "FAILED"} else None,
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
                 }

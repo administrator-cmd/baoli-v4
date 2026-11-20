@@ -1,6 +1,6 @@
 # 数据库迁移
 
-`0001_baseline` 是历史起点，当前 head 为 `0009_report_template_upload_key`。
+`0001_baseline` 是历史起点，当前 head 为 `0011_generation_checkpoint`。0011 仅新增可空编制断点，已有记录不用回填。前序 0010 面向空验证数据，更新响应索引结构，不搬迁历史业务文件。
 `backend/resource/schema.sql` 是当前完整结构，与 head 保持同步。
 基线本身不建表：它只把已有结构登记为迁移起点。
 

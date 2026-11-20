@@ -32,11 +32,7 @@ watch(
   (visible) => {
     stopTimer();
     if (!visible) return;
-    timer = setInterval(() => {
-      if (!props.state.processingLoading && !props.state.processingSubmitting) {
-        void props.state.loadProcessingStatuses();
-      }
-    }, REFRESH_INTERVAL_MS);
+    timer = setInterval(props.state.pollProcessingStatuses, REFRESH_INTERVAL_MS);
   },
   { immediate: true },
 );
@@ -86,6 +82,8 @@ onUnmounted(stopTimer);
     </div>
     <p class="text-hint">这里仅展示处理前的质量检查；需要识别正文、印章或字段的检查，在后续规则中执行。</p>
     <strong class="processing-heading">材料处理</strong>
+    <el-alert v-if="state.processingStatusError" class="block-gap-sm" type="error" show-icon :closable="false"
+      :title="`任务状态未刷新：${state.processingStatusError}`" />
     <el-alert
       v-for="error in state.processingErrors"
       :key="error.artifact_type"
@@ -95,7 +93,7 @@ onUnmounted(stopTimer);
       :closable="false"
       :title="`${state.processingArtifactLabel(error.artifact_type)}：${error.message}`"
     >
-      <el-button size="small" :loading="state.processingLoading" @click="state.loadProcessingStatuses">重新查询</el-button>
+      <el-button size="small" :loading="state.processingLoading" @click="state.loadProcessingStatuses(true)">重新查询</el-button>
     </el-alert>
     <div class="processing-table-scroll">
       <el-table
@@ -109,7 +107,7 @@ onUnmounted(stopTimer);
         <el-table-column label="处理步骤" width="130">
           <template #default="{ row }">{{ state.processingArtifactLabel(row.artifact_type) }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="140">
+        <el-table-column label="处理状态" width="180">
           <template #default="{ row }">
             <StatusBadge :status="row.status" :label="state.processingStatusLabel(row)" :tone="state.processingStatusTone(row)" />
           </template>
@@ -117,6 +115,10 @@ onUnmounted(stopTimer);
         <el-table-column label="详情" min-width="220">
           <template #default="{ row }">
             <div>{{ row.message }}</div>
+            <div v-if="state.processingRetryable(row) && state.processingRetryBlockedReason" class="text-hint">{{ state.processingRetryBlockedReason }}</div>
+            <div v-else-if="!state.processingActive && (row.status === 'PROCESSING' || row.status === 'SUBMITTING')" class="text-hint">上次外部处理结果未确认。</div>
+            <div v-else-if="row.status === 'INVALIDATED'" class="text-hint">该处理结果已过期，请以当前文件重新处理的结果为准。</div>
+            <div v-else-if="row.status === 'SKIPPED'" class="text-hint">前置质量检查已停止后续处理，请先处理质量检查中的问题。</div>
             <div v-if="typeof row.extract_progress?.extractedPages === 'number'" class="text-hint">
               已识别 {{ row.extract_progress.extractedPages }}<template v-if="typeof row.extract_progress.totalPages === 'number'"> / {{ row.extract_progress.totalPages }}</template> 页
             </div>
@@ -126,7 +128,7 @@ onUnmounted(stopTimer);
         </el-table-column>
         <el-table-column label="操作" width="170">
           <template #default="{ row }">
-            <el-button v-if="quality?.processing_allowed && state.processingRetryable(row)" :disabled="!state.processingRetryAllowed" :loading="state.processingSubmitting" link type="primary" size="small" @click="state.retrySingleArtifact(row)">{{ state.processingRetryLabel(row) }}</el-button>
+            <el-button v-if="quality?.processing_allowed && state.processingRetryable(row)" :disabled="Boolean(state.processingRetryBlockedReason)" :loading="state.processingSubmitting" link type="primary" size="small" @click="state.retrySingleArtifact(row)">{{ state.processingRetryLabel(row) }}</el-button>
             <span v-else>—</span>
           </template>
         </el-table-column>
@@ -135,7 +137,7 @@ onUnmounted(stopTimer);
 
     <el-alert v-if="state.processingError" class="block-gap-sm" type="error" show-icon :closable="false" :title="state.processingError" />
     <template #footer>
-      <el-button :loading="state.processingLoading" :disabled="state.processingSubmitting" @click="state.loadProcessingStatuses">刷新状态</el-button>
+      <el-button :loading="state.processingLoading" :disabled="state.processingSubmitting" @click="state.loadProcessingStatuses(true)">刷新状态</el-button>
       <el-button :disabled="state.processingSubmitting" @click="$emit('update:visible', false)">关闭</el-button>
     </template>
   </el-dialog>

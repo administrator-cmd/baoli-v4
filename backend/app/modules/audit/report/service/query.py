@@ -45,6 +45,10 @@ class AuditReportQueryService:
             page_size=page_size,
         )
         task_ids = {row.audit_task_id for row in rows}
+        scope_signals = {
+            row.id: AuditReportValidityService().scope_signals(row.manifest_json, set(row.enabled_keys), row.reasons_json)
+            for row in crud.AuditReportCRUD(self.db).status_context_rows([row.id for row in rows])
+        }
         latest_report_map = crud.AuditReportCRUD(self.db).current_report_map(task_ids)
         current_ids = current_execution_ids(self.db, task_ids)
         pending_by_execution = pending_rerun_by_execution(
@@ -80,6 +84,7 @@ class AuditReportQueryService:
                     # 范围完整与风险可判定是报告生成时的真实记录，不随快照失效改写。
                     "scope_execution_complete": row.scope_execution_complete,
                     "risk_conclusion_available": row.risk_conclusion_available,
+                    **scope_signals[row.id],
                     "status": "ARCHIVED" if row.archived_at else "GENERATED",
                     "archived_at": row.archived_at,
                     "current": latest_report_map.get((row.audit_task_id, row.snapshot_rule_key)) == row.id,
@@ -138,6 +143,12 @@ class AuditReportQueryService:
             # 范围完整与风险可判定是报告生成时的真实记录，不随快照失效改写。
             "scope_execution_complete": report.scope_execution_complete,
             "risk_conclusion_available": report.risk_conclusion_available,
+            **AuditReportValidityService().scope_signals(
+                task.manifest_json, set(task.task_schema_json["enabled_rule_keys"]), report.reasons_json,
+            ),
+            "current": crud.AuditReportCRUD(self.db).current_report_map({report.audit_task_id}).get(
+                (report.audit_task_id, rule_key)
+            ) == report.id,
             "reasons": report.reasons_json or {},
             "snapshot": report.snapshot_json,
             "report_generation": snapshot.get("report_generation"),

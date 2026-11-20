@@ -201,6 +201,10 @@ def graph_call_model(
             "last_error": None,
         }
         if turn.kind == TURN_TOOL_CALLS:
+            if not tools and log_context is None:
+                issue = {"kind": "UNEXPECTED_TOOL_CALL", "message": "本次请求未提供工具，模型却返回工具调用，没有生成所需的 JSON 结论"}
+                return {**base, "loop_status": LOOP_BLOCKED, "unresolved_items": [issue],
+                        "verdict_errors": [{"code": issue["kind"], "message": issue["message"], "model_response": summary}]}
             exhausted = _loop_limit_reached(next_loop_count)
             if exhausted is not None:
                 # 这一轮是最后一轮：不把这一批工具放进待执行集合（它不会被执行），

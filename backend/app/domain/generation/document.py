@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 GENERATION_DOCUMENT_SCHEMA_VERSION = "rulebook_generation_v2"
-GENERATION_PROMPT_VERSION = "rulebook_generation_prompt_v11"
+GENERATION_PROMPT_VERSION = "rulebook_generation_prompt_v12"
 GENERATION_EXPORT_FORMAT_VERSION = "rulebook_generation_xlsx_v11"
 GENERATION_WORKBOOK_PROFILE = "rulebook_generation_v2"
 # UTF-8 每字符最多 4 字节，保证两个编制输入各自小于 MySQL TEXT 的字节上限。
@@ -109,6 +109,7 @@ class GenerationSheet(GenerationModel):
 
 
 class GenerationIssue(GenerationModel):
+    source_unclear_ids: list[str] = Field(default_factory=list, description="本事项承接的首阶段疑点编号，可多对一，仅内部溯源。")
     issue_id: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1)
     detail: str = ""
@@ -128,8 +129,14 @@ class GenerationDocument(GenerationModel):
     code_counters: dict[str, int] = Field(default_factory=dict, description="程序记录已有编号的流水上界，供模型补号时避免重用；模型不填写，不按固定前缀分配编号。")
 
 
+class ReviewQuestion(GenerationIssue):
+    status: Literal["OPEN"] = "OPEN"
+    resolution: Literal[""] = ""
+
+
 class GenerationContentReview(GenerationModel):
     problems: list[str]
+    new_questions: list[ReviewQuestion] = Field(default_factory=list, description="仅提交尚无对应事项、正文未擅自定论的真实业务疑问。")
 
 
 def is_business_code_column(name: str) -> bool:
@@ -297,9 +304,19 @@ def requirement_identity_problems(
     for reference in first.keys() | second.keys():
         if first.get(reference) != second.get(reference):
             _add(problems, reference, "requirement.changed_or_missing")
-    issues = {item.issue_id for item in document.issues}
+    expected = {item.unclear_id for item in inventory.unclear_items}
+    covered: set[str] = set()
+    for issue in document.issues:
+        refs = set(issue.source_unclear_ids)
+        if issue.issue_id in expected:  # 兼容独立事项与历史格式
+            refs.add(issue.issue_id)
+        for ref in sorted(refs - expected):
+            _add(problems, issue.issue_id, "unclear.unknown_reference", ref)
+        for ref in sorted(refs & covered):
+            _add(problems, issue.issue_id, "unclear.already_carried", ref)
+        covered.update(refs)
     for item in inventory.unclear_items:
-        if item.unclear_id not in issues:
+        if item.unclear_id not in covered:
             _add(problems, item.unclear_id, "unclear.not_carried_to_issue")
     return problems
 

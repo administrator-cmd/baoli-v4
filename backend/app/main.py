@@ -29,7 +29,7 @@ from app.modules.system.operation.execution import OperationExecution
 from app.runtime.schema_check import verify_schema
 
 
-def _configure_logging(level_name: str) -> None:
+def _configure_logging(level_name: str, httpx_level_name: str) -> None:
     """日志同时输出到控制台与文件。
 
     只输出到控制台时，日志随进程终止而消失：一次未预期失败的完整堆栈就再也找不回来
@@ -63,6 +63,10 @@ def _configure_logging(level_name: str) -> None:
     )
     logging.getLogger().setLevel(level)
     logging.getLogger("app").setLevel(level)
+    # 外部请求的失败、重试及业务进度由集成层记录。
+    httpx_level = getattr(logging, httpx_level_name)
+    logging.getLogger("httpx").setLevel(httpx_level)
+    logging.getLogger("httpcore").setLevel(httpx_level)
 
 
 settings = get_settings()
@@ -86,12 +90,16 @@ def _document_service() -> _DocumentService:
 # 执行契约目录路径从配置注入，domain 不直接读取全局配置。
 # 外部文档服务的供应商实现注册进审核层端口：审核层不导入 integrations，只认端口。
 document_ports.register_document_service(_document_service())
-_configure_logging(settings.log_level)
+_configure_logging(settings.log_level, settings.httpx_log_level)
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logger.info(
+        "PaddleOCR 并发上限 max_concurrent_jobs=%s（单后端进程）",
+        settings.ocr_max_concurrent_jobs,
+    )
     try:
         check_database_connection()
     except (OSError, SQLAlchemyError):

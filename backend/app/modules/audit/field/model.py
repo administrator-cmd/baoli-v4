@@ -264,6 +264,7 @@ class FieldReviewConfirmation(Base, TimestampMixin):
             onupdate="RESTRICT",
         ),
         Index("idx_field_review_task", "audit_task_id", "node_execution_id"),
+        Index("idx_field_review_task_id", "audit_task_id", "id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -279,6 +280,8 @@ class FieldReviewConfirmation(Base, TimestampMixin):
     # 确认时仍未取到值的字段：允许用户明确带缺项继续，但必须记下确认了什么。
     missing_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     missing_field_keys: Mapped[list[Any] | None] = mapped_column(JSON)
+    # Confirm-time immutable values and upload/evidence references for audit history.
+    snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     note: Mapped[str | None] = mapped_column(Text)
     # 产生本次确认的后台命令编号，用于把确认与命令对账。
     operation_no: Mapped[str | None] = mapped_column(String(40))

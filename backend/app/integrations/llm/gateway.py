@@ -9,7 +9,7 @@ JSON；供应商的地址、密钥、超时与响应格式细节都不外泄。
 
 供应商限制：端点可能是 baseurl 本身（已带 `/chat/completions`）或 baseurl 下的标准路径，
 两种写法都要接受；请求使用 SSE 流式输出，完整组装后再校验 JSON 或工具调用；
-配置缺失（baseurl / apikey / model）明确报 503，不退回本地规则或空结果；
+地址或模型名缺失明确报 503；API Key 可选；
 `tool_calls[].function.arguments` 是 JSON 字符串，需要二次解析，不能当普通文本用。
 
 本模块不依赖 domain 的规则契约，只做「发请求、取响应」。
@@ -83,7 +83,10 @@ def _context_text(context: RequestLogContext | None) -> str:
     if context.task_name:
         parts.append(f"任务={context.task_name}")
     if context.material_name:
-        parts.append(f"材料={context.material_name}")
+        # 批量操作会把整份材料清单拼进来；只保留前两项和总数，避免日志行过长。
+        names = [name for name in context.material_name.split("、") if name]
+        material = context.material_name if len(names) <= 2 else f"{'、'.join(names[:2])} 等{len(names)}项"
+        parts.append(f"材料={material}")
     if context.operation:
         parts.append(f"操作={context.operation}")
     if context.field_count is not None:
@@ -294,7 +297,7 @@ class _StreamProgress:
         return f"{text} {tool_text}" if tool_text else text
 
     def log_progress(self) -> None:
-        logger.info(
+        logger.debug(
             "LLM进行中 请求=%s%s 耗时=%.1f秒 %s",
             self.short_id, self.attempt_text(), self.elapsed(), self.stats_text(),
         )
@@ -311,7 +314,8 @@ class _StreamProgress:
         ]
         tool_count = self.tool_call_count()
         parts = [
-            f"LLM完成 请求={self.short_id}{self.attempt_text()}",
+            f"LLM完成 请求={self.short_id}{self.attempt_text()}"
+            + (f" {self.context_text}" if self.context_text else ""),
             f"耗时={self.elapsed():.1f}秒",
             f"结束类型={_end_type_text(finish_reasons, has_tool_calls=bool(tool_count))}",
         ]
@@ -402,15 +406,14 @@ def _endpoint(baseurl: str) -> str:
     return normalized if normalized.endswith("/chat/completions") else f"{normalized}/chat/completions"
 
 
-def _require_settings() -> tuple[str, str, str]:
-    """取出并校验模型配置；缺任一项都明确报 503，不退回任何默认值。"""
+def _require_settings() -> tuple[str, str | None, str]:
+    """校验必需的模型地址和名称，密钥按部署配置传递。"""
     settings = get_settings()
     api_key = settings.llm_api_key_value
     missing = [
         name
         for name, value in {
             "BAOLI_LLM_BASEURL": settings.llm_baseurl,
-            "BAOLI_LLM_APIKEY": api_key,
             "BAOLI_LLM_MODEL_NAME": settings.llm_model_name,
         }.items()
         if not value
@@ -423,6 +426,13 @@ def _require_settings() -> tuple[str, str, str]:
             details={"missing": missing},
         )
     return settings.llm_baseurl, api_key, settings.llm_model_name
+
+
+def _request_headers(accept: str, api_key: str | None) -> dict[str, str]:
+    headers = {"Accept": accept}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def _stream_invalid(reason: str) -> BusinessError:
@@ -621,7 +631,7 @@ def _read_stream(
         chunks += 1
         progress.json_chunk()
         if chunks == 1:
-            logger.info(
+            logger.debug(
                 "LLM首块 请求=%s%s 耗时=%.1f秒",
                 progress.short_id, progress.attempt_text(), time.monotonic() - started,
             )
@@ -766,10 +776,11 @@ def probe_connection(timeout_seconds: float = LLM_PROBE_TIMEOUT_SECONDS) -> Mode
     try:
         settings = get_settings()
         deadline = started + timeout_seconds
-        with _request_pacer.slot(interval_seconds=settings.llm_request_interval_seconds, deadline=deadline):
+        with _request_pacer.slot(interval_seconds=settings.llm_request_interval_seconds, deadline=deadline,
+                                 max_concurrent=settings.llm_max_concurrent_requests):
             response = _http_client().post(
                 _endpoint(baseurl),
-                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                headers=_request_headers("application/json", api_key),
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": "ping"}],
@@ -831,7 +842,8 @@ def _post(
     deadline = time.monotonic() + settings.llm_max_seconds
     with _request_pacer.slot(
         interval_seconds=settings.llm_request_interval_seconds, deadline=deadline,
-        on_wait=lambda: logger.info("LLM等待 请求=%s%s 原因=请求排队或冷却", short_id, _context_text(log_context)),
+        max_concurrent=settings.llm_max_concurrent_requests,
+        on_wait=lambda: logger.debug("LLM等待 请求=%s%s 原因=请求排队或冷却", short_id, _context_text(log_context)),
     ):
         return _post_attempts(
             body, call=call, idempotency_key=idempotency_key, log_context=log_context,
@@ -856,7 +868,7 @@ def _post_attempts(
     # 短编号只在当前进程内递增，同一次逻辑请求的所有重试共用它；
     # 完整标识沿用幂等键，没有时生成本地诊断编号，只写日志，不发给供应商。
     identity = idempotency_key or f"local-{uuid.uuid4().hex[:12]}"
-    logger.info("LLM开始 请求=%s%s 标识=%s", short_id, _context_text(log_context), identity)
+    logger.debug("LLM开始 请求=%s%s 标识=%s", short_id, _context_text(log_context), identity)
     logger.debug(
         "LLM请求映射 请求=%s 标识=%s 调用=%s 进程=%s 最大尝试=%s 读取超时=%s秒 总时限=%s秒",
         short_id, identity, call, os.getpid(), max_attempts,
@@ -866,6 +878,8 @@ def _post_attempts(
     # 仍在持续出块的长响应不会被总时长截断。
     client = _http_client()
     for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            _request_pacer.wait_for_retry_window(deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             logger.warning(
@@ -889,10 +903,7 @@ def _post_attempts(
             name=f"llm-stream-progress-{attempt}",
             daemon=True,
         )
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "text/event-stream",
-        }
+        headers = _request_headers("text/event-stream", api_key)
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         progress_thread.start()
@@ -1065,8 +1076,9 @@ def call_json(
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": settings.llm_max_output_tokens,
     }
+    if settings.llm_max_output_tokens is not None:
+        request_body["max_tokens"] = settings.llm_max_output_tokens
     if reasoning_effort is not None:
         request_body["reasoning_effort"] = reasoning_effort
     envelope = _post(
@@ -1192,9 +1204,9 @@ def call_chat(
         "model": model,
         "temperature": temperature,
         "messages": messages,
-        # 不传时由供应商决定默认输出上限；显式设置避免长响应被默认值截断。
-        "max_tokens": settings.llm_max_output_tokens,
     }
+    if settings.llm_max_output_tokens is not None:
+        body["max_tokens"] = settings.llm_max_output_tokens
     if tools is not None:
         body["tools"] = tools
         body["tool_choice"] = tool_choice

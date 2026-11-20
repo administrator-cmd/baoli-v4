@@ -55,6 +55,57 @@ export function listTaskExecutions(taskNo: string, page = 1, pageSize = 50): Pro
 export function getAuditTask(taskNo: string): Promise<AuditTask> {
   return request<AuditTask>(`/audit-tasks/${encodeURIComponent(taskNo)}`);
 }
+export interface FieldReviewHistoryItem {
+  confirmation_no: string;
+  task_no: string;
+  task_name: string;
+  input_revision: number;
+  missing_field_count: number;
+  missing_field_keys: string[];
+  note: string | null;
+  operation_no: string | null;
+  created_at: string;
+  snapshot: {
+    fields?: Array<{
+      field_key: string;
+      field_name: string;
+      material_key: string;
+      material_name: string;
+      status: string | null;
+      raw_value: string | null;
+      value: unknown;
+      unit: string | null;
+      period_scope: string | null;
+      statement_scope: string | null;
+      fact_revision_no: number | null;
+      candidate_revision_no: number | null;
+      upload_id: number | null;
+      upload_filename: string | null;
+      upload_no: string | null;
+      evidence: Array<Record<string, unknown>>;
+    }>;
+    missing_fields?: Array<Record<string, unknown>>;
+  } | null;
+}
+export interface FieldReviewHistoryTaskItem {
+  task_no: string;
+  task_name: string;
+  confirmation_count: number;
+  latest_confirmation_no: string;
+  latest_confirmed_at: string;
+  latest_missing_field_count: number;
+}
+export function listFieldReviewHistory(page = 1, pageSize = 20): Promise<Paged<FieldReviewHistoryTaskItem>> {
+  return request<Paged<FieldReviewHistoryTaskItem>>(
+    `/audit-tasks/manual-review/history${toQuery({ page, page_size: pageSize })}`,
+  );
+}
+export async function listTaskFieldReviewHistory(taskNo: string): Promise<FieldReviewHistoryItem[]> {
+  const result = await request<{ items: FieldReviewHistoryItem[] }>(
+    `/audit-tasks/${encodeURIComponent(taskNo)}/manual-review/history`,
+  );
+  return result.items;
+}
 /**
  * 上传或替换材料文件，并回报浏览器真实的上传进度。
  *

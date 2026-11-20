@@ -3,17 +3,16 @@
 
 引用来源包括数据库路径列、JSON 内的路径与业务约定的配套文件：
 
-- `background_operation.raw_response_path`：规则库解析的模型原始返回
+- `operation_llm_response.relative_path`：规则库解析的每次模型原始返回
 - `import_job.source_path`：上传的规则库 Excel
 - `document_upload.relative_path`：任务上传的材料（含已被替换的历史上传版本）
 - `stored_artifact.relative_path`：文件处理 / OCR / 印章 / 材料识别产物
 - `stored_artifact.artifact_type`：与产物同目录的信封 JSON（二进制产物的正文是 PDF）
-- `import_job` + `imports/{job_no}/llm/initial.json`：第二轮重试要用的第一轮解析目录
-- `audit_task.value_file_json`：取值四表
+- 导入原件同目录中的 `checkpoints/initial.json`：第二轮重试用的检查点
+- `audit_task.value_file_json`：当前取值和历史文件（含旧版取值四表）
 - `rule_result.result_json.verdict_errors[].diagnostics_path`：审核失败的模型响应诊断
 
-`background_operation.raw_response_path` 只登记最后一次调用，同一操作的两轮响应
-写在同一目录，因此该目录整体受保护。
+规则库编制原件、各版导出和报告模板原件按各自的数据库记录保留。
 
 固定锁文件以及 .rollback/.restoring 恢复文件不属于业务孤儿，自动清理时保留；
 恢复文件须结合失败日志人工核对。删除任务中途终止留下的 `.deleting-*` 暂存目录
@@ -55,7 +54,8 @@ import pymysql  # noqa: E402
 from sqlalchemy.engine import URL  # noqa: E402
 
 from app.core.config import get_settings, validated_database_url  # noqa: E402
-from app.services.imports.stage_cache import initial_relative_path  # noqa: E402
+from app.modules.imports.job.service.stage_cache import ImportsJobStageCacheService  # noqa: E402
+from app.services.shared.directory_cleanup import cleanup_path  # noqa: E402
 
 
 def _validated_database_url() -> URL:
@@ -81,19 +81,20 @@ def _connection_kwargs(url: URL) -> dict[str, object]:
 
 def _referenced_paths(
     connection: pymysql.Connection, root: Path,
-) -> tuple[dict[str, str], set[str], set[str]]:
-    """返回引用来源、受保护目录与必须存在的路径。
+) -> tuple[dict[str, str], set[str]]:
+    """返回引用来源与必须存在的路径。
 
-    同一路径被多处引用时保留第一个来源。`background_operation.raw_response_path`
-    只记录最后一次调用，而同一操作的两轮响应写在同一目录，因此该目录整体保护。
+    同一路径被多处引用时保留第一个来源。
     """
     queries = (
-        ("background_operation.raw_response_path", "SELECT raw_response_path FROM background_operation WHERE raw_response_path IS NOT NULL"),
+        ("operation_llm_response.relative_path", "SELECT relative_path FROM operation_llm_response"),
+        ("report_template.source_path", "SELECT source_path FROM report_template"),
+        ("rulebook_generation_job.source_path", "SELECT source_path FROM rulebook_generation_job"),
+        ("rulebook_generation_export.relative_path", "SELECT relative_path FROM rulebook_generation_export"),
         ("import_job.source_path", "SELECT source_path FROM import_job"),
         ("document_upload.relative_path", "SELECT relative_path FROM document_upload"),
     )
     referenced: dict[str, str] = {}
-    protected_dirs: set[str] = set()
     required_paths: set[str] = set()
 
     def add_path(relative: str, source: str, *, required: bool = True) -> str:
@@ -109,9 +110,9 @@ def _referenced_paths(
             for row in cursor.fetchall():
                 value = row[0]
                 if value:
-                    relative = add_path(str(value), source)
-                    if source == "background_operation.raw_response_path":
-                        protected_dirs.add(Path(relative).parent.as_posix())
+                    add_path(str(value), source)
+                    if source == "import_job.source_path":
+                        add_path(ImportsJobStageCacheService().initial_relative_path(value), "import_job.initial_stage", required=False)
         # 产物正文与同名信封都要保护：二进制产物（8010）的 relative_path 指向 PDF，
         # 信封保存在同目录的 {artifact_type}.json，也是读取产物时的必需文件。
         cursor.execute("SELECT relative_path, artifact_type, status FROM stored_artifact")
@@ -123,10 +124,6 @@ def _referenced_paths(
                      required=status == "READY" or not relative.endswith(_OPTIONAL_SUFFIXES))
             envelope = Path(relative).parent / f"{str(artifact_type).lower()}.json"
             add_path(envelope.as_posix(), "stored_artifact.envelope", required=status == "READY")
-        # 导入作业的第一轮解析检查点：第二轮重试要用，不能当孤儿删除。
-        cursor.execute("SELECT job_no FROM import_job")
-        for (job_no,) in cursor.fetchall():
-            add_path(initial_relative_path(str(job_no)), "import_job.initial_stage", required=False)
         # 明细文件同样是正式业务数据，不能只保护 relative_path 指向的主表。
         cursor.execute("SELECT value_file_json FROM audit_task WHERE value_file_json IS NOT NULL")
         for (raw,) in cursor.fetchall():
@@ -146,7 +143,7 @@ def _referenced_paths(
                 relative = error.get("diagnostics_path")
                 if relative:
                     add_path(str(relative), "rule_result.result_json.verdict_errors[].diagnostics_path")
-    return referenced, protected_dirs, required_paths
+    return referenced, required_paths
 
 
 # 非 READY 产物的占位路径不保证存在；信封是否必需由产物状态单独决定。
@@ -156,13 +153,6 @@ _OPTIONAL_SUFFIXES = (".processing", ".submitting", ".pending")
 def _is_pending_delete(relative: str) -> bool:
     """删除任务先把目录改名为 .deleting-*；中途终止时唯一副本在这里，不能当孤儿删除。"""
     return any(part.startswith(".deleting-") for part in Path(relative).parts)
-
-
-def _is_protected(relative: str, protected_dirs: set[str]) -> bool:
-    return _is_pending_delete(relative) or any(
-        prefix == "." or relative == prefix or relative.startswith(f"{prefix}/")
-        for prefix in protected_dirs
-    )
 
 
 def _storage_files(root: Path) -> list[Path]:
@@ -188,7 +178,7 @@ def _human_size(size: int) -> str:
     return f"{value:.1f} GiB"
 
 
-def _remove_empty_dirs(root: Path, protected_dirs: set[str]) -> list[Path]:
+def _remove_empty_dirs(root: Path) -> list[Path]:
     """回收删除文件后变空的目录，从最深层往上；不动存储根目录。"""
     removed: list[Path] = []
     directories = sorted(
@@ -200,7 +190,7 @@ def _remove_empty_dirs(root: Path, protected_dirs: set[str]) -> list[Path]:
         if directory == root:
             continue
         relative = _relative_of(root, directory)
-        if relative == "." or relative == ".locks" or relative.startswith(".locks/") or _is_protected(relative, protected_dirs):
+        if relative == "." or relative == ".locks" or relative.startswith(".locks/") or _is_pending_delete(relative):
             continue
         try:
             directory.rmdir()
@@ -221,7 +211,7 @@ def main() -> int:
         parser.error("实际删除必须先停止后端及后台进程，再使用 --yes --offline；脚本无法与业务文件写入互斥")
 
     settings = get_settings()
-    root = settings.storage_root.resolve()
+    root = cleanup_path(settings.storage_root.resolve())
     if not root.is_dir():
         raise SystemExit(f"存储根目录不存在：{root}")
 
@@ -235,7 +225,7 @@ def main() -> int:
         raise SystemExit(f"数据库连接失败：{exc}") from exc
 
     try:
-        referenced, protected_dirs, required_paths = _referenced_paths(connection, root)
+        referenced, required_paths = _referenced_paths(connection, root)
     finally:
         connection.close()
 
@@ -251,7 +241,7 @@ def main() -> int:
     orphans: list[Path] = []
     missing: list[tuple[str, str]] = []
     for relative, path in by_relative.items():
-        if _is_protected(relative, protected_dirs):
+        if _is_pending_delete(relative):
             continue
         if relative not in referenced:
             orphans.append(path)
@@ -260,7 +250,7 @@ def main() -> int:
             missing.append((relative, source))
 
     keep_bytes = sum(path.stat().st_size for relative, path in by_relative.items()
-                     if relative in referenced or _is_protected(relative, protected_dirs))
+                     if relative in referenced or _is_pending_delete(relative))
     orphan_bytes = sum(path.stat().st_size for path in orphans)
 
     print()
@@ -300,12 +290,12 @@ def main() -> int:
         _relative_of(root, path)  # 删除前再次核对解析后的根目录边界。
         path.unlink()
         deleted += 1
-    removed_dirs = _remove_empty_dirs(root, protected_dirs)
+    removed_dirs = _remove_empty_dirs(root)
 
     remaining = _storage_files(root)
     leftover = [path for path in remaining
                 if (relative := _relative_of(root, path)) not in referenced
-                and not _is_protected(relative, protected_dirs)]
+                and not _is_pending_delete(relative)]
     print()
     print(f"已删除 {deleted} 个文件，回收空目录 {len(removed_dirs)} 个，释放 {_human_size(orphan_bytes)}。")
     if leftover:

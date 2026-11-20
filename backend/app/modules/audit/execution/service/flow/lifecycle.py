@@ -243,6 +243,25 @@ def incomplete_failure_message(result_json: dict[str, Any] | None) -> str | None
     return f"本批次有 {count} 项未完成执行" + (f"：{reasons}" if reasons else "") + "；可处理后重新执行"
 
 
+def enter_field_review(task: AuditTask, execution: NodeExecution) -> None:
+    """保存核对边界；确认前可选择补跑失败字段，确认后只执行下游。"""
+    if not AuditFieldReviewService().extraction_closed(execution):
+        boundary = field_review_boundary(
+            evaluation_plan(task, task.current_node, execution=execution), all_rules=_task_manifest(task)["rules"],
+        )
+        execution.result_json = {
+            **(execution.result_json or {}),
+            "field_review": {
+                "closed_at": datetime.now(UTC).isoformat(),
+                "extraction_rule_keys": sorted(boundary.extraction),
+            },
+        }
+    execution.status = EXECUTION_STATUS_WAITING_FIELD_REVIEW
+    execution.failure_code = None
+    execution.failure_message = None
+    task.status = TASK_STATUS_WAITING_FIELD_REVIEW
+
+
 def graph_finalize_node_execution(
     db: Session,
     task_no: str,
@@ -301,26 +320,7 @@ def graph_finalize_node_execution(
         task.status = TASK_STATUS_BLOCKED
         AuditExecutionCRUD(db).flush()
     elif (agent_summary or {}).get("field_review_paused"):
-        # 字段核对是正常业务等待点：批次尚未结束，既不是成功也不是失败。
-        # 抽取段自身的未完成项（例如某字段抽取失败）已在逐条结果里，由人工核对处理。
-        extraction_already_closed = AuditFieldReviewService().extraction_closed(execution)
-        execution.status = EXECUTION_STATUS_WAITING_FIELD_REVIEW
-        execution.failure_code = None
-        execution.failure_message = None
-        # 抽取阶段到此结束：后续续跑不再重跑抽取规则，避免覆盖人工补填值。
-        # 抽取段的规则键与关闭时间一起落库：收尾判定、失败提示与续跑范围都据此排除。
-        if not extraction_already_closed:
-            boundary = field_review_boundary(
-                evaluation_plan(task, task.current_node, execution=execution), all_rules=_task_manifest(task)["rules"],
-            )
-            execution.result_json = {
-                **(execution.result_json or {}),
-                "field_review": {
-                    "closed_at": datetime.now(UTC).isoformat(),
-                    "extraction_rule_keys": sorted(boundary.extraction),
-                },
-            }
-        task.status = TASK_STATUS_WAITING_FIELD_REVIEW
+        enter_field_review(task, execution)
         AuditExecutionCRUD(db).flush()
     elif execution.result_json.get("loop_status") == LOOP_BLOCKED or failed:
         execution.status = "BLOCKED"

@@ -1,4 +1,5 @@
 import type { AuditField } from "@/api/contracts";
+import { extractionLabels } from "@/utils/extractionResult";
 import { formatBusinessValue } from "@/constants/labels";
 
 /** 只格式化声明为数值的字段；按字符串分组，保留全部小数位且不改变计算精度。 */
@@ -46,6 +47,23 @@ export function formatTypedValue(value: unknown, valueType: string | null | unde
 export function hasEffectiveFieldValue(field: AuditField): boolean {
   return ["PRESENT", "REVIEWED"].includes(field.status)
     && field.normalized_value !== null && field.normalized_value !== undefined && field.normalized_value !== "";
+}
+
+export function extractionOutcomeCode(field: AuditField): "EXTRACTED" | "NO_VALUE" | "UNKNOWN_STATUS" | null {
+  if (["PENDING", "NOT_EXECUTED", "NOT_APPLICABLE"].includes(field.status)) return null;
+  if (!["PRESENT", "REVIEWED", "NOT_PRESENT", "EVIDENCE_UNCLEAR", "EVIDENCE_INSUFFICIENT", "NORMALIZATION_FAILED", "EXTRACTION_FAILED"].includes(field.status)) {
+    return "UNKNOWN_STATUS";
+  }
+  if (field.corrected) {
+    const value = field.extracted_normalized_value;
+    return field.extracted_status === "PRESENT" && value !== null && value !== undefined && value !== "" ? "EXTRACTED" : "NO_VALUE";
+  }
+  return hasEffectiveFieldValue(field) ? "EXTRACTED" : "NO_VALUE";
+}
+
+export function extractionOutcome(field: AuditField) {
+  const code = extractionOutcomeCode(field);
+  return code === "EXTRACTED" || code === "NO_VALUE" ? extractionLabels[code] : null;
 }
 
 export function fieldSourceFiles(field: AuditField): string[] {

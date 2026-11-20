@@ -13,6 +13,7 @@ class DocumentRowResponse(BaseModel):
     material_name: str
     required: bool
     status: str
+    processing_notes: list[str]
     filename: str | None
     size_bytes: int | None
     uploaded_at: datetime | None
@@ -43,5 +44,6 @@ class DocumentDetailResponse(BaseModel):
     material_name: str
     required: bool
     status: str
+    processing_notes: list[str]
     current_upload_no: str | None = None
     uploads: list[DocumentUploadItem] = Field(default_factory=list)

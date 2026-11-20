@@ -27,6 +27,9 @@ class ScenarioDraftRulesService:
         definition = {**(previous or {}), **payload, "name": name, "node": NODE_RULE_EXECUTION, "node_type": NODE_RULE_EXECUTION,
                       "operator": payload.get("operator") or (previous or {}).get("operator") or OPERATOR_LLM_EXECUTE,
                       "source_ref": ScenarioTemplateCommonService()._normalized_source_ref(payload.get("source_ref")), "enabled": bool(payload.get("enabled", True))}
+        if payload.get("config_status") is not None:
+            definition["enabled"] = payload["config_status"] == "CLEAR"
+            return definition
         if payload.get("enabled") is True and definition.get("config_status") in {"PENDING", "DISABLED"}:
             definition["config_status"] = "CLEAR"
         return definition

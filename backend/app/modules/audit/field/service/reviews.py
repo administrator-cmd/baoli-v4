@@ -24,6 +24,7 @@ from app.domain.configuration.rule_library import active, execution_container_of
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.service.execution_history import AuditExecutionHistoryService
 from app.modules.audit.field.crud import AuditFieldCRUD
+from app.modules.audit.field.service.value_store import AuditFieldValueStoreService
 from app.modules.audit.rule.crud import AuditRuleCRUD
 from app.modules.audit.shared import _current_upload_map, _task_manifest
 from app.modules.audit.task.model import AuditTask
@@ -98,6 +99,7 @@ class AuditFieldReviewsService:
         # 执行批次既可能产生计算派生事实，也可能产生抽取统一事实。只撤销 DERIVED 会让
         # 已失效抽取节点的旧字段继续留在 TaskFact 当前位，后续规则仍能读取到它。
         AuditFieldCRUD(self.db).clear_current_facts(task.id, execution_ids=execution_ids)
+        AuditFieldValueStoreService(self.db).sync_current(task)
         counts["invalidated_executions"] = AuditExecutionHistoryService(self.db).invalidate_by_ids(execution_ids, "字段纠错后重算")
         return counts
 
@@ -135,6 +137,7 @@ class AuditFieldReviewsService:
             AuditFieldCRUD(self.db).clear_current_facts(
                 task.id, fact_kind=FACT_KIND_DERIVED, execution_ids=execution_ids,
             )
+            AuditFieldValueStoreService(self.db).sync_current(task)
 
         # 节点重试已经改变了当前执行/待办集合，旧批次哈希无论重试的是哪类节点都不再有效。
         # 这一步不能放在字段抽取分支末尾，否则普通规则节点和无字段归属的历史节点会提前返回，
@@ -187,3 +190,4 @@ class AuditFieldReviewsService:
                 fact_codes=affected_fact_codes,
                 exclude_status=FIELD_STATUS_REVIEWED,
             )
+            AuditFieldValueStoreService(self.db).sync_current(task)

@@ -205,7 +205,7 @@ function apply(): void {
         <el-form-item label="规则类型"><el-input v-model="rule.operator_code" /></el-form-item>
         <el-form-item label="执行方式"><span class="text-muted">{{ executionModeLabel(executionMode) }}</span></el-form-item>
         <el-form-item label="规则用途"><el-select v-model="form.role"><el-option value="CHECK" label="普通核查" /><el-option value="RISK" label="风险结论" /></el-select></el-form-item>
-        <el-form-item label="状态"><el-select v-model="form.status" @change="changeRuleStatus"><el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认" /><el-option value="DISABLED" label="暂停" /></el-select></el-form-item>
+        <el-form-item label="配置状态"><el-select v-model="form.status" @change="changeRuleStatus"><el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认" /><el-option value="DISABLED" label="停用" /></el-select></el-form-item>
         <el-form-item label="审核要求"><el-input v-model="form.requirement" type="textarea" :rows="5" /></el-form-item>
         <el-form-item label="适用材料"><el-select v-model="form.materialKeys" multiple filterable><el-option v-for="item in config.materials" :key="item.material_key" :value="item.material_key" :label="item.name" /></el-select></el-form-item>
         <el-form-item label="输入字段"><el-select v-model="form.fieldKeys" multiple filterable><el-option v-for="item in config.fields" :key="item.field_key" :value="item.field_key" :label="fieldName(item.field_key)" /></el-select></el-form-item>
@@ -221,7 +221,7 @@ function apply(): void {
         <el-form-item label="计算名称" required><el-input v-model="calculation.rule_name" maxlength="255" /></el-form-item>
         <el-form-item label="业务编号"><el-input v-model="calculation.source_id" maxlength="80" /></el-form-item>
         <el-form-item label="结果标识" required><el-input v-model="calculation.result_code" maxlength="80" /></el-form-item>
-        <el-form-item label="状态"><el-select v-model="calculation.status" @change="changeCalculationStatus"><el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认" /><el-option value="DISABLED" label="暂停" /></el-select></el-form-item>
+        <el-form-item label="配置状态"><el-select v-model="calculation.status" @change="changeCalculationStatus"><el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认" /><el-option value="DISABLED" label="停用" /></el-select></el-form-item>
         <el-form-item label="计算方法"><el-input v-model="calculation.formula" type="textarea" :rows="4" /></el-form-item>
         <el-form-item label="业务要求"><el-input v-model="calculation.requirement" type="textarea" :rows="4" /></el-form-item>
         <el-form-item label="结果类型"><el-select v-model="calculation.result_type" filterable allow-create><el-option v-for="item in valueTypeOptions" :key="item.value" :value="item.value" :label="item.label" /></el-select></el-form-item>

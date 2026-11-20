@@ -2,6 +2,8 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router"
 
 import AuditTaskDetailView from "@/views/audits/AuditTaskDetailView.vue";
 import AuditTaskListView from "@/views/audits/AuditTaskListView.vue";
+import ManualReviewHistoryView from "@/views/audits/ManualReviewHistoryView.vue";
+import ManualReviewView from "@/views/audits/ManualReviewView.vue";
 import ExecutionListView from "@/views/audits/ExecutionListView.vue";
 import DocumentListView from "@/views/documents/DocumentListView.vue";
 import RulebookFilesView from "@/views/documents/RulebookFilesView.vue";
@@ -15,6 +17,7 @@ import ReportListView from "@/views/reports/ReportListView.vue";
 import ReportTemplateListView from "@/views/reports/ReportTemplateListView.vue";
 import RiskResultListView from "@/views/reports/RiskResultListView.vue";
 import SceneDetailView from "@/views/scenes/SceneDetailView.vue";
+import SceneCalculationEditView from "@/views/scenes/SceneCalculationEditView.vue";
 import SceneImportsView from "@/views/scenes/SceneImportsView.vue";
 import SceneListView from "@/views/scenes/SceneListView.vue";
 import SceneRuleEditView from "@/views/scenes/SceneRuleEditView.vue";
@@ -54,6 +57,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "规则编辑", group: "场景管理", menu: "/scenes" },
   },
   {
+    path: "/scene-calculations/new/:scenarioCode",
+    name: "scene-calculation-new",
+    component: SceneCalculationEditView,
+    meta: { title: "新增计算规则", group: "场景管理", menu: "/scenes" },
+  },
+  {
+    path: "/scene-calculations/edit/:scenarioCode/:ruleCode",
+    name: "scene-calculation-edit",
+    component: SceneCalculationEditView,
+    meta: { title: "编辑计算规则", group: "场景管理", menu: "/scenes" },
+  },
+  {
     // 导入作业列表与工作台是场景上下文页面：从场景详情的「规则库导入」进入，
     // 也可通过 `?scenario=` 指定场景；作业记录所属场景。
     path: "/scene-imports",
@@ -75,6 +90,14 @@ const routes: RouteRecordRaw[] = [
 
   // 任务管理
   { path: "/audit-tasks", name: "audit-tasks", component: AuditTaskListView, meta: { title: "审核任务", group: "任务管理", menu: "/audit-tasks" } },
+  { path: "/manual-reviews", name: "manual-reviews", component: ManualReviewView, meta: { title: "人工审核", group: "任务管理", menu: "/manual-reviews" } },
+  {
+    path: "/manual-reviews/:taskNo/history",
+    name: "manual-review-history",
+    component: ManualReviewHistoryView,
+    props: true,
+    meta: { title: "字段核对记录", group: "任务管理", menu: "/manual-reviews" },
+  },
   {
     path: "/audit-tasks/:taskNo",
     name: "audit-task-detail",

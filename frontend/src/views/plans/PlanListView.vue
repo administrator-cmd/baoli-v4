@@ -8,7 +8,6 @@ import {
   deletePlan,
   listPlans,
   restorePlan,
-  setPlanEnabled,
 } from "@/api/plans";
 import { listSceneOptions, type ScenarioOption } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
@@ -43,7 +42,6 @@ const sceneOptions = ref<ScenarioOption[]>([]);
 /** 场景下拉读取失败时保留可见原因，不静默变成空列表。 */
 const sceneOptionsError = ref<string | null>(null);
 const selectedRows = ref<PlanListItem[]>([]);
-const editSelectedDisabled = computed(() => selectedRows.value.length !== 1);
 const deleteSelectedDisabled = computed(() => selectedRows.value.length === 0);
 const deleteSaving = ref(false);
 
@@ -53,16 +51,6 @@ function goNew(): void {
 
 function goEdit(row: PlanListItem): void {
   void router.push({ name: "plan-edit", params: { planCode: row.plan_code } });
-}
-
-async function toggleEnabled(row: PlanListItem): Promise<void> {
-  try {
-    await setPlanEnabled(row.plan_code, !row.enabled);
-    ElMessage.success(row.enabled ? "方案已停用（已创建任务不受影响）" : "方案已启用");
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "操作失败");
-  }
 }
 
 async function removePlans(targets: PlanListItem[]): Promise<void> {
@@ -146,10 +134,10 @@ async function loadSceneOptions(): Promise<void> {
           <el-option value="false" label="停用" />
         </el-select>
       </el-form-item>
-      <el-form-item label="范围状态">
+      <el-form-item label="配置状态">
         <el-select v-model="filters.effective" clearable placeholder="全部" style="width: 130px">
-          <el-option value="true" label="已生效" />
-          <el-option value="false" label="待核对" />
+          <el-option value="true" label="配置已生效" />
+          <el-option value="false" label="配置未生效" />
         </el-select>
       </el-form-item>
       <el-form-item>
@@ -161,7 +149,6 @@ async function loadSceneOptions(): Promise<void> {
       <div class="app-toolbar__left">
         <template v-if="!filters.deleted">
           <el-button type="primary" @click="goNew">新增</el-button>
-          <el-button type="success" plain :disabled="editSelectedDisabled" @click="selectedRows[0] && goEdit(selectedRows[0])">编辑</el-button>
           <el-button type="danger" plain :disabled="deleteSelectedDisabled" :loading="deleteSaving" @click="removePlans([...selectedRows])">删除</el-button>
         </template>
       </div>
@@ -194,11 +181,12 @@ async function loadSceneOptions(): Promise<void> {
           <span v-else class="text-hint">未绑定</span>
         </template>
       </el-table-column>
-      <el-table-column label="范围状态" width="140">
+      <el-table-column label="配置状态" min-width="240">
         <template #default="{ row }">
           <el-tag :type="row.effective ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
-            {{ row.effective ? "已生效" : "待核对" }}
+            {{ row.effective ? "配置已生效" : "配置未生效" }}
           </el-tag>
+          <div v-if="!row.effective" class="status-notes">{{ row.sync_error?.message || "尚未生成可用配置，请进入编辑页核对并保存" }}</div>
         </template>
       </el-table-column>
       <el-table-column label="启用规则数" width="104">
@@ -216,11 +204,10 @@ async function loadSceneOptions(): Promise<void> {
       <el-table-column label="更新时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="232" class-name="table-actions" fixed="right">
+      <el-table-column label="操作" width="184" class-name="table-actions" fixed="right">
         <template #default="{ row }">
           <template v-if="!filters.deleted">
             <el-button link type="primary" size="small" @click="goEdit(row)">编辑</el-button>
-            <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
             <el-button link type="primary" size="small" @click="openCreateTask(row)">创建任务</el-button>
             <el-button link type="danger" size="small" :disabled="deleteSaving" @click="removePlans([row])">删除</el-button>
           </template>
@@ -246,3 +233,14 @@ async function loadSceneOptions(): Promise<void> {
 
   </div>
 </template>
+
+<style scoped>
+.status-notes {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>

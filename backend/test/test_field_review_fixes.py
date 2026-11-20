@@ -70,6 +70,23 @@ class ComparisonSourceTests(unittest.TestCase):
             {"field_key": "f2", "name": "分项金额"},
         ]})
 
+    def test_value_rows_get_names_without_tool_findings_or_extracted_value(self):
+        rows = [
+            {"field_key": "f1", "material_key": "a", "raw_value": "123", "normalized_value": 123},
+            {"field_key": "f2", "material_key": "a", "raw_value": None, "status": "MISSING"},
+            {"field_key": "f1", "field_name": "历史字段名", "material_key": "a", "material_name": "历史材料名"},
+            {"field_key": "unknown", "material_key": "unknown"},
+        ]
+        docs = {"a": SimpleNamespace(material_name="资产负债表")}
+        for key in ("inputs", "extracted_values"):
+            fixed = AuditTaskRuleViewsService().comparison_sources({key: rows}, task=self._task(), documents_by_material_key=docs)
+            self.assertEqual(fixed[key], [
+                {**rows[0], "field_name": "合计金额", "material_name": "资产负债表"},
+                {**rows[1], "field_name": "分项金额", "material_name": "资产负债表"},
+                rows[2], rows[3],
+            ])
+            self.assertNotIn("field_name", rows[0])
+
     def test_empty_label_placeholders_are_backfilled(self):
         result = {"tool_findings": [{
             "comparison": {"left_index": 0, "right_index": 0, "addends": [100, 60], "addend_labels": ["", ""]},

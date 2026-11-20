@@ -17,6 +17,18 @@ ENCODED_KINDS = ("decimal", "date", "datetime")
 _ENVELOPE_KEYS = frozenset({"kind", "value"})
 _ESCAPED_MAPPING_KIND = "mapping"
 
+def recognized_scopes(output: dict[str, Any]) -> dict[str, str]:
+    """字段事实和规则详情均使用本次产出的识别口径，不用配置值补缺。"""
+    mapping = {
+        "actual_period_scope": "recognized_period",
+        "actual_statement_scope": "recognized_statement_scope",
+        "actual_entity_scope": "recognized_entity_scope",
+        "actual_unit": "recognized_unit",
+    }
+    return {target: value.strip() for target, source in mapping.items()
+            if isinstance(value := output.get(source), str) and value.strip()}
+
+
 def encode_value(value: Any) -> Any:
     """把一个取值投影成 JSON 可表达、且可无损还原的形式。
 

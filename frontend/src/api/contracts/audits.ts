@@ -92,6 +92,7 @@ export interface ChannelFailure {
 /** 服务端对当前批次能否续跑、续跑多少的统一判断；页面只展示，不自行推导。 */
 export interface ResumeState {
   execution_id: number | null;
+  field_review?: { retry_extraction_count?: number };
   /** 不能续跑的原因；可续跑时为 null。 */
   blocked_reason: string | null;
   plan: ResumeScope | null;
@@ -417,6 +418,7 @@ export interface RiskList {
   task_no: string;
   risk_configured: boolean;
   risk_executed: boolean;
+  risk_results_stale: boolean;
   risk_conclusion_available: boolean;
   /** 只统计 ABNORMAL；不能用结果总数冒充命中数。 */
   hit_count: number;

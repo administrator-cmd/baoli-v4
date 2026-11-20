@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftFieldItem, ScenarioConfigurationView } from "@/api/contracts";
 import { ApiError } from "@/api/http";
+import { useLocalPagination } from "@/composables/useLocalPagination";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 import { compareNaturalLabels } from "@/utils/naturalSort";
+import { fieldDataType, fieldDataTypeLabel, fieldDataTypeOptions, fieldTypePayload, STRUCTURED_FIELD_TYPE } from "@/utils/fieldTypeConfig";
 import {
   createDraftField,
   deleteDraftField,
@@ -14,16 +17,10 @@ import {
 import {
   artifactSourceLabel,
   artifactSourceOptions,
-  defaultExtractionStrategy,
-  extractionStrategyLabel,
-  extractionStrategyOptions,
-  extractionStrategySupports,
   periodScopeLabel,
   periodScopeOptions,
   statementScopeLabel,
   statementScopeOptions,
-  valueTypeLabel,
-  valueTypeOptions,
 } from "@/constants/labels";
 
 /**
@@ -61,6 +58,11 @@ const filteredFields = computed(() =>
       (!query.name.trim() || `${item.name}\n${item.source_ref ?? ""}`.toLocaleLowerCase().includes(query.name.trim().toLocaleLowerCase())),
   ).sort((left, right) => compareNaturalLabels(left.source_ref, right.source_ref)),
 );
+const { page, pageSize, pageItems: pagedFields } = useLocalPagination(() => filteredFields.value);
+
+watch([() => query.material_key, () => query.name], () => {
+  page.value = 1;
+});
 
 /**
  * 被规则引用的字段键。
@@ -87,8 +89,7 @@ const editingItem = ref<DraftFieldItem | null>(null);
 const form = reactive({
   material_key: "",
   name: "",
-  value_type: "STRING",
-  extraction_strategy: "RAW_TEXT" as "RAW_TEXT" | "DETERMINISTIC" | "STRUCTURED",
+  data_type: "STRING",
   structure_schema_text: "",
   unit: "",
   currency: "",
@@ -109,8 +110,7 @@ function openCreate(): void {
   editingItem.value = null;
   form.material_key = materials.value[0]?.material_key ?? "";
   form.name = "";
-  form.value_type = "STRING";
-  form.extraction_strategy = "RAW_TEXT";
+  form.data_type = "STRING";
   form.structure_schema_text = "";
   form.unit = "";
   form.currency = "";
@@ -127,8 +127,7 @@ function openEdit(item: DraftFieldItem): void {
   editingItem.value = item;
   form.material_key = item.material_key;
   form.name = item.name;
-  form.value_type = item.value_type;
-  form.extraction_strategy = item.extraction_strategy ?? defaultExtractionStrategy(item.value_type);
+  form.data_type = fieldDataType(item);
   form.structure_schema_text = item.structure_schema ? JSON.stringify(item.structure_schema, null, 2) : "";
   form.unit = item.unit ?? "";
   form.currency = item.currency ?? "";
@@ -141,25 +140,17 @@ function openEdit(item: DraftFieldItem): void {
   dialogVisible.value = true;
 }
 
+defineExpose({ openEdit });
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败";
 }
 
-function handleValueTypeChange(): void {
-  if (form.extraction_strategy !== "STRUCTURED") form.structure_schema_text = "";
-}
-
-function handleExtractionStrategyChange(): void {
-  if (form.extraction_strategy !== "STRUCTURED") {
-    form.structure_schema_text = "";
-  }
-}
-
 function parsedStructureSchema(): Record<string, unknown> | null {
-  if (form.extraction_strategy !== "STRUCTURED") return null;
+  if (form.data_type !== STRUCTURED_FIELD_TYPE) return null;
   const text = form.structure_schema_text.trim();
   if (!text) {
-    throw new Error("结构化抽取必须填写结构定义");
+    throw new Error("结构化对象必须填写结构定义");
   }
   let parsed: unknown;
   try {
@@ -190,8 +181,7 @@ async function submitForm(): Promise<void> {
     const payload = {
       material_key: form.material_key,
       name: form.name.trim(),
-      value_type: form.value_type,
-      extraction_strategy: form.extraction_strategy,
+      ...fieldTypePayload(form.data_type, editingItem.value),
       structure_schema: structureSchema,
       unit: form.unit.trim() ? form.unit.trim() : null,
       // 币种与产物来源：留空表示未声明 / 常规字段抽取，不表示“随便选一个”。
@@ -288,7 +278,7 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-button size="small" @click="$emit('refresh')">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="filteredFields" border stripe class="management-table" v-loading="loading" :empty-text="fields.length ? '未找到匹配的字段' : '暂无字段配置'">
+      <el-table v-else :data="pagedFields" border stripe class="management-table" v-loading="loading" :empty-text="fields.length ? '未找到匹配的字段' : '暂无字段配置'">
         <el-table-column prop="source_ref" label="字段编号" width="140" align="center">
           <template #default="{ row }">
             <span v-if="row.source_ref" class="mono">{{ row.source_ref }}</span>
@@ -297,11 +287,8 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         </el-table-column>
         <el-table-column prop="name" label="字段名称" min-width="180" show-overflow-tooltip />
         <el-table-column prop="material_name" label="来源材料" width="160" show-overflow-tooltip />
-        <el-table-column label="数据类型" width="88" align="center">
-          <template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template>
-        </el-table-column>
-        <el-table-column label="抽取策略" :width="TABLE_COLUMN_WIDTHS.extractionStrategy" align="center">
-          <template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template>
+        <el-table-column label="数据类型" width="112" align="center">
+          <template #default="{ row }">{{ fieldDataTypeLabel(row) }}</template>
         </el-table-column>
         <el-table-column label="单位" width="64" align="center">
           <template #default="{ row }">{{ row.unit || "—" }}</template>
@@ -309,17 +296,21 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         <el-table-column label="币种" width="64" align="center">
           <template #default="{ row }">{{ row.currency || "—" }}</template>
         </el-table-column>
-        <el-table-column label="取数期间" width="96" align="center">
+        <el-table-column label="取数期间" width="120" align="center">
           <template #default="{ row }">{{ periodScopeLabel(row.period_scope) }}</template>
         </el-table-column>
-        <el-table-column label="报表口径" width="96" align="center">
+        <el-table-column label="报表口径" width="120" align="center">
           <template #default="{ row }">{{ statementScopeLabel(row.statement_scope) }}</template>
         </el-table-column>
         <el-table-column label="产物来源" :width="TABLE_COLUMN_WIDTHS.artifactSource" align="center">
           <template #default="{ row }">{{ artifactSourceLabel(row.artifact_source) }}</template>
         </el-table-column>
         <el-table-column label="是否必填" width="88" align="center">
-          <template #default="{ row }">{{ row.required ? "是" : "否" }}</template>
+          <template #default="{ row }">
+            <el-tag :type="row.required ? 'warning' : 'info'" size="small" effect="plain" disable-transitions>
+              {{ row.required ? "是" : "否" }}
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="抽取要求" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">{{ row.instruction || "—" }}</template>
@@ -340,6 +331,17 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
         </el-table-column>
       </el-table>
 
+      <div v-if="!loadError && filteredFields.length" class="app-pagination">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="filteredFields.length"
+          :page-sizes="PAGE_SIZE_OPTIONS"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+        />
+      </div>
+
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑字段' : '新增字段'" width="min(680px, 96vw)" :close-on-click-modal="false">
         <el-form label-width="100px">
           <el-form-item label="所属材料" required>
@@ -353,23 +355,12 @@ async function removeItem(item: DraftFieldItem): Promise<void> {
           <el-form-item label="字段名称" required>
             <el-input v-model="form.name" maxlength="255" placeholder="例如：应收账款金额" />
           </el-form-item>
-          <el-form-item label="字段类型" required>
-            <el-select v-model="form.value_type" style="width: 100%" @change="handleValueTypeChange">
-              <el-option v-for="item in valueTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
+          <el-form-item label="数据类型" required>
+            <el-select v-model="form.data_type" style="width: 100%">
+              <el-option v-for="item in fieldDataTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
           </el-form-item>
-          <el-form-item label="抽取策略" required>
-            <el-select v-model="form.extraction_strategy" style="width: 100%" @change="handleExtractionStrategyChange">
-              <el-option
-                v-for="item in extractionStrategyOptions"
-                :key="item.value"
-                :value="item.value"
-                :label="item.label"
-                :disabled="!extractionStrategySupports(item.value)"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item v-if="form.extraction_strategy === 'STRUCTURED'" label="结构定义" required>
+          <el-form-item v-if="form.data_type === STRUCTURED_FIELD_TYPE" label="结构定义" required>
             <el-input
               v-model="form.structure_schema_text"
               type="textarea"

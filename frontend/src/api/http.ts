@@ -197,8 +197,10 @@ export function operationToneClass(status: OperationStatus | null | undefined): 
 }
 
 /** 按操作编号查询后台操作的真实状态。 */
-export function getOperation(operationNo: string): Promise<OperationView> {
-  return request<OperationView>(`/operations/${encodeURIComponent(operationNo)}`);
+type OperationDetail = OperationView & { response_files: { stage: string; relative_path: string; created_at: string }[] };
+
+export function getOperation(operationNo: string): Promise<OperationDetail> {
+  return request<OperationDetail>(`/operations/${encodeURIComponent(operationNo)}`);
 }
 
 /**

@@ -8,7 +8,6 @@ import {
   createScene,
   deleteScene,
   listScenes,
-  setSceneEnabled,
   updateScene,
 } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
@@ -108,7 +107,7 @@ async function submitForm(): Promise<void> {
       scenario_name: form.scenario_name.trim(),
       category: form.category.trim() || null,
       description: form.description.trim() || null,
-      enabled: form.enabled,
+      ...(form.enabled !== editing.value.enabled && { enabled: form.enabled }),
     });
     ElMessage.success("场景资料已保存");
     dialogVisible.value = false;
@@ -117,16 +116,6 @@ async function submitForm(): Promise<void> {
     ElMessage.error(failure instanceof Error ? failure.message : "保存失败");
   } finally {
     saving.value = false;
-  }
-}
-
-async function toggleEnabled(row: ScenarioListItem): Promise<void> {
-  try {
-    await setSceneEnabled(row.scenario_code, !row.enabled);
-    ElMessage.success(row.enabled ? "场景已停用（不影响已创建任务）" : "场景已启用");
-    await list.load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "操作失败");
   }
 }
 
@@ -224,10 +213,9 @@ onMounted(() => {
       <el-table-column label="业务类型" :width="TABLE_COLUMN_WIDTHS.businessType" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category || "—" }}</template>
       </el-table-column>
-      <el-table-column label="配置状态" width="140">
+      <el-table-column label="发布状态" width="160">
         <template #default="{ row }">
-          <el-tag v-if="row.sync_error" type="warning" size="small" effect="light" disable-transitions>配置待完善</el-tag>
-          <el-tag v-else-if="row.configuration_kind === 'DRAFT'" type="warning" size="small" effect="light" disable-transitions>{{ row.published_version_no ? '有未发布修改' : '尚未发布' }}</el-tag>
+          <el-tag v-if="row.configuration_kind === 'DRAFT'" type="warning" size="small" effect="light" disable-transitions>{{ row.published_version_no ? '有未发布修改' : '尚未发布' }}</el-tag>
           <el-tag v-else type="success" size="small" effect="light" disable-transitions>已发布</el-tag>
           <div v-if="row.sync_error" class="text-hint">{{ row.sync_error.message }}</div>
         </template>
@@ -238,7 +226,7 @@ onMounted(() => {
       <el-table-column label="已发布版本" width="100">
         <template #default="{ row }">{{ row.published_version_no ?? "未发布" }}</template>
       </el-table-column>
-      <el-table-column label="场景状态" width="140">
+      <el-table-column label="启用状态" width="140">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
             {{ row.enabled ? "启用" : "停用" }}
@@ -248,11 +236,10 @@ onMounted(() => {
       <el-table-column label="更新时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.updated_at)) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="208" class-name="table-actions" align="center" fixed="right">
+      <el-table-column label="操作" width="168" class-name="table-actions" align="center" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button link type="primary" size="small" @click="toggleEnabled(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
           <el-button
             link
             type="danger"

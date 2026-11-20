@@ -62,7 +62,7 @@ class RetryDelayTests(unittest.TestCase):
 
     def test_pacing_settings_reject_nonfinite_and_negative_values(self):
         for changes in [{"llm_request_interval_seconds": -1}, {"llm_request_interval_seconds": float("nan")},
-                        {"llm_retry_base_seconds": 0}, {"llm_retry_base_seconds": float("inf")}]:
+                        {"llm_max_concurrent_requests": 0}, {"llm_retry_base_seconds": 0}, {"llm_retry_base_seconds": float("inf")}]:
             with self.subTest(changes=changes), self.assertRaises(ValidationError):
                 Settings(_env_file=None, **changes)
 
@@ -112,11 +112,28 @@ class PacerTests(unittest.TestCase):
             self.assertEqual(self.clock.now, 1010)
 
     def test_queue_timeout_does_not_release_another_requests_slot(self):
-        self.pacer._busy = True
-        with self.assertRaises(BusinessError):
-            with self.slot(deadline=1003):
+        with self.slot():
+            with self.assertRaises(BusinessError), self.slot(deadline=1003):
                 self.fail("不应抢占仍在使用的窗口")
-        self.assertTrue(self.pacer._busy)
+            self.assertEqual(self.pacer._active, 1)
+
+    def test_two_slots_overlap_but_third_waits_for_reusable_slot(self):
+        def slot(deadline=2000):
+            return self.pacer.slot(interval_seconds=2, deadline=deadline, max_concurrent=2)
+
+        with slot():
+            with slot():
+                self.assertEqual(self.clock.now, 1000)
+                with self.assertRaises(BusinessError), slot(deadline=1001):
+                    self.fail("并发不能超过两个槽位")
+            with slot():
+                self.assertEqual(self.clock.now, 1003)
+
+    def test_shared_cooldown_also_delays_retry_in_already_occupied_slot(self):
+        with self.slot():
+            self.pacer.defer(30)
+            self.pacer.wait_for_retry_window(1100)
+            self.assertEqual(self.clock.now, 1030)
 
 
 class ConcurrentPacerTests(unittest.TestCase):
@@ -148,7 +165,7 @@ class GatewayPacingTests(unittest.TestCase):
         self.clock = Clock()
         self.pacer = pacing.LlmRequestPacer()
         self.settings = SimpleNamespace(llm_max_seconds=1000, llm_timeout_seconds=60,
-                                        llm_request_interval_seconds=2, llm_retry_base_seconds=10,
+                                        llm_request_interval_seconds=2, llm_max_concurrent_requests=1, llm_retry_base_seconds=10,
                                         llm_max_output_tokens=393216)
         self.client = Mock()
         self.responses = []

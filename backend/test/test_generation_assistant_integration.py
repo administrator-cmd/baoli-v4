@@ -19,6 +19,7 @@ from app.core.database import SessionLocal
 from app.core.transactions import commit_transaction, rollback_transaction
 from app.domain.generation.document import GenerationDocument
 from app.modules.imports.generation.crud import GenerationMessageCRUD, GenerationRevisionCRUD
+from app.modules.imports.generation.dto import AssistantIssueAnswer
 from app.modules.imports.generation.model import (
     RulebookGenerationExport, RulebookGenerationJob, RulebookGenerationMessage, RulebookGenerationRevision,
 )
@@ -26,11 +27,13 @@ from app.modules.imports.generation.service.assistant import GenerationAssistant
 from app.modules.imports.generation.service.editing import GenerationEditingService
 from app.modules.imports.generation.service.export import GenerationExportService
 from app.modules.imports.generation.service.history import GenerationHistoryService
+from app.modules.imports.generation.service.lifecycle import GenerationLifecycleService
 from app.modules.imports.generation.service.operations import GenerationOperationsService
 from app.modules.imports.generation.service.query import GenerationQueryService
 from app.modules.imports.generation.service.upload import GenerationUploadService
 from app.modules.system.operation.execution import OperationExecution
-from app.modules.system.operation.model import BackgroundOperation
+from app.modules.system.operation.model import BackgroundOperation, OperationLog
+from app.modules.system.operation.service.operation_types import OBJECT_RULEBOOK_GENERATION
 from app.runtime.schema_check import verify_schema
 from app.services.shared.storage import resolve_storage_path
 from test_generation_assistant import document
@@ -68,6 +71,7 @@ class AssistantPersistenceTests(unittest.TestCase):
             )
             self.job_no, self.job_id = job.job_no, job.id
             self.paths.add(resolve_storage_path(job.source_path))
+            self.job_directory = resolve_storage_path(job.source_path).parent
             job.revision = 1
             job.document_json = document().model_dump(mode="json")
             GenerationHistoryService(db).snapshot(job, origin="INITIAL", summary="回归测试原版")
@@ -84,9 +88,12 @@ class AssistantPersistenceTests(unittest.TestCase):
             for model in (RulebookGenerationMessage, RulebookGenerationExport, RulebookGenerationRevision):
                 db.execute(delete(model).where(model.generation_job_id == self.job_id))
             db.execute(delete(BackgroundOperation).where(BackgroundOperation.object_no == self.job_no))
+            db.execute(delete(OperationLog).where(
+                OperationLog.object_type == OBJECT_RULEBOOK_GENERATION, OperationLog.object_no == self.job_no,
+            ))
             db.execute(delete(RulebookGenerationJob).where(RulebookGenerationJob.id == self.job_id))
             commit_transaction(db)
-        root = resolve_storage_path(f"rulebook_generations/{self.job_no}").resolve()
+        root = self.job_directory
         for path in self.paths:
             self.assertTrue(path.resolve().is_relative_to(root))
             path.unlink(missing_ok=True)
@@ -95,11 +102,11 @@ class AssistantPersistenceTests(unittest.TestCase):
                 parent.rmdir()
                 parent = parent.parent
 
-    def submit(self, *, message="整理标题", revision=1, key=None, issue_id=None):
+    def submit(self, *, message="整理标题", revision=1, key=None, issue_id=None, issue_answers=None):
         with patch.object(OperationExecution, "dispatch") as dispatch, SessionLocal() as db:
             operation, reused = GenerationAssistantService(db).submit(
                 self.job_no, message=message, expected_revision=revision, idempotency_key=key or uuid.uuid4().hex,
-                issue_id=issue_id,
+                issue_id=issue_id, issue_answers=issue_answers,
             )
             operation_id = operation.id
             self.assertFalse(dispatch.called, "提交事务前不能调度模型")
@@ -147,7 +154,7 @@ class AssistantPersistenceTests(unittest.TestCase):
         self.assertTrue(self.submit(key=key)[1])
         self.assertEqual(self.llm.call_count, 2)
 
-    def add_issue(self):
+    def add_issue(self, *additional):
         with SessionLocal() as db:
             job = GenerationQueryService(db).get_job(self.job_no)
             payload = dict(job.document_json)
@@ -155,11 +162,54 @@ class AssistantPersistenceTests(unittest.TestCase):
                 "issue_id": "UNC-001", "title": "违约金算法", "detail": "原文没有算法",
                 "affected_row_ids": ["r1"], "status": "OPEN", "resolution": "",
                 "source": {"kind": "ORIGINAL_EXCEL", "origin": {"sheet_name": "原始规则", "row_no": 2}},
-            }]
+            }, *additional]
             job.document_json = payload
             GenerationRevisionCRUD(db).by_revision(self.job_id, 1).document_json = payload
             commit_transaction(db)
             return payload["issues"][0]
+
+    def test_batch_applies_two_answers_together_and_preserves_unanswered_issue(self):
+        source = {"kind": "ORIGINAL_EXCEL", "origin": {"sheet_name": "原始规则", "row_no": 2}}
+        second = {"issue_id": "UNC-002", "title": "主合同附件", "affected_row_ids": ["m1"], "source": source}
+        unanswered = {"issue_id": "UNC-003", "title": "违约金上限", "affected_row_ids": ["r1"], "source": source}
+        first = self.add_issue(second, unanswered)
+        key = uuid.uuid4().hex
+        answers = [AssistantIssueAnswer(issue_id="UNC-001", answer="按合同金额的1%计算"),
+                   AssistantIssueAnswer(issue_id="UNC-002", answer="需要附签字页")]
+        operation_id, _, runner = self.submit(message=None, key=key, issue_answers=answers)
+        operation = self.run_operation(operation_id, runner, [
+            {"kind": "EDIT", "message": "已补充违约金算法和主合同附件要求", "edits": [
+                {"op": "update_cells", "row_id": "r1", "cells": {"body": "违约金按合同金额的1%计算"}},
+                {"op": "update_cells", "row_id": "m1", "cells": {"body": "主合同需附签字页"}},
+                {"op": "upsert_issue", "issue": {**first, "status": "RESOLVED", "resolution": answers[0].answer}},
+                {"op": "upsert_issue", "issue": {**second, "status": "RESOLVED", "resolution": answers[1].answer}},
+            ]},
+            {"problems": []},
+        ])
+        self.assertEqual(operation.status, "SUCCEEDED", operation.failure_message)
+        self.assertEqual(self.llm.call_count, 2)
+        for call in self.llm.call_args_list:
+            self.assertEqual({item["issue_id"]: item["answer"] for item in call.args[0]["issue_answers"]},
+                             {item.issue_id: item.answer for item in answers})
+        revision, payload = self.current()
+        self.assertEqual(revision, 2)
+        self.assertEqual({item["issue_id"]: item["status"] for item in payload["issues"]},
+                         {"UNC-001": "RESOLVED", "UNC-002": "RESOLVED", "UNC-003": "OPEN"})
+        self.assertEqual(self.submit(message=None, key=key, issue_answers=answers[::-1]), (operation_id, True, None))
+
+    def test_batch_rejects_model_closing_unanswered_issue_without_saving(self):
+        first = self.add_issue({"issue_id": "UNC-002", "title": "违约金上限", "affected_row_ids": ["r1"],
+                                "source": {"kind": "ORIGINAL_EXCEL", "origin": {"sheet_name": "原始规则", "row_no": 2}}})
+        original = self.current()
+        answers = [AssistantIssueAnswer(issue_id=first["issue_id"], answer="按合同金额的1%计算")]
+        operation_id, _, runner = self.submit(message=None, issue_answers=answers)
+        wrong = {"kind": "EDIT", "message": "已解决", "edits": [{"op": "upsert_issue", "issue": {
+            **original[1]["issues"][1], "status": "RESOLVED", "resolution": "假定没有上限",
+        }}]}
+        operation = self.run_operation(operation_id, runner, [wrong, wrong])
+        self.assertEqual(operation.status, "FAILED")
+        self.assertEqual(self.current(), original)
+        self.assertEqual(self.llm.call_args.args[0]["correction"]["problems"][0]["code"], "ASSISTANT_INVALID_EDIT")
 
     def test_missing_issue_is_rejected_before_accepting_an_operation(self):
         with self.assertRaises(BusinessError) as failure:
@@ -265,6 +315,46 @@ class AssistantPersistenceTests(unittest.TestCase):
             self.submit(revision=1)
         self.assertEqual(conflict.exception.code, "GENERATION_REVISION_CONFLICT")
         self.assertEqual(self.current()[1]["title"], "新标题")
+
+    def test_delete_rejects_active_operation_without_removing_files(self):
+        self.submit()
+        with SessionLocal() as db:
+            with self.assertRaises(BusinessError) as conflict:
+                GenerationLifecycleService(db).delete_job(self.job_no)
+            self.assertEqual(conflict.exception.code, "GENERATION_OPERATION_ACTIVE")
+            rollback_transaction(db)
+        self.assertTrue(all(path.is_file() for path in self.paths))
+        self.assertEqual(self.current()[0], 1)
+
+    def test_delete_rolls_back_then_removes_files_and_records_on_commit(self):
+        operation_id, _, runner = self.submit()
+        self.run_operation(operation_id, runner, [{"kind": "EXPLAIN", "message": "已读取", "edits": []}])
+        with SessionLocal() as db:
+            export = GenerationExportService(db).create_export(self.job_no, expected_revision=1)
+            self.paths.add(resolve_storage_path(export.relative_path))
+            commit_transaction(db)
+
+        with SessionLocal() as db:
+            try:
+                GenerationLifecycleService(db).delete_job(self.job_no)
+                self.assertFalse(self.job_directory.exists())
+            finally:
+                rollback_transaction(db)
+        self.assertTrue(all(path.is_file() for path in self.paths))
+        self.assertEqual(self.current()[0], 1)
+
+        with SessionLocal() as db:
+            try:
+                GenerationLifecycleService(db).delete_job(self.job_no)
+                commit_transaction(db)
+            except Exception:
+                rollback_transaction(db)
+                raise
+            with self.assertRaises(BusinessError) as missing:
+                GenerationQueryService(db).get_job(self.job_no)
+            self.assertEqual(missing.exception.code, "GENERATION_JOB_NOT_FOUND")
+            self.assertIsNone(db.get(BackgroundOperation, operation_id))
+        self.assertFalse(self.job_directory.exists())
 
     def test_manual_save_historical_export_and_restore_create_new_version(self):
         old_revision, payload = self.current()
@@ -540,10 +630,24 @@ class AssistantPersistenceTests(unittest.TestCase):
         initial["requirements"] = [requirement]
         initial["sheets"][0]["rows"][1]["source"]["requirement_ids"] = ["req1"]
         inventory = {"schema_version": initial["schema_version"], "requirements": [requirement], "unclear_items": []}
+        with patch("app.modules.imports.generation.service.llm.call_json", side_effect=[inventory, initial, BusinessError("LLM_TIMEOUT", "复核超时")]) as model:
+            operation_id, runner = accept()
+            OperationExecution()._run_in_background(operation_id, runner)
+            self.assertEqual(model.call_count, 3)
+        self.assertEqual(self.current(), (0, None))
+        with SessionLocal() as db:
+            service = GenerationQueryService(db)
+            view = service.job_view(service.get_job(self.job_no))
+            self.assertIsNone(view["document"])
+            self.assertFalse(view["can_edit"])
+            with self.assertRaises(BusinessError) as denied:
+                GenerationExportService(db).create_export(self.job_no, expected_revision=0)
+            self.assertEqual(denied.exception.code, "GENERATION_DOCUMENT_MISSING")
         with patch("app.modules.imports.generation.service.llm.call_json", side_effect=[inventory, initial, {"problems": []}]) as model:
             operation_id, runner = accept()
             OperationExecution()._run_in_background(operation_id, runner)
             self.assertEqual(model.call_count, 3)
+            self.assertIn(":requirements:", model.call_args_list[0].kwargs["idempotency_key"])
         with SessionLocal() as db:
             operation = db.get(BackgroundOperation, operation_id)
             self.assertEqual(operation.status, "SUCCEEDED", operation.failure_message)

@@ -52,7 +52,7 @@ onMounted(() => {
         </el-select>
       </el-form-item>
       <el-form-item label="执行状态">
-        <el-select v-model="filters.status" clearable placeholder="全部" style="width: 150px">
+        <el-select v-model="filters.status" clearable placeholder="全部" style="width: 210px">
           <el-option v-for="item in statusOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>

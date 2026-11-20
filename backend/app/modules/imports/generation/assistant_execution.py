@@ -75,12 +75,23 @@ class GenerationAssistantExecution:
         ]
         workbook_ir = GenerationEditingService(self.db).source_workbook(job.job_no)
         workbook, source_rows = GenerationLlmService()._workbook_payload(workbook_ir)
+        previous_issues = {item.issue_id: item for item in previous.issues}
         issue_answer = None
         if issue_id := command.request.get("issue_id"):
-            issue = next((item for item in previous.issues if item.issue_id == issue_id), None)
+            issue = previous_issues.get(issue_id)
             if issue is None:
                 raise BusinessError("GENERATION_ISSUE_NOT_FOUND", "本次补充对应的事项已不存在，原版本保留", status_code=409)
             issue_answer = {**issue.model_dump(mode="json"), "answer": command.request["message"]}
+        issue_answers = []
+        for item in command.request.get("issue_answers", []):
+            issue = previous_issues.get(item["issue_id"])
+            if issue is None or issue.status != "OPEN":
+                raise BusinessError("GENERATION_ISSUE_NOT_FOUND", "部分待补充事项已变化，原版本保留", status_code=409)
+            issue_answers.append({**issue.model_dump(mode="json"), "answer": item["answer"]})
+        answer_ids = {item["issue_id"] for item in issue_answers}
+        targets = answer_ids | ({issue_answer["issue_id"]} if issue_answer else set())
+        unanswered_ids = ({item.issue_id for item in previous.issues if item.status == "OPEN"} - answer_ids
+                          if issue_answers else set())
         payload = {
             "document": previous.model_dump(mode="json"), "workbook": workbook,
             "business_background": job.business_background, "generation_requirements": job.generation_requirements,
@@ -88,6 +99,8 @@ class GenerationAssistantExecution:
             "issue_answer": issue_answer,
             "response_schema": AssistantReply.model_json_schema(),
         }
+        if issue_answers:
+            payload["issue_answers"] = issue_answers
         rollback_transaction(self.db)
         command.phase(PHASE_LLM_REQUEST)
         candidate = None
@@ -101,27 +114,40 @@ class GenerationAssistantExecution:
             )
             try:
                 reply = AssistantReply.model_validate(response)
-                if issue_answer and reply.kind == "EXPLAIN":
+                if targets and reply.kind == "EXPLAIN":
                     raise BusinessError("ASSISTANT_ANSWER_NOT_APPLIED", "用户提交的是业务补充，请实际修改；依据不足时明确提问，不能只解释而不处理", status_code=502)
                 if edit_base != previous and reply.kind != "EDIT":
                     raise BusinessError("ASSISTANT_INVALID_EDIT", "纠正候选稿必须返回修改结果，不能用解释跳过修复", status_code=502)
                 candidate = apply_edits(edit_base, reply)
                 candidate = GenerationDocument.model_validate(candidate.model_dump(mode="json"))
                 problems = collect_document_problems(candidate, source_rows)
-                if issue_answer and not any(item.issue_id == issue_answer["issue_id"] for item in candidate.issues):
-                    problems.append({"kind": "issue.answer_target_removed", "owner": issue_answer["issue_id"]})
-                if issue_answer and reply.kind == "EDIT" and normalize_business_codes(candidate) == baseline:
-                    problems.append({"kind": "issue.answer_not_applied", "owner": issue_answer["issue_id"]})
-                if issue_answer and reply.kind == "EDIT" and any(item.issue_id == issue_answer["issue_id"] and item.status == "RESOLVED"
-                                        and not item.resolution.strip() for item in candidate.issues):
-                    problems.append({"kind": "issue.answer_evidence_missing", "owner": issue_answer["issue_id"]})
+                candidate_issues = {item.issue_id: item for item in candidate.issues}
+                changed = normalize_business_codes(candidate) != baseline
+                for target in sorted(targets):
+                    item = candidate_issues.get(target)
+                    if item is None:
+                        problems.append({"kind": "issue.answer_target_removed", "owner": target})
+                    elif reply.kind == "EDIT":
+                        if not changed:
+                            problems.append({"kind": "issue.answer_not_applied", "owner": target})
+                        if item.status == "RESOLVED" and not item.resolution.strip():
+                            problems.append({"kind": "issue.answer_evidence_missing", "owner": target})
+                for target in sorted(unanswered_ids):
+                    if target not in candidate_issues or candidate_issues[target].status != "OPEN":
+                        problems.append({"kind": "issue.unanswered_must_remain_open", "owner": target})
                 if problems:
                     raise BusinessError("ASSISTANT_INVALID_EDIT", summarize_generation_problems(problems), status_code=502)
-                if normalize_business_codes(candidate) != baseline:
+                if changed or issue_answers:
                     edit_base = candidate
+                    batch_context = None
+                    if issue_answers:
+                        batch_context = {
+                            "issue_answers": issue_answers,
+                            "answer_reply": {"kind": reply.kind, "message": reply.message},
+                        }
                     candidate, review = self._review(
                         command, previous, candidate, workbook=workbook, source_rows=source_rows,
-                        issue_answer=issue_answer, conversation=conversation, attempt=attempt,
+                        issue_answer=issue_answer, conversation=conversation, attempt=attempt, batch_context=batch_context,
                     )
                     if review.problems:
                         # 结构已合法，语义纠正接着候选稿补齐；不能从原版重新应用补丁而丢失前轮修改。
@@ -174,11 +200,14 @@ class GenerationAssistantExecution:
         commit_transaction(self.db)
         return result
 
-    def _review(self, command, previous, candidate, *, workbook, source_rows, issue_answer, conversation, attempt):
+    def _review(self, command, previous, candidate, *, workbook, source_rows, issue_answer, conversation, attempt,
+                batch_context=None):
         for repair_round in range(2):
             payload = {"before": previous.model_dump(mode="json"), "changes": document_changes(previous, candidate),
                        "instruction": command.request["message"], "workbook": workbook, "issue_answer": issue_answer,
                        "conversation": conversation, "response_schema": AssistantReview.model_json_schema()}
+            if batch_context:
+                payload.update(batch_context)
             for correction in range(2):
                 response = call_json(
                     payload, ASSISTANT_REVIEW_PROMPT,

@@ -17,7 +17,7 @@ import {
   updateReportTemplate,
   uploadReportTemplate,
 } from "@/api/reportTemplates";
-import { formatDate } from "@/constants/labels";
+import { formatDate, statusTagType } from "@/constants/labels";
 
 const items = ref<ReportTemplate[]>([]);
 const loading = ref(false);
@@ -252,20 +252,14 @@ function isAnalyzing(row: ReportTemplate): boolean {
 }
 
 function statusLabel(row: ReportTemplate): string {
-  if (isAnalyzing(row)) return "风格更新中";
-  if (row.status === "READY" && row.analysis_error) return "可用，更新失败";
-  if (row.status === "READY" && row.latest_operation?.status === "INTERRUPTED") return "档案可用，更新中断";
-  if (row.status === "PROCESSING" && row.latest_operation
-    && ["FAILED", "INTERRUPTED"].includes(row.latest_operation.status)) return "分析失败";
-  return row.status === "READY" ? "可使用" : row.status === "PROCESSING" ? "处理中" : "分析失败";
+  const status = row.latest_operation?.status;
+  if (status) return { PENDING: "等待分析", RUNNING: row.style_profile ? "风格更新中" : "首次分析中", SUCCEEDED: "分析完成", FAILED: "分析失败", INTERRUPTED: "分析中断" }[status];
+  return row.status === "READY" ? "已保存风格档案" : row.status === "PROCESSING" ? "尚无分析结果" : "分析失败";
 }
 
-function statusType(row: ReportTemplate): "success" | "warning" | "danger" {
-  if (isAnalyzing(row) || row.analysis_error) return "warning";
-  if (row.status === "READY" && row.latest_operation?.status === "INTERRUPTED") return "warning";
-  if (row.status === "PROCESSING" && row.latest_operation
-    && ["FAILED", "INTERRUPTED"].includes(row.latest_operation.status)) return "danger";
-  return row.status === "READY" ? "success" : row.status === "PROCESSING" ? "warning" : "danger";
+function statusType(row: ReportTemplate) {
+  if (row.latest_operation) return statusTagType(row.latest_operation.status);
+  return row.status === "READY" ? "success" : row.status === "PROCESSING" ? "info" : "danger";
 }
 
 function statusHint(row: ReportTemplate): string | null {
@@ -307,12 +301,18 @@ onUnmounted(() => {
       <el-table-column label="文件大小" width="120">
         <template #default="{ row }">{{ formatSize(row.source_size) }}</template>
       </el-table-column>
-      <el-table-column label="状态" width="150">
+      <el-table-column label="模板可用性" width="130">
+        <template #default="{ row }">
+          <el-tag :type="row.status === 'READY' ? 'success' : 'warning'">{{ row.status === 'READY' ? '可使用' : '暂不可用' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="最近分析" min-width="200">
         <template #default="{ row }">
           <el-tooltip v-if="statusHint(row)" :content="statusHint(row) || ''" placement="top">
             <el-tag :type="statusType(row)" effect="light">{{ statusLabel(row) }}</el-tag>
           </el-tooltip>
           <el-tag v-else :type="statusType(row)" effect="light">{{ statusLabel(row) }}</el-tag>
+          <div v-if="row.analysis_error || row.latest_operation?.failure_message" class="status-note">{{ row.analysis_error || row.latest_operation?.failure_message }}</div>
         </template>
       </el-table-column>
       <el-table-column label="更新时间" width="200">
@@ -366,7 +366,7 @@ onUnmounted(() => {
           <el-input v-model="profileText" type="textarea" :rows="20" spellcheck="false" class="json-editor" />
         </el-form-item>
       </el-form>
-      <el-alert v-if="editLocked" type="warning" :closable="false" title="模板正在重新分析，当前档案仍可用；分析完成后可再保存修改。" />
+      <el-alert v-if="editLocked" type="warning" :closable="false" :title="editRow?.status === 'READY' ? '模板正在重新分析，当前档案仍可用；分析完成后可再保存修改。' : '模板正在分析，尚无可用风格档案；分析完成后可再保存修改。'" />
       <el-alert v-if="profileError" type="error" :closable="false" :title="profileError" />
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -377,6 +377,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.status-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .page-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
 .page-heading h2 { margin: 0; font-size: 20px; }
 .page-heading p { margin: 6px 0 0; color: var(--el-text-color-secondary); }

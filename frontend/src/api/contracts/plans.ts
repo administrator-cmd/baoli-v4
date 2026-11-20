@@ -12,7 +12,7 @@ export interface PlanListItem {
   enabled: boolean;
   deleted: boolean;
   base_scenario_version_no: number | null;
-  /** 范围是否已生效：false 表示最近一次保存没算出可用范围，方案显示为「待核对」。 */
+  /** 范围是否已生效：false 表示尚未生成可用配置，具体原因见 sync_error。 */
   effective: boolean;
   sync_error: { code?: string; message?: string } | null;
   enabled_rule_count: number;
@@ -192,6 +192,7 @@ export interface AuditTaskRow {
   current_node: string;
   current_node_name: string;
   status: string;
+  block_reason: string | null;
   deleted: boolean;
   created_at: string;
   updated_at: string;

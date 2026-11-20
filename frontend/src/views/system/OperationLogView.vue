@@ -13,15 +13,14 @@ import {
   objectTypeFilterOptions,
   operationTypeLabel,
   operationTypeFilterOptions,
-  statusFilterOptions,
+  operationStatusLabel,
 } from "@/constants/labels";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 
 /**
  * 操作日志：业务写操作与后台命令并列展示。
- * 业务日志只记录已成功提交的写操作；后台命令的 PENDING/RUNNING 显示为“执行中”，
- * 既不当作成功也不当作失败；两者按编号独立可查。
+ * 业务日志与后台命令按编号独立可查，后台命令保留等待、执行中和结束状态。
  */
 const route = useRoute();
 
@@ -51,7 +50,7 @@ const list = usePagedList<OperationLogRow, { object_type: string; operation_type
 
 const { filters, page, pageSize, total, items, loading, error } = list;
 
-const resultOptions = statusFilterOptions(["SUCCEEDED", "ACCEPTED", "FAILED"]);
+const resultOptions = ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "ACCEPTED"].map((value) => ({ value, label: value === "ACCEPTED" ? "未结束（汇总）" : operationStatusLabel(value) }));
 
 const detail = ref<OperationLogRow | null>(null);
 const errorDetail = ref<OperationLogRow | null>(null);
@@ -81,8 +80,8 @@ onMounted(() => {
           <el-option v-for="item in operationTypeFilterOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
-      <el-form-item label="结果">
-        <el-select v-model="filters.result" clearable placeholder="全部" style="width: 130px">
+      <el-form-item label="操作状态">
+        <el-select v-model="filters.result" clearable placeholder="全部" style="width: 180px">
           <el-option v-for="item in resultOptions" :key="item.value" :value="item.value" :label="item.label" />
         </el-select>
       </el-form-item>
@@ -128,8 +127,8 @@ onMounted(() => {
       <el-table-column label="操作类型" width="160">
         <template #default="{ row }">{{ operationTypeLabel(row.operation_type) }}</template>
       </el-table-column>
-      <el-table-column label="结果" width="148">
-        <template #default="{ row }"><StatusBadge :status="row.result" /></template>
+      <el-table-column label="操作状态" width="148">
+        <template #default="{ row }"><StatusBadge :status="row.result" :label="operationStatusLabel(row.result)" /></template>
       </el-table-column>
       <!-- 耗时按「N 小时 M 分 S 秒」展示，列宽要放得下完整时长，否则会折成两行。 -->
       <el-table-column label="耗时" width="200">
@@ -175,7 +174,7 @@ onMounted(() => {
           {{ objectTypeLabel(detail.object_type) }} · {{ detail.object_name }}（{{ detail.object_no }}）
         </el-descriptions-item>
         <el-descriptions-item label="操作">{{ operationTypeLabel(detail.operation_type) }}</el-descriptions-item>
-        <el-descriptions-item label="结果"><StatusBadge :status="detail.result" /></el-descriptions-item>
+        <el-descriptions-item label="操作状态"><StatusBadge :status="detail.result" :label="operationStatusLabel(detail.result)" /></el-descriptions-item>
         <el-descriptions-item label="时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
         <el-descriptions-item label="耗时">{{ formatDuration(detail.duration_ms) }}</el-descriptions-item>
         <el-descriptions-item v-if="detail.failure_code" label="失败码">{{ detail.failure_code }}</el-descriptions-item>

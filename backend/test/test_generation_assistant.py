@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Border, Font, PatternFill, Side
+from pydantic import ValidationError
 
 from app.common.exceptions import BusinessError
 from app.domain.generation.assistant import (
@@ -18,6 +19,7 @@ from app.domain.generation.document import (
     GenerationColumn, GenerationDocument, GenerationEntry, GenerationSource, collect_document_problems, normalize_business_codes,
     source_record_coverage_problems,
 )
+from app.modules.imports.generation.dto import AssistantMessageRequest
 from app.modules.imports.generation.service.export import GenerationExportService
 from app.modules.imports.generation.service.llm import GenerationLlmService
 
@@ -42,6 +44,22 @@ def document():
 
 def edit(*operations):
     return AssistantReply.model_validate({"kind": "EDIT", "message": "已整理", "edits": list(operations)})
+
+
+class AssistantMessageRequestTests(unittest.TestCase):
+    def test_batch_rejects_blank_empty_duplicate_and_mixed_requests(self):
+        answer = {"issue_id": "UNC-001", "answer": "按合同金额的1%计算"}
+        for submission in (
+            {"issue_answers": []},
+            {"issue_answers": [{**answer, "answer": "  \n  "}]},
+            {"issue_answers": [answer, answer]},
+            {"issue_answers": [answer], "message": "另一项修改"},
+            {"issue_answers": [answer], "issue_id": "UNC-001"},
+        ):
+            with self.subTest(submission=submission), self.assertRaises(ValidationError):
+                AssistantMessageRequest(expected_revision=1, idempotency_key="answer-test", **submission)
+        request = AssistantMessageRequest(expected_revision=1, idempotency_key="answer-test", issue_answers=[answer])
+        self.assertEqual(request.issue_answers[0].model_dump(), answer)
 
 
 class NumberingTests(unittest.TestCase):
@@ -522,6 +540,7 @@ class WorkbookTests(unittest.TestCase):
 
 
 class SourceCoverageTests(unittest.TestCase):
+
     def test_initial_content_review_repairs_unsupported_business_clause(self):
         valid = document().model_dump(mode="json")
         wrong = document().model_dump(mode="json")
@@ -530,13 +549,15 @@ class SourceCoverageTests(unittest.TestCase):
         service = GenerationLlmService()
         with patch.object(service, "_workbook_payload", return_value=([], {("原始规则", 2)})), patch(
             "app.modules.imports.generation.service.llm.call_json",
-            side_effect=[inventory, wrong, {"problems": ["原文没有30%算法，保留真实要求与未明确口径"]}, valid, {"problems": []}],
+            side_effect=[inventory, wrong, {"problems": ["原文没有30%算法，保留真实要求与未明确口径"]},
+                         {"kind": "EDIT", "message": "订正违约金口径", "edits": [{"op": "update_cells", "row_id": "r1",
+                          "cells": {"body": "应计算违约金，原文未给算法"}}]}, {"problems": []}],
         ) as model:
             saved = service.build_document(SimpleNamespace(sheets=[]), business_background="", generation_requirements="",
                                            operation_no="initial-review", job_no="test")
         self.assertEqual(saved["sheets"][0]["rows"][1]["cells"]["body"], "应计算违约金，原文未给算法")
         self.assertEqual(model.call_count, 5)
-        self.assertEqual(model.call_args_list[3].args[0]["correction"]["problems"][0]["kind"], "content.review_failed")
+        self.assertEqual(model.call_args_list[3].args[0]["review_problems"][0]["kind"], "content.review_failed")
 
     def test_initial_content_review_failure_never_returns_a_document(self):
         payload = document().model_dump(mode="json")
@@ -544,12 +565,13 @@ class SourceCoverageTests(unittest.TestCase):
         service = GenerationLlmService()
         with patch.object(service, "_workbook_payload", return_value=([], {("原始规则", 2)})), patch(
             "app.modules.imports.generation.service.llm.call_json",
-            side_effect=[inventory, payload, {"problems": ["独立条款遗漏"]}, payload, {"problems": ["独立条款仍遗漏"]}],
+            side_effect=[inventory, payload,
+                         {"problems": ["独立条款遗漏"]}, {"kind": "EXPLAIN", "message": "无法可靠补修"}],
         ), self.assertRaises(BusinessError) as failure:
             service.build_document(SimpleNamespace(sheets=[]), business_background="", generation_requirements="",
                                    operation_no="initial-review-failure", job_no="test")
         self.assertEqual(failure.exception.code, "LLM_CONTENT_REVIEW_FAILED")
-        self.assertIn("独立条款仍遗漏", str(failure.exception.details))
+        self.assertIn("独立条款遗漏", str(failure.exception.details))
 
     def test_initial_workflow_rejects_omitted_numbered_reference_after_one_correction(self):
         ir = SimpleNamespace(sheets=[SimpleNamespace(name="字典", rows=[

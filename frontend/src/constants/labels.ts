@@ -8,7 +8,7 @@
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
 
 const statusLabels: Record<string, string> = {
-  PARSED: "已读取",
+  PARSED: "文件已读取",
   OPEN: "待处理",
   CONNECTED: "已连接",
   DEGRADED: "服务降级",
@@ -19,7 +19,7 @@ const statusLabels: Record<string, string> = {
   HIDDEN: "隐藏工作表",
   EXCLUDED: "已排除",
   BOUND: "已选择",
-  PROPOSED: "已转换",
+  PROPOSED: "解析已完成",
   CONFIRMED: "已确认",
   // 场景版本发布状态；导入作业写入草稿后为 APPLIED。
   PUBLISHED: "已发布",
@@ -43,8 +43,8 @@ const statusLabels: Record<string, string> = {
   INVALIDATED: "已失效",
   WAITING_UPLOAD: "待上传",
   UPLOADED: "已上传",
-  PREPARED: "已处理",
-  PROCESSED: "已处理",
+  PREPARED: "文件处理完成",
+  PROCESSED: "文件处理完成",
   RESOLVED: "已解决",
   TYPE_REVIEW: "材料类型待复核",
   TYPE_REJECTED: "材料类型不符",
@@ -102,6 +102,7 @@ const statusTones: Record<string, StatusTone> = {
   BOUND: "info",
   PROPOSED: "info",
   CONFIRMED: "success",
+  APPLIED: "success",
   PUBLISHED: "success",
   CONTRACT_INVALID: "danger",
   SOURCE_REF_INVALID: "danger",
@@ -236,7 +237,7 @@ const operationTypeLabels: Record<string, string> = {
   IMPORT_CONVERT: "规则解析与转换",
   SOURCE_ACTIVATION_PREVIEW: "来源增量解析",
   NODE_EXECUTE: "规则执行",
-  NODE_RESUME: "中断恢复",
+  NODE_RESUME: "继续执行审核",
   FIELD_REVIEW_CONFIRM: "确认字段核对并继续",
   DOCUMENT_CLASSIFY: "文件自动校验",
   DOCUMENT_ARTIFACT_RETRY: "材料单项重试",
@@ -393,6 +394,10 @@ export function statusFilterOptions(
   return values.map((value) => ({ value, label: overrides[value] ?? statusLabel(value) }));
 }
 
+export function operationStatusLabel(status: string): string {
+  return ({ PENDING: "等待执行", RUNNING: "执行中", SUCCEEDED: "操作完成", FAILED: "操作失败", INTERRUPTED: "操作中断", ACCEPTED: "已受理" } as Record<string, string>)[status] ?? statusLabel(status);
+}
+
 const valueTypeLabels: Record<string, string> = {
   STRING: "文本",
   DECIMAL: "数值",
@@ -489,29 +494,6 @@ export const valueTypeOptions = [
   { value: "CLAUSE", label: "条款" },
 ];
 
-export const extractionStrategyOptions = [
-  { value: "RAW_TEXT", label: "保留原文" },
-  { value: "DETERMINISTIC", label: "确定性转换" },
-  { value: "STRUCTURED", label: "结构化抽取" },
-] as const;
-
-const extractionStrategyLabels: Record<string, string> = Object.fromEntries(
-  extractionStrategyOptions.map((item) => [item.value, item.label]),
-);
-
-export function extractionStrategyLabel(value: string | null | undefined): string {
-  return value ? extractionStrategyLabels[value] ?? value : "未配置";
-}
-
-export function defaultExtractionStrategy(valueType: string): "RAW_TEXT" | "DETERMINISTIC" {
-  return ["STRING", "CLAUSE", "DECIMAL_CN"].includes(valueType) ? "RAW_TEXT" : "DETERMINISTIC";
-}
-
-export function extractionStrategySupports(strategy: string): boolean {
-  // 普通策略只决定模型返回原文的方式，服务端再按 value_type 规范化；
-  // 不把业务类型和策略硬编码成互斥组合。STRUCTURED 仅要求 Schema 完整。
-  return strategy === "RAW_TEXT" || strategy === "DETERMINISTIC" || strategy === "STRUCTURED";
-}
 
 /**
  * 字段的「产物来源」：当前只有印章识别一种。

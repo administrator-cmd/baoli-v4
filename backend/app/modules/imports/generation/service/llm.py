@@ -9,12 +9,13 @@ from pydantic import ValidationError
 
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
-from app.domain.generation.assistant import GenerationRepairReply, apply_edits
+from app.domain.generation.assistant import GenerationRepairReply, apply_edits, merge_initial_issues
 from app.domain.generation.document import (
     GENERATION_DOCUMENT_SCHEMA_VERSION,
     GENERATION_PROMPT_VERSION,
     GenerationContentReview,
     GenerationDocument,
+    GenerationIssue,
     GenerationRequirementInventory,
     collect_document_problems,
     collect_requirement_inventory_problems,
@@ -258,7 +259,7 @@ class GenerationLlmService:
 
     def _repair_document(self, payload, document, check, *, operation_no: str, reasoning_effort):
         """局部补修合法候选稿；只有内容复核通过才交付文档。"""
-        problems = self._review_document(payload, document, operation_no=operation_no, attempt=0, reasoning_effort=reasoning_effort)
+        document, problems = self._review_document(payload, document, check, operation_no=operation_no, attempt=0, reasoning_effort=reasoning_effort)
         history, diagnostics = [], []
         for attempt in range(3):
             if not problems:
@@ -271,9 +272,11 @@ class GenerationLlmService:
                                  idempotency_key=f"{operation_no}:document-repair:{attempt}", reasoning_effort=reasoning_effort)
             try:
                 reply = GenerationRepairReply.model_validate(response)
-                if reply.kind != "EDIT" and (reply.requirement_repairs or reply.row_source_repairs):
+                if reply.kind != "EDIT" and (reply.requirement_repairs or reply.row_source_repairs or reply.issue_merges):
                     raise BusinessError("ASSISTANT_INVALID_EDIT", "解释或提问不能同时补修目录或来源", status_code=502)
                 candidate = apply_edits(document, reply)
+                if reply.issue_merges:
+                    merge_initial_issues(candidate, reply.issue_merges, {item["unclear_id"] for item in payload["previous_json"]["unclear_items"]})
                 requirements = {item.requirement_id: item for item in candidate.requirements}
                 rows = {row.row_id: row for sheet in candidate.sheets for row in sheet.rows}
                 for repair in reply.requirement_repairs:
@@ -308,14 +311,14 @@ class GenerationLlmService:
                 break
             document = candidate
             diagnostics = []
-            problems = self._review_document(payload, document, operation_no=operation_no,
-                                             attempt=attempt + 1, reasoning_effort=reasoning_effort)
+            document, problems = self._review_document(payload, document, check, operation_no=operation_no,
+                                                       attempt=attempt + 1, reasoning_effort=reasoning_effort)
         if problems:
             logger.error("编制内容复核未通过 operation_no=%s problems=%s diagnostics=%s", operation_no, problems, diagnostics)
             self._raise_contract_error("document", problems)
         return document
 
-    def _review_document(self, payload, document, *, operation_no: str, attempt: int, reasoning_effort):
+    def _review_document(self, payload, document, check, *, operation_no: str, attempt: int, reasoning_effort):
         request = {**payload, "document": document.model_dump(mode="json"),
                    "response_schema": GenerationContentReview.model_json_schema()}
         for correction in range(2):
@@ -326,13 +329,23 @@ class GenerationLlmService:
             )
             try:
                 review = GenerationContentReview.model_validate(response)
-                break
+                # 不允许复核意见覆盖原事项或替代正文修复；新增问题和普通草稿走同一来源校验。
+                candidate = document.model_copy(deep=True)
+                problems = []
+                for question in review.new_questions:
+                    if not question.source.origin and not question.source.requirement_ids:
+                        problems.append({"owner": question.issue_id, "kind": "issue.question_without_basis"})
+                    candidate.issues.append(GenerationIssue.model_validate(question.model_dump()))
+                if review.new_questions:
+                    problems.extend(check(candidate))
+                if not problems:
+                    return candidate, [{"owner": "编制内容", "kind": "content.review_failed", "reference": text}
+                                       for text in review.problems]
             except ValidationError as exc:
                 problems = [{"owner": ".".join(map(str, error["loc"])), "kind": error["type"]}
                             for error in exc.errors(include_input=False, include_context=False, include_url=False)]
-                if correction:
-                    raise BusinessError("LLM_REVIEW_INVALID", "AI 内容复核响应纠正后仍不符合结构契约，未保存编制文档",
-                                        status_code=502, details={"problems": problems}) from exc
-                request["previous_response"] = response
-                request["correction"] = {"instruction": "只纠正复核响应，按 response_schema 返回结论，不重写编制文档。", "problems": problems}
-        return [{"owner": "编制内容", "kind": "content.review_failed", "reference": problem} for problem in review.problems]
+            if correction:
+                raise BusinessError("LLM_REVIEW_INVALID", "AI 未能生成有效的复核结果，请重试编制。",
+                                    status_code=502, details={"problems": problems})
+            request["previous_response"] = response
+            request["correction"] = {"instruction": "只纠正复核结果与事项来源；不重复已有事项，不重写文档。", "problems": problems}

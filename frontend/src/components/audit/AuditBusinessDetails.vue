@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { JsonValue } from "@/api/contracts";
+import { knownStatusLabel } from "@/constants/statusVocabulary";
 
 const props = defineProps<{
   result: Record<string, JsonValue> | null;
@@ -12,6 +13,8 @@ const files = computed(() => [...new Set(props.sourceFiles.filter(Boolean))]);
 const requirements = computed(() => [...new Set(props.materialNames.filter((name) => name && !files.value.includes(name)))]);
 /** 仅标注明确匹配的配置名称，保留原说明，不猜测每行与文件的对应关系。 */
 function explanationParts(text: string): Array<{ text: string; requirement: boolean }> {
+  text = text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g, (code) =>
+    knownStatusLabel("field", code) ?? knownStatusLabel("rule", code) ?? (code === "NOT_PRESENT" ? "未抽取到" : code));
   if (!requirements.value.length) return [{ text, requirement: false }];
   // 先匹配完整文件名，避免材料要求名称恰好是文件名的一部分时把文件名拆开标注。
   const names = [...files.value, ...requirements.value].sort((left, right) => right.length - left.length);
@@ -23,6 +26,7 @@ function displayValue(value: JsonValue): string {
   if (value === null) return "未取得值";
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "object") return JSON.stringify(value, null, 2);
+  if (typeof value === "string") return knownStatusLabel("rule", value) ?? value;
   return String(value);
 }
 </script>

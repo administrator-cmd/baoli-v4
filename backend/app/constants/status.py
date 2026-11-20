@@ -116,15 +116,15 @@ STATUS_CATEGORIES: dict[str, str] = {
 }
 
 RULE_STATUS_LABELS: dict[str, str] = {
-    # COMPUTED 只表示产出了中间值，本身没有合格/异常结论；文案必须把这一点写出来。
-    "COMPUTED": "已产出（无结论）",
+    # COMPUTED 表示产出了中间数据；合格/异常结论由下游检查给出。
+    "COMPUTED": "已产出数据",
     "PASSED": "通过",
     "ABNORMAL": "异常",
     "EVIDENCE_INSUFFICIENT": "证据不足",
     "NOT_APPLICABLE": "不适用",
     "NOT_EXECUTED": "未执行",
-    "PENDING_REVIEW": "未确认",
-    "REVIEWED": "已复核",
+    "PENDING_REVIEW": "业务结论未确认",
+    "REVIEWED": "已人工复核",
     "SKIPPED": "已跳过",
     "RUNNING": "执行中",
 }
@@ -134,7 +134,7 @@ RISK_STATUS_LABELS: dict[str, str] = {
     **RULE_STATUS_LABELS,
     "PASSED": "未命中风险",
     "ABNORMAL": "已确认风险",
-    "PENDING_REVIEW": "待确认",
+    "PENDING_REVIEW": "业务结论未确认",
     "NOT_APPLICABLE": "本次不适用",
 }
 
@@ -145,7 +145,7 @@ FIELD_STATUS_LABELS: dict[str, str] = {
     "EVIDENCE_INSUFFICIENT": "证据不足",
     # 历史结果可能保存旧码，与 EVIDENCE_INSUFFICIENT 同义。
     "EVIDENCE_UNCLEAR": "证据不足",
-    "REVIEWED": "已复核",
+    "REVIEWED": "已人工核对",
     "EXTRACTION_FAILED": "抽取失败",
     "NORMALIZATION_FAILED": "标准化失败",
     "PENDING": "待处理",
@@ -154,7 +154,7 @@ FIELD_STATUS_LABELS: dict[str, str] = {
 }
 
 STATUS_CATEGORY_LABELS: dict[str, str] = {
-    STATUS_CATEGORY_COMPUTED: "已产出（无结论）",
+    STATUS_CATEGORY_COMPUTED: "已产出数据",
     STATUS_CATEGORY_DECIDED: "已判定",
     STATUS_CATEGORY_UNDECIDED: "尚未判定",
     STATUS_CATEGORY_NOT_APPLICABLE: "不适用",

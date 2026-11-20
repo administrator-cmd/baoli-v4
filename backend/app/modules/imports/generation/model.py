@@ -53,6 +53,8 @@ class RulebookGenerationJob(Base, TimestampMixin):
     document_schema_version: Mapped[str] = mapped_column(String(40), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(40), nullable=False)
     document_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
+    # 保留 0011 已部署的可空字段；v12 编制不读取或续写旧断点。
+    checkpoint_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), deferred=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 

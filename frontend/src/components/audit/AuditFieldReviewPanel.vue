@@ -12,7 +12,7 @@ import type {
 import AuditFieldDetailDrawer from "@/components/audit/AuditFieldDetailDrawer.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { formatBusinessValue } from "@/constants/labels";
-import { fieldSourceFiles, formatFieldValue, hasEffectiveFieldValue } from "@/utils/fieldPresentation";
+import { extractionOutcome, extractionOutcomeCode, fieldSourceFiles, formatFieldValue } from "@/utils/fieldPresentation";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /**
@@ -243,11 +243,14 @@ const noteRequired = computed(() => dirty.value && !note.value.trim());
 
 const filters = [
   { value: "ALL", label: "全部" },
-  { value: "EXTRACTED", label: "有有效值" },
-  { value: "NO_VALUE", label: "无有效值" },
-  { value: "MISSING", label: "未取到值" },
-  { value: "FAILED", label: "抽取失败" },
-  { value: "EDITED", label: "已修改" },
+  { value: "EXTRACTED", label: "已抽取" },
+  { value: "NO_VALUE", label: "未抽取到" },
+  { value: "MISSING", label: "核对缺项（汇总）" },
+  { value: "FAILED", label: "抽取或标准化失败" },
+  { value: "EVIDENCE_INSUFFICIENT", label: "证据不足" },
+  { value: "NOT_EXECUTED", label: "未执行" },
+  { value: "PENDING", label: "待处理" },
+  { value: "EDITED", label: "人工修改（含未保存）" },
 ];
 
 watch(() => props.filter, (value) => {
@@ -273,13 +276,18 @@ const MISSING_STATUSES = new Set([
 function matchesFilterValue(field: AuditField, value: string): boolean {
   switch (value) {
     case "EXTRACTED":
-      return hasEffectiveFieldValue(field);
+      return extractionOutcomeCode(field) === "EXTRACTED";
     case "NO_VALUE":
-      return field.status !== "NOT_APPLICABLE" && !hasEffectiveFieldValue(field);
+      return extractionOutcomeCode(field) === "NO_VALUE";
     case "MISSING":
       return stillMissing(field) || MISSING_STATUSES.has(field.status);
     case "FAILED":
-      return ["EXTRACTION_FAILED", "NORMALIZATION_FAILED", "EVIDENCE_INSUFFICIENT", "EVIDENCE_UNCLEAR"].includes(field.status);
+      return ["EXTRACTION_FAILED", "NORMALIZATION_FAILED"].includes(field.status);
+    case "EVIDENCE_INSUFFICIENT":
+      return ["EVIDENCE_INSUFFICIENT", "EVIDENCE_UNCLEAR"].includes(field.status);
+    case "NOT_EXECUTED":
+    case "PENDING":
+      return field.status === value;
     case "EDITED":
       return Boolean(field.corrected) || Boolean(draftOf(field));
     default:
@@ -392,9 +400,10 @@ function countOf(value: string): number {
             </el-button>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="150">
+        <el-table-column label="抽取结果" width="150">
           <template #default="{ row }">
-            <StatusBadge domain="field" :status="row.status" />
+            <StatusBadge v-if="extractionOutcome(row)" :status="row.status" :label="extractionOutcome(row)" :tone="extractionOutcomeCode(row) === 'EXTRACTED' ? 'success' : 'warning'" />
+            <span v-else class="text-hint">—</span>
             <el-tag v-if="row.corrected" class="block-gap-sm" type="success" size="small" effect="plain" disable-transitions>
               人工修改
             </el-tag>
@@ -433,7 +442,7 @@ function countOf(value: string): number {
           <span v-else class="text-hint">未修改的字段沿用本次抽取值。</span>
           <el-button :disabled="!canSubmit || !dirty || noteRequired" :loading="saving" @click="save">保存修改</el-button>
           <el-button type="primary" :disabled="!canSubmit || noteRequired" :loading="confirming" @click="confirm">
-            确认并继续审核
+            {{ remainingMissing.length ? "带缺项继续审核" : "确认并继续审核" }}
           </el-button>
         </div>
       </div>
@@ -484,7 +493,7 @@ function countOf(value: string): number {
 }
 
 .field-status-filter {
-  width: 180px;
+  width: 280px;
 }
 
 .field-count {

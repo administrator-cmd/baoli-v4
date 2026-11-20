@@ -11,7 +11,10 @@
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from app.common.exceptions import BusinessError
+from app.constants.execution import ORIGIN_HUMAN_CORRECTION
 from app.constants.status import LOOP_BLOCKED
 from app.domain.audit.audit_state import EvaluationPlanEntry
 from app.domain.configuration.execution_mode import MODE_EXTRACT, MODE_MATERIAL_CHECK, SOURCE_ONLY_MODES, execution_mode_label
@@ -19,6 +22,8 @@ from app.domain.audit.field_review import reviewed_extraction_keys
 from app.domain.materials.material_precheck import material_blocks, precheck_rule_keys
 from app.domain.configuration.rule_library import active, dependency_indexes, execution_order, rule_dependencies
 from app.modules.audit.rule.model import RuleResult
+from app.modules.audit.execution.model import NodeExecution
+from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.shared import _task_manifest
 from app.modules.audit.task.model import AuditTask
 
@@ -89,6 +94,22 @@ def evaluation_plan(task: AuditTask, node_code: str, *, execution: Any = None) -
         elif entry["rule_key"] in early:
             entry["rule"] = {**entry["rule"], "material_precheck": True}
     return plan
+
+
+def failed_extraction_keys(db: Session, task: AuditTask, execution: NodeExecution,
+                           plan: list[EvaluationPlanEntry]) -> set[str]:
+    """抽取技术失败且仍需机器补跑的规则；人工已处理的字段不重新抽取。"""
+    result = execution.result_json or {}
+    failed = {item["rule_key"] for item in result.get("rule_outcomes", [])
+              if item.get("loop_status") == LOOP_BLOCKED or item.get("status") == "NOT_EXECUTED"}
+    failed.update(result.get("missing_rule_keys", []))
+    outputs = {entry["rule_key"]: {field["field_key"] for field in entry["rule"]["output_definitions"]}
+               for entry in plan if entry["rule_key"] in failed and entry["rule"].get("execution_mode") == MODE_EXTRACT
+               and not entry["rule"].get("material_quality_block")}
+    if not outputs:
+        return set()
+    manual = AuditFieldCRUD(db).human_keys_for(task.id, set().union(*outputs.values()), ORIGIN_HUMAN_CORRECTION)
+    return {key for key, fields in outputs.items() if not fields or fields - manual}
 
 
 def rule_finished(result: RuleResult) -> bool:

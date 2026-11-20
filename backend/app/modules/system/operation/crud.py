@@ -2,16 +2,21 @@
 
 from datetime import datetime
 
-from sqlalchemy import and_, case, func, literal, or_, select, text, union_all
+from sqlalchemy import and_, func, literal, or_, select, text, union_all
 
 from app.core.base_crud import CRUDBase
 from app.modules.audit.task.model import AuditTask
 from app.modules.imports.job.model import ImportJob
-from app.modules.system.operation.model import BackgroundOperation, OperationLog
+from app.modules.system.operation.model import BackgroundOperation, OperationLlmResponse, OperationLog
 
 
 class SystemOperationCRUD(CRUDBase):
     model = OperationLog
+
+    def response_files(self, operation_id: int):
+        return self.db.scalars(select(OperationLlmResponse).where(
+            OperationLlmResponse.operation_id == operation_id,
+        ).order_by(OperationLlmResponse.id)).all()
 
     def lock_by_id(self, operation_id: int) -> BackgroundOperation | None:
         return self.db.scalar(
@@ -131,12 +136,6 @@ class SystemOperationCRUD(CRUDBase):
             select(ImportJob.source_filename).where(ImportJob.job_no == BackgroundOperation.object_no).limit(1).scalar_subquery(),
             BackgroundOperation.object_no,
         )
-        # 命令状态映射成统一结果口径；PENDING/RUNNING 是“执行中”，不是成功。
-        result = case(
-            (BackgroundOperation.status == "SUCCEEDED", literal("SUCCEEDED")),
-            (BackgroundOperation.status.in_(("FAILED", "INTERRUPTED")), literal("FAILED")),
-            else_=literal("ACCEPTED"),
-        )
         return select(
             BackgroundOperation.operation_no.label("entry_no"),
             literal("COMMAND").label("source"),
@@ -144,7 +143,7 @@ class SystemOperationCRUD(CRUDBase):
             BackgroundOperation.object_no.label("object_no"),
             object_name.label("object_name"),
             BackgroundOperation.operation_type.label("operation_type"),
-            result.label("result"),
+            BackgroundOperation.status.label("result"),
             # 与业务日志同一列位置：命令的耗时按开始/结束时间计算，缺时间时为 NULL。
             func.timestampdiff(
                 text("MICROSECOND"),
@@ -211,7 +210,7 @@ class SystemOperationCRUD(CRUDBase):
         if operation_type:
             conditions.append(combined.c.operation_type == operation_type)
         if result:
-            conditions.append(combined.c.result == result)
+            conditions.append(combined.c.result.in_(("PENDING", "RUNNING", "ACCEPTED")) if result == "ACCEPTED" else combined.c.result == result)
         if keyword:
             like = f"%{keyword.strip()}%"
             conditions.append(or_(

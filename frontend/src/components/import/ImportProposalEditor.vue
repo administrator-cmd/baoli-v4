@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref, useId, watch } from "vue";
 import { ElMessage } from "element-plus";
 import type {
   ConfigOrigin, ImportJob, ImportProposalChanges, ImportProposalGroup, ImportProposalStatus,
@@ -22,6 +22,8 @@ const activeGroup = ref<ImportProposalGroup>("rules");
 const savingRef = ref<string | null>(null);
 const editing = ref<ProposalRow | null>(null);
 const editRevision = ref(0);
+const findingsExpanded = ref(false);
+const findingsPanelId = useId();
 const form = reactive({ name: "", text: "", formula: "", required: false, role: "CHECK" as "CHECK" | "RISK", mode: "UNKNOWN", status: "" });
 
 interface ProposalRow {
@@ -157,16 +159,22 @@ const fieldRows = computed(() => rowsOf("fields"));
 const ruleRows = computed(() => rowsOf("rules"));
 const calculationRows = computed(() => rowsOf("calculations"));
 const sectionRows = computed(() => rowsOf("report_sections"));
-/** 第二轮逐项核对后仍未建立绑定的输入；不改变启用状态，只暴露配置不完整。 */
 const bindingGaps = computed(() => props.job.proposals?.binding_gaps ?? []);
+const editingBindingGaps = computed(() => {
+  const row = editing.value;
+  return row ? bindingGaps.value.filter((gap) => gap.owner_group === row.group && gap.owner_ref === row.ref) : [];
+});
 const relatedSupportingContent = computed(() => {
   const row = editing.value;
   if (!row) return [];
   return (props.job.proposals?.supporting_content ?? []).filter((item) =>
     item.targets.some((target) => target.group === row.group && target.candidate_ref === row.ref));
 });
-const incompleteRows = computed(() => [...materialRows.value, ...fieldRows.value, ...ruleRows.value,
-  ...calculationRows.value, ...sectionRows.value].filter((row) => row.interpretation?.missing_details.length));
+const rowsWithFindings = computed(() => {
+  const gapOwners = new Set(bindingGaps.value.map((gap) => `${gap.owner_group}:${gap.owner_ref}`));
+  const rows = [...materialRows.value, ...fieldRows.value, ...ruleRows.value, ...calculationRows.value, ...sectionRows.value];
+  return rows.filter((row) => row.interpretation?.missing_details.length || gapOwners.has(`${row.group}:${row.ref}`));
+});
 
 /** 材料筛选按名称匹配：表格里的「适用材料 / 所属材料」显示的就是名称。 */
 const materialOptions = computed(() => (props.job.proposals?.materials ?? [])
@@ -179,14 +187,14 @@ function rowSearchText(row: ProposalRow): string {
 }
 
 function statusLabel(status: string | null): string {
-  if (status === "DISABLED") return "暂停";
+  if (status === "DISABLED") return "停用";
   if (status === "PENDING") return "待确认";
   if (!status || status === "CLEAR") return "启用";
   return status;
 }
 
 function statusTone(status: string | null): "success" | "warning" | "info" {
-  return status === "DISABLED" ? "info" : status === "PENDING" ? "warning" : "success";
+  return status === "PENDING" ? "warning" : !status || status === "CLEAR" ? "success" : "info";
 }
 
 /** 工具栏右侧的启用统计，与方案配置同一写法。 */
@@ -244,7 +252,11 @@ async function saveEditor(): Promise<void> {
   if (await persist(row, changes, editRevision.value)) editing.value = null;
 }
 
-watch(() => props.job.job_no, () => { editing.value = null; clear(); });
+watch(() => props.job.job_no, () => {
+  editing.value = null;
+  findingsExpanded.value = false;
+  clear();
+});
 </script>
 
 <template>
@@ -252,38 +264,32 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
     <div class="proposal-heading">
       <div>
         <h3>核对解析配置</h3>
-        <p>{{ readonly ? '已写入的解析结果，可到场景配置继续调整。' : '核对业务要求，调整后写入场景草稿。' }}</p>
+        <p>{{ job.status === 'APPLIED' ? '已写入的解析结果，可到场景配置继续调整。' : readonly ? '正在处理，完成后可继续核对。' : '核对业务要求，调整后写入场景草稿。' }}</p>
       </div>
-      <el-tag size="small" :type="readonly ? 'info' : 'success'" effect="plain">{{ readonly ? '已写入' : '可编辑' }}</el-tag>
+      <el-tag size="small" :type="readonly ? 'info' : 'success'" effect="plain">{{ job.status === 'APPLIED' ? '已写入场景草稿' : readonly ? '处理中，暂不可编辑' : '可编辑' }}</el-tag>
     </div>
 
     <FailureNotice v-if="!editing" :error="failure" @dismiss="failure = null" />
-    <el-alert
-      v-if="bindingGaps.length"
-      type="warning"
-      show-icon
-      :closable="false"
-      :title="`有 ${bindingGaps.length} 项输入尚未建立绑定`"
-      class="block-gap-sm"
-    >
-      这些缺项不会把规则自动改为停用；执行时缺少真实依据会按证据不足记录，不会用 0 或相近科目替代。
-      <div v-for="(gap, index) in bindingGaps" :key="index" class="binding-gap">
-        <strong>{{ gap.owner_name || gap.owner_ref }}</strong>
-        <template v-if="gap.parameter_code"> · 参数 {{ gap.parameter_code }}</template>
-        ：缺少「{{ gap.missing_input }}」——{{ gap.reason }}
-        <div v-if="gap.original_requirement" class="text-hint">原文要求：{{ gap.original_requirement }}</div>
+    <div v-if="rowsWithFindings.length" class="proposal-findings">
+      <el-button
+        type="warning"
+        plain
+        :aria-expanded="findingsExpanded"
+        :aria-controls="findingsPanelId"
+        @click="findingsExpanded = !findingsExpanded"
+      >
+        {{ findingsExpanded ? '收起解析缺项' : '查看解析缺项' }}（涉及 {{ rowsWithFindings.length }} 条配置）
+      </el-button>
+      <div v-show="findingsExpanded" :id="findingsPanelId" class="proposal-findings-list">
+        <p>点击条目查看缺项和 Excel 原文。请在发布前核对相关业务口径和取数来源。</p>
+        <ul>
+          <li v-for="row in rowsWithFindings" :key="`${row.group}:${row.ref}`">
+            <el-button link type="primary" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button>
+            <span> · {{ groupLabels[row.group] }}<template v-if="row.ruleCode"> · {{ row.ruleCode }}</template></span>
+          </li>
+        </ul>
       </div>
-    </el-alert>
-    <el-alert v-if="incompleteRows.length" class="block-gap-sm" type="warning" :closable="false" show-icon title="部分业务要求在解析时尚未给出完整口径，已保留对应配置">
-      <details class="interpretation-gaps">
-        <summary>查看 {{ incompleteRows.length }} 项解析时未明确的口径</summary>
-        <div v-for="row in incompleteRows" :key="row.ref" class="interpretation-gap">
-          <el-button link type="primary" :disabled="pending" @click="openEditor(row)">{{ row.name }}</el-button>
-          <span>{{ row.interpretation?.missing_details.join('；') }}</span>
-          <span v-if="row.interpretation?.edited_after_interpretation" class="text-hint">此后已有人工修改，以当前配置为准。</span>
-        </div>
-      </details>
-    </el-alert>
+    </div>
     <el-tabs v-model="activeGroup">
       <el-tab-pane :label="`材料（${materialRows.length}）`" name="materials" lazy>
         <PlanConfigList
@@ -300,7 +306,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
             <template #default="{ row }">{{ row.text || "未填写" }}</template>
           </el-table-column>
           <el-table-column label="必传" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-          <el-table-column label="状态" width="140">
+          <el-table-column label="配置状态" width="160">
             <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
           </el-table-column>
           <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
@@ -327,7 +333,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           <el-table-column prop="context" label="所属材料" width="168" show-overflow-tooltip />
           <el-table-column label="数据类型" width="88"><template #default="{ row }">{{ row.fieldType || "未声明" }}</template></el-table-column>
           <el-table-column label="必抽" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-          <el-table-column label="状态" width="140">
+          <el-table-column label="配置状态" width="160">
             <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
           </el-table-column>
           <el-table-column label="提取要求" min-width="300" show-overflow-tooltip>
@@ -367,7 +373,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           <el-table-column label="审核要求" min-width="340" show-overflow-tooltip>
             <template #default="{ row }">{{ row.text || "未填写" }}</template>
           </el-table-column>
-          <el-table-column label="状态" width="140">
+          <el-table-column label="配置状态" width="160">
             <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
           </el-table-column>
           <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
@@ -400,7 +406,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           <el-table-column label="业务要求" min-width="300" show-overflow-tooltip>
             <template #default="{ row }">{{ row.text || "未填写" }}</template>
           </el-table-column>
-          <el-table-column label="状态" width="140">
+          <el-table-column label="配置状态" width="160">
             <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
           </el-table-column>
           <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
@@ -430,7 +436,7 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           <el-table-column label="生成要求" min-width="300" show-overflow-tooltip>
             <template #default="{ row }">{{ row.text || "未填写" }}</template>
           </el-table-column>
-          <el-table-column label="状态" width="140">
+          <el-table-column label="配置状态" width="160">
             <template #default="{ row }"><el-tag size="small" :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
           </el-table-column>
           <el-table-column label="操作" width="84" class-name="table-actions" fixed="right">
@@ -450,13 +456,24 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
           <p v-if="editing.interpretation.missing_details.length">解析时未明确：{{ editing.interpretation.missing_details.join('；') }}</p>
           <p v-if="editing.interpretation.edited_after_interpretation" class="text-hint">此后已有人工修改，请以当前配置内容为准。</p>
         </div>
+        <div v-if="editingBindingGaps.length" class="proposal-interpretation">
+          <strong>解析时缺少的输入</strong>
+          <p>如果执行时仍缺少取数依据，相关规则会记录为证据不足。</p>
+          <ul>
+            <li v-for="(gap, index) in editingBindingGaps" :key="index">
+              <strong>{{ gap.missing_input }}</strong>
+              <p>{{ gap.reason }}</p>
+              <p v-if="gap.original_requirement" class="text-hint">原文要求：{{ gap.original_requirement }}</p>
+            </li>
+          </ul>
+        </div>
         <el-form label-position="top" :disabled="readonly || pending" class="proposal-edit-form" @submit.prevent="saveEditor">
           <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
           <div class="proposal-edit-meta">
-            <el-form-item v-if="editing.group !== 'materials'" label="状态">
+            <el-form-item v-if="editing.group !== 'materials'" label="配置状态">
               <el-select v-model="form.status" placeholder="未标注（当前启用）">
                 <el-option v-if="form.status && !['CLEAR', 'PENDING', 'DISABLED'].includes(form.status)" :value="form.status" :label="form.status" />
-                <el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认（不执行）" /><el-option value="DISABLED" label="暂停" />
+                <el-option value="CLEAR" label="启用" /><el-option value="PENDING" label="待确认" /><el-option value="DISABLED" label="停用" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="editing.group === 'rules'" label="执行方式">
@@ -489,11 +506,12 @@ watch(() => props.job.job_no, () => { editing.value = null; clear(); });
 .proposal-context { margin-top: 12px; }
 .proposal-interpretation { margin: 0 0 18px; padding: 12px; background: var(--el-fill-color-light); }
 .proposal-interpretation p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
-.interpretation-gaps summary { cursor: pointer; line-height: 1.7; }
-.interpretation-gap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 8px; line-height: 1.7; overflow-wrap: anywhere; }
-.interpretation-gap :deep(.el-button) { white-space: normal; height: auto; text-align: left; line-height: 1.7; }
+.proposal-findings { margin: 8px 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.proposal-findings p { margin: 6px 0; }
+.proposal-findings ul, .proposal-interpretation ul { margin: 8px 0 0; padding-left: 20px; }
+.proposal-findings li, .proposal-interpretation li { margin-bottom: 6px; overflow-wrap: anywhere; }
+.proposal-findings-list :deep(.el-button) { white-space: normal; height: auto; text-align: left; line-height: inherit; }
 .proposal-context :deep(.el-descriptions__content) { overflow-wrap: anywhere; white-space: pre-wrap; }
-.binding-gap { margin-top: 4px; font-size: 12px; line-height: 1.6; }
 @media (max-width: 640px) {
   .proposal-heading { align-items: flex-start; }
   .proposal-edit-meta { grid-template-columns: 1fr; gap: 0; }

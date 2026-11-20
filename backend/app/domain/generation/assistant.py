@@ -17,7 +17,7 @@ from app.domain.generation.document import (
     normalize_business_codes,
 )
 
-ASSISTANT_PROMPT_VERSION = "generation_assistant_v12"
+ASSISTANT_PROMPT_VERSION = "generation_assistant_v14"
 
 
 class SetDocument(GenerationModel):
@@ -119,11 +119,44 @@ class GenerationRowSourceRepair(GenerationModel):
     requirement_ids: list[str] = Field(default_factory=list, description="需追加的已有目录项编号，保留已有引用。")
 
 
+class GenerationIssueMerge(GenerationModel):
+    keep_id: str
+    duplicate_ids: list[str] = Field(min_length=1)
+
+
 class GenerationRepairReply(AssistantReply):
     """仅用于首轮交付前的补修；后续对话仍使用不可改目录的 AssistantReply。"""
 
+    issue_merges: list[GenerationIssueMerge] = Field(default_factory=list)
     requirement_repairs: list[GenerationRequirementRepair] = Field(default_factory=list)
     row_source_repairs: list[GenerationRowSourceRepair] = Field(default_factory=list)
+
+
+def merge_initial_issues(document: GenerationDocument, merges: list[GenerationIssueMerge], unclear_ids: set[str]) -> None:
+    """模型判断是否同一个业务决定，程序合并候选稿内的身份、关联和依据。"""
+    issues = {item.issue_id: item for item in document.issues}
+    for merge in merges:
+        keep = issues.get(merge.keep_id)
+        for reference in merge.duplicate_ids:
+            other = issues.get(reference)
+            if keep is None or other is None or keep is other:
+                raise BusinessError("ASSISTANT_INVALID_EDIT", "合并事项引用失效或重复", status_code=502)
+            for item in (keep, other):
+                refs = [*item.source_unclear_ids, *([item.issue_id] if item.issue_id in unclear_ids else [])]
+                keep.source_unclear_ids.extend(ref for ref in refs if ref not in keep.source_unclear_ids)
+            keep.affected_row_ids.extend(ref for ref in other.affected_row_ids if ref not in keep.affected_row_ids)
+            keep.source.requirement_ids.extend(ref for ref in other.source.requirement_ids if ref not in keep.source.requirement_ids)
+            origin = other.source.origin
+            if origin and not keep.source.origin:
+                keep.source.origin = origin.model_copy(deep=True)
+            elif origin and keep.source.origin:
+                primary = GenerationRowReference(sheet_name=origin.sheet_name, row_no=origin.row_no)
+                target = keep.source.origin
+                for row in [primary, *origin.related_rows]:
+                    if (row.sheet_name, row.row_no) != (target.sheet_name, target.row_no) and row not in target.related_rows:
+                        target.related_rows.append(row)
+            del issues[reference]
+    document.issues = list(issues.values())
 
 
 class ReviewTextRepair(GenerationModel):
@@ -326,7 +359,9 @@ def apply_edits(previous: GenerationDocument, reply: AssistantReply) -> Generati
             if index is None:
                 result.issues.append(edit.issue.model_copy(deep=True))
             else:
-                result.issues[index] = edit.issue.model_copy(deep=True)
+                updated = edit.issue.model_copy(deep=True)
+                updated.source_unclear_ids = list(dict.fromkeys([*result.issues[index].source_unclear_ids, *updated.source_unclear_ids]))
+                result.issues[index] = updated
         elif isinstance(edit, RemoveIssue):
             if not any(item.issue_id == edit.issue_id for item in result.issues):
                 invalid("修改引用了不存在的事项")

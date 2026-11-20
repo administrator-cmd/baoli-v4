@@ -99,6 +99,16 @@ class ImportsJobCRUD(CRUDBase):
             ).all()
         }
 
+    def latest_operations(self, job_nos: list[str]) -> dict[str, BackgroundOperation]:
+        latest_ids = (
+            select(func.max(BackgroundOperation.id))
+            .where(BackgroundOperation.object_type == "IMPORT_JOB", BackgroundOperation.object_no.in_(job_nos))
+            .group_by(BackgroundOperation.object_no)
+        )
+        return {operation.object_no: operation for operation in self.db.scalars(
+            select(BackgroundOperation).where(BackgroundOperation.id.in_(latest_ids))
+        ).all()}
+
 
     def published_versions(self, job_ids: list[int]) -> dict[int, int]:
         """作业发布出的场景版本号；import_job_id 有唯一约束，一个作业最多一个版本。"""

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftMaterialItem, ScenarioConfigurationView } from "@/api/contracts";
@@ -10,6 +10,8 @@ import {
   updateDraftMaterial,
 } from "@/api/scenes";
 import { formatDate } from "@/constants/labels";
+import { useLocalPagination } from "@/composables/useLocalPagination";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /**
@@ -32,8 +34,17 @@ const emit = defineEmits<{
 
 /** 数据来自父级唯一的配置请求。 */
 const materials = computed(() => props.config?.materials ?? []);
-const sortedMaterials = computed(() => [...materials.value]
+const search = ref("");
+const keyword = computed(() => search.value.trim().toLowerCase());
+const filteredMaterials = computed(() => materials.value
+  .filter((item) => !keyword.value || `${item.name}\n${item.source_ref ?? ""}`.toLowerCase().includes(keyword.value))
   .sort((left, right) => compareNaturalLabels(left.source_ref, right.source_ref)));
+const { page, pageSize, pageItems: pagedMaterials } = useLocalPagination(() => filteredMaterials.value);
+
+watch(keyword, () => {
+  page.value = 1;
+});
+
 const loading = computed(() => props.configLoading === true);
 const loadError = computed(() => props.configError ?? null);
 const saving = ref(false);
@@ -144,19 +155,6 @@ async function removeItem(item: DraftMaterialItem): Promise<void> {
     saving.value = false;
   }
 }
-
-async function toggleRequired(item: DraftMaterialItem): Promise<void> {
-  if (!props.scenarioCode) {
-    return;
-  }
-  try {
-    await updateDraftMaterial(props.scenarioCode, item.material_key, { required: !item.required });
-    ElMessage.success(item.required ? "已改为按需材料" : "已改为必传材料");
-    emit("changed");
-  } catch (error) {
-    ElMessage.error(describeError(error));
-  }
-}
 </script>
 
 <template>
@@ -164,6 +162,12 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
     <el-alert v-if="!scenarioCode" type="info" show-icon :closable="false" title="请先选择场景" />
 
     <template v-else>
+      <el-form inline class="app-query block-gap-sm" @submit.prevent>
+        <el-form-item label="材料搜索">
+          <el-input v-model="search" clearable placeholder="材料名称或编号" style="width: 240px" />
+        </el-form-item>
+      </el-form>
+
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增材料</el-button>
@@ -180,11 +184,11 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
       <el-table
         v-else
         class="management-table scene-materials-table"
-        :data="sortedMaterials"
+        :data="pagedMaterials"
         border
         stripe
         v-loading="loading"
-        empty-text="暂无材料配置"
+        :empty-text="materials.length ? '未找到匹配的材料' : '暂无材料配置'"
         :cell-style="{ textAlign: 'center' }"
       >
         <el-table-column prop="source_ref" label="材料编号" width="140">
@@ -207,16 +211,24 @@ async function toggleRequired(item: DraftMaterialItem): Promise<void> {
         <el-table-column label="更新时间" width="200">
           <template #default="{ row }"><span class="table-nowrap">{{ row.updated_at ? formatDate(String(row.updated_at)) : "—" }}</span></template>
         </el-table-column>
-        <el-table-column v-if="canEdit" label="操作" width="168" class-name="table-actions" fixed="right">
+        <el-table-column v-if="canEdit" label="操作" width="124" class-name="table-actions" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" size="small" @click="toggleRequired(row)">
-              {{ row.required ? "改为按需" : "改为必需" }}
-            </el-button>
             <el-button link type="danger" size="small" @click="removeItem(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
+
+      <div v-if="!loadError && filteredMaterials.length" class="app-pagination">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="filteredMaterials.length"
+          :page-sizes="PAGE_SIZE_OPTIONS"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+        />
+      </div>
 
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑材料' : '新增材料'" width="600px" :close-on-click-modal="false">
         <el-form label-width="100px">

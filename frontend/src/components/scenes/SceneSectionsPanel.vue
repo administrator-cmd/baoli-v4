@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftSectionItem, ScenarioConfigurationView } from "@/api/contracts";
@@ -9,6 +9,8 @@ import {
   updateDraftSection,
 } from "@/api/scenes";
 import { reportContentTypeOptions, reportFormatOptions, reportResultSortOptions } from "@/constants/labels";
+import { useLocalPagination } from "@/composables/useLocalPagination";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 /** 场景章节控制报告正文，材料范围与排序由配置确定。 */
@@ -28,8 +30,17 @@ const emit = defineEmits<{
 /** 数据来自父级唯一的配置请求。 */
 const draft = computed(() => props.config);
 const sections = computed(() => props.config?.sections ?? []);
-const sortedSections = computed(() => [...sections.value]
+const search = ref("");
+const keyword = computed(() => search.value.trim().toLowerCase());
+const filteredSections = computed(() => sections.value
+  .filter((item) => !keyword.value || `${item.report_name ?? ""}\n${item.report_code ?? ""}\n${item.title}`.toLowerCase().includes(keyword.value))
   .sort((left, right) => compareNaturalLabels(left.report_code, right.report_code)));
+const { page, pageSize, pageItems: pagedSections } = useLocalPagination(() => filteredSections.value);
+
+watch(keyword, () => {
+  page.value = 1;
+});
+
 const fields = computed(() => props.config?.fields ?? []);
 const materials = computed(() => props.config?.materials ?? []);
 const loading = computed(() => props.configLoading === true);
@@ -181,6 +192,12 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
     <el-alert v-if="!scenarioCode" type="info" show-icon :closable="false" title="请先选择场景" />
 
     <template v-else>
+      <el-form inline class="app-query block-gap-sm" @submit.prevent>
+        <el-form-item label="报告搜索">
+          <el-input v-model="search" clearable placeholder="报告名称、编号或章节名称" style="width: 240px" />
+        </el-form-item>
+      </el-form>
+
       <div class="app-toolbar">
         <div class="app-toolbar__left">
           <el-button v-if="canEdit" type="primary" @click="openCreate">新增章节</el-button>
@@ -194,7 +211,7 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
         <el-button size="small" @click="$emit('refresh')">重试</el-button>
       </el-alert>
 
-      <el-table v-else :data="sortedSections" border stripe class="management-table" v-loading="loading" empty-text="暂无报告章节（系统执行摘要仍会生成）">
+      <el-table v-else :data="pagedSections" border stripe class="management-table" v-loading="loading" :empty-text="sections.length ? '未找到匹配的报告章节' : '暂无报告章节（系统执行摘要仍会生成）'">
         <el-table-column label="报告编号" width="140" align="center">
           <template #default="{ row }">{{ row.report_code || "—" }}</template>
         </el-table-column>
@@ -217,10 +234,10 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
         <el-table-column prop="content_instruction" label="内容要求" min-width="300" show-overflow-tooltip>
           <template #default="{ row }">{{ row.content_instruction || "—" }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="140" align="center">
+        <el-table-column label="配置状态" width="160" align="center">
           <template #default="{ row }">
             <el-tag size="small" :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'">
-              {{ row.config_status === 'PENDING' ? '待确认' : row.config_status === 'DISABLED' ? '暂停' : '启用' }}
+              {{ row.config_status === 'PENDING' ? '待确认' : row.config_status === 'DISABLED' ? '停用' : '启用' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -231,6 +248,17 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
           </template>
         </el-table-column>
       </el-table>
+
+      <div v-if="!loadError && filteredSections.length" class="app-pagination">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="filteredSections.length"
+          :page-sizes="PAGE_SIZE_OPTIONS"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+        />
+      </div>
 
       <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑报告章节' : '新增报告章节'" width="600px" :close-on-click-modal="false">
         <el-form label-width="100px">
@@ -285,11 +313,11 @@ async function removeItem(item: DraftSectionItem): Promise<void> {
           <el-form-item label="风险等级顺序">
             <el-input v-model="form.risk_level_order_text" type="textarea" :rows="3" placeholder="按风险从高到低，每行填写一个场景等级；不排序时可留空" />
           </el-form-item>
-          <el-form-item label="状态">
+          <el-form-item label="配置状态">
             <el-select v-model="form.config_status">
               <el-option value="CLEAR" label="启用" />
-              <el-option value="PENDING" label="待确认（不生成）" />
-              <el-option value="DISABLED" label="暂停" />
+              <el-option value="PENDING" label="待确认" />
+              <el-option value="DISABLED" label="停用" />
             </el-select>
           </el-form-item>
         </el-form>

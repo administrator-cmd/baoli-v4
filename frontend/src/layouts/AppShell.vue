@@ -37,6 +37,7 @@ const menuGroups = [
     icon: ListChecks,
     items: [
       { path: "/audit-tasks", title: "审核任务" },
+      { path: "/manual-reviews", title: "人工审核" },
     ],
   },
   {
@@ -157,7 +158,7 @@ onUnmounted(() => {
             <span>{{ group.name }}</span>
           </template>
           <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path">
-            {{ item.title }}
+            <span>{{ item.title }}</span>
           </el-menu-item>
         </el-sub-menu>
       </el-menu>

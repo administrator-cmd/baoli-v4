@@ -14,7 +14,7 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 
 /**
- * 规则配置面板：业务规则可增删改；自动抽取与报告生成规则由系统派生，只读。
+ * 规则配置面板：业务规则可增删改，自动抽取规则通过对应的字段配置编辑。
  * 审核要求、输入对象、参数与适用条件都来自真实配置；发布时由后端做同口径编译校验。
  */
 const props = defineProps<{
@@ -28,6 +28,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   changed: [];
   refresh: [];
+  editField: [fieldKey: string];
 }>();
 
 const router = useRouter();
@@ -44,11 +45,20 @@ const canEdit = computed(() => Boolean(props.scenarioCode));
 const query = reactive({ name: "", enabled: "", mode: "" });
 const { selectedSheet, sourceSheetOptions, matchesSourceSheet } = useRuleSourceFilter(() => rules.value);
 const keyword = computed(() => query.name.trim().toLowerCase());
+function configurationState(rule: DraftRuleItem): string {
+  if (rule.config_status === "PENDING") return "PENDING";
+  return rule.enabled ? "true" : "false";
+}
+
+function configurationLabel(rule: DraftRuleItem): string {
+  if (rule.config_status === "PENDING") return "待确认";
+  return rule.enabled ? "启用" : "停用";
+}
+
 const filteredRules = computed(() =>
   rules.value.filter((item) => {
     if (!matchesSourceSheet(item)) return false;
-    if (query.enabled === "true" && !item.enabled) return false;
-    if (query.enabled === "false" && item.enabled) return false;
+    if (query.enabled && configurationState(item) !== query.enabled) return false;
     if (query.mode && (item.execution_mode || "UNKNOWN") !== query.mode) return false;
     if (keyword.value && !`${item.name}\n${item.source_ref ?? ""}`.toLowerCase().includes(keyword.value)) return false;
     return true;
@@ -62,6 +72,20 @@ const pageSize = ref(savedPaging?.pageSize ?? 20);
 const pagedRules = computed(() =>
   filteredRules.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
 );
+
+const fieldKeys = computed(() => new Set(props.config?.fields.map((field) => field.field_key)));
+
+function editableFieldKey(rule: DraftRuleItem): string | undefined {
+  if (!rule.system || rule.operator !== "LLM_EXTRACT" || rule.outputs.length !== 1) return;
+  const fieldKey = rule.outputs[0]?.field_key;
+  return fieldKey && fieldKeys.value.has(fieldKey) ? fieldKey : undefined;
+}
+
+const actionsWidth = computed(() => {
+  if (canEdit.value && pagedRules.value.some((rule) => !rule.system)) return 132;
+  if (canEdit.value && pagedRules.value.some(editableFieldKey)) return 96;
+  return 64;
+});
 
 watch([selectedSheet, () => query.name, () => query.enabled, () => query.mode], () => {
   page.value = 1;
@@ -99,6 +123,23 @@ function operatorLabel(operator: string): string {
 
 
 const detailRule = ref<DraftRuleItem | null>(null);
+const detailDependencies = computed(() => {
+  const rule = detailRule.value;
+  if (!rule) return [];
+  const keys = new Set(rule.source_rule_keys ?? []);
+  if (rule.source_rule_key) keys.add(rule.source_rule_key);
+  const names = [...keys].map((key) =>
+    rules.value.find((item) => item.rule_key === key)?.name
+    ?? (key === rule.source_rule_key ? rule.source_rule_name : null)
+    ?? "未找到引用的规则",
+  );
+  const calculations = props.config?.calculations ?? [];
+  for (const code of new Set(rule.source_rule_codes ?? [])) {
+    const matches = calculations.filter((item) => item.result_code === code || item.rule_code === code);
+    names.push(matches.length === 1 ? matches[0]!.name || code : code);
+  }
+  return names;
+});
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败";
@@ -118,6 +159,15 @@ function openEditor(ruleKey: string): void {
     name: "scene-rule-edit",
     params: { scenarioCode: props.scenarioCode, ruleKey },
   });
+}
+
+function editRule(rule: DraftRuleItem): void {
+  if (!rule.system) {
+    openEditor(rule.rule_key);
+    return;
+  }
+  const fieldKey = editableFieldKey(rule);
+  if (fieldKey) emit("editField", fieldKey);
 }
 
 async function removeRule(rule: DraftRuleItem): Promise<void> {
@@ -185,9 +235,10 @@ function scopeText(rule: DraftRuleItem): string {
         <el-form-item label="规则搜索">
           <el-input v-model="query.name" clearable placeholder="规则名称或业务编号" style="width: 220px" />
         </el-form-item>
-        <el-form-item label="启用状态">
-          <el-select v-model="query.enabled" clearable placeholder="全部" style="width: 120px">
+        <el-form-item label="配置状态">
+          <el-select v-model="query.enabled" clearable placeholder="全部" style="width: 190px">
             <el-option value="true" label="启用" />
+            <el-option value="PENDING" label="待确认" />
             <el-option value="false" label="停用" />
           </el-select>
         </el-form-item>
@@ -195,9 +246,6 @@ function scopeText(rule: DraftRuleItem): string {
           <el-select v-model="query.mode" clearable placeholder="全部" style="width: 150px">
             <el-option v-for="item in EXECUTION_MODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
           </el-select>
-        </el-form-item>
-        <el-form-item>
-          <el-button @click="resetFilters">重置</el-button>
         </el-form-item>
       </el-form>
 
@@ -244,23 +292,18 @@ function scopeText(rule: DraftRuleItem): string {
         <el-table-column label="适用材料" width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ scopeText(row) }}</template>
         </el-table-column>
-        <el-table-column label="依赖规则" min-width="132" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.source_rule_name || "—" }}</template>
-        </el-table-column>
-        <el-table-column label="启用状态" width="140" align="center">
+        <el-table-column label="配置状态" width="160" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
-              {{ row.enabled ? "启用" : "停用" }}
+            <el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.enabled ? 'success' : 'info'" size="small" effect="light" disable-transitions>
+              {{ configurationLabel(row) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" :width="canEdit ? 168 : 96" class-name="table-actions" fixed="right" align="center">
+        <el-table-column label="操作" :width="actionsWidth" class-name="table-actions" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="detailRule = row">详情</el-button>
-            <template v-if="canEdit && !row.system">
-              <el-button link type="primary" size="small" @click="openEditor(row.rule_key)">编辑</el-button>
-              <el-button link type="danger" size="small" :disabled="saving" @click="removeRule(row)">删除</el-button>
-            </template>
+            <el-button v-if="canEdit && (!row.system || editableFieldKey(row))" link type="primary" size="small" @click="editRule(row)">编辑</el-button>
+            <el-button v-if="canEdit && !row.system" link type="danger" size="small" :disabled="saving" @click="removeRule(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -295,6 +338,9 @@ function scopeText(rule: DraftRuleItem): string {
             <el-descriptions-item label="执行方式">{{ executionModeLabel(detailRule.execution_mode) }}</el-descriptions-item>
             <el-descriptions-item label="执行能力">{{ operatorLabel(detailRule.operator) }}</el-descriptions-item>
             <el-descriptions-item label="输入对象">{{ inputText(detailRule) }}</el-descriptions-item>
+            <el-descriptions-item v-if="detailDependencies.length" label="依赖规则">
+              {{ detailDependencies.join("、") }}
+            </el-descriptions-item>
             <el-descriptions-item label="材料范围 / 输出">{{ scopeText(detailRule) }}</el-descriptions-item>
             <el-descriptions-item label="审核要求">{{ detailRule.requirement || "—" }}</el-descriptions-item>
             <el-descriptions-item label="适用条件">
@@ -306,12 +352,9 @@ function scopeText(rule: DraftRuleItem): string {
               </span>
               <span v-else>—</span>
             </el-descriptions-item>
-            <el-descriptions-item v-if="detailRule.source_rule_name" label="来源规则">
-              {{ detailRule.source_rule_name }}
-            </el-descriptions-item>
             <el-descriptions-item v-if="detailRule.risk_level" label="风险等级">{{ detailRule.risk_level }}</el-descriptions-item>
             <el-descriptions-item v-if="detailRule.risk_action" label="规则配置的处置要求">{{ detailRule.risk_action }}</el-descriptions-item>
-            <el-descriptions-item label="启用状态">{{ detailRule.enabled ? "启用" : "停用" }}</el-descriptions-item>
+            <el-descriptions-item label="配置状态">{{ configurationLabel(detailRule) }}</el-descriptions-item>
           </el-descriptions>
         </template>
       </el-drawer>

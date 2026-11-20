@@ -36,6 +36,9 @@ export interface Report {
   scope_execution_complete: boolean;
   /** 风险是否可判定；未配置风险评级时为 false，但不代表执行故障。 */
   risk_conclusion_available: boolean;
+  risk_configured: boolean;
+  execution_notes: string[];
+  risk_notes: string[];
   /** 报告范围只对应当前有效事实与执行结果。 */
   results_scope: "CURRENT_RUN";
   /** 当前入口返回的报告是否仍对应当前执行；为 false 时页面必须标明“已失效”。 */
@@ -95,6 +98,9 @@ export interface ReportRow {
   report_generated: boolean;
   scope_execution_complete: boolean;
   risk_conclusion_available: boolean;
+  risk_configured: boolean;
+  execution_notes: string[];
+  risk_notes: string[];
   status: string;
   archived_at: string | null;
   current: boolean;
@@ -120,6 +126,10 @@ export interface ReportDetail {
   report_generated: boolean;
   scope_execution_complete: boolean;
   risk_conclusion_available: boolean;
+  risk_configured: boolean;
+  execution_notes: string[];
+  risk_notes: string[];
+  current: boolean;
   reasons: Record<string, JsonValue>;
   snapshot: Record<string, JsonValue> | null;
   report_generation?: ReportGenerationInfo | null;

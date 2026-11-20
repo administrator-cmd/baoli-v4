@@ -9,7 +9,7 @@ const statuses: Record<MaterialQualityStatus, { label: string; tone: StatusTone 
   ABNORMAL: { label: "不合格", tone: "danger" },
   EVIDENCE_INSUFFICIENT: { label: "无法判定", tone: "warning" },
   NOT_APPLICABLE: { label: "不适用", tone: "neutral" },
-  NOT_CONFIGURED: { label: "无前置检查", tone: "neutral" },
+  NOT_CONFIGURED: { label: "未配置前置检查", tone: "neutral" },
 };
 
 export function materialQualityLabel(status?: MaterialQualityStatus | null): string {

@@ -1,11 +1,18 @@
 import type { AuditRule, JsonValue, RuleInputSnapshot, RuleStandard } from "@/api/contracts";
+import { auditResultSummary } from "@/constants/auditStatus";
 import { formatTypedValue } from "@/utils/fieldPresentation";
+import { isReportRuleGenerated } from "@/utils/reportPresentation";
 /* 结果负载读取：全部来自服务端 result_json，不做前端推断 */
 
 export function payloadOf(rule: AuditRule): Record<string, JsonValue> {
   return rule.result && typeof rule.result === "object" ? rule.result : {};
 }
 export function hasBusinessResult(rule: AuditRule): boolean { return payloadOf(rule).presentation_version === 2; }
+
+export function ruleResultSummary(rule: AuditRule): string {
+  if (isReportRuleGenerated(rule)) return rule.message.trim() || "已生成报告正文";
+  return auditResultSummary(rule.status, rule.message, payloadOf(rule));
+}
 
 /** 显示真实业务编号；抽取和报告继承来源编号，内部身份不用于业务定位。 */
 export function ruleCodeOf(rule: AuditRule): string | null {

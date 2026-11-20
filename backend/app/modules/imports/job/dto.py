@@ -24,6 +24,7 @@ class ImportProposalChanges(BaseModel):
     instruction: str = ""
     requirement: str = ""
     execution_mode: ExecutionMode = "UNKNOWN"
+    dependency_answers: list[str] = Field(default_factory=list)
     rule_role: Literal["CHECK", "RISK"] = "CHECK"
     rule_name: str = Field(default="", min_length=1)
     formula: str = ""

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
-import type { GenerationMessage, GenerationRevision } from "@/api/contracts";
+import type { GenerationIssueAnswer, GenerationMessage, GenerationRevision } from "@/api/contracts";
 import { listGenerationMessages, listGenerationRevisions } from "@/api/rulebookGenerations";
 import { formatDate } from "@/constants/labels";
 import { generationAssistantFailureMessage } from "@/utils/generationDocument";
@@ -11,6 +11,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   "update:modelValue": [value: string]; send: [message: string, issueId?: string];
+  "retry-batch": [answers: GenerationIssueAnswer[]];
   download: [revision: number]; restore: [revision: number];
 }>();
 const messages = ref<GenerationMessage[]>([]);
@@ -74,6 +75,12 @@ function send(value = props.modelValue, issueId?: string): void {
   if (props.disabled || props.busy || !value.trim()) return;
   emit("send", value.trim(), issueId);
 }
+
+function retryMessage(item: GenerationMessage): void {
+  if (props.disabled || props.busy) return;
+  if (item.issue_answers?.length) emit("retry-batch", item.issue_answers);
+  else send(item.answer ?? item.content, item.issue_id ?? undefined);
+}
 </script>
 
 <template>
@@ -94,7 +101,7 @@ function send(value = props.modelValue, issueId?: string): void {
           <small v-if="['PENDING', 'RUNNING'].includes(item.operation.status)">正在处理，离开页面后仍会继续</small>
           <template v-else-if="['FAILED', 'INTERRUPTED'].includes(item.operation.status)">
             <p class="generation-assistant__failure">{{ generationAssistantFailureMessage(item.operation) || item.operation.failure_message || '本次处理未完成' }}</p>
-            <el-button link type="primary" :disabled="disabled || busy" @click="send(item.answer ?? item.content, item.issue_id ?? undefined)">重试这条要求</el-button>
+            <el-button link type="primary" :disabled="disabled || busy" @click="retryMessage(item)">{{ item.issue_answers?.length ? '重试本次批量回答' : '重试这条要求' }}</el-button>
           </template>
         </template>
       </article>

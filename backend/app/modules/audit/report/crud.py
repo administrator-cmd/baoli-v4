@@ -122,6 +122,15 @@ class AuditReportCRUD(CRUDBase):
     def report_by_no(self, report_no: str) -> AuditReport | None:
         return self.db.scalar(select(AuditReport).where(AuditReport.report_no == report_no))
 
+    def status_context_rows(self, report_ids: list[int]):
+        # 分页完成后再读取原因与冻结配置，避免大 JSON 进入列表的排序缓冲。
+        return self.db.execute(
+            select(AuditReport.id, AuditReport.reasons_json, AuditTask.manifest_json,
+                   AuditTask.task_schema_json["enabled_rule_keys"].label("enabled_keys"))
+            .join(AuditTask, AuditTask.id == AuditReport.audit_task_id)
+            .where(AuditReport.id.in_(report_ids))
+        ).all()
+
     def report_context(
         self, report: AuditReport
     ) -> tuple[AuditTask | None, ScenarioVersion | None, AuditPlan | None, NodeExecution | None]:

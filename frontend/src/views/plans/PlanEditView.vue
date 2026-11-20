@@ -14,14 +14,12 @@ import PlanExtractionEditor from "@/components/plans/PlanExtractionEditor.vue";
 import PlanConfigList from "@/components/plans/PlanConfigList.vue";
 import { sourceSheetLabel } from "@/composables/useRuleSourceFilter";
 import { executionModeLabel } from "@/constants/executionModes";
-import { TABLE_COLUMN_WIDTHS } from "@/constants/tableColumns";
 import {
-  extractionStrategyLabel,
   reportContentTypeOptions,
   reportFormatOptions,
   reportResultSortOptions,
-  valueTypeLabel,
 } from "@/constants/labels";
+import { fieldDataTypeLabel } from "@/utils/fieldTypeConfig";
 import { newId } from "@/utils/ids";
 
 /**
@@ -74,7 +72,7 @@ function editExtraction(kind: "material" | "field", key: string): void {
 
 function statusLabel(status: unknown, enabled?: boolean): string {
   if (status === "PENDING") return "待确认";
-  if (status === "DISABLED" || enabled === false) return "暂停";
+  if (status === "DISABLED" || enabled === false) return "停用";
   if (status === "CLEAR" || enabled === true) return "启用";
   return typeof status === "string" && status ? status : "未声明";
 }
@@ -431,7 +429,7 @@ function ruleMaterialKeys(item: PlanRuleItem): string[] {
   return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [];
 }
 function sectionStatusLabel(item: PlanSectionItem): string {
-  return item.config_status === "PENDING" ? "待确认·不生成" : item.config_status === "DISABLED" ? "不生成" : "生成";
+  return item.config_status === "PENDING" ? "待确认" : item.config_status === "DISABLED" ? "停用" : "启用";
 }
 
 function openSectionEditor(item?: PlanSectionItem): void {
@@ -590,11 +588,12 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
       <template v-if="!isCreate && config">
         <section class="plan-config-workspace block-gap-sm">
           <div class="plan-status-line">
-            <span>范围状态</span>
+            <span>配置状态</span>
             <el-tag :type="plan?.effective ? 'success' : 'warning'" size="small" effect="light">
-              {{ plan?.effective ? "已生效" : "待核对" }}
+              {{ plan?.effective ? "配置已生效" : "配置未生效" }}
             </el-tag>
             <span v-if="plan?.sync_error?.message" class="text-hint">{{ plan.sync_error.message }}</span>
+            <span v-else-if="!plan?.effective" class="text-hint">尚未生成可用配置，请核对并保存</span>
             <span v-if="hasUnsavedBasic || hasUnsavedConfig" class="text-hint">有未保存修改</span>
           </div>
           <el-tabs v-model="activeTab" class="plan-tabs">
@@ -629,7 +628,7 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                   <el-table-column prop="name" label="材料名称" width="180" show-overflow-tooltip />
                   <el-table-column prop="description" label="业务说明" min-width="300" show-overflow-tooltip />
                   <el-table-column label="必传" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
+                  <el-table-column label="配置状态" width="160"><template #default="{ row }"><el-tag :type="statusTone(row.config_status)" size="small">{{ statusLabel(row.config_status) }}</el-tag></template></el-table-column>
                   <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('material', row.material_key)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
@@ -641,7 +640,7 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                 :search-text="fieldSearchText"
                 :status-text="(item: PlanFieldItem) => statusLabel(item.config_status, item.enabled)"
                 :materials="config.materials" :material-keys="(item: PlanFieldItem) => [item.material_key]"
-                group-label="数据类型" :group-text="(item: PlanFieldItem) => valueTypeLabel(item.value_type)"
+                group-label="数据类型" :group-text="fieldDataTypeLabel"
                 keyword-placeholder="字段名称、编号或提取要求" empty-text="当前方案没有字段"
               >
                   <el-table-column label="字段编号" width="140" show-overflow-tooltip>
@@ -649,10 +648,9 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                   </el-table-column>
                   <el-table-column prop="name" label="字段名称" width="180" show-overflow-tooltip />
                   <el-table-column label="所属材料" width="168" show-overflow-tooltip><template #default="{ row }">{{ materialNames([row.material_key]) }}</template></el-table-column>
-                  <el-table-column label="数据类型" width="88"><template #default="{ row }">{{ valueTypeLabel(row.value_type) }}</template></el-table-column>
-                  <el-table-column label="抽取策略" :width="TABLE_COLUMN_WIDTHS.extractionStrategy"><template #default="{ row }">{{ extractionStrategyLabel(row.extraction_strategy) }}</template></el-table-column>
+                  <el-table-column label="数据类型" width="112"><template #default="{ row }">{{ fieldDataTypeLabel(row) }}</template></el-table-column>
                   <el-table-column label="必抽" width="88"><template #default="{ row }">{{ row.required ? "是" : "否" }}</template></el-table-column>
-                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="配置状态" width="160"><template #default="{ row }"><el-tag :type="statusTone(row.config_status, row.enabled)" size="small">{{ statusLabel(row.config_status, row.enabled) }}</el-tag></template></el-table-column>
                   <el-table-column prop="instruction" label="提取要求" min-width="300" show-overflow-tooltip />
                   <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editExtraction('field', row.field_key)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
@@ -681,7 +679,7 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                   </el-table-column>
                   <el-table-column label="适用材料" width="180" show-overflow-tooltip align="center"><template #default="{ row }">{{ ruleMaterialNames(row) }}</template></el-table-column>
                   <el-table-column label="审核要求" min-width="340" show-overflow-tooltip align="center"><template #default="{ row }">{{ row.rule_json.requirement || "—" }}</template></el-table-column>
-                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="配置状态" width="160"><template #default="{ row }"><el-tag :type="statusTone(row.rule_json.config_status, row.enabled)" size="small">{{ statusLabel(row.rule_json.config_status, row.enabled) }}</el-tag></template></el-table-column>
                   <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('rule', row.rule_key)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
@@ -702,7 +700,7 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                   </el-table-column>
                   <el-table-column prop="formula" label="计算方法" min-width="300" show-overflow-tooltip />
                   <el-table-column prop="requirement" label="业务要求" min-width="300" show-overflow-tooltip />
-                  <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
+                  <el-table-column label="配置状态" width="160"><template #default="{ row }"><el-tag :type="statusTone(row.status, row.enabled)" size="small">{{ statusLabel(row.status, row.enabled) }}</el-tag></template></el-table-column>
                   <el-table-column label="操作" width="84" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="editBusiness('calculation', row.rule_code)">编辑</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
@@ -724,7 +722,7 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
                   <el-table-column prop="report_name" label="所属报告" width="192" show-overflow-tooltip />
                   <el-table-column label="材料范围" width="120" show-overflow-tooltip><template #default="{ row }">{{ materialNames(row.material_keys) }}</template></el-table-column>
                   <el-table-column label="业务数据引用" min-width="300" show-overflow-tooltip><template #default="{ row }">{{ dataNames(row.data_refs) }}</template></el-table-column>
-                  <el-table-column label="章节处理" width="96"><template #default="{ row }"><el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'" size="small">{{ sectionStatusLabel(row) }}</el-tag></template></el-table-column>
+                  <el-table-column label="配置状态" width="160"><template #default="{ row }"><el-tag :type="row.config_status === 'PENDING' ? 'warning' : row.config_status === 'DISABLED' ? 'info' : 'success'" size="small">{{ sectionStatusLabel(row) }}</el-tag></template></el-table-column>
                   <el-table-column label="操作" width="124" class-name="table-actions" fixed="right"><template #default="{ row }"><el-button link type="primary" size="small" @click="openSectionEditor(row)">编辑</el-button><el-button link type="danger" size="small" @click="removeSection(row)">移除</el-button></template></el-table-column>
               </PlanConfigList>
             </el-tab-pane>
@@ -780,9 +778,9 @@ async function removeSection(item: PlanSectionItem): Promise<void> {
             </el-form-item>
             <el-form-item label="章节处理">
               <el-select v-model="sectionForm.config_status" style="width: 100%">
-                <el-option value="CLEAR" label="生成（已核对）" />
-                <el-option value="PENDING" label="待确认（本章节不生成）" />
-                <el-option value="DISABLED" label="不生成" />
+                <el-option value="CLEAR" label="启用" />
+                <el-option value="PENDING" label="待确认" />
+                <el-option value="DISABLED" label="停用" />
               </el-select>
             </el-form-item>
           </el-form>

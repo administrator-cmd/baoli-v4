@@ -64,6 +64,14 @@ function timeText(value: string | null): string {
         />
       </template>
     </el-table-column>
+    <el-table-column label="记录时效" width="120">
+      <template #default="{ row }">
+        <el-tooltip v-if="row.invalidated" :content="row.invalidation_reason || '失效原因未记录'" placement="top">
+          <el-tag type="info" size="small">已失效</el-tag>
+        </el-tooltip>
+        <span v-else>未失效</span>
+      </template>
+    </el-table-column>
     <el-table-column label="开始时间" width="195">
       <template #default="{ row }"><span class="table-nowrap">{{ timeText(row.started_at) }}</span></template>
     </el-table-column>

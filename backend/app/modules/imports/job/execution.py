@@ -33,11 +33,12 @@ class ImportConversionExecution(ImportsJobConversionService):
         schema_key = job.schema_key
         schema_version = job.schema_version
         source_sha256 = job.source_sha256
+        source_path = job.source_path
         # 校验作业冻结的场景 schema；本模块不再使用返回值。
         ImportsJobLookupService()._job_schema(job)
         fingerprint = ImportsJobLlmService().initial_fingerprint(profile_version, schema_key, schema_version, source_sha256, scenario_code)
         if mode == CONVERSION_MODE_RESUME and not ImportsJobLlmService().can_resume_initial(
-            job_no, profile_version, schema_key, schema_version, source_sha256, scenario_code,
+            source_path, profile_version, schema_key, schema_version, source_sha256, scenario_code,
         ):
             raise BusinessError(
                 "IMPORT_INITIAL_STAGE_UNAVAILABLE",
@@ -61,7 +62,7 @@ class ImportConversionExecution(ImportsJobConversionService):
             # 后续不得访问已过期的 ORM 输入。
             rollback_transaction(self.db)
             proposals = ImportsJobLlmService().convert_workbook(
-                workbook_ir, operation_no=operation_no, job_no=job_no,
+                workbook_ir, operation_no=operation_no, job_no=job_no, source_path=source_path,
                 fingerprint=fingerprint, mode=mode,
             )
             job = self._conversion_job_for_write( job_no, operation_no, draft_revision=draft_revision)

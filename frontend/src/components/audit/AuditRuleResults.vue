@@ -4,9 +4,11 @@ import { computed, ref, watch } from "vue";
 import type { AuditRule } from "@/api/contracts";
 import AuditRuleDetailDrawer from "@/components/audit/AuditRuleDetailDrawer.vue";
 import StateBlock from "@/components/StateBlock.vue";
-import StatusBadge from "@/components/StatusBadge.vue";
+import AuditRuleOutcomeBadge from "@/components/audit/AuditRuleOutcomeBadge.vue";
+import { extractionLabels, ruleExtractionOutcome } from "@/utils/extractionResult";
+import { isReportRuleGenerated, REPORT_GENERATED_LABEL } from "@/utils/reportPresentation";
 import { isOutputRule, isOutputRuleGroup, ruleGroupOf } from "@/constants/auditRuleGroups";
-import { auditResultSummary, AUDIT_RESULT_CATEGORIES, COMPLETED_RESULT_STATUSES } from "@/constants/auditStatus";
+import { AUDIT_RESULT_CATEGORIES, COMPLETED_RESULT_STATUSES } from "@/constants/auditStatus";
 import { EXECUTION_MODE_OPTIONS, executionModeLabel } from "@/constants/executionModes";
 import {
   categoryLabel,
@@ -20,8 +22,8 @@ import {
   formatInputValue,
   materialsOf,
   sourceFilesOf,
-  payloadOf,
   ruleCodeOf,
+  ruleResultSummary,
   standardText,
   valueSourcesOf,
 } from "@/utils/auditRulePresentation";
@@ -68,11 +70,18 @@ interface RuleFilter {
  */
 const filters = computed<RuleFilter[]>(() => [
   { value: "ALL", label: "全部", categories: [] },
+  { value: "EXTRACTED", label: extractionLabels.EXTRACTED, categories: [] },
+  { value: "NO_VALUE", label: extractionLabels.NO_VALUE, categories: [] },
+  { value: "REPORT_GENERATED", label: REPORT_GENERATED_LABEL, categories: [] },
   { value: "ABNORMAL", label: "异常", categories: [], statuses: ["ABNORMAL"] },
   { value: "EVIDENCE_INSUFFICIENT", label: "证据不足", categories: [], statuses: ["EVIDENCE_INSUFFICIENT"] },
-  { value: "INCOMPLETE", label: "未完成 / 未确认", categories: [] },
+  { value: "INCOMPLETE", label: "待处理项（汇总）", categories: [] },
+  { value: "NOT_EXECUTED", label: "未执行", categories: [], statuses: ["NOT_EXECUTED"] },
+  { value: "RUNNING", label: "执行中", categories: [], statuses: ["RUNNING"] },
+  { value: "PENDING_REVIEW", label: "业务结论未确认", categories: [], statuses: ["PENDING_REVIEW"] },
+  { value: "SKIPPED", label: "已跳过（历史状态）", categories: [], statuses: ["SKIPPED"] },
   { value: "DECIDED", label: categoryLabel("DECIDED") ?? "已判定", categories: ["DECIDED"] },
-  { value: "COMPUTED", label: categoryLabel("COMPUTED") ?? "已产出（无结论）", categories: ["COMPUTED"] },
+  { value: "COMPUTED", label: categoryLabel("COMPUTED") ?? "已产出数据", categories: ["COMPUTED"] },
   { value: "UNDECIDED", label: categoryLabel("UNDECIDED") ?? "尚未判定", categories: ["UNDECIDED"] },
   { value: "NOT_APPLICABLE", label: categoryLabel("NOT_APPLICABLE") ?? "不适用", categories: ["NOT_APPLICABLE"] },
 ]);
@@ -92,6 +101,11 @@ function categoryOf(rule: AuditRule): string {
 function matchesFilter(rule: AuditRule, filter: RuleFilter): boolean {
   if (filter.value === "ALL") return true;
   if (filter.value === "INCOMPLETE") return !COMPLETED_RESULT_STATUSES.has(rule.status);
+  const outcome = ruleExtractionOutcome(rule);
+  if (filter.value === "EXTRACTED" || filter.value === "NO_VALUE") return outcome === filter.value;
+  if (filter.value === "REPORT_GENERATED") return isReportRuleGenerated(rule);
+  if (isReportRuleGenerated(rule)) return false;
+  if (outcome && filter.value !== "NOT_EXECUTED") return false;
   if (filter.statuses?.length) return filter.statuses.includes(rule.status);
   return filter.categories.includes(categoryOf(rule));
 }
@@ -295,14 +309,14 @@ function openDetail(rule: AuditRule): void {
           <!-- 结论列要容纳最长的状态文案「已产出（无结论）」，列宽不足时标签会向右溢出压到列边界。 -->
           <el-table-column label="结论" width="184" align="center">
             <template #default="{ row }">
-              <StatusBadge domain="rule" :status="row.status" />
+              <AuditRuleOutcomeBadge :rule="row" />
             </template>
           </el-table-column>
 
           <el-table-column label="判断依据" min-width="400" align="center">
             <template #default="{ row }">
               <div class="rule-reason">
-                <span>{{ auditResultSummary(row.status, row.message, payloadOf(row)) }}</span>
+                <span>{{ ruleResultSummary(row) }}</span>
               </div>
             </template>
           </el-table-column>
@@ -340,7 +354,7 @@ function openDetail(rule: AuditRule): void {
 }
 
 .rule-status-filter {
-  width: 190px;
+  width: 240px;
 }
 
 .rule-mode-filter {

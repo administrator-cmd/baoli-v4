@@ -67,7 +67,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
             audit_task_id=task.id,
             document_upload_id=upload.id,
             artifact_type=service_code,
-            relative_path=f"tasks/{task.task_no}/artifacts/{upload.upload_no}/{service_code.lower()}.processing",
+            relative_path=f"{upload.artifact_directory}/{service_code.lower()}.processing",
             status="PROCESSING",
             metadata_json={"submission_state": "PROCESSING"},
         )
@@ -152,7 +152,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
             audit_task_id=task.id,
             document_upload_id=upload.id,
             artifact_type="OCR",
-            relative_path=f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting",
+            relative_path=f"{upload.artifact_directory}/ocr.submitting",
             status="SUBMITTING",
             metadata_json={"submission_state": "SUBMITTING"},
         )
@@ -173,7 +173,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
                 record.failure_message = exc.message
                 commit_transaction(self.db)
             raise
-        record.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.pending"
+        record.relative_path = f"{upload.artifact_directory}/ocr.pending"
         record.status = "PENDING"
         record.external_job_id = submission.job_id
         record.deadline_at = submission.deadline_at
@@ -263,7 +263,7 @@ class ArtifactExecution(AuditArtifactArtifactsService):
             "job_id": submission.job_id,
             "deadline_at": submission.deadline_at.isoformat(),
         }
-        record.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.pending"
+        record.relative_path = f"{upload.artifact_directory}/ocr.pending"
         record.status = "PENDING"
         record.external_job_id = submission.job_id
         record.deadline_at = submission.deadline_at

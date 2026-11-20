@@ -75,6 +75,7 @@ class DraftRuleRequest(BaseModel):
     execution_mode: ExecutionMode = "UNKNOWN"
     rule_role: Literal["CHECK", "RISK"] = "CHECK"
     enabled: bool = True
+    config_status: Literal["CLEAR", "PENDING", "DISABLED"] | None = None
     inputs: list[DraftRuleInput] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
     materials: list[str] = Field(default_factory=list)
@@ -103,7 +104,7 @@ class DraftCalculationParameter(BaseModel):
 
 
 class DraftCalculationRequest(BaseModel):
-    rule_code: str = Field(min_length=1, max_length=80)
+    rule_code: str = Field(default="", max_length=80)
     rule_name: str = Field(min_length=1, max_length=255)
     result_code: str = Field(min_length=1, max_length=80)
     source_id: str | None = None

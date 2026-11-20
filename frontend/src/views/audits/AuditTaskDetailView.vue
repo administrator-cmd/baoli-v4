@@ -45,7 +45,8 @@ import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { isDetailTab, type DetailTab } from "@/constants/auditWorkspaces";
 import { COMPLETED_RESULT_STATUSES } from "@/constants/auditStatus";
-import { hasEffectiveFieldValue } from "@/utils/fieldPresentation";
+import { extractionOutcomeCode } from "@/utils/fieldPresentation";
+import { isExtractionRule } from "@/utils/extractionResult";
 import {
   nodeLabel,
   operationTypeLabel,
@@ -125,7 +126,7 @@ const materialProcessing = useMaterialProcessing({
   pending,
   generation: () => stateGeneration,
   isStale,
-  refresh: refreshTask,
+  refresh: refreshMaterialTaskStatus,
   onOperationAccepted: trackOperation,
 });
 const processingState = proxyRefs(materialProcessing);
@@ -158,24 +159,22 @@ const qualityPassedCount = computed(() => task.value?.documents.filter(
 const qualityRunningCount = computed(() => task.value?.documents.filter(
   (document) => document.filename && document.quality_precheck?.status === "RUNNING",
 ).length ?? 0);
+const extractionRetryCount = computed(() => task.value?.current_node.resume?.field_review?.retry_extraction_count ?? 0);
 const extractionFinished = computed(
   () =>
     task.value?.nodes.some(
       // 停在字段核对等待点的批次已经跑完抽取段，字段页不应再显示成「尚未执行」。
       (node) => node.node_type === "RULE_EXECUTION"
-        && (node.status === "SUCCEEDED" || node.status === "WAITING_FIELD_REVIEW"),
+        && (node.status === "SUCCEEDED" || (node.status === "WAITING_FIELD_REVIEW" && !extractionRetryCount.value)),
     ) ?? false,
-);
-const riskNodeExecuted = computed(() => risks.value?.risk_executed ?? false);
-const riskConfigured = computed(
-  () => risks.value?.risk_configured ?? false,
 );
 const atWaitingReview = computed(() => task.value?.status === "WAITING_REVIEW");
 
 /* 字段核对：抽取完成后的正常等待点，任务停在这里等人工确认字段。 */
 const fieldReview = computed(() => task.value?.current_node.field_review ?? null);
 const atFieldReview = computed(
-  () => task.value?.status === "WAITING_FIELD_REVIEW" && Boolean(fieldReview.value?.required),
+  () => Boolean(fieldReview.value?.required) && (task.value?.status === "WAITING_FIELD_REVIEW"
+    || (task.value?.status === "BLOCKED" && task.value.current_node.failure_code === "AUDIT_EXTRACTION_INCOMPLETE")),
 );
 /** 核对区域有未保存修改：切换页签或离开页面时必须明确提示。 */
 const reviewDirty = ref(false);
@@ -225,6 +224,9 @@ const taskOperationActive = computed(
 const uploadBlockedReason = computed(() => {
   if (!taskOperationActive.value) return null;
   const type = task.value?.latest_operation?.operation_type;
+  if (type === "NODE_EXECUTE" || type === "NODE_RESUME") {
+    return "审核正在执行，完成前不能上传、替换或移除材料。";
+  }
   const label = type ? operationTypeLabel(type) : null;
   return label
     ? `该任务正在执行「${label}」，完成前不能上传、替换或移除材料。`
@@ -313,7 +315,7 @@ const prerequisites = computed(() => {
 const unsatisfiedPrerequisites = computed(() => prerequisites.value.filter((item) => !item.satisfied));
 const canExecuteNode = computed(
   () => !pending.value && !watching.value && unsatisfiedPrerequisites.value.length === 0
-    && task.value?.status !== "WAITING_REVIEW" && task.value?.status !== "WAITING_FIELD_REVIEW",
+    && task.value?.status !== "WAITING_REVIEW" && task.value?.status !== "WAITING_FIELD_REVIEW" && !atFieldReview.value,
 );
 
 /** 有未完成规则的批次可以原地继续；为空表示只能全部重新执行。 */
@@ -349,7 +351,7 @@ const resumeHint = computed(() => {
 const executeDisabledReason = computed(() => {
   if (!task.value) return null;
   if (atWaitingReview.value) return "该任务停在历史人工复核等待点；当前未提供人工审核入口。";
-  if (atFieldReview.value) return "字段抽取已完成，正在等待人工核对；请核对字段后「确认并继续审核」，不能另建批次绕过核对。";
+  if (atFieldReview.value) return "正在等待人工核对；请核对字段后「确认并继续审核」。";
   if (task.value.status === "COMPLETED") return "任务执行已结束，具体结论见规则结果。";
   if (watching.value) return "正在查询上一次执行的服务端状态，请等待查询结束。";
   if (unsatisfiedPrerequisites.value.length) {
@@ -390,7 +392,6 @@ const primaryAction = computed<PrimaryAction>(() => {
     return { label: "查看执行记录", tab: "executions", disabled: false, reason: null, loading: false };
   }
   if (atFieldReview.value) {
-    // 等待核对的唯一下一步是去核对字段：页头只负责把用户带到能操作的地方。
     return { label: "去核对字段", tab: "fields", disabled: false, reason: null, loading: false };
   }
   if (watching.value || task.value.status === "RUNNING") {
@@ -429,7 +430,7 @@ const primaryAction = computed<PrimaryAction>(() => {
   if (resumableExecutionId.value !== null) {
     // 未完成批次可以原地继续：已完成的规则保留，只重跑未完成项及其下游。
     return {
-      label: "继续执行",
+      label: extractionRetryCount.value ? "补跑失败字段" : "继续执行",
       run: () => void resumeInterrupted(),
       disabled: !canResumeExecution.value,
       reason: canResumeExecution.value
@@ -541,7 +542,7 @@ const blockers = computed<BlockerItem[]>(() => {
       tab: "executions",
       tabLabel: "查看失败原因",
     });
-  } else if (task.value.current_node.failure_message) {
+  } else if (task.value.current_node.failure_message && !atFieldReview.value) {
     const qualityLimited = qualityStoppedMaterials.value.length > 0
       && task.value.current_node.failure_code === "AUDIT_RULE_EXECUTION_INCOMPLETE";
     items.push({
@@ -549,6 +550,8 @@ const blockers = computed<BlockerItem[]>(() => {
       title: qualityLimited ? "本批次还有未完成的规则" : "上次执行失败",
       description: qualityLimited
         ? `${task.value.current_node.failure_message}。其中受质量限制的规则，需先处理对应文件的问题；其他原因请查看执行记录。`
+        : resumableExecutionId.value !== null && task.value.current_node.failure_code === "OCR_JOB_FAILED"
+          ? "此前失败的材料 OCR 已处理完成，可继续执行原批次。"
         : `${task.value.current_node.failure_message}。需要按失败原因处理后重新执行。`,
       tab: "executions",
       tabLabel: "查看执行记录",
@@ -573,9 +576,10 @@ const blockers = computed<BlockerItem[]>(() => {
   if (atFieldReview.value && fieldReview.value) {
     items.push({
       tone: "warning",
-      title: "字段抽取已完成，等待人工核对",
-      description: `请核对 ${task.value.fields.length} 项字段的取值与原文依据，其中 ${fieldReview.value.missing_field_count} 项没有可执行取值；`
-        + `确认后才会继续执行剩余 ${fieldReview.value.after_review_rule_count} 条规则。`,
+      title: "等待人工核对字段",
+      description: (extractionRetryCount.value ? `${extractionRetryCount.value} 项抽取规则失败，可补跑或人工核对。` : "")
+        + (fieldReview.value.missing_field_count ? `${fieldReview.value.missing_field_count} 项字段没有可执行取值，可保留缺项。` : "")
+        + `确认后继续执行剩余 ${fieldReview.value.after_review_rule_count} 条规则。`,
       tab: "fields",
       tabLabel: "去核对字段",
     });
@@ -664,18 +668,17 @@ function tabFromRoute(): DetailTab | null {
 /* 关键统计 */
 
 const fieldExtractedCount = computed(
-  () => task.value?.fields.filter(hasEffectiveFieldValue).length ?? 0,
+  () => task.value?.fields.filter(field => extractionOutcomeCode(field) === "EXTRACTED").length ?? 0,
 );
-const ruleAbnormalCount = computed(() => task.value?.rules.filter((rule) => rule.status === "ABNORMAL").length ?? 0);
+const ruleAbnormalCount = computed(() => task.value?.rules.filter((rule) => !isExtractionRule(rule) && rule.status === "ABNORMAL").length ?? 0);
 const ruleEvidenceInsufficientCount = computed(
-  () => task.value?.rules.filter((rule) => rule.status === "EVIDENCE_INSUFFICIENT").length ?? 0,
+  () => task.value?.rules.filter((rule) => !isExtractionRule(rule) && rule.status === "EVIDENCE_INSUFFICIENT").length ?? 0,
 );
 const unresolvedRuleCount = computed(
   () => task.value?.rules.filter((rule) => !COMPLETED_RESULT_STATUSES.has(rule.status)).length ?? 0,
 );
 const fieldNoValueCount = computed(
-  () => task.value?.fields.filter((field) => field.status !== "NOT_APPLICABLE"
-    && !hasEffectiveFieldValue(field)).length ?? 0,
+  () => task.value?.fields.filter(field => extractionOutcomeCode(field) === "NO_VALUE").length ?? 0,
 );
 
 async function openFieldFilter(value: string): Promise<void> {
@@ -756,7 +759,10 @@ async function loadTask(currentTaskNo: string): Promise<void> {
 
 async function refreshTask(): Promise<void> {
   if (materialTypeCatalog.state.error) void materialTypeCatalog.reload();
-  if (!task.value) return;
+  if (!task.value) {
+    await syncFromRoute();
+    return;
+  }
   const currentTaskNo = task.value.task_no;
   loadingTask.value = true;
   try {
@@ -766,6 +772,14 @@ async function refreshTask(): Promise<void> {
   } finally {
     loadingTask.value = false;
   }
+}
+
+async function refreshMaterialTaskStatus(): Promise<void> {
+  const currentTaskNo = task.value?.task_no;
+  if (!currentTaskNo) return;
+  const token = stateGeneration;
+  const latest = await getAuditTask(currentTaskNo);
+  if (!isStale(token, currentTaskNo)) applyTask(latest);
 }
 
 /* 后台操作查询 */
@@ -898,7 +912,7 @@ async function syncFromRoute(): Promise<void> {
     tab.value = routeTab ?? "materials";
     await loadTask(currentTaskNo);
     if (!task.value) return;
-    if (!routeTab && task.value.status === "WAITING_FIELD_REVIEW") tab.value = "fields";
+    if (!routeTab && atFieldReview.value) tab.value = "fields";
     if (!routeTab && task.value.status === "COMPLETED") tab.value = "rules";
     await ensureTabLoaded(tab.value, stateGeneration);
     const operationNo = typeof route.query.operation === "string" ? route.query.operation : null;
@@ -968,6 +982,7 @@ async function resumeInterrupted(): Promise<void> {
     formMessage.value = "当前没有可继续执行的未完成批次；如需重跑全部生效规则，请使用「全部重新执行」。";
     return;
   }
+  if (!(await confirmLeaveReview())) return;
   const token = stateGeneration;
   const attemptKey = resumeAttemptKey ?? operationIdempotencyKey("NODE_RESUME", currentTaskNo);
   resumeAttemptKey = attemptKey;
@@ -1119,14 +1134,15 @@ watch(
         <BackButton label="返回任务列表" @click="router.push({ name: 'audit-tasks' })" />
         <span class="app-detail-head__name">{{ task?.task_name ?? "任务详情" }}</span>
         <StatusBadge v-if="task" :status="task.status" size="default"
-          :label="task.status === 'COMPLETED' ? (unresolvedRuleCount ? '执行结束 · 有未解决项' : '执行已结束') : null"
-          :tone="task.status === 'COMPLETED' && unresolvedRuleCount ? 'warning' : null" />
+          :label="atFieldReview ? '等待字段核对' : task.status === 'COMPLETED' ? (unresolvedRuleCount ? '执行结束 · 有未解决项' : '执行已结束') : null"
+          :tone="atFieldReview || (task.status === 'COMPLETED' && unresolvedRuleCount) ? 'warning' : null" />
         <div class="card-actions task-head-actions">
           <el-button v-if="task && (primaryAction.run || primaryAction.tab !== tab)"
             type="primary" :disabled="primaryAction.disabled" :loading="primaryAction.loading"
             :title="primaryAction.reason ?? ''" @click="runPrimaryAction">{{ primaryAction.label }}</el-button>
-          <!-- 全量重跑是独立的次要操作：有可续跑批次时也能明确选择它，但必须确认。 -->
-          <el-button v-if="task && resumableExecutionId !== null" :disabled="!canExecuteNode"
+          <el-button v-if="atFieldReview && extractionRetryCount" :disabled="!canResumeExecution || reviewSaving || reviewConfirming"
+            :loading="watching || pending" @click="resumeInterrupted">补跑失败字段</el-button>
+          <el-button v-if="task && !atFieldReview && resumableExecutionId !== null" :disabled="!canExecuteNode"
             :loading="watching || pending" title="重新执行全部生效规则，原有结果会失效"
             @click="requestFullRerun">全部重新执行</el-button>
           <el-button :loading="loadingTask" @click="refreshTask">刷新</el-button>
@@ -1145,7 +1161,7 @@ watch(
             <span class="summary-label">审核事项</span><strong>{{ task.rules.length }}</strong>
           </button>
           <button type="button" class="summary-item" :class="{ 'summary-item--warning': unresolvedRuleCount > 0 }" @click="openRuleFilter('INCOMPLETE')">
-            <span class="summary-label">未完成 / 未确认</span><strong>{{ unresolvedRuleCount }}</strong>
+            <span class="summary-label">待处理项（汇总）</span><strong>{{ unresolvedRuleCount }}</strong>
           </button>
           <button type="button" class="summary-item" :class="{ 'summary-item--warning': ruleEvidenceInsufficientCount > 0 }" @click="openRuleFilter('EVIDENCE_INSUFFICIENT')">
             <span class="summary-label">证据不足</span><strong>{{ ruleEvidenceInsufficientCount }}</strong>
@@ -1154,10 +1170,10 @@ watch(
             <span class="summary-label">发现异常</span><strong>{{ ruleAbnormalCount }}</strong>
           </button>
           <button type="button" class="summary-item" @click="openFieldFilter('EXTRACTED')">
-            <span class="summary-label">字段有有效值</span><strong>{{ fieldExtractedCount }}<small> / {{ task.fields.length }}</small></strong>
+            <span class="summary-label">已抽取</span><strong>{{ fieldExtractedCount }}<small> / {{ task.fields.length }}</small></strong>
           </button>
           <button type="button" class="summary-item" :class="{ 'summary-item--warning': fieldNoValueCount > 0 }" @click="openFieldFilter('NO_VALUE')">
-            <span class="summary-label">字段无有效值</span><strong>{{ fieldNoValueCount }}</strong>
+            <span class="summary-label">未抽取到</span><strong>{{ fieldNoValueCount }}</strong>
           </button>
           <button type="button" class="summary-item" @click="setTab('materials')">
             <span class="summary-label">材料已上传</span><strong>{{ uploadedDocumentCount }}<small> / {{ task.documents.length }}</small></strong>
@@ -1278,8 +1294,6 @@ watch(
           <el-tab-pane label="风险" name="risks">
             <AuditRiskResults
               :risks="risks"
-              :risk-node-executed="riskNodeExecuted"
-              :risk-configured="riskConfigured"
               :loading="risksLoading"
               :error="risksError"
             />

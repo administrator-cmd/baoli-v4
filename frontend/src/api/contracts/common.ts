@@ -33,7 +33,6 @@ export interface OperationAccepted {
   reused: boolean;
   result: Record<string, JsonValue> | null;
   /** 规则库模型原始返回文件，相对于后端 data 根目录。 */
-  raw_response_path?: string | null;
   failure_code: string | null;
   failure_message: string | null;
   /** 命令当前阶段：区分已保存未执行 / 外部已受理 / 结果未知 / 业务已提交但图未推进 / 结果已就绪等。 */

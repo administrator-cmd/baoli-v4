@@ -64,8 +64,8 @@ export function auditResultSummary(status: string, message: string, result: Reco
     COMPUTED: "已产出中间值，本条没有合格或异常结论",
     NOT_APPLICABLE: "本次不适用",
     EVIDENCE_INSUFFICIENT: "依据不足，尚未形成结论",
-    NOT_EXECUTED: "未完成执行",
-    PENDING_REVIEW: "尚未确认",
+    NOT_EXECUTED: "未执行",
+    PENDING_REVIEW: "业务结论未确认",
     REVIEWED: "已人工复核",
   };
   return summaries[status] ?? "尚无明确结论";

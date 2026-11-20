@@ -6,7 +6,7 @@
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
     "moduleResolution": "Bundler",
-    "baseUrl": ".", //TODO
+    "baseUrl": ".", // TODO: 待修复的bug TS7 后面不再支持
     "paths": {
       "@/*": ["src/*"]
     },

@@ -61,7 +61,7 @@ const { filters, page, pageSize, total, items, loading, error } = list;
 
 const statusOptions = statusFilterOptions(
   ["READY", "RUNNING", "WAITING_FIELD_REVIEW", "WAITING_REVIEW", "BLOCKED", "COMPLETED", "FAILED"],
-  { COMPLETED: "执行已结束" },
+  { COMPLETED: "执行已结束", FAILED: "执行失败（历史状态）", WAITING_REVIEW: "等待人工复核（历史状态）" },
 );
 
 const selectedRows = ref<AuditTaskRow[]>([]);
@@ -414,6 +414,19 @@ async function loadFilterOptions(): Promise<void> {
           <StatusBadge :status="row.status" :label="row.status === 'COMPLETED' ? '执行已结束' : statusLabel(row.status)" />
         </template>
       </el-table-column>
+      <el-table-column label="待处理说明" min-width="280">
+        <template #default="{ row }">
+          <template v-if="row.status === 'BLOCKED' || row.status === 'FAILED'">
+            <div class="status-notes">{{ row.block_reason || "阻断原因未记录，请查看执行记录" }}</div>
+            <el-button link type="primary" @click="openTask(row, 'executions')">查看原因与恢复操作</el-button>
+          </template>
+          <span v-else-if="row.status === 'WAITING_FIELD_REVIEW'">核对字段后，点击确认并继续</span>
+          <span v-else-if="row.status === 'WAITING_REVIEW'">历史人工复核状态，请查看执行记录</span>
+          <span v-else-if="row.status === 'RUNNING'">正在执行，可查看执行进度</span>
+          <span v-else-if="row.status === 'READY'">上传所需材料后开始审核</span>
+          <span v-else class="text-hint">无待处理操作</span>
+        </template>
+      </el-table-column>
       <el-table-column label="创建时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
       </el-table-column>
@@ -496,6 +509,15 @@ async function loadFilterOptions(): Promise<void> {
 </template>
 
 <style scoped>
+.status-notes {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .audit-task-list {
   container: task-list / inline-size;
 }

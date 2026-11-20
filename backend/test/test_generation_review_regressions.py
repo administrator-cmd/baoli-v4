@@ -13,7 +13,7 @@ from app.common.exceptions import BusinessError
 from app.domain.materials.file_quality import check_file_size
 from app.domain.generation.assistant import ReviewTextRepair, apply_edits, apply_review_text_repairs, document_changes
 from app.domain.materials.material_precheck import PRECHECK_KEY
-from app.domain.generation.document import GenerationColumn, GenerationIssue, GenerationSource, mark_user_edits, normalize_business_codes
+from app.domain.generation.document import GenerationColumn, GenerationIssue, GenerationSource, collect_document_problems, mark_user_edits, normalize_business_codes
 from app.modules.audit.execution.service.commands import AuditExecutionCommandsService
 from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
 from app.modules.imports.generation.assistant_execution import GenerationAssistantExecution
@@ -141,14 +141,52 @@ class AssistantReviewRegressionTests(unittest.TestCase):
 
     def test_initial_review_format_error_does_not_regenerate_document(self):
         with patch("app.modules.imports.generation.service.llm.call_json", side_effect=[{}, {"problems": []}]) as llm:
-            result = GenerationLlmService()._review_document({}, document(), operation_no="op", attempt=0, reasoning_effort="low")
-            self.assertEqual(result, [])
+            result = GenerationLlmService()._review_document({}, document(), lambda _: [], operation_no="op", attempt=0, reasoning_effort="low")
+            self.assertEqual(result, (document(), []))
             self.assertEqual(llm.call_count, 2)
             self.assertEqual(llm.call_args_list[0].args[0]["document"], llm.call_args_list[1].args[0]["document"])
         with patch("app.modules.imports.generation.service.llm.call_json", return_value={}):
             with self.assertRaises(BusinessError) as caught:
-                GenerationLlmService()._review_document({}, document(), operation_no="op", attempt=0, reasoning_effort="low")
+                GenerationLlmService()._review_document({}, document(), lambda _: [], operation_no="op", attempt=0, reasoning_effort="low")
             self.assertEqual(caught.exception.code, "LLM_REVIEW_INVALID")
+
+    def test_review_delivers_answerable_question_without_rewriting_business_cells(self):
+        draft = document()
+        source = draft.sheets[0].rows[1].source.model_dump()
+        question = {"issue_id": "Q1", "title": "违约金按什么标准计算？", "affected_row_ids": ["r1"], "source": source}
+        check = lambda doc: collect_document_problems(doc, {("原始规则", 2)})
+        with patch("app.modules.imports.generation.service.llm.call_json", return_value={"problems": [], "new_questions": [question]}) as model:
+            result = GenerationLlmService()._repair_document({}, draft, check, operation_no="op", reasoning_effort="low")
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(result.sheets, draft.sheets)
+        self.assertEqual([(q.title, q.status) for q in result.issues], [(question["title"], "OPEN")])
+        self.assertEqual(draft.issues, [])
+        question["affected_row_ids"] = ["missing"]
+        with patch("app.modules.imports.generation.service.llm.call_json", return_value={"problems": [], "new_questions": [question]}):
+            with self.assertRaises(BusinessError) as failure:
+                GenerationLlmService()._repair_document({}, draft, check, operation_no="op", reasoning_effort="low")
+            self.assertEqual(failure.exception.code, "LLM_REVIEW_INVALID")
+
+    def test_merge_during_initial_review_keeps_one_answerable_issue_and_both_sources(self):
+        draft = document().model_dump(mode="json")
+        inventory = {"schema_version": draft["schema_version"], "requirements": [], "unclear_items": []}
+        for index in (1, 2):
+            source = {"kind": "ORIGINAL_EXCEL", "origin": {"sheet_name": "原始规则", "row_no": index + 1}}
+            issue_id = f"U-{index}"
+            inventory["unclear_items"].append({"unclear_id": issue_id, "text": "违约金计算口径？", "source": source})
+            draft["issues"].append({"issue_id": issue_id, "title": "违约金计算口径？", "source": source, "affected_row_ids": ["r1"]})
+        replies = [inventory, draft, {"problems": ["重复询问同一计算口径"]},
+                   {"kind": "EDIT", "message": "合并重复问题", "issue_merges": [{"keep_id": "U-1", "duplicate_ids": ["U-2"]}]},
+                   {"problems": []}]
+        service = GenerationLlmService()
+        with patch.object(service, "_workbook_payload", return_value=([], {("原始规则", 2), ("原始规则", 3)})), patch(
+            "app.modules.imports.generation.service.llm.call_json", side_effect=replies,
+        ):
+            saved = service.build_document(SimpleNamespace(sheets=[]), business_background="", generation_requirements="", operation_no="op", job_no="test")
+        issue, = saved["issues"]
+        self.assertEqual(issue["status"], "OPEN")
+        self.assertEqual(set(issue["source_unclear_ids"]), {"U-1", "U-2"})
+        self.assertEqual(issue["source"]["origin"]["related_rows"], [{"sheet_name": "原始规则", "row_no": 3}])
 
     def test_reordered_rows_allow_related_issue_text_repair(self):
         previous = document()

@@ -18,15 +18,29 @@ RULE_EXECUTION 只关联执行记录，系统不提供业务节点编排。文�
 
 上传限制分别由 `BAOLI_MAX_RULEBOOK_BYTES`（默认 30 MiB）和 `BAOLI_MAX_DOCUMENT_BYTES`（默认 128 MiB）配置。页面从 `GET /api/system/upload-policy` 读取策略，后端写入时最终校验；外部服务和反向代理的限制独立且未经确认。
 
-## 外部依赖
+## 文件定位
+
+`data` 按业务对象组织。目录名由英文用途、UTC 创建时间（`YYYYMMDDTHHMMSSZ`）和完整业务编号组成，可按页面或日志中的编号查找。
+
+| 模块 | 定位文件 |
+| --- | --- |
+| `rulebook_generations/generation_<时间>_<GEN编号>` | 上传原件与 `exports/v0001/` 等版本导出 |
+| `rulebook_imports/import_<时间>_<IMP编号>` | 上传原件、`checkpoints/initial.json`、`operations/parse_<时间>_<OP编号>/llm_responses/` 下的各阶段响应 |
+| `audit_tasks/audit_<时间>_<TASK编号>` | `materials/<材料编号>/<上传编号>/` 中的原件及其 `artifacts/`，`values/current/` 中的业务取值，`diagnostics/` 中的执行诊断 |
+| `report_templates/template_<时间>_<模板编号>` | 报告模板原件；任务报告正文保存在 `audit_report`，下载时由正文生成 |
+
+按操作编号查询 `GET /api/operations/{operation_no}`，`response_files` 按写入顺序给出阶段、路径与时间。`0010_operation_llm_response` 只升级结构，不搬迁历史目录或回填响应，采用新布局时使用空验证数据集。
+
+## 外部服务配置
 
 | 配置 | 用途 |
 | --- | --- |
-| `BAOLI_LLM_BASEURL`、`BAOLI_LLM_APIKEY`、`BAOLI_LLM_MODEL_NAME` | 规则转换、字段抽取、业务计算和校验 |
+| `BAOLI_LLM_BASEURL`、`BAOLI_LLM_MODEL_NAME`、`BAOLI_LLM_APIKEY`（可选） | 规则转换、字段抽取、业务计算和校验；密钥留空时不发送认证头 |
 | `BAOLI_SERVICE_8018_URL` | 材料类型目录与核对 |
 | `BAOLI_SERVICE_8010_URL` | 文件处理 |
 | `BAOLI_SEAL_SERVICE_URL` | 印章识别 |
 | `BAOLI_OCR_SERVICE_URL`、`BAOLI_OCR_TOKEN`、`BAOLI_OCR_MODEL` | OCR 提交与查询 |
+| `BAOLI_OCR_MAX_CONCURRENT_JOBS` | 每个后端进程共享的 OCR 并发上限，默认 5 |
 
 外部服务可暂不配置以查看已有任务和系统状态；依赖该服务的操作会明确报错。“已配置，未验证”仅表示配置齐备，不表示服务已连通。OCR 提交状态未知时不会自动重发。
 
@@ -64,7 +78,7 @@ npm run dev
 ## 当前边界
 
 - 导入使用两轮 LLM，请求失败不以不完整结果替代；第二轮可按检查点重试。任务冻结配置，后续场景或方案修改不影响已有任务。
-- 业务取值采用格式版本 6 的任务四表 CSV。字段原文依据直接保存在 `values.csv` 的“原文依据”JSON 列；规则在 `rule_results.csv` 同列保存直接引文或当时字段/规则记录的引用，不复制完整上游证据。引用对象只含上传版本、产物、原文和可选字段属性，原文来源随任务详情返回；没有独立 Evidence 表、证据编号或查询接口。数据库保留索引、状态、结论摘要、执行诊断和报告；审核成功的原始模型响应不落盘，结论校验失败的响应写入任务诊断目录并记入 `verdict_errors`。四表已按数据库与 CSV 的单一来源原则收缩：数据库状态副本、只写不读的上下文列和重复结论列已删除。
+- 新审核任务的业务取值采用格式版本 7：`values/current/values.csv` 只存可复用的当前字段值和计算结果，字段原文、候选和历史取值保存在 `values/history.json`。规则业务结论与引用通过原结果记录返回，不复制完整上游证据。版本 6 的旧任务继续使用四表；参见 [任务取值 CSV 维护说明](docs/任务取值CSV维护说明.md)。
 - 删除证据表的结构已包含在当前 `schema.sql` 中，新库执行 `schema.sql` 后 stamp head 即可；后续变更走 Alembic 迁移并同步更新 `schema.sql`。代码不自动建表或迁移旧证据。旧版任务 CSV 不能直接按版本 6 读取，未对真实任务文件作转换。
 - 固定审核图无持久化 checkpoint；支持按已提交规则结果继续中断批次，被中断的单条从头执行。重新尝试则创建新批次、全部重跑；两者语义见[恢复与继续执行](docs/规则库与审核执行契约.md#恢复与继续执行)。
 - 符合条件的字段抽取可批量执行，其他规则按依赖计划串行运行。`BAOLI_LLM_TOOL_MAX_ROUNDS` 默认 12，0 关闭轮次限制；规则数量和模型轮次不占用图步数。

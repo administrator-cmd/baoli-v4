@@ -1,4 +1,4 @@
-"""字段和规则的原文依据随业务取值保存于 CSV，不另建证据记录。"""
+"""校验并展开字段与规则的原文依据，不另建证据记录。"""
 from __future__ import annotations
 
 from typing import Any
@@ -258,7 +258,7 @@ class AuditFieldEvidenceService:
     def save_artifact_references(self, task: AuditTask, execution: NodeExecution, rule: dict[str, Any],
                                  verdict: dict[str, Any] | None,
                                  output_values: list[tuple[str, int, dict[str, Any]]]) -> tuple[list[tuple[str, int, dict[str, Any]]], list[dict[str, Any]]]:
-        """抽取原文写字段 CSV；规则只引用字段版本，不复制字段或上游规则的原文。"""
+        """抽取原文随字段版本保存；规则只引用字段版本，不复制上游原文。"""
         entries = {(kind, record_id): dict(payload) for kind, record_id, payload in output_values}
         field_outputs = {}
         for (kind, record_id), payload in entries.items():

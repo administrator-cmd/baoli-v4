@@ -6,7 +6,8 @@ from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.modules.plan.config.model import PlanField, PlanRule
+from app.modules.plan.config.model import PlanField, PlanRule, PlanSection
+from app.modules.plan.config.service.configuration import _retain_submitted_extensions
 from app.services.shared import configuration as config_store
 
 
@@ -64,6 +65,25 @@ class ConfigurationUpdateTests(unittest.TestCase):
         self.assertFalse(self.field.enabled)
         self.assertEqual(self.field.data["custom"], {"note": "更新"})
         self.assertEqual(self.field.model, {"name": "业务元数据"})
+
+    def test_submitted_fixed_section_status_is_not_misrouted_to_extensions(self):
+        extensions = {"PlanSection": {"s1": {"legacy": "保留"}}, "PlanField": {"f1": {}}}
+
+        _retain_submitted_extensions(
+            extensions,
+            [{"section_key": "s1", "config_status": "PENDING", "business_context": "章节说明"}],
+            PlanSection,
+            "section_key",
+        )
+        _retain_submitted_extensions(
+            extensions,
+            [{"field_key": "f1", "config_status": "PENDING"}],
+            PlanField,
+            "field_key",
+        )
+
+        self.assertEqual(extensions["PlanSection"]["s1"], {"legacy": "保留", "business_context": "章节说明"})
+        self.assertEqual(extensions["PlanField"]["f1"]["config_status"], "PENDING")
 
     def test_generated_rule_sync_is_separate_from_ordinary_rule_editing(self):
         rule = config_store.ConfigItem(self.owner, "rules", {"rule_key": "old", "custom": "保留"}, PlanRule)

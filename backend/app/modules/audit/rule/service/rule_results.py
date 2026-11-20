@@ -14,7 +14,7 @@ from app.modules.audit.rule.crud import AuditRuleCRUD
 from app.modules.audit.rule.model import RuleResult
 from app.modules.audit.task.model import AuditTask
 
-# 诊断里的输入摘要只保留身份、状态与证据引用；业务取值以任务 CSV 为准，
+# 诊断里的输入摘要只保留身份、状态与证据引用；业务取值按当时的事实版本回读，
 # 不在数据库里重复保存一份。
 _INPUT_DIAGNOSTIC_KEYS = (
     "field_key", "material_key", "value_type", "unit", "currency", "material_state",
@@ -54,7 +54,7 @@ class AuditRuleResultsService:
     def _diagnostic_inputs(self, inputs: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         """诊断只保存身份与来源记录 id。
 
-        业务取值以任务 CSV 为准，不在每条结果里重复保存；展示时按这些 id 读取当时的版本。
+        不在每条结果的输入诊断里重复保存取值；展示时按这些 id 读取当时的版本。
         """
         return [
             {key: item.get(key) for key in _INPUT_DIAGNOSTIC_KEYS}
@@ -107,7 +107,7 @@ class AuditRuleResultsService:
     ) -> RuleResult:
         """保存本条规则的业务结论与执行诊断。
 
-        业务结论与引用工具的比较/逐材料依据写进任务 CSV；表里只留身份、状态与诊断。
+        业务结论与逐材料依据由统一取值服务保存；诊断与业务载荷分别读取。
         完整工具内容只在内存里用，不落库。
         """
         record = AuditRuleCRUD(self.db).by_execution_rule(execution.id, rule["rule_key"])
@@ -176,11 +176,11 @@ class AuditRuleResultsService:
                 result_json=diagnostics,
             )
             AuditRuleCRUD(self.db).add(record)
-        # 依据随业务值写 CSV。字段原文只写一次；规则引用被实际使用的字段/上游结果版本。
+        # 字段原文只写一次；规则引用被实际使用的字段或上游结果版本。
         output_values, payload["evidence"] = AuditFieldEvidenceService(self.db).save_artifact_references(
              task, execution, rule, verdict, list(output_values or []),
         )
-        # 所有引用核对成功后再合并产出与结论，一条规则只改写一次四表。
+        # 所有引用核对成功后再保存产出与结论。
         task_value_service.AuditFieldValueStoreService(self.db).append_values(task, [*(output_values or []), (task_value_service.RECORD_RULE_RESULT, record.id, payload)]
         )
         return record

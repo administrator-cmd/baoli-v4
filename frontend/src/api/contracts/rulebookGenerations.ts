@@ -50,6 +50,7 @@ export interface GenerationSheet {
   business_code_scope?: "DOCUMENT" | "SHEET";
 }
 export interface GenerationIssue {
+  source_unclear_ids?: string[];
   issue_id: string;
   title: string;
   detail: string;
@@ -123,12 +124,22 @@ export interface GenerationRetryResult {
   reused: boolean;
 }
 
+export interface GenerationIssueAnswer {
+  issue_id: string;
+  answer: string;
+}
+
+export type GenerationMessageSubmission =
+  | { message: string; issueId?: string; issueAnswers?: never }
+  | { message?: never; issueId?: never; issueAnswers: GenerationIssueAnswer[] };
+
 export interface GenerationMessage {
   id: number;
   role: "USER" | "ASSISTANT";
   content: string;
   issue_id?: string | null;
   answer?: string | null;
+  issue_answers?: GenerationIssueAnswer[] | null;
   revision: number;
   created_at: string;
   operation: OperationAccepted;

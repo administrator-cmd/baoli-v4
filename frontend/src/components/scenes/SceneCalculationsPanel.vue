@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import type { DraftCalculationItem, DraftFieldItem, JsonValue } from "@/api/contracts";
 import { deleteDraftCalculation } from "@/api/scenes";
-import SceneCalculationEditor from "@/components/scenes/SceneCalculationEditor.vue";
+import { useLocalPagination } from "@/composables/useLocalPagination";
+import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
 import { sourceSheetLabel, useRuleSourceFilter } from "@/composables/useRuleSourceFilter";
 import { compareNaturalLabels } from "@/utils/naturalSort";
 
 const props = defineProps<{ scenarioCode: string; items: DraftCalculationItem[]; fields: DraftFieldItem[] }>();
 const emit = defineEmits<{ changed: [] }>();
-const editorVisible = ref(false);
-const editingItem = ref<DraftCalculationItem | null>(null);
+const router = useRouter();
 const detailItem = ref<DraftCalculationItem | null>(null);
 const deleting = ref(false);
 const search = ref("");
@@ -21,16 +22,24 @@ const filteredCalculations = computed(() => props.items.filter((item) => {
   if (!matchesSourceSheet(item)) return false;
   return !keyword.value || `${item.name ?? ""}\n${item.rule_code ?? ""}`.toLowerCase().includes(keyword.value);
 }).sort((left, right) => compareNaturalLabels(left.rule_code, right.rule_code)));
+const { page, pageSize, pageItems: pagedCalculations } = useLocalPagination(() => filteredCalculations.value);
+
+watch([selectedSheet, search], () => {
+  page.value = 1;
+});
+
 const detailParameters = computed(() => (detailItem.value?.definition.parameters ?? []) as Record<string, JsonValue>[]);
 
-function resetFilters(): void {
-  search.value = "";
-  selectedSheet.value = "";
-}
-
 function openEditor(item: DraftCalculationItem | null): void {
-  editingItem.value = item;
-  editorVisible.value = true;
+  if (!item) {
+    void router.push({ name: "scene-calculation-new", params: { scenarioCode: props.scenarioCode } });
+    return;
+  }
+  if (!item.rule_code) {
+    ElMessage.error("计算规则缺少编号，无法编辑");
+    return;
+  }
+  void router.push({ name: "scene-calculation-edit", params: { scenarioCode: props.scenarioCode, ruleCode: item.rule_code } });
 }
 
 function statusLabel(item: DraftCalculationItem): string {
@@ -101,9 +110,6 @@ async function remove(item: DraftCalculationItem): Promise<void> {
       <el-form-item label="规则搜索">
         <el-input v-model="search" clearable placeholder="规则名称或业务编号" style="width: 220px" />
       </el-form-item>
-      <el-form-item>
-        <el-button @click="resetFilters">重置</el-button>
-      </el-form-item>
     </el-form>
 
     <div class="app-toolbar">
@@ -113,7 +119,7 @@ async function remove(item: DraftCalculationItem): Promise<void> {
       </div>
     </div>
 
-    <el-table :data="filteredCalculations" border stripe class="management-table" :empty-text="items.length ? '未找到匹配的规则' : '当前配置没有计算规则'">
+    <el-table :data="pagedCalculations" border stripe class="management-table" :empty-text="items.length ? '未找到匹配的规则' : '当前配置没有计算规则'">
       <el-table-column prop="rule_code" label="规则编号" width="140" show-overflow-tooltip align="center" />
       <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
       <el-table-column label="来源工作表" width="204" show-overflow-tooltip>
@@ -126,7 +132,7 @@ async function remove(item: DraftCalculationItem): Promise<void> {
       <el-table-column prop="result_code" label="结果编号" width="140" show-overflow-tooltip align="center" />
       <el-table-column prop="unit" label="单位" width="64" align="center" />
       <el-table-column prop="currency" label="币种" width="64" align="center" />
-      <el-table-column label="状态" width="140" align="center"><template #default="{ row }">{{ statusLabel(row) }}</template></el-table-column>
+      <el-table-column label="配置状态" width="160" align="center"><template #default="{ row }">{{ statusLabel(row) }}</template></el-table-column>
       <el-table-column label="操作" width="160" class-name="table-actions" fixed="right" align="center">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="detailItem = row">详情</el-button>
@@ -136,8 +142,16 @@ async function remove(item: DraftCalculationItem): Promise<void> {
       </el-table-column>
     </el-table>
 
-    <SceneCalculationEditor v-model="editorVisible" :scenario-code="scenarioCode" :item="editingItem"
-      :items="items" :fields="fields" @saved="emit('changed')" />
+    <div v-if="filteredCalculations.length" class="app-pagination">
+      <el-pagination
+        v-model:current-page="page"
+        v-model:page-size="pageSize"
+        :total="filteredCalculations.length"
+        :page-sizes="PAGE_SIZE_OPTIONS"
+        layout="total, sizes, prev, pager, next, jumper"
+        background
+      />
+    </div>
 
     <el-drawer :model-value="Boolean(detailItem)" title="计算规则详情" size="min(680px, 96vw)" @close="detailItem = null">
       <template v-if="detailItem">
@@ -147,7 +161,7 @@ async function remove(item: DraftCalculationItem): Promise<void> {
           <el-descriptions-item label="业务编号">{{ displayValue(detailItem.definition.source_id) }}</el-descriptions-item>
           <el-descriptions-item label="结果标识">{{ detailItem.result_code || '—' }}</el-descriptions-item>
           <el-descriptions-item label="来源工作表">{{ sourceSheetLabel(detailItem.origin) }}</el-descriptions-item>
-          <el-descriptions-item label="启用状态">{{ statusLabel(detailItem) }}</el-descriptions-item>
+          <el-descriptions-item label="配置状态">{{ statusLabel(detailItem) }}</el-descriptions-item>
           <el-descriptions-item label="计算方法" :span="2"><div class="detail-text">{{ detailItem.formula || '—' }}</div></el-descriptions-item>
           <el-descriptions-item label="业务要求" :span="2"><div class="detail-text">{{ detailItem.requirement || '—' }}</div></el-descriptions-item>
           <el-descriptions-item label="结果类型">{{ displayValue(detailItem.definition.result_type) }}</el-descriptions-item>

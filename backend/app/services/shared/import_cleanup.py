@@ -1,7 +1,6 @@
 """规则库导入作业及其文件产物的级联清理。"""
 
 import logging
-import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
@@ -15,22 +14,22 @@ from app.modules.imports.job.model import ImportJob
 from app.modules.scenario.template.service.crud import ScenarioTemplateCRUD
 from app.modules.system.operation.crud import SystemOperationCRUD
 from app.modules.system.operation.service.operation_types import OBJECT_IMPORT_JOB
+from app.services.shared.directory_cleanup import remove_directory_tree
 from app.services.shared.storage import resolve_storage_path
 
 logger = logging.getLogger(__name__)
 
-def _stage_tree(relative_path: str) -> tuple[Path, Path] | None:
+def stage_tree(source: Path) -> tuple[Path, Path] | None:
     """把作业目录改名到同根的暂存位置；不存在时返回 None。
 
-    改名是可恢复的删除动作：数据库提交失败时能改回原名，不依赖已删除文件的备份。
+    调用方传入已校验的绝对路径。数据库提交失败时能改回原名，不依赖文件备份。
     """
-    source = resolve_storage_path(relative_path)
     if not source.exists():
         return None
     if not source.is_dir():
         raise BusinessError(
             "STORAGE_PATH_INVALID", "待清理的业务存储路径不是目录",
-            status_code=500, details={"path": relative_path},
+            status_code=500,
         )
     staged = source.with_name(f".deleting-{source.name}-{uuid4().hex}")
     source.rename(staged)
@@ -44,19 +43,22 @@ def restore_staged_trees(staged: Sequence[tuple[Path, Path]]) -> None:
             temporary.rename(original)
 
 
-def discard_staged_trees(staged: Sequence[tuple[Path, Path]], *, object_no: str) -> None:
+def discard_staged_trees(
+    staged: Sequence[tuple[Path, Path]], *, object_no: str,
+    error_code: str = "IMPORT_FILE_CLEANUP_FAILED", object_label: str = "导入作业",
+) -> None:
     """提交成功后删除暂存目录；清理失败区分「数据已删除」与「剩余目录待清理」。"""
     remaining = []
     for _original, temporary in staged:
         try:
-            shutil.rmtree(temporary)
+            remove_directory_tree(temporary)
         except OSError:
             logger.exception("业务数据已删除，但文件清理失败 object_no=%s path=%s", object_no, temporary)
             remaining.append(str(temporary))
     if remaining:
         raise BusinessError(
-            "IMPORT_FILE_CLEANUP_FAILED",
-            "导入作业数据已删除，但仍有目录未清理，请按剩余路径排查",
+            error_code,
+            f"{object_label}数据已删除，但仍有目录未清理，请按剩余路径排查",
             status_code=500,
             details={"object_no": object_no, "deleted": True, "remaining_directories": remaining},
         )
@@ -96,11 +98,7 @@ def delete_import_job_entities(db: Session, jobs: Sequence[ImportJob]) -> list[t
     staged: list[tuple[Path, Path]] = []
     try:
         for job in jobs:
-            item = _stage_tree(f"imports/{job.job_no}")
-            if item is not None:
-                staged.append(item)
-        for operation in operations:
-            item = _stage_tree(f"llm_responses/{operation.operation_no}")
+            item = stage_tree(resolve_storage_path(Path(job.source_path).parent.as_posix()))
             if item is not None:
                 staged.append(item)
 

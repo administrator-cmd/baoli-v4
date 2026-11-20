@@ -6,7 +6,9 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type {
   GenerationDocument,
   GenerationExport,
+  GenerationIssueAnswer,
   GenerationJob,
+  GenerationMessageSubmission,
   GenerationRevision,
   GenerationStatus,
 } from "@/api/contracts";
@@ -26,7 +28,7 @@ import {
 } from "@/api/rulebookGenerations";
 import { listTemplates, type TemplateOption } from "@/api/imports";
 import { ApiError, isOperationActive, operationIdempotencyKey } from "@/api/http";
-import { formatDate } from "@/constants/labels";
+import { formatDate, operationStatusLabel } from "@/constants/labels";
 import { useOperationTracker } from "@/composables/useOperationTracker";
 import { useRequestRunner } from "@/composables/useRequestRunner";
 import { useMediaQuery } from "@/composables/useMediaQuery";
@@ -94,7 +96,7 @@ const assistantSubmitting = ref(false);
 const assistantDialog = ref(false);
 const assistantInstruction = ref("");
 const assistantRefresh = ref(0);
-const resultSummary = ref("");
+const followUp = ref<{ question: string; issueId?: string | null } | null>(null);
 const restoring = ref(false);
 const pendingReload = ref(false);
 const documentBusy = computed(() => saving.value || exporting.value || preparingImport.value || importing.value
@@ -117,7 +119,7 @@ const displayStatus = computed<GenerationStatus>(() => {
 });
 const displayStatusMessage = computed(() => {
   if (displayStatus.value === "PENDING") return isRevising.value ? "修改要求已受理，等待 AI 处理" : "AI 编制已受理，等待后台执行";
-  if (displayStatus.value === "RUNNING") return "AI 正在整理业务规则库，离开页面后仍会继续";
+  if (displayStatus.value === "RUNNING") return isRevising.value ? "AI 正在处理本次修改要求，离开页面后仍会继续" : "AI 正在整理业务规则库，离开页面后仍会继续";
   return job.value?.status_message ?? "";
 });
 const counts = computed(() => generationCounts(draft.value));
@@ -132,7 +134,7 @@ let contextVersion = 0;
 let editVersion = 0;
 /** 尚未确认受理的幂等标识：响应丢失后的重发复用它，已确认或明确拒绝后清空。 */
 let generationAttemptKey: string | null = null;
-let assistantAttempt: { key: string; message: string; revision: number; issueId?: string } | null = null;
+let assistantAttempt: { key: string; signature: string; revision: number } | null = null;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -158,7 +160,7 @@ function trackOperation(value: NonNullable<GenerationJob["latest_operation"]>): 
 
 function applyJob(payload: GenerationJob, replaceDraft: boolean): void {
   if (job.value && payload.revision < job.value.revision) return;
-  if (payload.revision !== job.value?.revision) resultSummary.value = "";
+  if (payload.revision !== job.value?.revision) followUp.value = null;
   const firstDocument = !draft.value && payload.document;
   job.value = payload;
   assistantRefresh.value += 1;
@@ -168,7 +170,7 @@ function applyJob(payload: GenerationJob, replaceDraft: boolean): void {
     draftRevision.value = payload.document ? payload.revision : null;
     dirty.value = false;
   }
-  if (firstDocument) activeTab.value = "content";
+  if (firstDocument) activeTab.value = firstDocument.issues.some(issue => issue.status === "OPEN") ? "issues" : "content";
   if (activeTab.value === "issues" && !payload.document?.issues.length) activeTab.value = "content";
   if (!payload.document) activeTab.value = "files";
   const latest = payload.latest_operation;
@@ -212,9 +214,8 @@ async function loadJob(options: { replaceDraft?: boolean } = {}): Promise<void> 
       exports.value = items;
       if (revisions.status === "rejected") throw revisions.reason;
       const latestReply = chat.status === "fulfilled" ? chat.value.items[chat.value.items.length - 1] : null;
-      resultSummary.value = latestReply?.role === "ASSISTANT" && latestReply.revision === payload.revision && latestReply.operation.result?.reply_kind === "CLARIFY"
-        ? latestReply.content
-        : revisions.status === "fulfilled" ? revisions.value.find(item => item.revision === payload.revision)?.summary ?? "" : "";
+      followUp.value = latestReply?.role === "ASSISTANT" && latestReply.revision === payload.revision && latestReply.operation.result?.reply_kind === "CLARIFY"
+        ? { question: latestReply.content, issueId: latestReply.issue_id } : null;
       const requestedExport = typeof route.query.import_export === "string"
         ? route.query.import_export : "";
       if (requestedExport) {
@@ -308,7 +309,15 @@ async function generate(): Promise<void> {
   }
 }
 
-async function sendInstruction(message: string, issueId?: string): Promise<boolean> {
+function sendInstruction(message: string, issueId?: string): Promise<boolean> {
+  return sendAssistantMessage({ message, issueId });
+}
+
+function sendBatchAnswers(issueAnswers: GenerationIssueAnswer[]): Promise<boolean> {
+  return sendAssistantMessage({ issueAnswers });
+}
+
+async function sendAssistantMessage(submission: GenerationMessageSubmission): Promise<boolean> {
   if (!job.value?.document || readOnly.value) return false;
   const context = contextVersion;
   const targetJobNo = jobNo.value;
@@ -318,23 +327,24 @@ async function sendInstruction(message: string, issueId?: string): Promise<boole
     if (dirty.value && !await save()) return false;
     if (context !== contextVersion || !job.value) return false;
     const revision = job.value.revision;
-    const attempt = assistantAttempt?.message === message && assistantAttempt.revision === revision && assistantAttempt.issueId === issueId
-      ? assistantAttempt : { key: operationIdempotencyKey("generation-edit", targetJobNo), message, revision, issueId };
+    const signature = JSON.stringify(submission);
+    const attempt = assistantAttempt?.signature === signature && assistantAttempt.revision === revision
+      ? assistantAttempt : { key: operationIdempotencyKey("generation-edit", targetJobNo), signature, revision };
     assistantAttempt = attempt;
     let accepted = await sendGenerationMessage(targetJobNo, {
-      message: attempt.message, expectedRevision: attempt.revision, idempotencyKey: attempt.key, issueId: attempt.issueId,
+      ...submission, expectedRevision: attempt.revision, idempotencyKey: attempt.key,
     });
     if (context !== contextVersion) return false;
     if (accepted.reused && ["FAILED", "INTERRUPTED"].includes(accepted.status)) {
       const next = { ...attempt, key: operationIdempotencyKey("generation-edit", targetJobNo) };
       assistantAttempt = next;
       accepted = await sendGenerationMessage(targetJobNo, {
-        message: next.message, expectedRevision: next.revision, idempotencyKey: next.key, issueId: next.issueId,
+        ...submission, expectedRevision: next.revision, idempotencyKey: next.key,
       });
     }
     if (context !== contextVersion) return false;
     assistantAttempt = null;
-    if (!issueId && assistantInstruction.value.trim() === message) assistantInstruction.value = "";
+    if (!submission.issueId && assistantInstruction.value.trim() === submission.message) assistantInstruction.value = "";
     job.value.latest_operation = accepted;
     assistantRefresh.value += 1;
     trackOperation(accepted);
@@ -624,7 +634,7 @@ watch(jobNo, () => {
   assistantAttempt = null;
   assistantDialog.value = false;
   assistantInstruction.value = "";
-  resultSummary.value = "";
+  followUp.value = null;
   assistantSubmitting.value = false;
   restoring.value = false;
   resetTracking();
@@ -677,16 +687,19 @@ onBeforeRouteUpdate(confirmDiscard);
 
 <template>
   <div class="app-panel authoring-page">
-    <PageHeader title="AI 辅助编制规则库" :notes="job ? [job.source_filename, job.revision ? `已保存第 ${job.revision} 版` : '原始业务资料已上传'] : []" :busy="loading" @refresh="refresh">
-      <template #leading><BackButton label="返回规则库" @click="router.push({ name: 'rulebooks' })" /></template>
+    <PageHeader :title="draft?.title || 'AI 辅助编制规则库'" :notes="job ? [job.source_filename, job.revision ? `第 ${job.revision} 版` : '原始资料已保存'] : []" :busy="loading" @refresh="refresh">
+      <template #leading><BackButton label="返回规则库" @click="router.push({ name: 'rulebooks', query: { tab: 'generations' } })" /></template>
       <template #actions>
         <el-button v-if="job && !draft && job.can_generate && !job.can_retry" type="primary" :loading="generating || isGenerating" :disabled="loading || isGenerating" @click="generate">{{ isGenerating ? 'AI 编制中' : generateLabel }}</el-button>
         <template v-if="draft">
           <el-button v-if="dirty" :loading="saving" :disabled="readOnly" @click="save">保存修改</el-button>
-          <el-button v-if="job?.document_supported" type="primary" plain :disabled="loading" @click="assistantDialog = true">让 AI 修改</el-button>
-          <el-button type="primary" :loading="exporting" :disabled="readOnly || !hasContent" @click="downloadCurrent">{{ dirty ? '保存并下载 Excel' : '下载规则库 Excel' }}</el-button>
+          <el-button v-if="job?.document_supported" :disabled="loading || isGenerating" @click="assistantDialog = true">AI 修改</el-button>
+          <el-button type="primary" :loading="exporting" :disabled="readOnly || !hasContent" @click="downloadCurrent">{{ dirty ? '保存并下载' : '下载 Excel' }}</el-button>
           <el-button :disabled="readOnly || !hasContent" @click="useCurrentInScenario">用于场景</el-button>
-          <el-button :disabled="readOnly" @click="openTitle">修改名称与说明</el-button>
+          <el-dropdown trigger="click" @command="(command: string) => command === 'title' ? openTitle() : (activeTab = 'files')">
+            <el-button aria-label="更多规则库操作">更多</el-button>
+            <template #dropdown><el-dropdown-menu><el-dropdown-item command="title">修改名称与说明</el-dropdown-item><el-dropdown-item command="versions">版本与使用记录</el-dropdown-item></el-dropdown-menu></template>
+          </el-dropdown>
         </template>
       </template>
     </PageHeader>
@@ -698,23 +711,36 @@ onBeforeRouteUpdate(confirmDiscard);
       <el-steps v-if="!draft" :active="1" simple class="authoring-page__steps">
         <el-step title="上传业务资料" /><el-step title="AI 整理编制" /><el-step title="核对与导出" />
       </el-steps>
-      <div class="authoring-page__status">
-        <StatusBadge :status="displayStatus" :label="generationStatusLabel(displayStatus)" :tone="generationStatusTone(displayStatus)" />
-        <span v-if="displayStatus !== 'EDITABLE'">{{ displayStatusMessage }}</span>
-        <el-tag v-if="dirty" type="warning">有未保存修改</el-tag>
+      <div class="authoring-page__overview">
+        <div class="authoring-page__status">
+          <StatusBadge :status="displayStatus" :label="generationStatusLabel(displayStatus)" :tone="generationStatusTone(displayStatus)" />
+          <span v-if="!['EDITABLE', 'FAILED'].includes(displayStatus)">{{ displayStatusMessage }}</span>
+          <el-tag v-if="dirty" type="warning">有未保存修改</el-tag>
+        </div>
+        <div v-if="draft" class="authoring-page__metrics">
+          <button type="button" @click="activeTab = 'content'"><strong>{{ counts.sheets }}</strong><span>张业务表</span></button>
+          <button type="button" @click="activeTab = 'content'"><strong>{{ counts.entries }}</strong><span>条业务内容</span></button>
+          <button type="button" :disabled="!draft.issues.length" :class="{ 'is-attention': counts.openIssues }" @click="activeTab = 'issues'"><strong>{{ counts.openIssues }}</strong><span>项待补充</span></button>
+          <span class="authoring-page__revision"><strong>第 {{ job.revision }} 版</strong><small>{{ dirty ? '有修改尚未保存' : '当前版本' }}</small></span>
+        </div>
       </div>
       <div v-if="job.can_retry && !draft && !isGenerating" class="authoring-page__recovery">
         <div class="authoring-page__recovery-copy">
-          <strong>可使用已上传的资料重新编制</strong>
-          <p>无需重新上传，沿用原 Excel、业务背景和编制要求，重新执行完整编制流程。</p>
-          <p v-if="job.retry_requires_new_job">本次使用更新后的编制流程，自动打开新记录，原记录保留。</p>
+          <strong>可使用原资料重新编制</strong>
+          <p>沿用原 Excel、业务背景和编制要求，从头编制，无需重新上传。</p>
+          <p v-if="job.retry_requires_new_job">重试会沿用原 Excel 和已填要求，打开对应的编制记录。原记录保留。</p>
         </div>
         <div class="authoring-page__recovery-actions">
           <el-button :disabled="generating || loading" @click="router.push({ name: 'rulebook-generate' })">更换 Excel</el-button>
           <el-button type="primary" :loading="generating" :disabled="loading" @click="generate">{{ generateLabel }}</el-button>
         </div>
       </div>
-      <OperationPanel v-if="displayOperation && (!draft || isGenerating || (isRevising && displayOperation.status !== 'SUCCEEDED'))" compact :operation="displayOperation" :watching="watching" :failure-message="generationAssistantFailureMessage(displayOperation)" :label="isRevising ? 'AI 修改规则库' : 'AI 编制规则库'" eyebrow="处理进度" @requery="requery" />
+      <OperationPanel v-if="displayOperation && (!draft || displayOperation.status !== 'SUCCEEDED')" compact :operation="displayOperation" :watching="watching" :failure-message="generationAssistantFailureMessage(displayOperation)" :label="isRevising ? '最近 AI 操作：修改规则库' : '最近 AI 操作：编制规则库'" @requery="requery" />
+      <div v-else-if="displayOperation" class="authoring-page__status">
+        <span>最近 AI 操作：{{ isRevising ? '修改规则库' : '编制规则库' }}</span>
+        <StatusBadge :status="displayOperation.status" :label="operationStatusLabel(displayOperation.status)" />
+        <time v-if="displayOperation.finished_at" :datetime="displayOperation.finished_at">{{ formatDate(displayOperation.finished_at) }}</time>
+      </div>
 
       <el-alert v-if="!job.document_supported" class="block-gap" type="info" :closable="false" show-icon title="此记录来自之前的编制格式">
         这份历史结果按系统配置组织，原始文件和已有下载文件仍保留。新的 AI 编制会生成供业务人员阅读和修改的规则库。
@@ -725,14 +751,9 @@ onBeforeRouteUpdate(confirmDiscard);
       </el-alert>
 
       <template v-if="draft">
-        <div class="authoring-page__heading">
-          <h2>{{ draft.title }}</h2>
-        </div>
-        <div class="authoring-page__summary">
-          <button type="button" @click="activeTab = 'content'"><strong>{{ counts.sheets }}</strong> 张业务表 · <strong>{{ counts.entries }}</strong> 条内容</button>
-          <button v-if="counts.openIssues" type="button" class="authoring-page__attention" @click="activeTab = 'issues'"><strong>{{ counts.openIssues }}</strong> 项需要补充</button>
-        </div>
-        <p v-if="resultSummary" class="authoring-page__result">{{ resultSummary }}</p>
+        <div v-if="followUp && !followUp.issueId" class="authoring-page__result">{{ followUp.question }} <el-button link type="primary" @click="assistantDialog = true">回答 AI</el-button></div>
+        <div v-else-if="counts.openIssues && activeTab !== 'issues'" class="authoring-page__result">还有 {{ counts.openIssues }} 项业务口径需要确认。 <el-button link type="primary" @click="activeTab = 'issues'">去确认</el-button></div>
+        <p v-else-if="hasContent && !counts.openIssues" class="authoring-page__result">业务内容已整理，可下载 Excel 或用于场景导入。</p>
       </template>
 
       <div class="authoring-page__workspace">
@@ -740,10 +761,10 @@ onBeforeRouteUpdate(confirmDiscard);
         <el-tab-pane v-if="draft" label="规则库内容" name="content">
           <GenerationWorkbookPanel :key="jobNo" :document="draft" :refresh-token="draftVersion" :disabled="readOnly" @change="updateDocument" />
         </el-tab-pane>
-        <el-tab-pane v-if="draft?.issues.length" :label="counts.openIssues ? `需要你补充（${counts.openIssues}）` : '补充记录'" name="issues">
-          <GenerationIssuesPanel :key="jobNo" :document="draft" :disabled="readOnly" :error-message="failure?.message" :submit-answer="sendInstruction" />
+        <el-tab-pane v-if="draft?.issues.length" :label="counts.openIssues ? `待补充（${counts.openIssues}）` : '已明确事项'" name="issues">
+          <GenerationIssuesPanel :key="jobNo" :document="draft" :disabled="readOnly" :error-message="failure?.message" :follow-up="followUp" :submit-answer="sendInstruction" :submit-batch="sendBatchAnswers" />
         </el-tab-pane>
-        <el-tab-pane label="版本与使用记录" name="files">
+        <el-tab-pane label="版本记录" name="files">
           <el-table :data="versionRows" border stripe class="management-table" empty-text="暂无已保存版本">
             <el-table-column label="版本" width="110"><template #default="{ row }">第 {{ row.revision }} 版 <el-tag v-if="row.revision === job.revision && !dirty" size="small">当前</el-tag></template></el-table-column>
             <el-table-column prop="filename" label="规则库文件" min-width="240" show-overflow-tooltip />
@@ -767,12 +788,13 @@ onBeforeRouteUpdate(confirmDiscard);
       </div>
     </template>
 
-    <el-dialog v-model="assistantDialog" title="AI 编制助手" width="min(1040px, calc(100vw - 32px))" top="5vh" destroy-on-close :close-on-click-modal="false">
+    <el-drawer v-model="assistantDialog" direction="rtl" size="min(520px, 100vw)" destroy-on-close :with-header="false" :close-on-click-modal="false" class="authoring-page__assistant-drawer">
+      <div class="authoring-page__assistant-drawer-head"><div><span>规则库工作台 · AI 助手</span><strong>{{ draft?.title || 'AI 编制助手' }}</strong></div><el-button circle aria-label="关闭 AI 助手" @click="assistantDialog = false">×</el-button></div>
       <div class="authoring-page__assistant-content">
         <FailureNotice :error="assistantDialog ? failure : null" @dismiss="clear" />
-        <GenerationAssistantPanel v-if="draft && job?.document_supported" v-model="assistantInstruction" :job-no="jobNo" :revision="job.revision" :refresh-token="assistantRefresh" :disabled="readOnly" :busy="assistantSubmitting || (isRevising && isGenerating)" @send="sendInstruction" @download="downloadRevision" @restore="restoreRevision" />
+        <GenerationAssistantPanel v-if="draft && job?.document_supported" v-model="assistantInstruction" :job-no="jobNo" :revision="job.revision" :refresh-token="assistantRefresh" :disabled="readOnly" :busy="assistantSubmitting || (isRevising && isGenerating)" @send="sendInstruction" @retry-batch="sendBatchAnswers" @download="downloadRevision" @restore="restoreRevision" />
       </div>
-    </el-dialog>
+    </el-drawer>
     <el-dialog v-model="titleDialog" title="规则库名称与说明" width="min(760px, 94vw)" destroy-on-close :close-on-click-modal="false">
       <el-form label-position="top" :disabled="readOnly">
         <el-form-item label="规则库名称" required><el-input v-model="titleForm.title" /></el-form-item>
@@ -800,26 +822,42 @@ onBeforeRouteUpdate(confirmDiscard);
 </template>
 
 <style scoped>
-.authoring-page__steps { margin-bottom: 20px; }
-.authoring-page__status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; color: var(--el-text-color-secondary); }
-.authoring-page__recovery { display: flex; align-items: center; flex-wrap: wrap; gap: 16px 24px; margin-bottom: 20px; padding: 16px 20px; border: 1px solid var(--el-border-color-light); border-radius: var(--el-border-radius-base); background: var(--el-fill-color-light); }
+.authoring-page { --authoring-ink: #1b2c3b; --authoring-muted: #788794; --authoring-line: #e8edf0; padding: 20px 24px 26px; }
+.authoring-page :deep(.page-header-wrap) { padding-bottom: 14px; border-bottom: 1px solid var(--authoring-line); }
+.authoring-page :deep(.page-header__title) { color: var(--authoring-ink); font-size: 20px; letter-spacing: -.02em; }
+.authoring-page :deep(.page-header__meta) { color: #87939d; font-size: 11px; }
+.authoring-page :deep(.card-actions) { gap: 7px; }
+.authoring-page :deep(.card-actions .el-button--primary) { --el-button-bg-color: #287a75; --el-button-border-color: #287a75; --el-button-hover-bg-color: #216b66; --el-button-hover-border-color: #216b66; }
+.authoring-page__steps { margin: 18px 0 14px; }
+.authoring-page__status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-height: 30px; color: var(--authoring-muted); font-size: 12px; }
+.authoring-page__overview { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 24px; margin: 16px 0 6px; }
+.authoring-page__metrics { display: flex; align-items: center; flex-wrap: wrap; gap: 0; }
+.authoring-page__metrics button { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 18px; border: 0; border-right: 1px solid var(--authoring-line); background: transparent; color: var(--authoring-muted); font: inherit; cursor: pointer; }
+.authoring-page__metrics button:first-child { padding-left: 0; }
+.authoring-page__metrics button:last-of-type { border-right: 0; }
+.authoring-page__metrics button:hover span { color: #287a75; }
+.authoring-page__metrics button strong { color: var(--authoring-ink); font-size: 18px; font-weight: 650; }
+.authoring-page__metrics button span { font-size: 11px; }
+.authoring-page__metrics button.is-attention strong, .authoring-page__metrics button.is-attention span { color: #a86a16; }
+.authoring-page__revision { display: flex; flex-direction: column; gap: 2px; margin-left: 10px; padding-left: 16px; border-left: 1px solid var(--authoring-line); }
+.authoring-page__revision strong { color: #415363; font-size: 11px; font-weight: 650; }
+.authoring-page__revision small { color: #929da6; font-size: 10px; }
+.authoring-page__recovery { display: flex; align-items: center; flex-wrap: wrap; gap: 16px 24px; margin: 14px 0; padding: 15px 18px; border: 1px solid #f0dfc2; border-radius: 7px; background: #fffaf1; }
 .authoring-page__recovery-copy { flex: 1 1 340px; min-width: 0; }
-.authoring-page__recovery-copy p { margin: 6px 0 0; color: var(--el-text-color-secondary); line-height: 1.6; }
+.authoring-page__recovery-copy p { margin: 5px 0 0; color: var(--authoring-muted); font-size: 11px; line-height: 1.6; }
 .authoring-page__recovery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .authoring-page__recovery-actions :deep(.el-button + .el-button) { margin-left: 0; }
-.authoring-page__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin: 24px 0 16px; }
-.authoring-page__heading h2 { margin: 0; font-size: 20px; }
-.authoring-page__summary { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; padding: 16px 0; border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); }
-.authoring-page__summary button { border: 0; background: none; color: var(--el-text-color-primary); font: inherit; text-align: left; padding: 4px; cursor: pointer; }
-.authoring-page__summary button:hover { color: var(--el-color-primary); }
-.authoring-page__summary button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
-.authoring-page__summary strong { font-size: 20px; }
-.authoring-page__summary .authoring-page__attention { color: var(--el-color-warning-dark-2); }
-.authoring-page__result { margin: 16px 0 0; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
-.authoring-page__tabs { margin-top: 18px; }
+.authoring-page__result { margin: 12px 0 0; padding: 11px 14px; border: 1px solid #d9e8e5; border-radius: 6px; background: #f5faf9; color: #476c67; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.authoring-page__tabs { margin-top: 14px; }
+.authoring-page__tabs :deep(.el-tabs__header) { margin-bottom: 14px; }
+.authoring-page__tabs :deep(.el-tabs__item) { height: 42px; font-size: 12px; }
 .authoring-page__workspace { min-width: 0; }
-.authoring-page__assistant-content { display: flex; flex-direction: column; height: min(700px, calc(100dvh - 160px)); min-height: 0; }
+.authoring-page__assistant-drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 2px 0 16px; border-bottom: 1px solid var(--authoring-line); }
+.authoring-page__assistant-drawer-head > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.authoring-page__assistant-drawer-head span { color: #43857e; font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.authoring-page__assistant-drawer-head strong { overflow-wrap: anywhere; color: var(--authoring-ink); font-size: 16px; }
+.authoring-page__assistant-content { display: flex; flex-direction: column; height: calc(100dvh - 108px); min-height: 0; padding-top: 14px; }
 .authoring-page__assistant-content :deep(.failure-notice) { flex-shrink: 0; max-height: 160px; overflow-y: auto; }
-@media (max-width: 700px) { .authoring-page__heading { flex-direction: column; gap: 8px; } .authoring-page__steps { padding: 12px; } .authoring-page__steps :deep(.el-step__title) { font-size: 12px; } }
+@media (max-width: 820px) { .authoring-page { padding: 16px 14px 20px; } .authoring-page__overview { align-items: flex-start; flex-direction: column; } .authoring-page__metrics { width: 100%; justify-content: flex-start; } }
+@media (max-width: 600px) { .authoring-page { padding: 14px 12px 18px; } .authoring-page :deep(.page-header__title) { font-size: 17px; } .authoring-page__status { align-items: flex-start; } .authoring-page__metrics { gap: 8px 0; } .authoring-page__metrics button { padding: 2px 10px; } .authoring-page__metrics button strong { font-size: 16px; } .authoring-page__revision { margin-left: 0; padding-left: 11px; } .authoring-page__steps { padding: 10px; } .authoring-page__steps :deep(.el-step__title) { font-size: 11px; } }
 </style>
-

@@ -3,6 +3,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.modules.system.operation.schema import OperationAcceptedResponse
+
 
 class ImportJobRowResponse(BaseModel):
     job_no: str
@@ -15,6 +17,7 @@ class ImportJobRowResponse(BaseModel):
     source_size: int
     published_version_no: int | None
     active_operation_count: int
+    latest_operation: OperationAcceptedResponse | None
     failure_code: str | None
     failure_message: str | None
     created_at: datetime

@@ -13,6 +13,7 @@ import { formatDate } from "@/constants/labels";
 import { usePagedList } from "@/composables/usePagedList";
 import ReportGenerationNotice from "@/components/audit/ReportGenerationNotice.vue";
 import { PAGE_SIZE_OPTIONS } from "@/constants/pagination";
+import { REPORT_EXECUTION_NOTE, reportRiskState } from "@/utils/reportPresentation";
 
 /**
  * 审核报告：真实报告生成项产生的快照。
@@ -71,6 +72,10 @@ const detailVisible = ref(false);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 const detail = ref<ReportDetail | null>(null);
+const nonRiskNotes = computed(() => {
+  const report = detail.value;
+  return report ? report.execution_notes.filter((note) => !report.risk_notes.includes(note)) : [];
+});
 /** 详情请求代次：连续打开不同报告时，先发的请求晚返回不能覆盖后选中的那一份。 */
 let detailRequest = 0;
 
@@ -102,12 +107,13 @@ const detailReasons = computed(() => {
   if (Array.isArray(unresolved)) {
     for (const item of unresolved) {
       const reason = item && typeof item === "object" && !Array.isArray(item) ? item : null;
+      if (reason?.status !== "NOT_GENERATED") continue;
       const message = reason?.message;
-      if (reason?.status === "NOT_GENERATED") unresolvedFormat = true;
+      unresolvedFormat = true;
       if (typeof message === "string" && message.trim()) {
         messages.push(message.trim());
       } else {
-        messages.push("存在尚未形成有效结果的审核项");
+        messages.push("要求的报告格式文件尚未生成，具体原因未记录");
       }
     }
   }
@@ -181,31 +187,22 @@ onMounted(async () => {
           <span>{{ row.plan_name || "方案名称未记录" }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="范围完整性" width="140">
+      <el-table-column label="审核项执行" width="150">
         <template #default="{ row }">
-          <el-tag :type="row.scope_execution_complete ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
-            {{ row.scope_execution_complete ? "完整" : "未完整" }}
+          <el-tag :type="row.scope_execution_complete ? 'success' : 'warning'" :title="REPORT_EXECUTION_NOTE" size="small" effect="light" disable-transitions>
+            {{ row.scope_execution_complete ? "已全部执行" : "有未执行项" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="风险可判定性" width="140">
+      <el-table-column label="风险结论" width="160">
         <template #default="{ row }">
-          <el-tag :type="row.risk_conclusion_available ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
-            {{ row.risk_conclusion_available ? "可判定" : "不可判定" }}
+          <el-tag :type="reportRiskState(row).type" size="small" effect="light" disable-transitions>
+            {{ reportRiskState(row).label }}
           </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="生成时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.generated_at)) }}</span></template>
-      </el-table-column>
-      <el-table-column label="有效性" width="140">
-        <template #default="{ row }">
-          <el-tooltip v-if="row.stale" :content="row.stale_reason ?? '失效原因未记录'" placement="top">
-            <el-tag type="warning" size="small" effect="plain" disable-transitions>已失效</el-tag>
-          </el-tooltip>
-          <el-tag v-else-if="row.current" type="success" size="small" effect="plain" disable-transitions>当前</el-tag>
-          <span v-else class="text-hint">—</span>
-        </template>
       </el-table-column>
       <el-table-column label="操作" width="124" class-name="table-actions" fixed="right">
         <template #default="{ row }">
@@ -248,20 +245,28 @@ onMounted(async () => {
                 {{ detail.report_generated ? "报告已生成" : "报告未生成" }}
               </el-tag>
               <el-tag :type="detail.scope_execution_complete ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
-                {{ detail.scope_execution_complete ? "范围执行完整" : "范围未完整执行" }}
+                {{ detail.scope_execution_complete ? "审核项已全部执行" : "存在未执行审核项" }}
               </el-tag>
-              <el-tag :type="detail.risk_conclusion_available ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
-                {{ detail.risk_conclusion_available ? "风险可判定" : "风险不可判定" }}
+              <el-tag :type="reportRiskState(detail).type" size="small" effect="light" disable-transitions>
+                {{ reportRiskState(detail).label }}
               </el-tag>
-              <el-tag v-if="detail.stale" type="warning" size="small" effect="light" disable-transitions>快照已失效</el-tag>
+              <el-tag type="info" size="small" effect="plain" disable-transitions>{{ detail.current ? "最新版本" : "历史版本" }}</el-tag>
+              <el-tag :type="detail.stale ? 'warning' : 'success'" size="small" effect="light" disable-transitions>{{ detail.stale ? "已过期" : "当前有效" }}</el-tag>
             </div>
             <div v-if="detail.stale" class="text-muted block-gap-sm">
-              失效原因：{{ detail.stale_reason ?? "未记录" }}
+              过期原因：{{ detail.stale_reason ?? "未记录" }}
             </div>
             <div class="app-toolbar__right">
               <el-button v-if="detail.content" size="small" tag="a" :href="reportDownloadUrl(detail.report_no)">下载 Markdown</el-button>
             </div>
           </div>
+          <p class="text-hint">{{ REPORT_EXECUTION_NOTE }}风险结论已齐全表示各风险项都有明确结论，也可能包含已发现的风险。</p>
+          <el-alert v-if="nonRiskNotes.length" class="block-gap-sm" type="warning" show-icon :closable="false" title="其他审核项待处理说明">
+            <ul><li v-for="note in nonRiskNotes" :key="note">{{ note }}</li></ul>
+          </el-alert>
+          <el-alert v-if="detail.risk_notes.length" class="block-gap-sm" type="warning" show-icon :closable="false" title="尚未形成明确结论的风险项">
+            <ul><li v-for="note in detail.risk_notes" :key="note">{{ note }}</li></ul>
+          </el-alert>
           <ReportGenerationNotice :generation="detail.report_generation" class="block-gap-sm" />
           <el-alert
             v-if="detailReasons.length"
@@ -269,7 +274,7 @@ onMounted(async () => {
             type="warning"
             show-icon
             :closable="false"
-            title="不可判定 / 未完整的原因（按结构化原因展示，不解析正文标题）"
+            title="其他报告缺项说明"
           >
             <ul>
               <li v-for="reason in detailReasons" :key="reason">{{ reason }}</li>

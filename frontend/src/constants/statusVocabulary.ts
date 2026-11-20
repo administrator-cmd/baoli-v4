@@ -91,6 +91,11 @@ export function statusTextOf(domain: StatusDomain, code: string | null | undefin
   return statusTerm(domain, code)?.label ?? `未识别状态（${code}）`;
 }
 
+/** 混合取值列只翻译词表里的完整状态码，其他业务原文不变。 */
+export function knownStatusLabel(domain: StatusDomain, value: string): string | null {
+  return statusTerm(domain, value)?.label ?? null;
+}
+
 export function statusCategoryOf(
   domain: StatusDomain,
   code: string | null | undefined,

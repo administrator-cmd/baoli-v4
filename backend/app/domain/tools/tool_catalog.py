@@ -321,10 +321,12 @@ def _description_of(metadata: _ToolMetadata) -> str:
 
 def _agent_selectable_of(metadata: _ToolMetadata) -> bool:
     """真实调用入口决定工具是否可选。"""
-    return _handler_ref_of(metadata.tool_id) is not None
+    return metadata.tool_id != "RISK_TRIGGER" and _handler_ref_of(metadata.tool_id) is not None
 
 
 def _agent_unselectable_reason(metadata: _ToolMetadata) -> str:
+    if metadata.tool_id == "RISK_TRIGGER":
+        return "风险规则由执行流程直接使用本批次来源结果判定，不参与工具选择"
     return (
         "该能力没有独立工具 handler；模型可以按本条原文直接执行，实际产出由规则结果记录"
     )
@@ -410,13 +412,13 @@ def _build_quality_tool(metadata: _ToolMetadata) -> ToolSpec:
         description=(
             f"{metadata.label}（文件质量检查）。"
             + (f"依赖的处理产物：{artifact}。" if artifact else "只读取原始上传的格式声明、字节数或内容哈希，无需处理产物。")
-            + "判定按材料位逐份完成。"
+            + "按材料位逐份检查。inputs 固定填 []；把本条允许检查的 material_key 放入 parameters.material_refs。"
             + ("" if implemented else "本项没有实际判定实现，不能作为工具调用。")
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "inputs": _inputs_schema(min_items=0),
+                "inputs": _inputs_schema(min_items=0, max_items=0),
                 "parameters": parameters,
             },
             "required": ["inputs", "parameters"],

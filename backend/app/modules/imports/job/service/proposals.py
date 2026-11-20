@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.domain.imports.rule_dependencies import answer_rule_dependencies
 from app.common.exceptions import BusinessError
 from app.constants.execution import OPERATOR_LLM_EXECUTE
 from app.domain.configuration.manifest import rule_comparison_view
@@ -28,7 +29,7 @@ class ImportsJobProposalsService:
         editable_attributes = {
             "materials": {"name", "description", "required"},
             "fields": {"name", "instruction", "required", "config_status"},
-            "rules": {"name", "requirement", "execution_mode", "rule_role", "config_status"},
+            "rules": {"name", "requirement", "execution_mode", "rule_role", "config_status", "dependency_answers"},
             "calculations": {"rule_name", "formula", "requirement", "status"},
             "report_sections": {"section_name", "content_instruction", "config_status"},
         }
@@ -49,6 +50,9 @@ class ImportsJobProposalsService:
         if item is None:
             raise BusinessError("IMPORT_PROPOSAL_NOT_FOUND", "解析结果中不存在该项配置", status_code=404,
                                 details={"group": group, "candidate_ref": candidate_ref})
+        if "dependency_answers" in changes:
+            changes = dict(changes)
+            answer_rule_dependencies(proposals, item, changes.pop("dependency_answers"))
         item.update(changes)
         interpretation = item.get("business_context", {}).get("interpretation")
         if interpretation is not None:
@@ -95,5 +99,6 @@ class ImportsJobProposalsService:
             # None 表示历史记录未保存识别结果，不能显示成“没有辅助资料”。
             "supporting_content": proposals.get("supporting_content"),
             # 第二轮逐项核对后的未绑定输入：页面据此提示配置不完整，不改变启用状态。
+            "dependency_questions": proposals.get("dependency_questions") or [],
             "binding_gaps": proposals.get("binding_gaps") or [],
         }

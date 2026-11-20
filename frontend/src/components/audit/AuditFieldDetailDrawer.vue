@@ -9,6 +9,8 @@ import { factOriginLabel, periodScopeLabel, statementScopeLabel } from "@/consta
 import {
   evidenceNote,
   evidenceTitle,
+  extractionOutcome,
+  extractionOutcomeCode,
   fieldMode,
   fieldReason,
   fieldSourceFiles,
@@ -139,7 +141,7 @@ function recognizedScopeText(field: AuditField): string {
   <DrawerPanel :open="open" :title="field?.name ?? '字段详情'" size="min(680px, 100%)" @close="emit('close')">
     <template v-if="field">
       <div class="field-detail-meta">
-        <StatusBadge domain="field" :status="field.status" />
+        <StatusBadge v-if="extractionOutcome(field)" :status="field.status" :label="extractionOutcome(field)" :tone="extractionOutcomeCode(field) === 'EXTRACTED' ? 'success' : 'warning'" />
         <span v-if="field.source_ref" class="text-muted">字段编号：{{ field.source_ref }}</span>
         <span v-if="field.fact_revision_no" class="text-muted">第 {{ field.fact_revision_no }} 版</span>
       </div>
@@ -160,13 +162,23 @@ function recognizedScopeText(field: AuditField): string {
       </section>
 
       <section v-if="mode !== 'VALUE'" class="detail-section">
-        <h4 class="detail-section__title">{{ reasonTitle(mode) }}</h4>
+        <h4 class="detail-section__title">{{ mode === 'FAILED' ? '未抽取到的原因' : reasonTitle(mode) }}</h4>
         <div class="detail-block" :class="reasonTone(mode)">{{ reason }}</div>
+      </section>
+
+      <section class="detail-section">
+        <h4 class="detail-section__title">字段来源</h4>
+        <dl class="detail-facts">
+          <dt>规则要求</dt>
+          <dd>{{ field.material_name?.trim() ? `规定从「${field.material_name.trim()}」中抽取` : '未记录规定的来源材料' }}</dd>
+          <dt>实际来源文件</dt>
+          <dd>{{ sourceFilesText(field) }}</dd>
+        </dl>
       </section>
 
       <section v-if="field.evidence.length || mode !== 'NOT_RUN'" class="detail-section">
         <h4 class="detail-section__title">{{ evidenceTitle(mode) }}</h4>
-        <p v-if="evidenceNote(mode)" class="detail-note">{{ evidenceNote(mode) }}</p>
+        <p v-if="field.evidence.length && evidenceNote(mode)" class="detail-note">{{ evidenceNote(mode) }}</p>
         <div v-if="field.evidence.length" class="evidence-list">
           <div v-for="(item, index) in field.evidence" :key="index" class="evidence-item">
             <div class="evidence-source">
@@ -195,8 +207,6 @@ function recognizedScopeText(field: AuditField): string {
             <dt>取值方式</dt>
             <dd>{{ factOriginLabel(field.value_source || field.origin) }}</dd>
           </template>
-          <dt>来源文件</dt>
-          <dd>{{ sourceFilesText(field) }}</dd>
           <template v-if="recognizedScope">
             <dt>识别口径</dt>
             <dd>{{ recognizedScope }}</dd>
@@ -341,7 +351,7 @@ function recognizedScopeText(field: AuditField): string {
 
 .detail-facts {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-columns: 88px minmax(0, 1fr);
   gap: 8px 12px;
   margin: 0;
   padding: 12px 14px;

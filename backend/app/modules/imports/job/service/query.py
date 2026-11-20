@@ -46,10 +46,12 @@ class ImportsJobQueryService:
         # 模型请求期间不持有作业行锁；转换状态以后台命令记录为准，
         # 所以「有没有未结束的后台操作」只能问 background_operation，不能靠作业状态猜。
         active_operation_counts = crud.ImportsJobCRUD(self.db).active_operation_counts( [row.job_no for row in rows])
+        latest_operations = crud.ImportsJobCRUD(self.db).latest_operations([row.job_no for row in rows])
         published_versions = crud.ImportsJobCRUD(self.db).published_versions( [row.id for row in rows])
 
         items = []
         for job in rows:
+            operation = latest_operations.get(job.job_no)
             items.append(
                 {
                     "job_no": job.job_no,
@@ -66,6 +68,7 @@ class ImportsJobQueryService:
                     # 仅当这份 Excel 发布成了场景版本才有编号；未发布的草稿作业为 None。
                     "published_version_no": published_versions.get(int(job.id)),
                     "active_operation_count": active_operation_counts.get(job.job_no, 0),
+                    "latest_operation": OperationBackgroundService().operation_view(operation) if operation else None,
                     "failure_code": job.failure_code,
                     "failure_message": job.failure_message,
                     "created_at": job.created_at,
@@ -114,7 +117,7 @@ class ImportsJobQueryService:
             "proposals": ImportsJobProposalsService()._proposal_business_view(job),
             # 第一轮目录可复用时可只重跑第二轮；检查点缺失或契约变化时为 False。
             "can_resume_refinement": ImportsJobLlmService().can_resume_initial(
-                job.job_no, job.profile_version, job.schema_key, job.schema_version, job.source_sha256,
+                job.source_path, job.profile_version, job.schema_key, job.schema_version, job.source_sha256,
                 job.scenario_code,
             ),
             "failure": {"code": job.failure_code, "message": job.failure_message} if job.failure_code else None,

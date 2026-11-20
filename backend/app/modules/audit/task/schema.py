@@ -20,6 +20,7 @@ class TaskRowResponse(BaseModel):
     current_node: str
     current_node_name: str
     status: str
+    block_reason: str | None
     created_at: datetime
     updated_at: datetime
 

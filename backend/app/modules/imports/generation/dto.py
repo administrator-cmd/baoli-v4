@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class StartGenerationRequest(BaseModel):
@@ -24,11 +24,28 @@ class SaveGenerationDocumentRequest(BaseModel):
     document: dict[str, Any]
 
 
+class AssistantIssueAnswer(BaseModel):
+    issue_id: str = Field(min_length=1, max_length=80, pattern=r"\S")
+    answer: str = Field(min_length=1, max_length=6000, pattern=r"\S")
+
+
 class AssistantMessageRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=6000, pattern=r"\S")
+    message: str | None = Field(default=None, min_length=1, max_length=6000, pattern=r"\S")
     issue_id: str | None = Field(default=None, min_length=1, max_length=80, pattern=r"\S")
+    issue_answers: list[AssistantIssueAnswer] | None = Field(default=None, min_length=1)
     expected_revision: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=120, pattern=r"\S")
+
+    @model_validator(mode="after")
+    def validate_submission(self):
+        if self.issue_answers is not None:
+            if self.message is not None or self.issue_id is not None:
+                raise ValueError("批量回答不能与单条回答或修改指令同时提交")
+            if len({item.issue_id for item in self.issue_answers}) != len(self.issue_answers):
+                raise ValueError("同一待补充事项不能重复回答")
+        elif self.message is None:
+            raise ValueError("请填写希望 AI 修改或解释的内容")
+        return self
 
 
 class RestoreGenerationRequest(BaseModel):

@@ -7,6 +7,7 @@ import StateBlock from "@/components/StateBlock.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import ReportBody from "@/components/audit/ReportBody.vue";
 import ReportGenerationNotice from "@/components/audit/ReportGenerationNotice.vue";
+import { REPORT_EXECUTION_NOTE, reportRiskState } from "@/utils/reportPresentation";
 
 /**
  * 审核报告。
@@ -47,9 +48,11 @@ const canDownload = computed(
 
 /** 本次审核范围是否执行完整。 */
 const scopeComplete = computed(() => Boolean(props.report?.scope_execution_complete));
-
-/** 风险是否可判定；未配置风险评级时为 false，但不代表执行故障。 */
-const riskAvailable = computed(() => Boolean(props.report?.risk_conclusion_available));
+const nonRiskNotes = computed(() => {
+  const report = props.report;
+  return report ? report.execution_notes.filter((note) => !report.risk_notes.includes(note)) : [];
+});
+const otherReasons = computed(() => props.report?.reasons.filter((reason) => !props.report?.execution_notes.includes(reason)) ?? []);
 
 /** 报告清单用于行列表；旧的单份报告响应也保持可读。 */
 const reportRows = computed(() => {
@@ -112,13 +115,6 @@ function reportRowClass({ row }: { row: (typeof reportRows.value)[number] }): st
       <el-table-column label="报告" min-width="220" show-overflow-tooltip>
         <template #default="{ row }"><span class="report-name">{{ row.report_name }}</span></template>
       </el-table-column>
-      <el-table-column label="版本" width="100">
-        <template #default="{ row }">
-          <el-tag :type="row.current ? 'success' : 'info'" size="small" effect="plain" disable-transitions>
-            {{ row.current ? "当前" : "历史" }}
-          </el-tag>
-        </template>
-      </el-table-column>
       <el-table-column label="生成状态" width="110">
         <template #default="{ row }">
           <el-tag :type="row.report_generated ? 'success' : 'info'" size="small" effect="light" disable-transitions>
@@ -126,10 +122,10 @@ function reportRowClass({ row }: { row: (typeof reportRows.value)[number] }): st
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="审核范围" width="120">
+      <el-table-column label="审核项执行" width="140">
         <template #default="{ row }">
           <el-tag :type="row.scope_execution_complete ? 'success' : 'warning'" size="small" effect="light" disable-transitions>
-            {{ row.scope_execution_complete ? "完整" : "未完整" }}
+            {{ row.scope_execution_complete ? "已全部执行" : "有未执行项" }}
           </el-tag>
         </template>
       </el-table-column>
@@ -194,7 +190,7 @@ function reportRowClass({ row }: { row: (typeof reportRows.value)[number] }): st
         type="warning"
         show-icon
         :closable="false"
-        :title="staleReason ? `报告当前无效：${staleReason}` : '报告当前无效（原因未记录）'"
+        :title="staleReason ? `报告已过期：${staleReason}` : '报告已过期（原因未记录）'"
       >
         当前报告不再对应当前执行，不能作为当前结论，也不提供下载。正文仅供查看历史结果。
       </el-alert>
@@ -209,24 +205,31 @@ function reportRowClass({ row }: { row: (typeof reportRows.value)[number] }): st
           <StatusBadge :status="generated ? 'COMPLETE' : 'NOT_GENERATED'" :label="generated ? '已生成' : '未生成'" />
         </div>
         <div class="report-status-item">
-          <span>审核范围是否完整</span>
-          <StatusBadge :status="scopeComplete ? 'CONFIRMED' : 'INCOMPLETE'" :label="scopeComplete ? '已完整执行' : '未完整执行'" :tone="scopeComplete ? 'success' : 'warning'" />
+          <span>审核项执行</span>
+          <StatusBadge :status="scopeComplete ? 'CONFIRMED' : 'INCOMPLETE'" :label="scopeComplete ? '已全部执行' : '有未执行项'" :tone="scopeComplete ? 'success' : 'warning'" />
         </div>
         <div class="report-status-item">
-          <span>风险结论状态</span>
-          <StatusBadge :status="riskAvailable ? 'CONFIRMED' : 'NOT_APPLICABLE'" :label="riskAvailable ? '可判定' : '不可判定'" :tone="riskAvailable ? 'success' : 'warning'" />
+          <span>风险结论</span>
+          <StatusBadge :status="report.risk_conclusion_available ? 'CONFIRMED' : 'INCOMPLETE'" :label="reportRiskState(report).label" :tone="reportRiskState(report).tone" />
         </div>
         <div class="report-status-item">
           <span>业务缺项 / 未完成说明</span>
-          <StatusBadge :status="report.reasons.length ? 'INCOMPLETE' : 'COMPLETE'" :label="report.reasons.length ? `${report.reasons.length} 项` : '无记录'" :tone="report.reasons.length ? 'warning' : 'success'" />
+          <StatusBadge :status="report.reasons.length ? 'INCOMPLETE' : 'COMPLETE'" :label="report.reasons.length ? `${report.reasons.length} 项` : '无缺项说明'" :tone="report.reasons.length ? 'warning' : 'success'" />
         </div>
       </div>
 
+      <p class="text-hint">{{ REPORT_EXECUTION_NOTE }}风险结论已齐全也可能包含已发现的风险。</p>
+      <el-alert v-if="nonRiskNotes.length" type="warning" show-icon :closable="false" title="其他审核项待处理说明">
+        <ul><li v-for="note in nonRiskNotes" :key="note">{{ note }}</li></ul>
+      </el-alert>
+      <el-alert v-if="report.risk_notes.length" type="warning" show-icon :closable="false" title="尚未形成明确结论的风险项">
+        <ul><li v-for="note in report.risk_notes" :key="note">{{ note }}</li></ul>
+      </el-alert>
       <ReportGenerationNotice :generation="report.report_generation" />
 
-      <el-alert v-if="report.reasons.length" type="warning" show-icon :closable="false" title="业务缺项与未完成说明">
+      <el-alert v-if="otherReasons.length" type="warning" show-icon :closable="false" title="其他报告缺项说明">
         <ul class="report-reasons">
-          <li v-for="reason in report.reasons" :key="reason">{{ reason }}</li>
+          <li v-for="reason in otherReasons" :key="reason">{{ reason }}</li>
         </ul>
       </el-alert>
 

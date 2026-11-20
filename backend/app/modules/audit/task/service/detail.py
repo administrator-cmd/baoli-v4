@@ -8,6 +8,7 @@ from app.common.exceptions import BusinessError
 from app.constants.execution import NODE_RULE_EXECUTION, ORIGIN_HUMAN_CORRECTION
 from app.constants.status import EXECUTABLE_FIELD_STATUSES
 from app.domain.audit.execution_scope import result_state
+from app.domain.configuration.execution_mode import MODE_EXTRACT
 from app.domain.configuration.manifest import enabled_extraction_field_keys
 from app.domain.configuration.rule_library import active, execution_container_of
 from app.modules.audit.artifact.service.artifacts import AuditArtifactArtifactsService
@@ -314,7 +315,7 @@ class AuditTaskDetailService:
         extraction_result_by_field: dict[str, RuleResult] = {}
         for result in rule_results:
             definition = rule_definitions.get((execution_node_by_id.get(result.node_execution_id), result.rule_key))
-            if not definition or not definition.get("outputs"):
+            if not definition or definition.get("execution_mode") != MODE_EXTRACT:
                 continue
             for field_key in definition.get("outputs") or []:
                 extraction_result_by_field.setdefault(str(field_key), result)
@@ -353,6 +354,9 @@ class AuditTaskDetailService:
                 extraction_result.status if extraction_result is not None
                 else ("NOT_EXECUTED" if owner_finished or not extraction_enabled else "PENDING")
             )
+            if (status == "NOT_EXECUTED" and extraction_result is not None
+                    and extraction_result.status == "NOT_EXECUTED" and extraction_result.turn_count > 0):
+                status = "EXTRACTION_FAILED"
             # 当前事实行会保留待复核候选，供人工查看；任务字段结果里的“标准化结果”
             # 只展示可执行事实，避免把 EVIDENCE_UNCLEAR / NORMALIZATION_FAILED 的
             # 候选误显示成已经生效的值。

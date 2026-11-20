@@ -21,10 +21,6 @@ import { compareNaturalLabels } from "@/utils/naturalSort";
  */
 const props = defineProps<{
   risks: RiskList | null;
-  /** 风险规则是否随当前批次执行过（状态来自服务端节点列表）。 */
-  riskNodeExecuted: boolean;
-  /** 当前场景是否配置了风险评级规则。 */
-  riskConfigured: boolean;
   /** 风险结果读取中。 */
   loading?: boolean;
   /** 风险结果读取失败的中文原因；非空时绝不显示成未命中。 */
@@ -115,19 +111,19 @@ const sourceRules = computed(() => (detailRisk.value?.details?.source_rules ?? [
 
 /** 无结果时说明实际状态，避免空列表被误读为没有风险。 */
 const emptyState = computed(() => {
-  if (!props.riskConfigured) {
+  if (!props.risks?.risk_configured) {
     return {
       title: "当前场景未配置风险规则",
       description: "本次审核没有风险判断项。",
     };
   }
-  if (props.riskNodeExecuted && props.risks && !props.risks.risk_executed) {
+  if (props.risks.risk_results_stale) {
     return {
       title: "风险结果已失效",
       description: "已有风险结果不再对应当前输入，不能作为当前风险结论。",
     };
   }
-  if (!props.risks?.risk_executed) {
+  if (!props.risks.risk_executed) {
     return {
       title: "风险评定尚未执行",
       description: "执行后显示各条风险规则的判断结果。",
@@ -180,7 +176,7 @@ const emptyState = computed(() => {
           <div v-if="row.risk_level" class="table-note">风险等级：{{ row.risk_level }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="风险结论" width="148">
+      <el-table-column label="风险结论" width="160">
         <template #default="{ row }">
           <StatusBadge domain="risk" :status="row.status" />
         </template>
@@ -263,7 +259,10 @@ const emptyState = computed(() => {
 .risk-search {
   width: min(100%, 300px);
 }
-.risk-status-filter, .risk-level-filter {
+.risk-status-filter {
+  width: 230px;
+}
+.risk-level-filter {
   width: 180px;
 }
 .risk-sheet-filter {

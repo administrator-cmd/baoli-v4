@@ -13,7 +13,7 @@ class OperationLogRowResponse(BaseModel):
     object_no: str
     object_name: str
     operation_type: str
-    result: Literal["SUCCEEDED", "FAILED", "ACCEPTED"]
+    result: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "ACCEPTED"]
     duration_ms: int | None
     command_no: str | None
     failure_code: str | None
@@ -24,6 +24,12 @@ class OperationLogRowResponse(BaseModel):
 
 class OperationLogPageResponse(PagedResponse[OperationLogRowResponse]):
     pass
+
+
+class OperationResponseFile(BaseModel):
+    stage: str
+    relative_path: str
+    created_at: datetime
 
 
 class OperationAcceptedResponse(BaseModel):
@@ -39,7 +45,6 @@ class OperationAcceptedResponse(BaseModel):
     message: str
     reused: bool = False
     result: dict[str, Any] | None = None
-    raw_response_path: str | None = None
     failure_code: str | None = None
     failure_message: str | None = None
     # 命令当前停在哪个阶段，用于区分“已保存未执行 / 外部已受理 / 结果未知 /
@@ -49,3 +54,7 @@ class OperationAcceptedResponse(BaseModel):
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class OperationDetailResponse(OperationAcceptedResponse):
+    response_files: list[OperationResponseFile]

@@ -38,7 +38,7 @@ defineEmits<{
       <el-table-column label="上传时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(row.created_at) }}</span></template>
       </el-table-column>
-      <el-table-column label="状态" width="140">
+      <el-table-column label="导入状态" width="190">
         <template #default="{ row }">
           <StatusBadge :status="row.status" />
         </template>

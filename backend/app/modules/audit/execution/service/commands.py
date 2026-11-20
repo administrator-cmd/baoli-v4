@@ -20,9 +20,9 @@ from app.constants.status import (
 )
 from app.core.config import get_settings
 from app.core.transactions import commit_transaction
-from app.domain.audit.field_review import reviewed_extraction_keys
 from app.domain.shared.identity import public_no
 from app.graphs.audit_graph import run_audit_node
+from app.integrations.documents.ocr_concurrency import OCR_CONCURRENCY_LIMITER
 from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.artifact.execution import ArtifactExecution
 from app.modules.audit.artifact.model import StoredArtifact
@@ -31,6 +31,7 @@ from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.dto import ExecuteNodeRequest
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import fail_running_execution, raise_graph_error
+from app.modules.audit.execution.service.flow.lifecycle import enter_field_review
 from app.modules.audit.execution.service.flow.runner import audit_runner
 from app.modules.audit.execution.service.material_precheck import AuditMaterialPrecheckService
 from app.modules.audit.execution.service.state import _scenario_nodes
@@ -162,9 +163,12 @@ class AuditExecutionCommandsService:
 
 
     def _waiting_review_execution(self, task: AuditTask) -> NodeExecution:
-        """任务当前停在字段核对等待点的执行批次。"""
-        execution = AuditExecutionCRUD(self.db).waiting_for_node(task.id, task.current_node)
-        if execution is None:
+        """取待核对的当前批次，包括旧逻辑因抽取未完成而阻断的批次。"""
+        execution = AuditExecutionCRUD(self.db).latest_for_task(task.id, task.current_node)
+        if execution is None or task.status != execution.status or not (
+            execution.status == TASK_STATUS_WAITING_FIELD_REVIEW
+            or (execution.status == TASK_STATUS_BLOCKED and execution.failure_code == "AUDIT_EXTRACTION_INCOMPLETE")
+        ):
             raise BusinessError(
                 "AUDIT_FIELD_REVIEW_NOT_WAITING",
                 "任务当前没有停在字段核对等待点的执行批次，请刷新任务后重试",
@@ -177,13 +181,6 @@ class AuditExecutionCommandsService:
     def _assert_field_review_editable(self, task: AuditTask, input_revision: int) -> NodeExecution:
         """保存与确认共用的前置校验：只有停在该等待点、且看不到旧输入时才能改。"""
         OperationBackgroundService(self.db).assert_no_active_operation(OBJECT_AUDIT_TASK, task.task_no)
-        if task.status != TASK_STATUS_WAITING_FIELD_REVIEW:
-            raise BusinessError(
-                "AUDIT_FIELD_REVIEW_NOT_WAITING",
-                f"任务当前状态为 {task.status}，不在字段核对等待点，不能保存核对修改",
-                status_code=409,
-                details={"task_no": task.task_no, "status": task.status},
-            )
         if int(input_revision) != int(task.input_revision):
             raise BusinessError(
                 "INPUT_REVISION_CONFLICT",
@@ -191,9 +188,7 @@ class AuditExecutionCommandsService:
                 status_code=409,
                 details={"submitted": int(input_revision), "current": int(task.input_revision)},
             )
-        execution = self._waiting_review_execution(task)
-        reviewed_extraction_keys(execution.result_json or {}, waiting=True)
-        return execution
+        return self._waiting_review_execution(task)
 
 
     def save_field_review(self, task_no: str, request: FieldReviewSaveRequest) -> dict[str, Any]:
@@ -204,6 +199,7 @@ class AuditExecutionCommandsService:
         """
         task = AuditTaskLookupService(self.db).task_or_404( task_no, lock=True)
         execution = self._assert_field_review_editable( task, request.input_revision)
+        enter_field_review(task, execution)
         previous_revision = int(task.input_revision)
         applied = field_review_service.AuditFieldReviewService(self.db).apply_corrections(task, list(request.corrections))
         if applied:
@@ -230,31 +226,13 @@ class AuditExecutionCommandsService:
         from app.modules.audit.execution.service.resume import AuditExecutionResumeService
 
         task = AuditTaskLookupService(self.db).task_or_404( task_no, lock=True)
-        if task.status != TASK_STATUS_WAITING_FIELD_REVIEW:
+        execution = self._waiting_review_execution(task)
+        if execution.id != execution_id:
             raise BusinessError(
-                "AUDIT_FIELD_REVIEW_NOT_WAITING",
-                f"任务当前状态为 {task.status}，不在字段核对等待点，不能确认继续审核",
-                status_code=409,
-                details={"task_no": task_no, "status": task.status},
-            )
-        execution = AuditExecutionCRUD(self.db).by_id(execution_id)
-        if (
-            execution is None
-            or execution.audit_task_id != task.id
-            or execution.node_code != task.current_node
-        ):
-            raise BusinessError(
-                "AUDIT_EXECUTION_MISSING", "确认对应的执行批次不属于任务当前节点",
+                "AUDIT_EXECUTION_MISSING", "待核对的执行批次已更新，请刷新后再确认",
                 status_code=409, details={"task_no": task_no, "execution_id": execution_id},
             )
-        if execution.status != TASK_STATUS_WAITING_FIELD_REVIEW:
-            raise BusinessError(
-                "AUDIT_FIELD_REVIEW_NOT_WAITING",
-                f"执行批次状态为 {execution.status}，不在字段核对等待点",
-                status_code=409,
-                details={"execution_id": execution.id, "status": execution.status},
-            )
-        reviewed_extraction_keys(execution.result_json or {}, waiting=True)
+        enter_field_review(task, execution)
         previous_revision = int(task.input_revision)
         applied = field_review_service.AuditFieldReviewService(self.db).apply_corrections(task, corrections, operation_no=operation_no,
         )
@@ -477,6 +455,15 @@ class AuditExecutionCommandsService:
     def retry_document_ocr(self, task: AuditTask, document_no: str, artifact_no: str | None, *, operation_no: str,
         resubmit_unknown: bool = False,
     ) -> dict[str, Any]:
+        with OCR_CONCURRENCY_LIMITER.slot():
+            return self._retry_document_ocr_with_slot(
+                task, document_no, artifact_no, operation_no=operation_no, resubmit_unknown=resubmit_unknown,
+            )
+
+
+    def _retry_document_ocr_with_slot(self, task: AuditTask, document_no: str, artifact_no: str | None, *, operation_no: str,
+        resubmit_unknown: bool = False,
+    ) -> dict[str, Any]:
         """只处理一份材料：续查原作业，或由用户主动提交一次新识别。"""
         document, upload, parsed, artifact = self._document_ocr_retry_target(
              task, document_no, artifact_no, resubmit_unknown=resubmit_unknown,
@@ -499,7 +486,7 @@ class AuditExecutionCommandsService:
                 "resubmit_unknown": resubmit_unknown,
             }
             artifact.status = "SUBMITTING"
-            artifact.relative_path = f"tasks/{task.task_no}/artifacts/{upload.upload_no}/ocr.submitting"
+            artifact.relative_path = f"{upload.artifact_directory}/ocr.submitting"
             artifact.metadata_json = {**metadata, "submit_attempts": [*attempts, attempt]}
             commit_transaction(self.db)  # 新提交意图和旧作业记录先保存，重复点击不会再提交。
             try:

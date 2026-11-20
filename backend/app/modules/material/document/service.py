@@ -15,6 +15,20 @@ class MaterialDocumentService:
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
 
+    def processing_notes(self, document_ids: list[int]) -> dict[int, list[str]]:
+        notes = {document_id: [] for document_id in document_ids}
+        for row in crud.MaterialDocumentCRUD(self.db).quality_attention_rows(document_ids):
+            if row.precheck is None or row.precheck["input_revision"] != row.input_revision:
+                continue
+            block = row.precheck["blocked_materials"].get(row.material_key)
+            if block is not None and block["upload_id"] == row.upload_id:
+                notes[row.id].extend(f"前置检查停止处理：{item['message']}" for item in block["reasons"])
+        stages = {"MATERIAL_CLASSIFY": "材料类型识别", "DOCUMENT_PARSE": "去除印章", "OCR": "正文识别", "SEAL": "印章识别"}
+        for row in crud.MaterialDocumentCRUD(self.db).processing_attention_rows(document_ids):
+            state = "处理失败" if row.status == "FAILED" else "处理结果待确认"
+            notes[row.id].append(f"{stages[row.artifact_type]}{state}：{row.failure_message or '具体原因未记录'}")
+        return notes
+
     def list_documents_page(self, *,
         task_no: str | None,
         task_name: str | None,
@@ -35,6 +49,7 @@ class MaterialDocumentService:
             page_size=page_size,
         )
         upload_ranks, upload_counts = crud.MaterialDocumentCRUD(self.db).upload_ranks( [row[0].id for row in rows])
+        processing_notes = self.processing_notes([row[0].id for row in rows])
 
         items = []
         for document, row_task_no, row_task_name, upload_id, filename, size_bytes, uploaded_at in rows:
@@ -47,6 +62,7 @@ class MaterialDocumentService:
                     "material_name": document.material_name,
                     "required": document.required,
                     "status": document.status,
+                    "processing_notes": processing_notes[document.id],
                     "filename": filename,
                     "size_bytes": size_bytes,
                     "uploaded_at": uploaded_at,
@@ -80,6 +96,7 @@ class MaterialDocumentService:
             )
         return {
             "document_no": document.document_no,
+            "processing_notes": self.processing_notes([document.id])[document.id],
             "task_no": task.task_no if task else None,
             "task_name": task.task_name if task else None,
             "material_key": document.material_key,

@@ -50,8 +50,7 @@ class AuditTask(Base, TimestampMixin):
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # 本任务的规则范围（启用/未启用规则与字段清单）。从上面的 manifest 算出。
     task_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    # 业务 CSV 清单：format_version、batches（只登记 current/files/record_count）。
-    # 由 services.audit.value_store 读写。
+    # 取值文件清单：format_version、batches（只登记 current/files/record_count）。
     value_file_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 任务输入修订号：首次补传、替换材料和人工有效值变化都会递增。
     # 写入口在对象锁内核对命令携带的修订号，过期命令不得覆盖新输入。

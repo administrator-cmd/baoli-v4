@@ -47,6 +47,7 @@ function setup(t, relative = "src/views/documents/RulebookGenerationDetailView.v
     "vue-router": { useRoute: () => route, useRouter: () => ({ push: async () => {}, replace: async () => {} }),
       onBeforeRouteLeave: () => {}, onBeforeRouteUpdate: () => {} },
     "element-plus": { ElMessage: { success() {}, error() {}, warning() {} }, ElMessageBox: { confirm: async () => {} } },
+    "lucide-vue-next": { Info: {}, ListChecks: {}, SlidersHorizontal: {} },
     "@/api/rulebookGenerations": strictApi,
     "@/api/imports": imports,
     "@/api/http": { ApiError: class ApiError extends Error {},
@@ -210,6 +211,45 @@ test("新待补充项恢复自动筛选，手动选择仍保留", async t => {
   h.props.document = { ...document(), issues: [{ issue_id: "q2", status: "OPEN" }] };
   await flush();
   assert.equal(h.state.filter.value, "RESOLVED");
+});
+
+test("批量回答只发送已填写的待补充事项，受理失败保留草稿", async t => {
+  const received = [];
+  const h = setup(t, "src/components/generation/GenerationIssuesPanel.vue", {
+    document: { ...document(), issues: [
+      { issue_id: "q1", status: "OPEN" }, { issue_id: "q2", status: "OPEN", resolution: "历史补充" },
+      { issue_id: "q3", status: "RESOLVED" },
+    ] },
+    submitBatch: async answers => { received.push(JSON.parse(JSON.stringify(answers))); return received.length > 1; },
+  });
+  h.state.openAnswer(h.props.document.issues[1]);
+  assert.equal(h.state.answer.value, "历史补充");
+  h.state.dialog.value = false;
+  h.state.openBatch();
+  assert.equal(h.state.batchDialog.value, true);
+  Object.assign(h.state.answers.value, { q1: " 第一项答案 ", q3: "不应提交" });
+  await h.state.submitBatchAnswers();
+  assert.equal(h.state.batchDialog.value, true);
+  assert.equal(h.state.answers.value.q1, " 第一项答案 ");
+  h.state.answers.value.q2 = "  ";
+  await h.state.submitBatchAnswers();
+  assert.deepEqual(received, [[{ issue_id: "q1", answer: "第一项答案" }], [{ issue_id: "q1", answer: "第一项答案" }]]);
+  assert.equal(h.state.batchDialog.value, false);
+  assert.equal(h.state.answers.value.q1, undefined);
+});
+
+test("多条业务补充使用一次助手提交并保留逐项绑定", async t => {
+  const h = setup(t);
+  h.state.applyJob(job(), true);
+  h.state.loading.value = false;
+  const requests = [];
+  h.api.sendGenerationMessage = async (_target, input) => { requests.push(input); return operation("RUNNING"); };
+  const answers = [{ issue_id: "q1", answer: "第一项" }, { issue_id: "q2", answer: "第二项" }];
+  assert.equal(await h.state.sendBatchAnswers(answers), true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].issueAnswers, answers);
+  assert.equal(requests[0].message, undefined);
+  assert.equal(requests[0].expectedRevision, 1);
 });
 
 test("保存刷新保留工作表、搜索和页码，关闭旧编辑副本", async t => {

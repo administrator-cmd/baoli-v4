@@ -1,4 +1,4 @@
-"""固定四表的事务锁与保存点快照；不判断规则或吞掉读写失败。"""
+"""取值文件的事务锁与保存点快照。"""
 
 import hashlib
 import logging
@@ -75,7 +75,7 @@ class AuditFieldValueFilesService:
 
     @contextmanager
     def read_task_files(self, task_no: str):
-        """只读调用只在加载四表时持锁；已有事务锁时复用，不提前释放。"""
+        """读取时持锁；已有事务锁时复用，不提前释放。"""
         info = self.db.info
         if task_no in info.get(_LOCKS, {}):
             yield

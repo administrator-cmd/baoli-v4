@@ -19,6 +19,7 @@ from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.service.execution_history import AuditExecutionHistoryService
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.model import ManualReview
+from app.modules.audit.field.service.value_store import AuditFieldValueStoreService
 from app.modules.audit.shared import current_upload
 from app.modules.audit.task.crud import AuditTaskCRUD
 from app.modules.audit.task.model import AuditTask
@@ -27,7 +28,7 @@ from app.modules.material.document.crud import MaterialDocumentCRUD
 from app.modules.material.document.model import DocumentUpload, TaskDocument
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_types import OBJECT_AUDIT_TASK
-from app.services.shared.storage import DOCUMENT_EXTENSIONS, resolve_storage_path, save_upload_sync
+from app.services.shared.storage import audit_directory, DOCUMENT_EXTENSIONS, resolve_storage_path, save_upload_sync
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class AuditTaskDocumentsService:
         AuditFieldCRUD(self.db).clear_current_field_values(task.id)
         # 所有节点执行都已失效，抽取与派生事实也不能继续作为后续节点的当前输入。
         AuditFieldCRUD(self.db).clear_current_facts(task.id)
+        AuditFieldValueStoreService(self.db).sync_current(task)
         first_node_code = execution_container_of(manifest)["node_code"]
         task.current_node = first_node_code
         task.status = TASK_STATUS_READY
@@ -186,7 +188,7 @@ class AuditTaskDocumentsService:
         declared_material_type = self._verified_material_type(material_type)
         upload_no = public_no("UPL")
         suffix = Path(upload.filename or "").suffix.lower()
-        relative_path = f"tasks/{task.task_no}/{document.document_no}/{upload_no}{suffix}"
+        relative_path = f"{audit_directory(task.task_no, task.created_at)}/materials/{document.document_no}/{upload_no}/source{suffix}"
         size, sha256 = save_upload_sync(
             upload,
             relative_path=relative_path,

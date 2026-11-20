@@ -24,9 +24,11 @@ from app.constants.status import (
 )
 from app.core.transactions import commit_transaction
 from app.domain.audit.audit_state import EvaluationPlanEntry, RuleOutcome
+from app.domain.materials.material_precheck import PRECHECK_KEY
 from app.domain.shared.llm_failure import ChannelFailure
 from app.graphs.audit_graph import collect_agent_summary
 from app.graphs.audit_rule_runner import extraction_group, run_rule_evaluation
+from app.modules.audit.artifact.crud import AuditArtifactCRUD
 from app.modules.audit.execution.crud import AuditExecutionCRUD
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.execution_scope import latest_execution
@@ -47,6 +49,7 @@ from app.modules.audit.execution.service.flow.plan import (
     ReviewBoundary,
     assert_results_match_plan,
     evaluation_plan,
+    failed_extraction_keys,
     field_review_boundary,
     rerun_split,
     reviewed_extraction_rule_keys,
@@ -117,7 +120,7 @@ class ResumePlan:
 class AuditExecutionResumeService:
     """本实体的服务方法；db 由构造时注入。"""
 
-    def __init__(self, db: Session | None = None) -> None:
+    def __init__(self, db: Session) -> None:
         self.db = db
 
     def _saved_results(self, execution: NodeExecution) -> dict[str, RuleResult]:
@@ -142,6 +145,21 @@ class AuditExecutionResumeService:
             return None
         if execution.status != "FAILED":
             return f"执行批次状态为 {execution.status}，不能继续执行"
+        if execution.failure_code == "OCR_JOB_FAILED":
+            result = execution.result_json or {}
+            if (result.get(PRECHECK_KEY) or {}).get("input_revision") != task.input_revision:
+                return "前置质量检查不属于当前输入版本，无法沿用原批次"
+            failed = [item for item in (result.get("preprocessing") or {}).get("materials", [])
+                      if item["status"] == "FAILED"]
+            if not failed:
+                return "原批次缺少失败材料记录，无法确认 OCR 已恢复"
+            if any({e["service"] for e in item["errors"]} != {"OCR"} for item in failed):
+                return "前置处理还有其他失败项，无法仅凭 OCR 结果恢复"
+            ready = {row.document_upload_id for row in AuditArtifactCRUD(self.db).by_uploads_and_type(
+                [item["upload_id"] for item in failed], "OCR"
+            ) if row.status == "READY"}
+            pending = [item["material_name"] for item in failed if item["upload_id"] not in ready]
+            return f"请先完成材料「{'、'.join(pending)}」的 OCR 处理" if pending else None
         if execution.failure_code not in RESUMABLE_FAILURE_CODES:
             reason = execution.failure_message or execution.failure_code or "未记录原因"
             return f"上次失败需要先处理：{reason}"
@@ -206,7 +224,8 @@ class AuditExecutionResumeService:
         任务详情、受理校验与真实续跑都从这里取，避免各自判断「现在该不该再核对一次」。
         """
         entries = evaluation_plan(task, task.current_node, execution=execution) if plan is None else plan
-        if AuditFieldReviewService().extraction_closed(execution):
+        closed = AuditFieldReviewService().extraction_closed(execution)
+        if closed:
             extraction = reviewed_extraction_rule_keys(execution)
             boundary = ReviewBoundary(tuple(sorted(extraction)), tuple(
                 entry["rule_key"] for entry in entries if entry["rule_key"] not in extraction
@@ -215,8 +234,10 @@ class AuditExecutionResumeService:
             boundary = field_review_boundary(entries, all_rules=_task_manifest(task)["rules"])
         confirmed = AuditFieldReviewService(self.db).confirmation_is_current( task, execution, pairs)
         allowed = boundary.phase_keys(
-            confirmed=confirmed, extraction_closed=AuditFieldReviewService().extraction_closed(execution),
+            confirmed=confirmed, extraction_closed=closed,
         )
+        if closed and not confirmed:
+            allowed |= failed_extraction_keys(self.db, task, execution, entries)
         from app.domain.materials.material_precheck import precheck_rule_keys
         allowed |= precheck_rule_keys(execution.result_json)
         return boundary, confirmed, allowed, entries
@@ -277,6 +298,8 @@ class AuditExecutionResumeService:
                 "confirmed": confirmed,
                 "extraction_rule_count": len(boundary.extraction),
                 "after_review_rule_count": len(boundary.after),
+                "retry_extraction_count": len(set(plan.unfinished) & set(boundary.extraction))
+                if execution.status == EXECUTION_STATUS_WAITING_FIELD_REVIEW or execution.failure_code == "AUDIT_EXTRACTION_INCOMPLETE" else 0,
             },
         }
 
@@ -384,7 +407,6 @@ class AuditExecutionResumeService:
                 return advanced["last_execution"]
             # 重跑范围与详情页预览出自同一个函数：待重跑清单、未完成项与依赖下游不再各算一份。
             # 字段核对边界同样取自服务端：未确认时本轮只跑抽取段，确认后才是完整计划。
-            from app.domain.materials.material_precheck import PRECHECK_KEY
             precheck = (execution.result_json or {}).get(PRECHECK_KEY)
             prepared = precheck is None or precheck["status"] != "READY"
             if prepared:

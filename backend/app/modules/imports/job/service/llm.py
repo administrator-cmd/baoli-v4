@@ -11,12 +11,14 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessError
 from app.core.config import get_settings
 from app.domain.configuration import field_strategy
+from app.domain.imports.rule_dependencies import prepare_rule_dependencies
 from app.domain.imports.workbook import WorkbookIR
 from app.domain.imports.workbook_proposals import PreparedSheet, WorkbookInventory, WorkbookProposals, prepare_sheets
 from app.integrations.llm.gateway import call_json
 from app.modules.imports.job.response_execution import save_raw_response
+from app.modules.imports.job.service.grouped_import import GroupedImport, grouped_contract
 from app.modules.imports.job.service.prompts import CONVERSION_PROMPT, REFINEMENT_PROMPT
-from app.modules.imports.job.service.stage_cache import ImportsJobStageCacheService
+from app.modules.imports.job.service.stage_cache import GroupedStageCache, ImportsJobStageCacheService
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,7 @@ class ImportsJobLlmService:
             if reference not in allowed:
                 problems.append({"owner": owner, "kind": kind, "reference": reference})
 
+        prepare_rule_dependencies(result, problems)
         for field in result.get("fields") or []:
             check(field.get("candidate_ref"), "field.material_ref", field.get("material_ref"), material_refs)
         for rule in result.get("rules") or []:
@@ -280,6 +283,10 @@ class ImportsJobLlmService:
         WorkbookInventory 的 JSON Schema，这四项都必须进入指纹；只改其中一项就
         不能复用旧的目录结果。
         """
+        if get_settings().rulebook_grouped_import:
+            return ImportsJobStageCacheService().build_fingerprint(
+                profile_version, schema_key, schema_version, source_sha256, scenario_code or "", grouped_contract(),
+            )
         contract = json.dumps(field_strategy.contract_payload(), ensure_ascii=False, sort_keys=True)
         inventory_schema = json.dumps(WorkbookInventory.model_json_schema(), ensure_ascii=False, sort_keys=True)
         return ImportsJobStageCacheService().build_fingerprint(
@@ -288,12 +295,13 @@ class ImportsJobLlmService:
         )
 
 
-    def can_resume_initial(self, job_no: str, profile_version: str, schema_key: str, schema_version: str, source_sha256: str,
+    def can_resume_initial(self, source_path: str, profile_version: str, schema_key: str, schema_version: str, source_sha256: str,
         scenario_code: str | None,
     ) -> bool:
         """当前作业是否存在可复用的第一轮结果（只核对输入层面，复用前还会核对完整指纹）。"""
-        return ImportsJobStageCacheService().initial_stage_available(
-            job_no, self.initial_fingerprint(profile_version, schema_key, schema_version, source_sha256, scenario_code),
+        cache = GroupedStageCache() if get_settings().rulebook_grouped_import else ImportsJobStageCacheService()
+        return cache.initial_stage_available(
+            source_path, self.initial_fingerprint(profile_version, schema_key, schema_version, source_sha256, scenario_code),
         )
 
 
@@ -301,6 +309,7 @@ class ImportsJobLlmService:
         *,
         operation_no: str,
         job_no: str,
+        source_path: str,
         fingerprint: str,
         mode: str = CONVERSION_MODE_FULL,
     ) -> dict[str, Any]:
@@ -311,15 +320,19 @@ class ImportsJobLlmService:
         """
         sheets = prepare_sheets(ir)
         return self.convert_prepared_sheets(
-            ir.scenario_code, sheets, operation_no=operation_no, job_no=job_no,
+            ir.scenario_code, sheets, operation_no=operation_no, job_no=job_no, source_path=source_path,
             fingerprint=fingerprint, mode=mode,
         )
 
 
     def convert_prepared_sheets(self, scenario_code: str | None, sheets: dict[str, PreparedSheet],
-        *, operation_no: str, job_no: str, fingerprint: str, mode: str = CONVERSION_MODE_FULL,
+        *, operation_no: str, job_no: str, source_path: str, fingerprint: str, mode: str = CONVERSION_MODE_FULL,
     ) -> dict[str, Any]:
         """两轮模型请求；程序只附加真实来源行，不解析业务语义或提供业务检查结果。"""
+        if get_settings().rulebook_grouped_import:
+            return GroupedImport(self, sheets, scenario_code, operation_no, source_path, fingerprint).run(
+                resume=mode == CONVERSION_MODE_RESUME,
+            )
         response_schema = WorkbookProposals.model_json_schema()
         reasoning_effort = get_settings().rulebook_llm_reasoning_effort
         workbook_payload = [sheet.model_input() for sheet in sheets.values()]
@@ -336,7 +349,7 @@ class ImportsJobLlmService:
         ).hexdigest()
         resume_fingerprint = ImportsJobStageCacheService().build_fingerprint(fingerprint, payload_digest)
         if mode == CONVERSION_MODE_RESUME:
-            initial_response = ImportsJobStageCacheService().load_initial(job_no, resume_fingerprint)
+            initial_response = ImportsJobStageCacheService().load_initial(source_path, resume_fingerprint)
             if initial_response is None:
                 raise BusinessError(
                     "IMPORT_INITIAL_STAGE_UNAVAILABLE",
@@ -359,7 +372,7 @@ class ImportsJobLlmService:
                 CONVERSION_PROMPT,
                 reasoning_effort=reasoning_effort,
                 idempotency_key=f"{operation_no}:initial",
-                on_content=lambda content: save_raw_response(operation_no, content, stage="initial"),
+                on_content=lambda content: save_raw_response(operation_no, content, source_path=source_path, stage="initial"),
             )
         # 第一轮目录既是检查点又被第二轮直接消费；形状不合法时不能存下来反复复用。
         try:
@@ -384,7 +397,7 @@ class ImportsJobLlmService:
         self._validate_sources(initial_response, source_rows, attach=False)
         if mode != CONVERSION_MODE_RESUME:
             # 检查点写不出是真实的存储故障：原样上抛，不把一次写盘失败伪装成转换成功。
-            ImportsJobStageCacheService().save_initial(job_no, resume_fingerprint, fingerprint, initial_response)
+            ImportsJobStageCacheService().save_initial(source_path, resume_fingerprint, fingerprint, initial_response)
         refinement_payload = {
             "previous_json": initial_response,
             "workbook": workbook_payload,
@@ -401,7 +414,7 @@ class ImportsJobLlmService:
             REFINEMENT_PROMPT,
             reasoning_effort=reasoning_effort,
             idempotency_key=f"{operation_no}:refinement",
-            on_content=lambda content: save_raw_response(operation_no, content, stage="refinement"),
+            on_content=lambda content: save_raw_response(operation_no, content, source_path=source_path, stage="refinement"),
         )
         # 读取结构后核对真实引用与出处；不按规则名称或表名筛除业务项。
         try:

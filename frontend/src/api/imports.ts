@@ -29,6 +29,7 @@ export interface ImportJobRow {
    * 转换期间作业状态不变，所以「是否执行中」只能看这个字段，不能看 status。
    */
   active_operation_count: number;
+  latest_operation: OperationAccepted | null;
   failure_code: string | null;
   failure_message: string | null;
   /** 上传原件的字节数；历史作业如实为 null。 */

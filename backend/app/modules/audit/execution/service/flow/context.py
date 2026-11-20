@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.execution import ORIGIN_HUMAN_CORRECTION
-from app.constants.status import LOOP_RUNNING
+from app.constants.status import LOOP_DONE, LOOP_RUNNING
 from app.domain.audit.audit_state import AuditGraphState, EvaluationContext, RuleExecutionState
-from app.domain.configuration.execution_mode import EXECUTION_MODES, MODE_EXTRACT, MODE_UNKNOWN
+from app.domain.configuration.execution_mode import (
+    EXECUTION_MODES, MODE_CALCULATE, MODE_CROSS_SCOPE_COMPARE, MODE_DERIVE_RISK, MODE_EXTRACT, MODE_UNKNOWN, MODE_VALUE_COMPARE,
+)
 from app.domain.materials.material_precheck import PRECHECK_KEY, PRECHECK_TOOLS, precheck_rule_keys
 from app.modules.audit.execution.model import NodeExecution
 from app.modules.audit.execution.service.flow.errors import agent_step
@@ -17,6 +19,7 @@ from app.modules.audit.execution.service.flow.plan import (
     ReviewBoundary,
     enabled_rules,
     evaluation_plan,
+    failed_extraction_keys,
     field_review_boundary,
     reviewed_extraction_rule_keys,
 )
@@ -27,6 +30,7 @@ from app.modules.audit.execution.service.flow.preload import (
 from app.modules.audit.execution.service.flow.shared import agent_module, rule_of_instance
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.service.field_review import AuditFieldReviewService
+from app.modules.audit.rule.service.input_validation import missing_rule_inputs
 from app.modules.audit.shared import _material_names, _task_manifest
 from app.modules.audit.task.model import AuditTask
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
@@ -118,6 +122,8 @@ def graph_load_evaluation(
         confirmed = AuditFieldReviewService(db).confirmation_is_current(task, execution)
         early_outcomes = list(((execution.result_json or {}).get(PRECHECK_KEY) or {}).get("outcomes") or [])
         allowed = boundary.phase_keys(confirmed=confirmed, extraction_closed=closed) | precheck_rule_keys(execution.result_json)
+        if closed and not confirmed:
+            allowed |= failed_extraction_keys(db, task, execution, plan)
         return {
             "agent_mode": True,
             "evaluation_plan": plan,
@@ -155,7 +161,6 @@ def graph_load_rule_instance(
         rule = planned_rule
         rule_code = str(rule.get("rule_code") or rule.get("rule_key"))
         agent = agent_module().AuditRuleAgentService(db)
-        allowed = agent.available_tools()
         identity = rule["rule_key"]
         rule_instance_id = _rule_instance_id(node_code, identity, execution.id)
         evaluation_id = _evaluation_id(task, execution.id, rule_instance_id, attempt_no)
@@ -197,7 +202,7 @@ def graph_load_rule_instance(
                 "human_field_keys": human_field_keys,
                 PRECHECK_KEY: bool(rule.get(PRECHECK_KEY)),
             },
-            "allowed_tools": allowed,
+            "allowed_tools": [],
             "messages": None,
             "pending_tool_calls": [],
             "tool_results": [],
@@ -244,16 +249,43 @@ def graph_prepare_agent_context(
         context_rule["available_materials"] = instance.get("materials") or []
         # 引用校验使用模型实际看到的版本，不在保存时重查替换。
         from app.domain.audit.fact_projection import fact_identity
-        visible_facts = {fact_identity(fact): fact
-                         for fact in [*execution_context["upstream_facts"], *list(instance.get("facts") or [])]}
-        instance = {**instance, "facts": list(visible_facts.values()),
-                    "upstream_results": execution_context["upstream_results"]}
+        if rule.get("kind") == "REPORT":
+            sources = [source for section in execution_context["report_data"] for source in section["data"]]
+            visible_facts = {fact["fact_id"]: fact for source in sources for fact in source["facts"]}
+            visible_results = {result["rule_result_id"]: result for source in sources for result in source["results"]}
+            instance = {**instance, "facts": list(visible_facts.values()), "upstream_results": list(visible_results.values())}
+        else:
+            visible_facts = {fact_identity(fact): fact
+                             for fact in [*execution_context["upstream_facts"], *list(instance.get("facts") or [])]}
+            instance = {**instance, "facts": list(visible_facts.values()),
+                        "upstream_results": execution_context["upstream_results"]}
         # 按声明预读抽取产物，同一材料与产物只读一次。
         requests = extraction_artifact_requests(rule)
         preloaded: list[dict[str, Any]] = []
-        allowed_tools = agent.available_tools()
+        mode = rule.get("execution_mode")
+        compare = mode in {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE}
+        direct = compare or mode in {MODE_CALCULATE, MODE_DERIVE_RISK} or rule.get("kind") == "REPORT"
+        allowed_tools = [] if direct else agent.available_tools()
+        if not instance.get(PRECHECK_KEY):
+            gaps = missing_rule_inputs(rule, inputs, instance["facts"])
+            if gaps and (compare or mode == MODE_CALCULATE):
+                field_names = {field["field_key"]: field["name"] for field in manifest["fields"]}
+                missing = list(dict.fromkeys(str(field_names.get(item.get("field_key")) or item.get("missing_input")
+                                                 or item.get("parameter_code") or "未明确的规则输入") for item in gaps))
+                return {
+                    "rule_instance": instance, "messages": [], "allowed_tools": [], "loop_status": LOOP_DONE,
+                    "candidate_verdict": {"status": "EVIDENCE_INSUFFICIENT", "outputs": [],
+                                          "message": f"缺少规则所需取值：{'、'.join(missing)}", "missing_items": missing},
+                    "unresolved_items": [{"kind": "RULE_INPUT_VALUES_MISSING", "references": gaps}],
+                    "last_error": None,
+                }
+            # 比较配置只声明材料范围时，执行的是正文核对；不能用未取得的字段或来源结果触发正文读取。
+            if compare and rule.get("materials") and not any(rule.get(key) for key in (
+                "inputs", "source_rule_key", "source_rule_keys", "source_rule_codes", "calculation_definition",
+            )):
+                requests = [(key, "OCR") for key in rule["materials"]]
         if instance.get(PRECHECK_KEY):
-            allowed_tools = [item for item in allowed_tools if item["tool_id"] in PRECHECK_TOOLS]
+            allowed_tools = [item for item in agent.available_tools() if item["tool_id"] in PRECHECK_TOOLS]
         if requests:
             preloaded = preload_extraction_artifacts(
                 db, task, node_code=node_code,
@@ -262,8 +294,7 @@ def graph_prepare_agent_context(
                 requests=requests,
             )
             instance = {**instance, "preloaded_artifacts": preloaded}
-            # 正文已在本次上下文中，继续暴露 TASK_DATA_READ 只会让模型重复读取同一产物。
-            allowed_tools = [item for item in allowed_tools if item.get("tool_id") != "TASK_DATA_READ"]
+            allowed_tools = []
         return {
             "rule_instance": instance,
             "allowed_tools": allowed_tools,

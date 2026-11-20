@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
@@ -68,15 +68,20 @@ class Settings(BaseSettings):
     # 规则库解析的供应商推理强度；未配置时不传，由供应商决定。
     # 与审核任务模型请求分开，避免复杂规则库整理耗尽长响应时间。
     rulebook_llm_reasoning_effort: str | None = None
+    rulebook_grouped_import: bool = False
+    # 仅字段配置组可以单独试用较低推理强度；未设置时沿用规则库设置。
+    rulebook_group_field_reasoning_effort: str | None = None
+    # 字符预算用于分包，不代表供应商 token 数。容不下不可分割的原文时显式报错。
+    rulebook_group_input_chars: int = Field(default=48000, ge=8000)
+    rulebook_group_objects: int = Field(default=8, ge=1, le=64)
     # 工具调用循环的轮数上限。达到上限时审核流程显式失败（LLM_TOOL_LOOP_LIMIT），
     # 不把「跑到上限」当作结论，也不静默降级成普通文本解析。
     # 0 表示不设上限，由调用方自行控制终止——上限是安全阀，不是业务默认。
     llm_tool_max_rounds: int = Field(default=12, ge=0)
-    # 单次模型请求的最大输出 token 数。供应商在未传 max_tokens 时可能使用较小的默认值，
-    # 批量抽取等长响应会被截断；这里显式设置为模型上限（deepseek-v4.1-flash 为 384K = 393216）。
-    # 超过模型上限时供应商直接返回 400，需要按实际模型调整。
-    llm_max_output_tokens: int = Field(default=393216, gt=0)
-    # 单进程所有模型入口串行发送；上一轮结束后至少等待此间隔（可设 0 关闭间隔）。
+    # 未指定时使用服务端的输出上限。
+    llm_max_output_tokens: int | None = Field(default=None, gt=0)
+    llm_max_concurrent_requests: int = Field(default=2, ge=1)
+    # 每个槽位独立计完成间隔，设为 0 可立即复用槽位。
     llm_request_interval_seconds: float = Field(default=2.0, ge=0, allow_inf_nan=False)
     # 可重试 HTTP 错误的退避基数；再按尝试次数指数增长并加入抖动。
     llm_retry_base_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
@@ -89,6 +94,7 @@ class Settings(BaseSettings):
     ocr_model: str | None = None
     ocr_poll_interval_seconds: float = Field(default=5.0, gt=0)
     ocr_max_wait_seconds: float = Field(default=600.0, gt=0)
+    ocr_max_concurrent_jobs: int = Field(default=5, ge=1)
 
     # 普通外部 HTTP 请求的超时，不是整轮 OCR 作业的超时，也不用于 LLM 长响应。
     request_timeout_seconds: float = Field(default=600.0, gt=0)
@@ -99,13 +105,16 @@ class Settings(BaseSettings):
     # 真实解析耗时超过它时按实际耗时调大，这与「网络不可达」是两件事。
     llm_max_seconds: float = Field(default=7200.0, gt=0)
     log_level: str = "INFO"
+    httpx_log_level: str = "WARNING"
 
     @field_validator(
         "database_url",
         "llm_baseurl",
         "llm_apikey",
         "llm_model_name",
+        "llm_max_output_tokens",
         "rulebook_llm_reasoning_effort",
+        "rulebook_group_field_reasoning_effort",
         "service_8018_url",
         "service_8010_url",
         "ocr_service_url",
@@ -124,12 +133,13 @@ class Settings(BaseSettings):
             return normalized
         return value
 
-    @field_validator("log_level")
+    @field_validator("log_level", "httpx_log_level")
     @classmethod
-    def _validate_log_level(cls, value: str) -> str:
+    def _validate_log_level(cls, value: str, info: ValidationInfo) -> str:
         normalized = value.strip().upper()
         if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-            raise ValueError("BAOLI_LOG_LEVEL 必须是 DEBUG、INFO、WARNING、ERROR 或 CRITICAL")
+            env_name = f"BAOLI_{info.field_name.upper()}"
+            raise ValueError(f"{env_name} 必须是 DEBUG、INFO、WARNING、ERROR 或 CRITICAL")
         return normalized
 
     @property

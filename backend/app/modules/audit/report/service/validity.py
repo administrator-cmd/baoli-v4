@@ -15,6 +15,7 @@ from app.domain.audit.execution_scope import (
     RESULT_STALE_PENDING_RERUN,
     result_state,
 )
+from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.report.crud import AuditReportCRUD
 
 
@@ -33,6 +34,21 @@ class AuditReportValidityService:
 
     def __init__(self, db: Session | None = None) -> None:
         self.db = db
+
+    def scope_signals(self, manifest, enabled_keys, reasons):
+        risk_keys = {rule["rule_key"] for rule in manifest["rules"]
+                     if rule["rule_key"] in enabled_keys and is_risk_rule(rule)}
+        names = {rule["rule_key"]: rule["name"] for rule in manifest["rules"]}
+        execution_notes = []
+        risk_notes = []
+        for item in (reasons or {}).get("unresolved", []):
+            if item["status"] == "NOT_GENERATED":
+                continue
+            note = f"{names[item['rule_key']]}：{item['message'] or '尚未形成明确结论'}"
+            execution_notes.append(note)
+            if item["rule_key"] in risk_keys:
+                risk_notes.append(note)
+        return {"risk_configured": bool(risk_keys), "execution_notes": execution_notes, "risk_notes": risk_notes}
 
     def result_signals(self, pairs: Iterable[tuple[int | None, str | None]],
     ) -> dict[tuple[int, str], ReportResultSignal]:

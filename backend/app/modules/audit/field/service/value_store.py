@@ -1,9 +1,4 @@
-"""按业务列保存取值及明细；数据库决定身份、当前版本与状态。
-
-每个任务维护一组固定的四张业务表（格式版本 6）。原文依据直接存主记录的 JSON 列。
-写入时按记录身份合并并原子替换，
-全部文件落盘后才更新数据库清单。旧格式不做原地转换，读取时明确报错。
-"""
+"""按记录身份访问当前与历史取值；已有任务继续沿用原文件协议。"""
 
 from __future__ import annotations
 
@@ -18,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessError
 from app.constants.execution import FACT_KIND_DERIVED, FACT_KIND_EXTRACTED
-from app.domain.audit.fact_projection import fact_identity, field_fact_identity
+from app.domain.audit.fact_projection import decode_value, encode_value, fact_identity, field_fact_identity, recognized_scopes
 from app.domain.audit.task_value_csv import (
     COUNT_COLUMNS,
     ITEM_CATEGORY,
@@ -31,12 +26,15 @@ from app.domain.audit.task_value_csv import (
 )
 from app.modules.audit.field.crud import AuditFieldCRUD
 from app.modules.audit.field.model import TaskFact, TaskFieldValue
+from app.modules.audit.field.service.current_values import CURRENT_FILES, CurrentTaskValues
 from app.modules.audit.field.service.value_files import TABLE_CACHE, AuditFieldValueFilesService
 from app.modules.audit.rule.model import RuleResult
 from app.modules.audit.task.model import AuditTask
 from app.services.shared.storage import resolve_storage_path
 
-FORMAT_VERSION = 6
+LEGACY_FORMAT_VERSION = 6
+FORMAT_VERSION = 7
+RULE_PAYLOAD_KEY = "business_result"
 
 
 CURRENT_BATCH_ID = "current"
@@ -73,7 +71,8 @@ class AuditFieldValueStoreService:
         metadata = task.value_file_json or {}
         if not metadata:
             return []
-        if metadata.get("format_version") != FORMAT_VERSION:
+        version = metadata.get("format_version")
+        if version not in (LEGACY_FORMAT_VERSION, FORMAT_VERSION):
             raise BusinessError(
                 "TASK_VALUE_FORMAT_UPGRADE_REQUIRED",
                 "任务取值文件格式与当前版本不一致，不能读取或继续执行",
@@ -94,7 +93,8 @@ class AuditFieldValueStoreService:
                 status_code=500, details={"task_no": task.task_no},
             )
         files = batch.get("files")
-        if not isinstance(files, dict) or set(files) != set(TABLE_COLUMNS):
+        expected_files = CURRENT_FILES if version == FORMAT_VERSION else set(TABLE_COLUMNS)
+        if not isinstance(files, dict) or set(files) != expected_files:
             raise BusinessError(
                 "TASK_VALUE_FILE_INVALID",
                 "任务取值文件清单与业务表结构不一致",
@@ -172,29 +172,53 @@ class AuditFieldValueStoreService:
 
 
     def append_values(self, task: AuditTask, entries: Iterable[tuple[str, int, dict[str, Any]]]) -> None:
-        """合并记录后重写任务唯一的一组四表，再由调用方提交数据库事务。
-
-        写入前在事务内保存旧文件快照；保存点或外层回滚分别恢复对应文件与清单。
-        """
-        entries = list(entries)
+        """合并新取值，并将退出当前位的事实移入历史。"""
+        entries = [(kind, int(record_id), payload) for kind, record_id, payload in entries]
         if not entries:
             return
         AuditFieldValueFilesService(self.db).lock_task_files( task.task_no)
-        identities = [(kind, int(record_id)) for kind, record_id, _ in entries]
+        identities = [(kind, record_id) for kind, record_id, _ in entries]
         if len(identities) != len(set(identities)):
             raise ValueError("同一次取值写入包含重复记录身份")
         batches = self._batches(task)
+        if not batches or task.value_file_json["format_version"] == FORMAT_VERSION:
+            values = []
+            for record_type, record_id, payload in entries:
+                if record_type != RECORD_RULE_RESULT:
+                    values.append((record_type, record_id, payload))
+                    continue
+                record = AuditFieldCRUD(self.db).get_of(RuleResult, record_id)
+                if record is None or record.audit_task_id != task.id:
+                    raise ValueError(f"规则结论没有对应的任务索引：{record_id}")
+                record.result_json = {**(record.result_json or {}), RULE_PAYLOAD_KEY: encode_value(payload)}
+            self._write_current(task, batches[0] if batches else None, values)
+            return
+        self._append_legacy(task, batches[0], entries, identities)
+
+
+    def sync_current(self, task: AuditTask) -> None:
+        """仅失效当前事实、没有新增取值时，同步 CSV 和历史文件。"""
+        if (task.value_file_json or {}).get("format_version") != FORMAT_VERSION:
+            return
+        AuditFieldValueFilesService(self.db).lock_task_files(task.task_no)
+        self._write_current(task, self._batches(task)[0], [])
+
+
+    def _write_current(self, task, batch, entries):
+        CurrentTaskValues(self.db).write(task, batch, entries, read_table=self._read_table,
+                                        business_context=self._business_context, format_version=FORMAT_VERSION)
+
+
+    def _append_legacy(self, task, batch, entries, identities):
         cache = self.db.info.setdefault(TABLE_CACHE, {})
         cached = cache.get(task.id)
         if cached is not None and cached["metadata"] is task.value_file_json:
             # 同一事务内刚写过这批文件：内容由本进程写入并已落地，不再整表重读解析。
             existing = cached["tables"]
         else:
-            existing = {name: [] for name in TABLE_COLUMNS}
-            for batch in batches:
-                for name, relative in batch["files"].items():
-                    existing[name] = self._read_table(resolve_storage_path(relative), TABLE_COLUMNS[name])
-                self._records_from_tables(task.task_no, existing, expected_count=batch["record_count"])
+            existing = {name: self._read_table(resolve_storage_path(relative), TABLE_COLUMNS[name])
+                        for name, relative in batch["files"].items()}
+            self._records_from_tables(task.task_no, existing, expected_count=batch["record_count"])
 
         incoming: dict[str, list[dict[str, Any]]] = {name: [] for name in TABLE_COLUMNS}
         for record_type, record_id, payload in entries:
@@ -205,22 +229,17 @@ class AuditFieldValueStoreService:
         incoming_identities = set(identities)
         tables: dict[str, list[dict[str, Any]]] = {}
         changed: list[str] = []
-        # 首次写入没有历史清单：必须建齐四张带表头的文件。清单登记四张表，缺任何一张，
-        # 下一次严格读取都会报缺文件；已有清单但缺文件属真实损坏，继续由 _read_table 报错。
-        initial = not batches
         for name in TABLE_COLUMNS:
             kept = [
                 row for row in existing[name]
                 if (row["记录类型"], int(row["记录ID"])) not in incoming_identities
             ]
-            if initial or incoming[name] or len(kept) != len(existing[name]):
+            if incoming[name] or len(kept) != len(existing[name]):
                 changed.append(name)
             tables[name] = [*kept, *incoming[name]]
 
-        directory = f"tasks/{task.task_no}/value_batches/{CURRENT_BATCH_ID}"
-        files = {name: f"{directory}/{name}" for name in TABLE_COLUMNS}
+        files = batch["files"]
         targets = {name: resolve_storage_path(relative) for name, relative in files.items()}
-        resolve_storage_path(directory).mkdir(parents=True, exist_ok=True)
         # 只重写本次真正变化的表：四张表都很大，逐条提交时全量重写加 fsync 会重复整份文件。
         writing = {name: targets[name] for name in changed}
         AuditFieldValueFilesService(self.db).snapshot_files( writing)
@@ -245,7 +264,7 @@ class AuditFieldValueStoreService:
                     pass
 
         record_count = sum(len(tables[name]) for name in MAIN_TABLES)
-        task.value_file_json = {**(task.value_file_json or {}), "format_version": FORMAT_VERSION,
+        task.value_file_json = {**(task.value_file_json or {}), "format_version": LEGACY_FORMAT_VERSION,
                                 "batches": [{"batch_id": CURRENT_BATCH_ID, "files": files,
                                              "record_count": record_count}]}
         cache[task.id] = {"metadata": task.value_file_json, "tables": tables}
@@ -320,7 +339,7 @@ class AuditFieldValueStoreService:
                             {"field_key": item["字段键"], "field_name": item["字段名称"],
                              "material_key": item["产出材料键"], "material_name": item["产出材料名称"],
                              "raw_value": value.get("raw_value"), "normalized_value": value["value"],
-                             "status": value.get("field_status")}
+                             "status": value.get("field_status"), **recognized_scopes(value)}
                             for item, value in zip(rows, values) if item["字段键"]
                         ]
                 records[identity] = payload
@@ -336,13 +355,13 @@ class AuditFieldValueStoreService:
 
 
     def _load(self, task: AuditTask) -> dict[tuple[str, int], dict[str, Any]]:
-        # _batches 保证只有一组 current 四表；尚未写入任何取值的任务没有任何批次。
+        # 旧任务只有一组四表；尚未写入任何取值的任务没有任何批次。
         batches = self._batches(task)
         return self._load_batch(task, batches[0]) if batches else {}
 
 
-    def values_of(self, task: AuditTask) -> dict[tuple[str, int], dict[str, Any]]:
-        """缓存任务取值；固定 current 批次在清单变化后整体重读。"""
+    def _legacy_values(self, task: AuditTask) -> dict[tuple[str, int], dict[str, Any]]:
+        """旧版记录沿用四表缓读。"""
         cached = self.db.info.get(_CACHE_KEY, {}).get(task.id)
         if cached is not None and cached["metadata"] is task.value_file_json:
             return cached["records"]
@@ -361,9 +380,37 @@ class AuditFieldValueStoreService:
         return records
 
 
+    def _rule_payload(self, task: AuditTask, record_id: int) -> dict[str, Any] | None:
+        record = AuditFieldCRUD(self.db).get_of(RuleResult, record_id)
+        if record is None or record.audit_task_id != task.id:
+            return None
+        payload = decode_value((record.result_json or {}).get(RULE_PAYLOAD_KEY))
+        if not isinstance(payload, dict) or not payload.get("outputs"):
+            return payload
+        rule = next(item for item in task.manifest_json["rules"] if item["rule_key"] == record.rule_key)
+        fields = {item["field_key"]: item for item in rule.get("output_definitions") or []}
+        materials = {item["material_key"]: item["name"] for item in task.manifest_json["materials"]}
+        payload["extracted_values"] = [
+            {"field_key": field["field_key"], "field_name": field["name"],
+             "material_key": field["material_key"], "material_name": materials[field["material_key"]],
+             "raw_value": output.get("raw_value"), "normalized_value": output.get("value"),
+             "status": output.get("field_status"), **recognized_scopes(output)}
+            for output in payload["outputs"] if (field := fields.get(output.get("code"))) is not None
+        ]
+        return payload
+
+
     def value_of(self, task: AuditTask, record_type: str, record_id: int) -> dict[str, Any]:
-        found = self.values_of( task).get((record_type, int(record_id)))
-        if found is None:
+        record_id = int(record_id)
+        if (task.value_file_json or {}).get("format_version") == FORMAT_VERSION:
+            if record_type == RECORD_RULE_RESULT:
+                found = self._rule_payload(task, record_id)
+            else:
+                with AuditFieldValueFilesService(self.db).read_task_files(task.task_no):
+                    found = CurrentTaskValues(self.db).find(task, self._batches(task)[0], record_type, record_id, self._read_table)
+        else:
+            found = self._legacy_values(task).get((record_type, record_id))
+        if not isinstance(found, dict):
             raise BusinessError("TASK_VALUE_RECORD_MISSING", "任务取值文件里没有这条记录的取值，本次读取未完成",
                                 status_code=500, details={"task_no": task.task_no, "record_type": record_type, "record_id": int(record_id)})
         return found

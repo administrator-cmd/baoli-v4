@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { FileUp, Plus, Power, Rocket, Save, Trash2 } from "lucide-vue-next";
+import { FileUp, Plus, Rocket, Save, Trash2 } from "lucide-vue-next";
 
 import type {
   ScenarioDetail,
@@ -13,7 +13,6 @@ import {
   getScene,
   getSceneConfiguration,
   publishSceneDraft,
-  setSceneEnabled,
   updateScene,
 } from "@/api/scenes";
 import { formatDate as formatDateTime } from "@/constants/labels";
@@ -62,6 +61,18 @@ const tabs = computed({
 const canEditBasic = computed(() => detail.value !== null);
 const calculations = computed(() => configuration.value?.calculations ?? []);
 const ruleIssues = computed(() => configuration.value?.sync_error?.details.rule_issues ?? []);
+
+const fieldsPanel = ref<InstanceType<typeof SceneFieldsPanel> | null>(null);
+
+async function editRuleField(fieldKey: string): Promise<void> {
+  const code = scenarioCode.value;
+  await router.replace({ query: { ...route.query, tab: "fields" } });
+  await nextTick();
+  if (scenarioCode.value !== code || tabs.value !== "fields") return;
+
+  const field = configuration.value?.fields.find((item) => item.field_key === fieldKey);
+  if (field) fieldsPanel.value?.openEdit(field);
+}
 
 interface BasicForm {
   scenario_name: string;
@@ -117,6 +128,7 @@ async function load(): Promise<void> {
       enabled: payload.enabled,
     };
     const keepLocalEdits = basicDirty.value && !switching;
+    if (keepLocalEdits && basicForm.enabled === basicSnapshot.value.enabled) basicForm.enabled = values.enabled;
     basicSnapshot.value = values;
     if (!keepLocalEdits) Object.assign(basicForm, values);
     try {
@@ -196,7 +208,7 @@ async function saveBasic(): Promise<void> {
       scenario_name: submitted.scenario_name,
       category: submitted.category || null,
       description: submitted.description || null,
-      enabled: submitted.enabled,
+      ...(submitted.enabled !== basicSnapshot.value.enabled && { enabled: submitted.enabled }),
     });
     ElMessage.success("场景资料已保存");
     // 提交值就是新基线：保存期间继续输入的内容不被响应覆盖。
@@ -207,19 +219,6 @@ async function saveBasic(): Promise<void> {
     ElMessage.error(failure instanceof Error ? failure.message : "保存失败");
   } finally {
     saving.value = false;
-  }
-}
-
-async function toggleEnabled(): Promise<void> {
-  if (!detail.value) {
-    return;
-  }
-  try {
-    await setSceneEnabled(detail.value.scenario_code, !detail.value.enabled);
-    ElMessage.success(detail.value.enabled ? "场景已停用（不影响已创建任务）" : "场景已启用");
-    await load();
-  } catch (failure) {
-    ElMessage.error(failure instanceof Error ? failure.message : "操作失败");
   }
 }
 
@@ -313,10 +312,6 @@ function openPlanCreation(): void {
               <template #icon><Plus :size="15" /></template>
               创建方案
             </el-button>
-            <el-button :type="detail.enabled ? 'warning' : 'success'" plain @click="toggleEnabled">
-              <template #icon><Power :size="15" /></template>
-              {{ detail.enabled ? "停用场景" : "启用场景" }}
-            </el-button>
             <el-button type="danger" plain :loading="deleting" @click="removeScenario">
               <template #icon><Trash2 :size="15" /></template>
               删除场景
@@ -352,44 +347,48 @@ function openPlanCreation(): void {
         </el-alert>
 
         <el-tabs v-model="tabs">
-          <el-tab-pane label="基本信息" name="basic">
-            <el-form label-width="100px" class="app-reading">
-              <el-form-item label="场景名称" required>
-                <el-input v-model="basicForm.scenario_name" :disabled="!canEditBasic" maxlength="255" />
-              </el-form-item>
-              <el-form-item label="业务类型">
-                <el-input v-model="basicForm.category" :disabled="!canEditBasic" maxlength="80" />
-              </el-form-item>
-              <el-form-item label="场景说明">
-                <el-input v-model="basicForm.description" :disabled="!canEditBasic" type="textarea" :rows="3" maxlength="4000" />
-              </el-form-item>
-              <el-form-item label="启用状态">
-                <el-switch v-model="basicForm.enabled" :disabled="!canEditBasic" active-text="启用" inactive-text="停用" />
-              </el-form-item>
-              <el-form-item label="草稿修订">
-                <span>{{ detail.draft ? `未发布草稿 · 第 ${detail.draft.revision_no} 次修订` : "无未发布草稿" }}</span>
-              </el-form-item>
-              <el-form-item label="生效状态">
-                <span>{{ configError ? "配置读取失败" : configuration?.configuration_kind === 'DRAFT' ? "草稿尚未发布" : "已发布配置" }}</span>
-              </el-form-item>
-              <el-form-item label="已发布版本">
-                <span>{{ detail.latest_version_no > 0 ? `第 ${detail.latest_version_no} 版` : "尚未发布" }}</span>
-              </el-form-item>
-              <el-form-item label="关联方案">
-                <span>{{ detail.plan_count }} 个方案使用该场景</span>
-              </el-form-item>
-              <el-form-item label="创建时间">
-                <span>{{ formatDate(detail.created_at) }}</span>
-              </el-form-item>
-              <el-form-item label="更新时间">
-                <span>{{ formatDate(detail.updated_at) }}</span>
-              </el-form-item>
-              <el-form-item>
-                <el-button type="primary" :disabled="!canEditBasic" :loading="saving" @click="saveBasic">
-                  <template #icon><Save :size="15" /></template>
-                  保存基本资料
-                </el-button>
-              </el-form-item>
+          <el-tab-pane label="基本信息" name="basic" class="scene-basic">
+            <el-form label-width="100px" class="scene-basic__grid">
+              <div>
+                <el-form-item label="场景名称" required>
+                  <el-input v-model="basicForm.scenario_name" :disabled="!canEditBasic" maxlength="255" />
+                </el-form-item>
+                <el-form-item label="业务类型">
+                  <el-input v-model="basicForm.category" :disabled="!canEditBasic" maxlength="80" />
+                </el-form-item>
+                <el-form-item label="场景说明">
+                  <el-input v-model="basicForm.description" :disabled="!canEditBasic" type="textarea" :rows="3" maxlength="4000" />
+                </el-form-item>
+                <el-form-item label="启用状态">
+                  <el-switch v-model="basicForm.enabled" :disabled="!canEditBasic" active-text="启用" inactive-text="停用" />
+                </el-form-item>
+                <el-form-item>
+                  <el-button type="primary" :disabled="!canEditBasic" :loading="saving" @click="saveBasic">
+                    <template #icon><Save :size="15" /></template>
+                    保存基本资料
+                  </el-button>
+                </el-form-item>
+              </div>
+              <div>
+                <el-form-item label="草稿修订">
+                  <span>{{ detail.draft ? `未发布草稿 · 第 ${detail.draft.revision_no} 次修订` : "无未发布草稿" }}</span>
+                </el-form-item>
+                <el-form-item label="发布状态">
+                  <span>{{ configError ? "配置读取失败" : !configuration ? "尚未读取配置" : configuration.configuration_kind === 'DRAFT' ? "草稿尚未发布" : "已发布配置" }}</span>
+                </el-form-item>
+                <el-form-item label="已发布版本">
+                  <span>{{ detail.latest_version_no > 0 ? `第 ${detail.latest_version_no} 版` : "尚未发布" }}</span>
+                </el-form-item>
+                <el-form-item label="关联方案">
+                  <span>{{ detail.plan_count }} 个方案使用该场景</span>
+                </el-form-item>
+                <el-form-item label="创建时间">
+                  <span>{{ formatDate(detail.created_at) }}</span>
+                </el-form-item>
+                <el-form-item label="更新时间">
+                  <span>{{ formatDate(detail.updated_at) }}</span>
+                </el-form-item>
+              </div>
             </el-form>
           </el-tab-pane>
 
@@ -405,6 +404,7 @@ function openPlanCreation(): void {
           </el-tab-pane>
           <el-tab-pane label="字段" name="fields">
             <SceneFieldsPanel
+              ref="fieldsPanel"
               :scenario-code="detail.scenario_code"
               :config="configuration"
               :config-error="configError"
@@ -421,6 +421,7 @@ function openPlanCreation(): void {
               :config-loading="loading"
               @changed="onChildChanged"
               @refresh="load"
+              @edit-field="editRuleField"
             />
           </el-tab-pane>
           <el-tab-pane label="计算规则" name="calculations">
@@ -445,6 +446,23 @@ function openPlanCreation(): void {
 </template>
 
 <style scoped>
+.scene-basic {
+  container-type: inline-size;
+}
+
+.scene-basic__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 32px;
+  align-items: start;
+}
+
+@container (max-width: 720px) {
+  .scene-basic__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .rule-issue {
   display: flex;
   align-items: center;

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.common.exceptions import BusinessError
 from app.integrations.llm.gateway import RequestLogContext, call_json
+from app.integrations.documents.ocr_concurrency import OCR_CONCURRENCY_LIMITER
 from app.modules.audit.report_template.schema import ReportStyleProfile
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,9 @@ def _ocr_pdf_online(source_path: Path, filename: str) -> list[dict[str, Any]]:
     """使用项目已配置的 PaddleOCR 在线作业接口提交 PDF 并读取各页结果。"""
     from app.integrations.documents.ocr import poll_ocr_job, submit_processed_document
 
-    submission = submit_processed_document(file_path=source_path, filename=filename)
-    result = poll_ocr_job(job_id=submission.job_id, deadline_at=submission.deadline_at)
+    with OCR_CONCURRENCY_LIMITER.slot():
+        submission = submit_processed_document(file_path=source_path, filename=filename)
+        result = poll_ocr_job(job_id=submission.job_id, deadline_at=submission.deadline_at)
     content = result.artifact.content
     pages = content.get("pages") if isinstance(content, dict) else None
     if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):

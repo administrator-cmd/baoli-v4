@@ -9,6 +9,9 @@ import type { OperationView } from "@/api/http";
 export function generationAssistantFailureMessage(
   operation: Pick<OperationView, "operation_type" | "failure_code" | "failure_message"> | null,
 ): string | undefined {
+  if (operation?.operation_type === "RULEBOOK_GENERATE" && ["LLM_CONTENT_REVIEW_FAILED", "LLM_CONTRACT_INVALID", "LLM_SOURCE_REFERENCE_INVALID", "LLM_REVIEW_INVALID"].includes(operation.failure_code ?? "")) {
+    return "AI 未能整理出可核对的规则库。原文件已保留，可重新编制。";
+  }
   if (operation?.operation_type !== "RULEBOOK_REVISE") return undefined;
   if (["ASSISTANT_REVIEW_FAILED", "ASSISTANT_REVIEW_INVALID"].includes(operation.failure_code ?? "")) {
     return "AI 未能完成本次修改的内容核对，原版本已保留。可在助手中重试这条要求。";
@@ -20,7 +23,7 @@ export function generationAssistantFailureMessage(
 }
 
 export const generationStatusLabels: Record<GenerationStatus, string> = {
-  NOT_GENERATED: "尚未编制", PENDING: "等待编制", RUNNING: "编制中", EDITABLE: "已编制",
+  NOT_GENERATED: "尚未编制", PENDING: "等待 AI 处理", RUNNING: "AI 处理中", EDITABLE: "已编制",
   NO_DEFINITIONS: "未识别到业务内容", FAILED: "编制失败", INTERRUPTED: "编制中断", UNKNOWN: "状态未知",
 };
 export const generationStatusOptions = Object.entries(generationStatusLabels).map(

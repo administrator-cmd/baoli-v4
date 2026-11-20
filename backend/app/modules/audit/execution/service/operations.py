@@ -155,10 +155,11 @@ class AuditExecutionOperationsService:
                     "AUDIT_EXECUTION_MISSING", "恢复目标执行批次不存在", status_code=404,
                     details={"execution_id": execution_id},
                 )
-            if audit_resume.AuditExecutionResumeService().resumable_execution(task, target) is None:
+            reason = audit_resume.AuditExecutionResumeService(self.db).resume_blocked_reason(task, target)
+            if reason is not None:
                 raise BusinessError(
                     "AUDIT_EXECUTION_NOT_RESUMABLE",
-                    audit_resume.AuditExecutionResumeService().resume_blocked_reason(task, target) or "该执行批次没有可继续的未完成项",
+                    reason,
                     status_code=409,
                     details={"execution_id": execution_id, "status": target.status,
                              "failure_code": target.failure_code},
@@ -243,10 +244,10 @@ class AuditExecutionOperationsService:
         }
 
         def validate() -> None:
-            if task.status != TASK_STATUS_WAITING_FIELD_REVIEW:
+            if AuditExecutionCommandsService(self.db)._waiting_review_execution(task).id != execution_id:
                 raise BusinessError(
-                    "AUDIT_FIELD_REVIEW_NOT_WAITING",
-                    f"任务当前状态为 {task.status}，不在字段核对等待点，不能确认继续审核",
+                    "AUDIT_EXECUTION_MISSING",
+                    "待核对的执行批次已更新，请刷新后再确认",
                     status_code=409,
                     details={"task_no": task.task_no, "status": task.status},
                 )

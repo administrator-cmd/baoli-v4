@@ -5,7 +5,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type { DraftFieldItem, DraftMaterialItem, DraftRuleItem, JsonValue } from "@/api/contracts";
 import { createDraftRule, getSceneConfiguration, updateDraftRule, type DraftRulePayload } from "@/api/scenes";
 import BackButton from "@/components/BackButton.vue";
-import { EXECUTION_MODE_OPTIONS, executionModeLabel, type ExecutionMode } from "@/constants/executionModes";
+import PageHeader from "@/components/PageHeader.vue";
+import { EXECUTION_MODE_OPTIONS, type ExecutionMode } from "@/constants/executionModes";
 
 const route = useRoute();
 const router = useRouter();
@@ -24,7 +25,7 @@ const formIdentity = ref("");
 /** 最近一次从服务端载入的表单快照；与表单不同就是有未保存输入。 */
 const loadedFormJson = ref("");
 let loadSequence = 0;
-const form = reactive({ name: "", source_ref: "", requirement: "", enabled: true,
+const form = reactive({ name: "", source_ref: "", requirement: "", config_status: "CLEAR" as "CLEAR" | "PENDING" | "DISABLED",
   execution_mode: "UNKNOWN" as ExecutionMode,
   rule_role: "CHECK" as "CHECK" | "RISK", field_keys: [] as string[], output_keys: [] as string[], material_keys: [] as string[], source_rule_keys: [] as string[] });
 
@@ -39,7 +40,7 @@ function resetForm(): void {
   form.name = "";
   form.source_ref = "";
   form.requirement = "";
-  form.enabled = true;
+  form.config_status = "CLEAR";
   form.execution_mode = "UNKNOWN";
   form.rule_role = "CHECK";
   form.field_keys = [];
@@ -53,7 +54,7 @@ function applyRule(rule: DraftRuleItem) {
   form.name = rule.name;
   form.source_ref = rule.source_ref ?? "";
   form.requirement = rule.requirement;
-  form.enabled = rule.enabled;
+  form.config_status = rule.config_status === "PENDING" ? "PENDING" : rule.enabled ? "CLEAR" : "DISABLED";
   form.execution_mode = (rule.execution_mode || "UNKNOWN") as ExecutionMode;
   form.rule_role = rule.rule_role ?? "CHECK";
   form.field_keys = rule.inputs.flatMap((i) => i.field_key ? [i.field_key] : []);
@@ -112,7 +113,8 @@ async function submit() {
   const parameters: Record<string, JsonValue> = { ...(existing.value?.parameters ?? {}) };
   const payload: DraftRulePayload = {
     name: form.name.trim(), source_ref: form.source_ref.trim() || null,
-    node: "RULE_EXECUTION", operator: existing.value?.operator ?? "LLM_EXECUTE", execution_mode: form.execution_mode, rule_role: form.rule_role, enabled: form.enabled,
+    node: "RULE_EXECUTION", operator: existing.value?.operator ?? "LLM_EXECUTE", execution_mode: form.execution_mode, rule_role: form.rule_role,
+    enabled: form.config_status === "CLEAR", config_status: form.config_status,
     inputs: form.field_keys.map((fieldKey) => {
       const field = fields.value.find((f) => f.field_key === fieldKey);
       if (!field) throw new Error("所选字段不存在");
@@ -172,45 +174,130 @@ onBeforeRouteUpdate((to, from) => (
 </script>
 
 <template>
-  <div class="page-shell">
-    <BackButton @click="back()" />
-    <h2>{{ creating ? '新增规则' : '编辑规则' }}</h2>
-    <el-alert v-if="errorMessage" type="error" :title="errorMessage" :closable="false" />
-    <el-form v-else v-loading="loading" label-width="110px">
-      <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
-      <el-form-item label="业务编号"><el-input v-model="form.source_ref" placeholder="原规则库未提供编号时可留空" /></el-form-item>
-      <el-form-item label="启用状态"><el-switch v-model="form.enabled" inline-prompt active-text="启用" inactive-text="停用" /></el-form-item>
-      <el-form-item label="执行方式" required>
-        <el-select v-model="form.execution_mode" style="width: 260px">
-          <el-option v-for="item in EXECUTION_MODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
-        </el-select>
-        <div v-if="form.execution_mode === 'UNKNOWN'" class="text-hint execution-mode-warning">
-          未判定执行方式时不能发布；请按原规则行选择材料检查、字段比较、跨范围比较、组合汇总或风险推导。
+  <div class="rule-editor">
+    <PageHeader :title="creating ? '新增规则' : '编辑规则'" :show-refresh="false" class="rule-editor__header">
+      <template #leading><BackButton @click="back()" /></template>
+      <template #actions>
+        <span v-if="hasUnsavedInput" class="rule-editor__unsaved" role="status">有未保存修改</span>
+        <el-button type="primary" :loading="saving" :disabled="loading || !!errorMessage" @click="submit">保存到草稿</el-button>
+      </template>
+    </PageHeader>
+    <el-alert v-if="errorMessage" type="error" :title="errorMessage" :closable="false" show-icon />
+    <el-form v-else v-loading="loading" label-position="top" :disabled="loading || saving" class="rule-form" @submit.prevent>
+      <section class="rule-section" aria-labelledby="rule-content-title">
+        <h2 id="rule-content-title" class="rule-section__title">规则内容</h2>
+        <div class="rule-identity">
+          <el-form-item label="规则名称" required>
+            <el-input v-model="form.name" placeholder="请输入规则名称" />
+          </el-form-item>
+          <el-form-item label="业务编号">
+            <el-input v-model="form.source_ref" placeholder="原文未提供时可留空" />
+          </el-form-item>
         </div>
-        <div v-else class="text-hint">{{ executionModeLabel(form.execution_mode) }}</div>
-      </el-form-item>
-      <el-form-item label="规则角色"><el-select v-model="form.rule_role"><el-option value="CHECK" label="普通核查" /><el-option value="RISK" label="风险结论" /></el-select></el-form-item>
-      <el-form-item label="执行要求"><el-input v-model="form.requirement" type="textarea" :rows="8" placeholder="填写完整业务规则、方法、公式、条件和输出要求" /></el-form-item>
-      <el-form-item label="适用材料"><el-select v-model="form.material_keys" multiple style="width:100%">
-        <el-option v-for="material in materials" :key="material.material_key" :value="material.material_key" :label="material.name" />
-      </el-select></el-form-item>
-      <el-form-item label="输入字段"><el-select v-model="form.field_keys" multiple style="width:100%">
-        <el-option v-for="field in fields" :key="field.field_key" :value="field.field_key" :label="field.name" />
-      </el-select></el-form-item>
-      <el-form-item label="输出字段"><el-select v-model="form.output_keys" multiple style="width:100%">
-        <el-option v-for="field in fields" :key="field.field_key" :value="field.field_key" :label="field.name" />
-      </el-select></el-form-item>
-      <el-form-item label="依赖规则"><el-select v-model="form.source_rule_keys" multiple style="width:100%">
-        <el-option v-for="rule in rules.filter((r) => r.rule_key !== ruleKey)" :key="rule.rule_key" :value="rule.rule_key" :label="rule.name" />
-      </el-select></el-form-item>
-      <el-form-item><el-button type="primary" :loading="saving" :disabled="loading" @click="submit">保存到草稿</el-button></el-form-item>
+        <div class="rule-settings">
+          <el-form-item label="配置状态">
+            <el-select v-model="form.config_status">
+              <el-option value="CLEAR" label="启用" />
+              <el-option value="PENDING" label="待确认" />
+              <el-option value="DISABLED" label="停用" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="规则用途">
+            <el-select v-model="form.rule_role">
+              <el-option value="CHECK" label="普通核查" />
+              <el-option value="RISK" label="风险结论" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="执行方式" required>
+            <el-select v-model="form.execution_mode" :aria-describedby="form.execution_mode === 'UNKNOWN' ? 'execution-mode-hint' : undefined">
+              <el-option v-for="item in EXECUTION_MODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <el-alert v-if="form.execution_mode === 'UNKNOWN'" id="execution-mode-hint" class="execution-mode-warning" type="warning" show-icon :closable="false" title="执行方式未判定，可保存草稿，发布前需明确。" />
+        <el-form-item label="执行要求" class="rule-requirement">
+          <el-input v-model="form.requirement" type="textarea" :rows="8" resize="vertical" placeholder="填写业务规则、判断条件、方法或公式，以及输出要求" />
+        </el-form-item>
+      </section>
+
+      <section class="rule-section" aria-labelledby="rule-relations-title">
+        <h2 id="rule-relations-title" class="rule-section__title">关联配置</h2>
+        <div class="rule-relations">
+          <el-form-item label="适用材料">
+            <el-select v-model="form.material_keys" multiple filterable placeholder="搜索并选择材料">
+              <el-option v-for="material in materials" :key="material.material_key" :value="material.material_key" :label="material.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="输入字段">
+            <el-select v-model="form.field_keys" multiple filterable placeholder="搜索材料或字段名称">
+              <el-option v-for="field in fields" :key="field.field_key" :value="field.field_key" :label="`${field.material_name ?? '未知材料'} · ${field.name}`" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="输出字段">
+            <el-select v-model="form.output_keys" multiple filterable placeholder="搜索材料或字段名称">
+              <el-option v-for="field in fields" :key="field.field_key" :value="field.field_key" :label="`${field.material_name ?? '未知材料'} · ${field.name}`" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="依赖规则">
+            <el-select v-model="form.source_rule_keys" multiple filterable placeholder="搜索并选择规则">
+              <el-option v-for="rule in rules.filter((r) => r.rule_key !== ruleKey)" :key="rule.rule_key" :value="rule.rule_key" :label="rule.name" />
+            </el-select>
+          </el-form-item>
+        </div>
+      </section>
     </el-form>
   </div>
 </template>
 
 <style scoped>
-.execution-mode-warning {
-  margin-top: 4px;
-  color: var(--el-color-warning);
+.rule-editor {
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  container-type: inline-size;
+}
+.rule-editor__header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: 4px 0 12px;
+  background: var(--app-page-bg);
+}
+.rule-editor__unsaved { color: var(--el-text-color-regular); font-size: 13px; }
+.rule-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr);
+  align-items: start;
+  gap: 20px;
+}
+.rule-section {
+  min-width: 0;
+  padding: 20px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: var(--el-border-radius-base);
+}
+.rule-section__title {
+  margin: 0 0 20px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.rule-identity, .rule-settings, .rule-relations { display: grid; gap: 16px; }
+.rule-identity { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+.rule-settings { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 20px; }
+.rule-form :deep(.el-form-item) { min-width: 0; margin-bottom: 0; }
+.rule-form :deep(.el-form-item__label) { margin-bottom: 8px; line-height: 20px; }
+.rule-form :deep(.el-select) { width: 100%; min-width: 0; }
+.rule-form :deep(.el-textarea__inner) { line-height: 1.75; }
+.rule-form .rule-requirement { margin-top: 20px; }
+.execution-mode-warning { margin-top: 16px; }
+@container (max-width: 1040px) {
+  .rule-form { grid-template-columns: minmax(0, 1fr); }
+  .rule-relations { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 640px) {
+  .rule-identity, .rule-settings, .rule-relations { grid-template-columns: minmax(0, 1fr); }
+  .rule-section { padding: 16px; }
 }
 </style>

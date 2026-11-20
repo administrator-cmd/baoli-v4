@@ -21,7 +21,7 @@ from app.modules.audit.report_template.service.operations import (
 from app.modules.system.operation.model import BackgroundOperation
 from app.modules.system.operation.service.background import OperationBackgroundService
 from app.modules.system.operation.service.operation_types import OBJECT_REPORT_TEMPLATE
-from app.services.shared.storage import resolve_storage_path, save_upload_sync
+from app.services.shared.storage import storage_entry, resolve_storage_path, save_upload_sync
 
 
 class ReportTemplateLifecycleService:
@@ -102,7 +102,7 @@ class ReportTemplateLifecycleService:
                 return existing
 
             template_no = public_no("RPTPL")
-            relative_path = f"report_templates/{template_no}/source.pdf"
+            relative_path = f"report_templates/{storage_entry('template', template_no)}/source.pdf"
             source_path = resolve_storage_path(relative_path)
             source_path.parent.mkdir(parents=True, exist_ok=True)
             staging_path.replace(source_path)

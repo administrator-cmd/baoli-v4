@@ -1,6 +1,7 @@
 """场景草稿计算定义维护与结构化引用同步。"""
 
 from copy import deepcopy
+from re import fullmatch
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -58,6 +59,13 @@ class ScenarioDraftCalculationsService:
         items = deepcopy(calculation_store(draft.calculation_json))
         previous = self._find(items, rule_code) if rule_code is not None else None
         definition = {**(previous or {}), **deepcopy(payload)}
+        if previous is None and not definition["rule_code"].strip():
+            next_number = max(
+                (int(match[1]) for item in items
+                 if (match := fullmatch(r"CALC_([0-9]+)", item.get("rule_code") or ""))),
+                default=0,
+            ) + 1
+            definition["rule_code"] = f"CALC_{next_number:04d}"
         for key in ("rule_code", "rule_name", "result_code"):
             definition[key] = definition[key].strip()
             if not definition[key]:

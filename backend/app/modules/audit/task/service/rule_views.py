@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.field.service.evidence import AuditFieldEvidenceService
+from app.modules.audit.field.service.value_store import RULE_PAYLOAD_KEY
 from app.modules.audit.rule.model import RuleResult
 from app.modules.audit.rule.service.rule_results import AuditRuleResultsService
 from app.modules.audit.task.model import AuditTask
@@ -45,21 +46,31 @@ class AuditTaskRuleViewsService:
 
     def comparison_sources(self, result: dict[str, Any], *, task: AuditTask, documents_by_material_key: dict[str, TaskDocument],
     ) -> dict[str, Any]:
-        """给比较双方的来源标签补上材料与字段中文名。
+        """为实际取值表和比较结果还原业务名称，与是否抽取成功无关。
 
         比较结果里的左右下标指向本次真实输入；名称取自任务冻结配置与材料位。
         早期结果保存时没有带上名称，这里只补展示字段，不改写已经算出的取值与算式。
         """
+        field_names = {field["field_key"]: field["name"] for field in task.task_schema_json["fields"] if field.get("name")}
+        material_names = {key: document.material_name for key, document in documents_by_material_key.items()}
+
+        def named_input(row):
+            if not isinstance(row, dict):
+                return row
+            labels = {}
+            if not row.get("field_name") and (name := field_names.get(str(row.get("field_key") or ""))):
+                labels["field_name"] = name
+            if not row.get("material_name") and (name := material_names.get(str(row.get("material_key") or ""))):
+                labels["material_name"] = name
+            return {**row, **labels} if labels else row
+
+        # 实际取值直接读取 inputs（旧版抽取结果也可能使用 extracted_values），不是 tool_findings。
+        # 只补缺失名称；不按金额或行序猜测身份，也不查当前事实来覆盖历史取值。
+        result = {**result, **{key: [named_input(row) for row in result[key]]
+                               for key in ("inputs", "extracted_values") if isinstance(result.get(key), list)}}
         findings = result.get("tool_findings")
         if not isinstance(findings, list):
             return result
-        field_names = {
-            str(field["field_key"]): str(field.get("name") or field["field_key"])
-            for field in task.task_schema_json["fields"]
-        }
-        material_names = {
-            key: str(document.material_name) for key, document in documents_by_material_key.items()
-        }
         changed = False
         updated: list[Any] = []
         for finding in findings:
@@ -136,14 +147,16 @@ class AuditTaskRuleViewsService:
             "turn_count": item.turn_count,
             "result": self.comparison_sources(
                 self._named_rule_result({
-                    # 诊断来自数据库，业务结论来自任务 CSV；状态与风险等级只存数据库。
+                    # 业务结论通过统一读取入口提供，诊断不重复展开存储载荷。
                     **rule_value_of[item.id],
                     "status": item.status,
                     "message": item.message,
                     "risk_level": item.risk_level,
                     **AuditRuleResultsService(self.db).restore_diagnostic_inputs(
                          task,
-                        AuditFieldEvidenceService().result_content_view(item.result_json if isinstance(item.result_json, dict) else {}),
+                        AuditFieldEvidenceService().result_content_view({
+                            key: value for key, value in (item.result_json or {}).items() if key != RULE_PAYLOAD_KEY
+                        } if isinstance(item.result_json, dict) else {}),
                     ),
                     # 规则结果的节点归属必须来自实际执行记录；node 使用能力类型供页面阶段筛选，
                     # node_code 保留用户配置的实例码，两个字段都不由规则名称推断。

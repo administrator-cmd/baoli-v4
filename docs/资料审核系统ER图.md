@@ -1,6 +1,6 @@
 # 资料审核系统 ER 图
 
-按 2026-11-16 当前源码与 `backend/resource/schema.sql` 静态梳理，共 25 张物理表；未连接运行数据库。实体定义来自 `backend/app/modules/**/model.py`。
+按仓库[目标 DDL](../backend/resource/schema.sql)静态核对，当前包含 26 张业务表、37 组物理外键。下方 Mermaid 与明细表已包含 `0010_operation_llm_response`。图册的 ER 图片是 2026-11-16 快照，未画出此次新增表和外键；运行数据库版本需另行核实。
 
 [打开可切换图册](diagrams/资料审核系统图册.html) · [ER 总览 SVG](diagrams/资料审核系统ER图.svg) · [工作流说明](资料审核系统工作流.md)
 
@@ -8,9 +8,9 @@
 
 ## 读图约定
 
-- 总览仅展示主干关系，实线为物理外键，虚线为业务快照关联；完整物理关系分散到模块明细中。后台操作与报告模板页单独展示无 FK 的逻辑引用。
+- 图册总览仅展示主干关系，实线为物理外键，虚线为业务快照关联。模块图用于定位；完整关系见本文下方的外键明细。
 - 模块明细连线格式为 `R编号 父记录数 : 子记录数`。例如 `1 : 0..N` 表示每个子记录必须关联一个父记录，每个父记录可以关联零到多个子记录；`0..1` 表示可空单个。
-- 图册每页下方可展开关系明细，核对 R 编号对应的完整外键列；R 编号仅在当前页有效。跨模块实体可以重复出现，但 36 组物理外键各归属一个明细页。
+- 图册中的 R 编号仅在当前页有效。图中覆盖旧版 36 组外键；后台操作到导入模型响应的一对多关系见本文 Mermaid。
 - `PK` 为主键，`FK` 为外键成员，`UK` 为单列唯一键，字段后的 `?` 表示 SQL 可空。卡片只列定位字段；完整字段与约束以实体和 SQL 为准。复合外键的一条连线代表整组字段，不代表单列可以独立关联。
 - 下方 Mermaid 为可编辑的完整关系源码。所有关系均为真实 FK；Mermaid 虚线表示非标识关系（子表有独立主键），不表示逻辑引用。
 
@@ -35,11 +35,12 @@
 | 内容 | 当前存储位置 |
 | --- | --- |
 | 材料、字段、规则、计算与报告章节定义 | `scenario_draft.config_json`、`scenario_version.manifest_json`、`audit_plan.config_json / manifest_json`、`audit_task.manifest_json`，不是独立物理表 |
-| 字段业务取值、事实取值、规则处置和依据明细 | 任务目录中的 `values.csv`、`rule_results.csv`、`rule_items.csv`、`value_details.csv`；清单在 `audit_task.value_file_json` |
+| 新任务的业务取值、规则处置和依据 | 当前事实在 `values/current/values.csv`，字段候选、历史和原文在 `values/history.json`，规则业务结果在 `rule_result.result_json`；清单在 `audit_task.value_file_json` |
 | 字段与事实的身份、版本、当前位及状态 | `task_field_value`、`task_fact` |
 | 规则名称、状态、风险等级及执行诊断 | `rule_result`；与取值 CSV 分工保存 |
 | 审核报告正文与生成范围快照 | `audit_report.content_md / snapshot_json` |
 | AI 编制当前文档与历史全文 | `rulebook_generation_job.document_json`、`rulebook_generation_revision.document_json`、`rulebook_generation_export.document_snapshot_json` |
+| 规则库导入的原始模型响应 | `operation_llm_response` 按后台操作、阶段和文件相对路径登记；不使用旧的 `background_operation.raw_response_path` |
 
 以下关联存在于业务逻辑或 JSON 快照中，**没有物理外键，未画入物理 ER 图**：
 
@@ -248,6 +249,12 @@ erDiagram
         string phase "可空"
         string status
     }
+    operation_llm_response ["导入模型响应 / operation_llm_response"] {
+        bigint id PK
+        bigint operation_id FK
+        string stage
+        string relative_path UK
+    }
     operation_log ["业务操作日志 / operation_log"] {
         bigint id PK
         string log_no UK
@@ -298,6 +305,7 @@ erDiagram
     rulebook_generation_job ||..o{ rulebook_generation_revision : "generation_job_id"
     background_operation |o..o| rulebook_generation_revision : "operation_id"
     background_operation ||..o{ rulebook_generation_message : "operation_id"
+    background_operation ||..o{ operation_llm_response : "operation_id"
     rulebook_generation_revision ||..o{ rulebook_generation_message : "generation_job_id, revision"
 ```
 
@@ -344,9 +352,10 @@ erDiagram
 | `rulebook_generation_revision` | `generation_job_id` | `rulebook_generation_job(id)` | 1 | 0..N |
 | `rulebook_generation_revision` | `operation_id` | `background_operation(id)` | 0..1 | 0..1 |
 | `rulebook_generation_message` | `operation_id` | `background_operation(id)` | 1 | 0..N |
+| `operation_llm_response` | `operation_id` | `background_operation(id)` | 1 | 0..N |
 | `rulebook_generation_message` | `generation_job_id, revision` | `rulebook_generation_revision(generation_job_id, revision)` | 1 | 0..N |
 
-合计 36 组外键；其中复合外键按组计数。
+合计 37 组外键；复合外键按组计数。
 
 ## 唯一键明细
 
@@ -356,6 +365,7 @@ erDiagram
 | --- | --- |
 | `scenario_template` | `(scenario_code)` |
 | `background_operation` | `(operation_no)`；`(object_type, object_no, operation_type, idempotency_key)` |
+| `operation_llm_response` | `(relative_path)` |
 | `import_job` | `(job_no)` |
 | `scenario_version` | `(scenario_code, version_no)`；`(import_job_id)` |
 | `scenario_node` | `(scenario_version_id, node_code)`；`(scenario_version_id, sequence_no)` |

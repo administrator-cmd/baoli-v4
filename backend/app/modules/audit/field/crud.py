@@ -2,7 +2,8 @@
 
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
+from sqlalchemy.orm import aliased
 
 from app.core.base_crud import CRUDBase
 from app.modules.audit.field.model import (
@@ -12,6 +13,7 @@ from app.modules.audit.field.model import (
     TaskFieldValue,
 )
 from app.modules.material.document.model import DocumentUpload, TaskDocument
+from app.modules.audit.task.model import AuditTask
 
 
 class AuditFieldCRUD(CRUDBase):
@@ -281,6 +283,71 @@ class AuditFieldCRUD(CRUDBase):
             .limit(1)
         )
 
+    def confirmation_history_page(self, *, page: int, page_size: int):
+        """分页读取每个任务的最新确认记录。
+
+        先只查询当前页需要的确认 ID，再读取确认快照和任务详情，避免把 JSON/TEXT
+        大字段带入全量聚合查询的排序阶段。最新记录判断使用反关联查询，配合
+        ``(audit_task_id, id)`` 索引可直接检查同任务是否存在更新记录。
+        """
+        newer_confirmation = aliased(FieldReviewConfirmation)
+        latest_confirmation = ~exists(
+            select(newer_confirmation.id).where(
+                newer_confirmation.audit_task_id == FieldReviewConfirmation.audit_task_id,
+                newer_confirmation.id > FieldReviewConfirmation.id,
+            )
+        )
+        page_statement = (
+            select(
+                FieldReviewConfirmation.id.label("confirmation_id"),
+                FieldReviewConfirmation.audit_task_id.label("task_id"),
+            )
+            .where(latest_confirmation)
+            .order_by(FieldReviewConfirmation.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        page_rows = self.db.execute(page_statement).mappings().all()
+        total = self.db.scalar(
+            select(func.count(func.distinct(FieldReviewConfirmation.audit_task_id)))
+        ) or 0
+        if not page_rows:
+            return [], int(total)
+
+        confirmation_ids = [row["confirmation_id"] for row in page_rows]
+        task_ids = [row["task_id"] for row in page_rows]
+        detail_rows = self.db.execute(
+            select(FieldReviewConfirmation, AuditTask)
+            .join(AuditTask, AuditTask.id == FieldReviewConfirmation.audit_task_id)
+            .where(FieldReviewConfirmation.id.in_(confirmation_ids))
+        ).all()
+        details_by_confirmation_id = {
+            confirmation.id: (confirmation, task)
+            for confirmation, task in detail_rows
+        }
+        count_rows = self.db.execute(
+            select(
+                FieldReviewConfirmation.audit_task_id,
+                func.count(FieldReviewConfirmation.id),
+            )
+            .where(FieldReviewConfirmation.audit_task_id.in_(task_ids))
+            .group_by(FieldReviewConfirmation.audit_task_id)
+        ).all()
+        counts_by_task_id = {task_id: count for task_id, count in count_rows}
+
+        rows = []
+        for row in page_rows:
+            confirmation, task = details_by_confirmation_id[row["confirmation_id"]]
+            rows.append((confirmation, task, counts_by_task_id[row["task_id"]]))
+        return rows, int(total)
+
+    def confirmations_for_task(self, task_id: int) -> list[FieldReviewConfirmation]:
+        return list(self.db.scalars(
+            select(FieldReviewConfirmation)
+            .where(FieldReviewConfirmation.audit_task_id == task_id)
+            .order_by(FieldReviewConfirmation.id.desc())
+        ).all())
+
     def field_value_ids_for_executions(self, task_id: int, execution_ids: list[int]) -> list[int]:
         return list(self.db.scalars(
             select(TaskFieldValue.id).where(
@@ -336,6 +403,11 @@ class AuditFieldCRUD(CRUDBase):
             .where(TaskFact.audit_task_id == task_id, TaskFact.is_current.is_(True))
         )
         return int(self.db.scalar(statement) or 0)
+
+    def current_fact_ids(self, task_id: int) -> set[int]:
+        return set(self.db.scalars(select(TaskFact.id).where(
+            TaskFact.audit_task_id == task_id, TaskFact.is_current.is_(True),
+        )))
 
     def clear_current_field_values(self, task_id: int) -> None:
         self.db.execute(

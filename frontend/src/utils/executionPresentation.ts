@@ -48,7 +48,7 @@ export const executionStatusOptions = [
   "FAILED",
   "SKIPPED",
   "INVALIDATED",
-].map((value) => ({ value, label: executionStatusLabel(value) }));
+].map((value) => ({ value, label: value === "SKIPPED" ? "已跳过（历史状态）" : value === "INVALIDATED" ? "已失效记录（汇总）" : executionStatusLabel(value) }));
 
 /** 列表里的执行概况：以进度与当前阻断为主。 */
 export function executionProgressText(

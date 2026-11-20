@@ -71,14 +71,6 @@ export function updatePlan(
   });
 }
 
-/** 启用 / 停用方案；已停用的方案不能用于创建任务。 */
-export function setPlanEnabled(planCode: string, enabled: boolean): Promise<PlanSelection> {
-  return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}/enabled`, {
-    method: "PUT",
-    data: { enabled },
-  });
-}
-
 /** 逻辑删除方案；已创建任务保留自己的冻结配置。 */
 export function deletePlan(planCode: string): Promise<PlanSelection> {
   return request<PlanSelection>(`/plans/${encodeURIComponent(planCode)}`, { method: "DELETE" });

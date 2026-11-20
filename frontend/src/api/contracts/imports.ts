@@ -21,7 +21,14 @@ export interface ProposalSupportingContent {
   origin: ConfigOrigin;
 }
 
+export interface DependencyQuestion {
+  owner_ref: string;
+  term: string;
+  options: Array<{ ref: string; group: "fields" | "rules" | "calculations"; name: string; sheet_name: string; row_no: number }>;
+}
+
 export interface ImportProposalChanges {
+  dependency_answers?: string[];
   name?: string;
   description?: string;
   required?: boolean;
@@ -190,6 +197,7 @@ export interface ImportJob {
     rules: ProposalRule[];
     calculations: ProposalCalculation[];
     report_sections: ProposalReportSection[];
+    dependency_questions?: DependencyQuestion[];
     binding_gaps?: ProposalBindingGap[];
     /** 未记录与已识别但为空应明确区分；辅助资料不计入执行规则。 */
     supporting_content?: ProposalSupportingContent[] | null;

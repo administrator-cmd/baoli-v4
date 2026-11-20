@@ -117,7 +117,6 @@ class ConsoleService:
         capability = "规则转换、字段抽取与语义判断"
         configuration, missing = self._configuration_status({
             "BAOLI_LLM_BASEURL": bool(settings.llm_baseurl),
-            "BAOLI_LLM_APIKEY": bool(settings.llm_api_key_value),
             "BAOLI_LLM_MODEL_NAME": bool(settings.llm_model_name),
         })
         if missing:

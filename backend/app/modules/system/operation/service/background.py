@@ -112,6 +112,10 @@ class OperationBackgroundService:
             )
         return operation
 
+    def response_files(self, operation_id: int):
+        return [{"stage": row.stage, "relative_path": row.relative_path, "created_at": row.created_at}
+                for row in SystemOperationCRUD(self.db).response_files(operation_id)]
+
 
     def latest_operation(self, object_type: str, object_no: str) -> BackgroundOperation | None:
         """该对象最近一次后台命令，页面刷新后凭它继续查询真实状态。"""
@@ -133,7 +137,6 @@ class OperationBackgroundService:
             "message": self._status_message(operation),
             "reused": reused,
             "result": operation.result_json,
-            "raw_response_path": operation.raw_response_path,
             "failure_code": operation.failure_code,
             "failure_message": operation.failure_message,
             "created_at": operation.created_at,

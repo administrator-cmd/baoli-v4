@@ -11,6 +11,7 @@ from app.common.exceptions import BusinessError
 from app.constants.status import LOOP_BLOCKED, LOOP_NEEDS_HUMAN, LOOP_RUNNING, PRODUCED_RESULT_STATUSES
 from app.core.transactions import commit_transaction
 from app.domain.audit.audit_state import RuleExecutionState, RuleOutcome, RuleSaveResult
+from app.domain.configuration.execution_mode import MODE_CROSS_SCOPE_COMPARE, MODE_DERIVE_RISK, MODE_VALUE_COMPARE
 from app.domain.configuration.rule_library import is_risk_rule
 from app.modules.audit.execution.service.flow.errors import agent_step
 from app.modules.audit.execution.service.flow.execution import execution_in_progress
@@ -18,7 +19,7 @@ from app.modules.audit.execution.service.flow.shared import agent_module, rule_o
 from app.modules.audit.rule.service.rule_results import AuditRuleResultsService
 from app.modules.audit.shared import _task_manifest, pending_rerun_keys
 from app.modules.audit.task.service.lookup import AuditTaskLookupService
-from app.services.shared.storage import resolve_storage_path
+from app.services.shared.storage import audit_directory, resolve_storage_path
 
 logger = logging.getLogger(__name__)
 
@@ -110,25 +111,32 @@ def graph_produce_candidate_verdict(
         except BusinessError as exc:
             # 原返回与接口错误交回同一条规则的模型上下文，不猜测状态或丢弃产出。
             # 下一次调用仍走既有模型/工具循环及其配置，不另设重试上限。
-            logger.warning("规则结论格式未满足接口，交回模型修正 task_no=%s rule_key=%s code=%s details=%s",
+            logger.warning("规则结论未通过校验 task_no=%s rule_key=%s code=%s details=%s",
                            task_no, rule["rule_key"], exc.code, exc.details)
+            direct = not instance.get("material_precheck") and (rule.get("kind") == "REPORT" or
+                     rule.get("execution_mode") in {MODE_VALUE_COMPARE, MODE_CROSS_SCOPE_COMPARE, MODE_DERIVE_RISK})
+            errors = [*(verdict_errors or []), {"code": exc.code, "message": exc.message, "details": exc.details,
+                                               "model_response": response}]
+            if direct and any(prior["code"] == exc.code and prior["model_response"].get("content") == response.get("content")
+                              for prior in verdict_errors or []):
+                return {"candidate_verdict": None, "loop_status": LOOP_BLOCKED, "verdict_errors": errors,
+                        "unresolved_items": [*(unresolved_items or []), {"kind": exc.code, "details": exc.details,
+                                             "message": f"模型修正后仍返回同一份无效结论：{exc.message}"}], "last_error": None}
             return {
                 "candidate_verdict": None,
                 "loop_status": LOOP_RUNNING,
                 "messages": [
-                    *list(messages or []),
+                    *((messages or [])[:2] if direct else (messages or [])),
                     {"role": "assistant", "content": response["content"]},
                     {"role": "user", "content": "上一轮返回未能保存，接口错误：" + json.dumps(
                         {"code": exc.code, "message": exc.message, "details": exc.details}, ensure_ascii=False
-                    ) + "。请结合已有真实材料、工具结果和本规则声明的输出继续执行并修正 JSON。"
+                    ) + ("。请依据原请求的数据和要求修正该错误，返回完整的 JSON 对象。" if direct else
+                    "。请结合已有真实材料、工具结果和本规则声明的输出继续执行并修正 JSON。"
                     "需要工具时使用原生 tool_calls；最终返回 status、message、basis、missing_items、next_action、evidence、outputs，不返回进度文字。"
-                    "不能完成时如实使用 EVIDENCE_INSUFFICIENT 并说明原因，不编造产出。"},
+                    "不能完成时如实使用 EVIDENCE_INSUFFICIENT 并说明原因，不编造产出。")},
                 ],
                 "unresolved_items": list(unresolved_items or []),
-                "verdict_errors": [*(verdict_errors or []), {
-                    "code": exc.code, "message": exc.message, "details": exc.details,
-                    "model_response": response,
-                }],
+                "verdict_errors": errors,
                 "last_error": None,
             }
         if is_risk_rule(rule):
@@ -156,7 +164,7 @@ def _save_verdict_diagnostics(task, execution, rule: dict[str, Any], errors: lis
     只保存失败响应，不把每次成功响应都落盘；写入失败只记录日志，不影响业务结论保存。
     """
     relative = (
-        f"tasks/{task.task_no}/diagnostics/rule_verdict_errors/"
+        f"{audit_directory(task.task_no, task.created_at)}/diagnostics/rule_verdict_errors/"
         f"{execution.id}_{rule.get('rule_key')}_{uuid4().hex}.json"
     )
     try:

@@ -10,6 +10,7 @@ export interface DocumentRow {
   material_name: string;
   required: boolean;
   status: string;
+  processing_notes: string[];
   filename: string | null;
   size_bytes: number | null;
   uploaded_at: string | null;
@@ -36,6 +37,7 @@ export interface DocumentDetail {
   material_name: string;
   required: boolean;
   status: string;
+  processing_notes: string[];
   current_upload_no: string | null;
   uploads: DocumentUploadRow[];
 }
@@ -97,7 +99,7 @@ export interface OperationLogRow {
   object_no: string;
   object_name: string;
   operation_type: string;
-  result: "SUCCEEDED" | "FAILED" | "ACCEPTED";
+  result: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "INTERRUPTED" | "ACCEPTED";
   duration_ms: number | null;
   command_no: string | null;
   failure_code: string | null;

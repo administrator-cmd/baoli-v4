@@ -114,7 +114,7 @@ def run_rule_evaluation(
     """
     state = nodes.graph_load_rule_instance(db, task_no, node_code, rule_cursor, execution_id, planned_rule)
     rule_key = state["rule_instance"]["rule_key"]
-    logger.info("开始执行审核规则 task_no=%s rule_key=%s cursor=%s", task_no, rule_key, rule_cursor)
+    logger.debug("开始执行审核规则 task_no=%s rule_key=%s cursor=%s", task_no, rule_key, rule_cursor)
 
     if planned_rule.get("material_quality_block"):
         materials = planned_rule["material_quality_block"]
@@ -147,7 +147,7 @@ def run_rule_evaluation(
     ))
 
     channel_failure: ChannelFailure | None = None
-    while True:
+    while state["loop_status"] == LOOP_RUNNING:
         turn = nodes.graph_call_model(
             db, task_no, node_code, planned_rule, state["messages"], state["allowed_tools"],
             state["loop_count"], state["evaluation_id"], state["tool_results"],

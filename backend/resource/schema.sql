@@ -54,7 +54,6 @@ CREATE TABLE `background_operation` (
   `status` varchar(30) NOT NULL, -- 操作状态
   `request_json` json NOT NULL, -- 原始请求参数
   `result_json` json DEFAULT NULL, -- 操作结果摘要
-  `raw_response_path` varchar(500) DEFAULT NULL, -- 模型原始响应文件路径
   `failure_code` varchar(80) DEFAULT NULL,
   `failure_message` text,
   `started_at` datetime(6) DEFAULT NULL,
@@ -66,6 +65,18 @@ CREATE TABLE `background_operation` (
   UNIQUE KEY `uq_background_operation_idempotency` (`object_type`,`object_no`,`operation_type`,`idempotency_key`),
   KEY `idx_background_operation_object` (`object_type`,`object_no`,`status`),
   KEY `idx_background_operation_status` (`status`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `operation_llm_response` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `operation_id` bigint NOT NULL,
+  `stage` varchar(40) NOT NULL,
+  `relative_path` varchar(500) NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_llm_response_path` (`relative_path`),
+  KEY `idx_llm_response_operation` (`operation_id`,`id`),
+  CONSTRAINT `fk_llm_response_operation` FOREIGN KEY (`operation_id`) REFERENCES `background_operation` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
@@ -563,6 +574,7 @@ CREATE TABLE `field_review_confirmation` (
   `field_digest` char(64) NOT NULL, -- 字段结果集合摘要
   `missing_field_count` int NOT NULL DEFAULT 0, -- 缺失字段数量
   `missing_field_keys` json DEFAULT NULL, -- 缺失字段编号列表
+  `snapshot_json` json DEFAULT NULL, -- 确认时字段值与证据快照
   `note` text,
   `operation_no` varchar(40) DEFAULT NULL, -- 对应操作编号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -570,6 +582,7 @@ CREATE TABLE `field_review_confirmation` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_field_review_no` (`confirmation_no`),
   KEY `idx_field_review_task` (`audit_task_id`,`node_execution_id`),
+  KEY `idx_field_review_task_id` (`audit_task_id`,`id`),
   CONSTRAINT `fk_field_review_execution_task` FOREIGN KEY (`node_execution_id`, `audit_task_id`) REFERENCES `node_execution` (`id`, `audit_task_id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
   CONSTRAINT `fk_field_review_task` FOREIGN KEY (`audit_task_id`) REFERENCES `audit_task` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -592,6 +605,7 @@ CREATE TABLE `rulebook_generation_job` (
   `document_schema_version` varchar(40) NOT NULL, -- 生成文档结构版本
   `prompt_version` varchar(40) NOT NULL, -- 使用的提示词版本
   `document_json` json DEFAULT NULL, -- 当前可编辑的规则库文档
+  `checkpoint_json` json DEFAULT NULL, -- 首轮编制私有断点，不用于导出或场景导入
   `revision` int NOT NULL DEFAULT 0, -- 当前文档修订号
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -682,6 +696,7 @@ SELECT expected.table_name AS missing_table
 FROM (
 SELECT 'scenario_template' AS table_name
     UNION ALL SELECT 'background_operation' AS table_name
+    UNION ALL SELECT 'operation_llm_response' AS table_name
     UNION ALL SELECT 'import_job' AS table_name
     UNION ALL SELECT 'scenario_version' AS table_name
     UNION ALL SELECT 'scenario_node' AS table_name

@@ -182,11 +182,6 @@ onMounted(async () => {
           <el-button link type="primary" class="table-link" @click="detail = row">{{ row.name }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="来源规则" min-width="220" show-overflow-tooltip>
-        <template #default="{ row }">
-          {{ row.source_rules.map((source: RiskResultRow["source_rules"][number]) => source.rule_name).join("、") || "—" }}
-        </template>
-      </el-table-column>
       <el-table-column label="风险等级" width="140">
         <template #default="{ row }">
           <el-tag v-if="row.risk_level" type="info" size="small" effect="light" disable-transitions>
@@ -195,11 +190,8 @@ onMounted(async () => {
           <span v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="当前状态" width="140">
+      <el-table-column label="风险结论" width="160">
         <template #default="{ row }"><StatusBadge domain="risk" :status="row.status" /></template>
-      </el-table-column>
-      <el-table-column label="判断说明" min-width="240" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.message || "未记录判断说明" }}</template>
       </el-table-column>
       <el-table-column label="创建时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ formatDate(String(row.created_at)) }}</span></template>
@@ -232,10 +224,10 @@ onMounted(async () => {
         <el-descriptions-item label="风险名称">{{ detail.name }}</el-descriptions-item>
         <el-descriptions-item label="来源规则">{{ detail.source_rules.map((source) => source.rule_name).join("、") || "未记录来源规则" }}</el-descriptions-item>
         <el-descriptions-item label="风险等级">{{ detail.risk_level || "—" }}</el-descriptions-item>
-        <el-descriptions-item label="当前状态">
+        <el-descriptions-item label="风险结论">
           <StatusBadge domain="risk" :status="detail.status" />
-          <div class="text-muted block-gap-sm">{{ detail.message }}</div>
         </el-descriptions-item>
+        <el-descriptions-item label="判断说明">{{ detail.message || "未记录判断说明" }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatDate(String(detail.created_at)) }}</el-descriptions-item>
       </el-descriptions>
       <div class="app-toolbar block-gap">

@@ -30,6 +30,21 @@ from app.modules.system.operation.service.operation_types import OBJECT_PLAN
 from app.services.shared import configuration as config_store
 
 
+def _retain_submitted_extensions(
+    extensions: dict[str, dict[str, dict[str, Any]]],
+    items: list[dict[str, Any]],
+    model: type,
+    identity: str,
+) -> None:
+    """Keep submitted dynamic values out of fields stored directly on the config model."""
+    fixed_fields = {item.name for item in config_fields(model)}
+    for item in items:
+        retained = extensions[model.__name__].setdefault(item[identity], {})
+        for key in ("business_context", "enabled", "config_status"):
+            if key in item and key not in fixed_fields:
+                retained[key] = deepcopy(item[key])
+
+
 class PlanConfigConfigurationService:
     """本实体的服务方法；db 由构造时注入。"""
 
@@ -156,11 +171,7 @@ class PlanConfigConfigurationService:
             extensions[model.__name__] = {getattr(row, identity): deepcopy({key: value for key, value in row.data.items() if key not in columns}) for row in rows}
         for items, model, identity in ((materials, PlanMaterial, "material_key"), (fields, PlanField, "field_key"),
                                         (sections, PlanSection, "section_key")):
-            for item in items:
-                retained = extensions[model.__name__].setdefault(item[identity], {})
-                for key in ("business_context", "enabled", "config_status"):
-                    if key in item:
-                        retained[key] = deepcopy(item[key])
+            _retain_submitted_extensions(extensions, items, model, identity)
         for rows in previous:
             for row in rows:
                 config_store.delete(row)

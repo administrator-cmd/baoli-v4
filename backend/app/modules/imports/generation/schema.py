@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.core.base_schema import PagedResponse
+from app.modules.imports.generation.dto import AssistantIssueAnswer
 from app.modules.system.operation.schema import OperationAcceptedResponse
 
 
@@ -108,6 +109,7 @@ class GenerationMessageResponse(BaseModel):
     content: str
     issue_id: str | None = None
     answer: str | None = None
+    issue_answers: list[AssistantIssueAnswer] | None = None
     revision: int
     created_at: datetime
     operation: OperationAcceptedResponse

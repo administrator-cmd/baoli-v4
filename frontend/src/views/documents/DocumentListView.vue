@@ -173,7 +173,7 @@ onMounted(() => {
       <el-form-item label="文件名称">
         <el-input v-model="filters.keyword" clearable placeholder="文件名 / 材料位" style="width: 180px" @keyup.enter="list.search()" />
       </el-form-item>
-      <el-form-item label="文件状态">
+      <el-form-item label="是否上传文件">
         <el-select v-model="filters.has_file" clearable placeholder="全部" style="width: 140px">
           <el-option value="true" label="已上传" />
           <el-option value="false" label="未上传" />
@@ -218,8 +218,12 @@ onMounted(() => {
       <el-table-column label="上传时间" width="200">
         <template #default="{ row }"><span class="table-nowrap">{{ row.uploaded_at ? formatDate(String(row.uploaded_at)) : "—" }}</span></template>
       </el-table-column>
-      <el-table-column label="处理状态" width="140">
-        <template #default="{ row }"><StatusBadge :status="row.status" /></template>
+      <el-table-column label="文件处理" min-width="280">
+        <template #default="{ row }">
+          <StatusBadge :status="row.status" :label="row.processing_notes.length ? '处理需关注' : row.status === 'UPLOADED' ? '已上传，待处理' : statusLabel(row.status)" :tone="row.processing_notes.length ? 'warning' : null" />
+          <div v-if="row.processing_notes.length" class="status-notes">{{ row.processing_notes.join('\n') }}</div>
+          <el-button v-if="row.processing_notes.length" link type="primary" @click="openTask(row)">进入任务查看处理详情</el-button>
+        </template>
       </el-table-column>
       <el-table-column label="上传版本数" width="104">
         <template #default="{ row }">
@@ -289,7 +293,10 @@ onMounted(() => {
           <el-descriptions :column="2" border size="small">
             <el-descriptions-item label="任务">{{ detail.task_name }}</el-descriptions-item>
             <el-descriptions-item label="材料位">{{ detail.material_name }}{{ detail.required ? "（必传）" : "（按需）" }}</el-descriptions-item>
-            <el-descriptions-item label="处理状态"><StatusBadge :status="detail.status" /></el-descriptions-item>
+            <el-descriptions-item label="文件处理">
+              <StatusBadge :status="detail.status" :label="detail.processing_notes.length ? '处理需关注' : detail.status === 'UPLOADED' ? '已上传，待处理' : statusLabel(detail.status)" :tone="detail.processing_notes.length ? 'warning' : null" />
+              <div v-for="note in detail.processing_notes" :key="note">{{ note }}</div>
+            </el-descriptions-item>
             <el-descriptions-item label="当前版本">
               {{ detail.uploads.find((item) => item.is_current)?.version_no ?? "—" }}
             </el-descriptions-item>
@@ -303,9 +310,12 @@ onMounted(() => {
             <el-table-column label="大小" width="88">
               <template #default="{ row }">{{ formatFileSize(row.size_bytes) }}</template>
             </el-table-column>
-            <el-table-column label="状态" width="120">
+            <el-table-column label="版本归属" width="110">
+              <template #default="{ row }">{{ row.is_current ? "当前版本" : "历史版本" }}</template>
+            </el-table-column>
+            <el-table-column label="文件留存状态" width="130">
               <template #default="{ row }">
-                <StatusBadge :status="row.status" :label="row.is_current ? '当前' : statusLabel(row.status)" />
+                <StatusBadge :status="row.status" :label="row.status === 'UPLOADED' ? '已保存' : statusLabel(row.status)" />
               </template>
             </el-table-column>
             <el-table-column label="上传时间" width="200">
@@ -317,3 +327,14 @@ onMounted(() => {
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.status-notes {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>

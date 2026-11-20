@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import {
@@ -12,9 +12,9 @@ import {
   type TemplateOption,
 } from "@/api/imports";
 import type { GenerationJobRow, GenerationStatus } from "@/api/contracts";
+import { ApiError, isOperationActive } from "@/api/http";
 import {
-  downloadGenerationExportFile,
-  generationSourceFileUrl,
+  deleteGenerationJob,
   listGenerationJobsPage,
 } from "@/api/rulebookGenerations";
 import { usePagedList } from "@/composables/usePagedList";
@@ -36,7 +36,8 @@ import {
  * 生成记录不是导入作业，不能伪装成导入；两类记录各自分页、筛选和状态。
  */
 const router = useRouter();
-const activeTab = ref<"files" | "generations">("files");
+const route = useRoute();
+const activeTab = ref<"files" | "generations">(route.query.tab === "generations" ? "generations" : "files");
 
 const list = usePagedList<ImportJobRow, { filename: string; scenario_code: string; status: string }>({
   key: "rulebook-files",
@@ -98,23 +99,6 @@ function openGeneration(row: GenerationJobRow): void {
   void router.push({ name: "rulebook-generation-detail", params: { jobNo: row.job_no } });
 }
 
-async function downloadGeneration(row: GenerationJobRow): Promise<void> {
-  if (!row.latest_export) return;
-  try {
-    await downloadGenerationExportFile(row.job_no, row.latest_export);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : String(error));
-  }
-}
-
-function openGenerationImport(row: GenerationJobRow): void {
-  void router.push({
-    name: "rulebook-generation-detail",
-    params: { jobNo: row.job_no },
-    query: row.latest_export ? { import_export: row.latest_export.export_no } : undefined,
-  });
-}
-
 function openGenerationCreate(): void {
   void router.push({ name: "rulebook-generate" });
 }
@@ -146,11 +130,41 @@ async function remove(row: ImportJobRow): Promise<void> {
   }
 }
 
+const deletingGeneration = ref<string | null>(null);
+const generationDeleteError = ref<string | null>(null);
+
+async function removeGeneration(row: GenerationJobRow): Promise<void> {
+  if (deletingGeneration.value || isOperationActive(row.latest_operation?.status)) return;
+  deletingGeneration.value = row.job_no;
+  try {
+    try {
+      await ElMessageBox.confirm(
+        `将永久删除「${row.source_filename}」（创建于 ${formatDate(row.created_at)}）的编制记录、上传原件和导出文件。已创建的场景导入不受影响。`,
+        "删除编制记录",
+        { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
+    generationDeleteError.value = null;
+    await deleteGenerationJob(row.job_no);
+    ElMessage.success("已删除编制记录");
+    await generationList.load();
+  } catch (failure) {
+    generationDeleteError.value = failure instanceof Error ? failure.message : "删除失败";
+    if (failure instanceof ApiError && (failure.statusCode === 404 || failure.statusCode === 409 || failure.details.deleted === true)) {
+      await generationList.load();
+    }
+  } finally {
+    deletingGeneration.value = null;
+  }
+}
+
 watch(activeTab, (tab) => {
   if (tab === "generations") {
     void generationList.load();
   }
-});
+}, { immediate: true });
 
 onMounted(() => {
   void loadScenarios();
@@ -178,8 +192,8 @@ onMounted(() => {
               <el-option v-for="item in scenarios" :key="item.scenario_code" :value="item.scenario_code" :label="item.scenario_name" />
             </el-select>
           </el-form-item>
-          <el-form-item label="状态">
-            <el-select v-model="filters.status" clearable placeholder="全部" style="width: 160px">
+          <el-form-item label="导入状态">
+            <el-select v-model="filters.status" clearable placeholder="全部" style="width: 190px">
               <el-option v-for="item in importJobStatusOptions" :key="item.value" :value="item.value" :label="item.label" />
             </el-select>
           </el-form-item>
@@ -212,10 +226,10 @@ onMounted(() => {
               <span class="table-nowrap">{{ formatDate(row.created_at) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="处理状态" width="180">
+          <el-table-column label="导入状态" width="190">
             <template #default="{ row }">
               <StatusBadge :status="row.status" />
-              <div v-if="row.failure_message" class="text-hint">{{ row.failure_message }}</div>
+              <div v-if="row.failure_message" class="status-note" :title="row.failure_message">{{ row.failure_message }}</div>
             </template>
           </el-table-column>
           <el-table-column label="发布版本" width="120">
@@ -251,7 +265,6 @@ onMounted(() => {
       </el-tab-pane>
 
       <el-tab-pane label="AI编制记录" name="generations">
-        <p class="text-hint">上传业务资料后，由 AI 整理成便于阅读的规则库。打开记录即可核对、修改并下载 Excel。</p>
         <el-form inline class="app-query" @submit.prevent="generationList.search()">
           <el-form-item label="原文件名">
             <el-input v-model="generationList.filters.filename" clearable placeholder="原始 Excel 文件名" style="width: 220px" @keyup.enter="generationList.search()" />
@@ -268,20 +281,22 @@ onMounted(() => {
           </el-form-item>
         </el-form>
 
+        <el-alert v-if="generationDeleteError" class="block-gap-sm" type="error" show-icon
+          :title="generationDeleteError" @close="generationDeleteError = null" />
         <el-alert v-if="generationList.error.value" type="error" show-icon :closable="false"
           :title="`读取失败：${generationList.error.value}`">
           <el-button size="small" @click="generationList.load()">重试</el-button>
         </el-alert>
 
-        <el-table v-else :data="generationList.items.value" border stripe class="management-table"
+        <el-table v-else :data="generationList.items.value" row-key="job_no" class="management-table rulebook-generation-table"
           v-loading="generationList.loading.value" empty-text="暂无编制记录，点击右上角「AI辅助生成规则库」开始">
-          <el-table-column label="原文件" min-width="260" show-overflow-tooltip>
+          <el-table-column label="原文件" min-width="250" class-name="rulebook-table__filename" show-overflow-tooltip>
             <template #default="{ row }">
-              <span class="mono">{{ row.source_filename }}</span>
+              <span>{{ row.source_filename }}</span>
               <span class="text-hint rulebook-table__size">{{ formatFileSize(row.source_size) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="状态" :width="generationStatusWidth" class-name="rulebook-table__single-line">
+          <el-table-column label="编制状态" :width="generationStatusWidth" class-name="rulebook-table__single-line">
             <template #default="{ row }">
               <StatusBadge
                 :status="row.status"
@@ -290,39 +305,22 @@ onMounted(() => {
               />
             </template>
           </el-table-column>
-          <el-table-column label="版本" width="120" class-name="rulebook-table__single-line">
+          <el-table-column label="版本" width="96" class-name="rulebook-table__single-line">
             <template #default="{ row }">{{ row.revision ? `第 ${row.revision} 版` : '尚未编制' }}</template>
           </el-table-column>
-          <el-table-column label="创建时间" width="180">
+          <el-table-column label="创建时间" width="196" class-name="rulebook-table__single-line rulebook-table__time">
             <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="最新修改" width="180">
+          <el-table-column label="修改时间" width="196" class-name="rulebook-table__single-line rulebook-table__time">
             <template #default="{ row }">{{ formatDate(row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="320" fixed="right">
+          <el-table-column label="操作" width="124" class-name="table-actions rulebook-table__single-line">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="openGeneration(row)">打开记录</el-button>
-              <el-button link type="primary" size="small" tag="a"
-                :href="generationSourceFileUrl(row.job_no)" :download="row.source_filename">下载原件</el-button>
-              <el-button
-                v-if="row.latest_export"
-                link
-                type="primary"
-                size="small"
-                @click="downloadGeneration(row)"
-              >
-                下载第 {{ row.latest_export.revision }} 版 Excel
-              </el-button>
-              <span v-else class="text-hint">尚未导出</span>
-              <el-button
-                v-if="row.latest_export"
-                link
-                type="primary"
-                size="small"
-                @click="openGenerationImport(row)"
-              >
-                用于场景
-              </el-button>
+              <el-button link type="danger" size="small" :loading="deletingGeneration === row.job_no"
+                :disabled="isOperationActive(row.latest_operation?.status) || (deletingGeneration !== null && deletingGeneration !== row.job_no)"
+                :title="isOperationActive(row.latest_operation?.status) ? 'AI 操作结束后可删除' : undefined"
+                @click="removeGeneration(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -345,13 +343,26 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.status-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 /* 文件资产列表：文件名与大小并排展示，时间不换行。 */
 .rulebook-table__size {
   margin-left: 8px;
 }
-:deep(.rulebook-table__single-line .cell) {
+.rulebook-generation-table :deep(td.rulebook-table__single-line > .cell) {
   padding-left: 12px;
   padding-right: 12px;
   white-space: nowrap;
+}
+.rulebook-generation-table :deep(td.el-table__cell) {
+  height: 44px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.rulebook-generation-table :deep(td.rulebook-table__filename > .cell) {
+  padding-inline: 14px;
+  text-align: left;
+}
+.rulebook-generation-table :deep(.rulebook-table__time > .cell) {
+  font-variant-numeric: tabular-nums;
 }
 </style>

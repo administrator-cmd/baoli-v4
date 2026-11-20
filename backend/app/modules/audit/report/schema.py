@@ -20,6 +20,9 @@ class ReportRowResponse(BaseModel):
     report_generated: bool
     scope_execution_complete: bool
     risk_conclusion_available: bool
+    risk_configured: bool
+    execution_notes: list[str]
+    risk_notes: list[str]
     status: str
     archived_at: datetime | None
     current: bool
@@ -59,6 +62,7 @@ class RiskListResponse(BaseModel):
     task_no: str
     risk_configured: bool = False
     risk_executed: bool = False
+    risk_results_stale: bool
     # 风险是否形成可用结论；与“命中 0 条”不是一回事。
     risk_conclusion_available: bool = False
     # 只统计 ABNORMAL，不能用结果总数冒充命中数。
@@ -116,6 +120,9 @@ class ReportResponse(BaseModel):
     report_generated: bool = False
     scope_execution_complete: bool = False
     risk_conclusion_available: bool = False
+    risk_configured: bool
+    execution_notes: list[str]
+    risk_notes: list[str]
     # 报告结果范围：只对应当前有效事实与执行结果，历史结果不再进入当前结论。
     results_scope: Literal["CURRENT_RUN"] = "CURRENT_RUN"
     # 当前入口返回的报告是否仍对应当前输入修订；为 false 时页面必须标明“已失效”。
@@ -152,6 +159,10 @@ class ReportDetailResponse(BaseModel):
     report_generated: bool
     scope_execution_complete: bool
     risk_conclusion_available: bool
+    risk_configured: bool
+    execution_notes: list[str]
+    risk_notes: list[str]
+    current: bool
     reasons: dict[str, Any] = Field(default_factory=dict)
     snapshot: dict[str, Any] | None = None
     report_generation: ReportGenerationInfo | None = None
